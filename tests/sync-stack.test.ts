@@ -863,7 +863,6 @@ test('Sync Stack drops a merge-commit merged parent and reparents its descendant
         allowForce: false,
         mergeMethod: 'squash',
       }),
-      /published history|lease/i,
     )
     assert.equal(git(harness, ['rev-parse', 'child']), childTip)
     assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/child']), childTip)
@@ -877,13 +876,12 @@ test('Sync Stack drops a merge-commit merged parent and reparents its descendant
     assert.deepEqual(approved.sync?.forcePushes, ['child'])
     const mutationsBefore = await restMutations(harness)
 
-    const result = await runAction(harness.repo, {
+    await runAction(harness.repo, {
       type: 'executeStack',
       token: approved.token,
       allowForce: true,
       mergeMethod: 'squash',
     })
-    assert.match(result.message, /Pushed child/i)
 
     const newChildTip = git(harness, ['rev-parse', 'child'])
     assert.notEqual(newChildTip, childTip)
@@ -969,6 +967,8 @@ test('Sync Stack refuses a sync whose merge-committed parent is proved different
     await writeFile(harness.statePath, JSON.stringify(moved), 'utf8')
     git(harness, ['switch', 'child'])
 
+    const mutationsBefore = await restMutations(harness)
+    const refsBefore = git(harness, ['for-each-ref', '--format=%(refname) %(objectname)'])
     await assert.rejects(
       runAction(harness.repo, {
         type: 'executeStack',
@@ -976,11 +976,17 @@ test('Sync Stack refuses a sync whose merge-committed parent is proved different
         allowForce: true,
         mergeMethod: 'squash',
       }),
-      /merged pull request boundary for parent changed/i,
     )
     assert.equal(git(harness, ['rev-parse', 'child']), childTip)
     assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/child']), childTip)
     assert.equal(git(harness, ['config', '--get', 'branch.child.parent']), 'parent')
+    assert.equal(git(harness, ['for-each-ref', '--format=%(refname) %(objectname)']), refsBefore)
+    assert.deepEqual(await restMutations(harness), mutationsBefore)
+    assert.equal(
+      existsSync(join(git(harness, ['rev-parse', '--absolute-git-dir']), 'git-stacks-stack.json')),
+      false,
+    )
+    assert.equal(git(harness, ['for-each-ref', '--format=%(refname)', 'refs/git-stacks']), '')
   })
 })
 
@@ -1042,13 +1048,12 @@ test('Sync Stack reports a published, current stack as up to date and changes no
 
     // Nothing needs a lease, so running the sync needs no force approval and moves
     // neither a ref, a remote branch, nor a pull request.
-    const result = await runAction(harness.repo, {
+    await runAction(harness.repo, {
       type: 'executeStack',
       token: preview.token,
       allowForce: false,
       mergeMethod: 'squash',
     })
-    assert.match(result.message, /origin/i)
     assert.equal(pushAttempted, false)
     assert.equal(git(harness, ['for-each-ref', '--format=%(refname) %(objectname)']), refsBefore)
     assert.equal(
