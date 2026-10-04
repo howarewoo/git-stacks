@@ -2084,7 +2084,22 @@ Before executing any mutation, the preview compares local and remote branch tips
 - **Trunk drift**: Evaluates whether the trunk is up to date, behind, ahead, or diverged. If the remote trunk was force-pushed or rewritten upstream (`diverged`), syncing is blocked until the local trunk is reconciled to avoid replaying onto an inconsistent upstream history.
 - **Merged layers**: Detects whether a lower layer's PR was merged (via merge commit, squash, or rebase). Merged layers are dropped from the replay cascade. Descendant layers are automatically retargeted onto the updated trunk or the highest surviving predecessor.
 - **Rebase boundaries**: For squash- or rebase-merged predecessors, the replay boundary is derived from the immutable head recorded at merge time (`isProvenMergeHead`). If a safe boundary cannot be proven from Git history or the merge journal, syncing is refused to prevent replaying duplicate commits or dropping unmerged work.
+- **Merged layers Git Stacks did not merge**: A pull request merged on GitHub or from
+  the command line leaves no record in this repository. Its merge-time head is then
+  proved from the merge commit itself, which names the merged head as its second
+  parent, and the descendant is replayed onto the merge: the merged layer is left
+  untouched, the commits it contributed are reached through the merge rather than
+  applied a second time, and the surviving layer's pull request keeps the base
+  GitHub already retargeted it to. The same proof is resolved again immediately before
+  anything moves, from what GitHub reports at that moment rather than from what the
+  preview held, so a merge proved differently since the preview is refused. An
+  unreadable answer proves no boundary and is refused too.
 - **Layer states**: Each branch is classified as `up-to-date`, `needs-rebase`, `retargeted`, `needs-push`, `needs-force`, `merged`, or `blocked`.
+- **A stack that is already current**: When every layer is published and matches the
+  trunk and its predecessor, every layer is classified `up-to-date`, no lease is
+  requested, and running the sync changes nothing — no branch is replayed, no remote
+  branch is pushed, no ref is rewritten, and no pull request or native stack is
+  written. The result reports the stack as already in sync with the remote it compared.
 
 ### Force-with-lease safety
 
