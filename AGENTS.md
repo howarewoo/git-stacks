@@ -51,6 +51,13 @@ and may download it when absent.
   The React renderer uses the typed `DesktopAPI` in `src/shared/types.ts` through
   `src/preload/index.ts`; preserve sender validation, sandboxing, context
   isolation, and CSP.
+- Provider authentication belongs to the provider CLI: `gh` is required for
+  GitHub collaboration. Reuse the typed main-process transport and keep CLI
+  credential material out of the renderer, logs, and application state. Do not
+  add app-owned GitHub App/device-flow authentication. The runtime cutover is
+  tracked in #11; follow the current-mode instructions in README until it lands.
+- GitLab/`glab` is future product direction, not current implementation scope.
+  Preserve the separately authorized Notifications credential boundary.
 - When changing `GitAction`, update the renderer fixture action messages in
   `tests/renderer/fixtures/control.ts` and affected payloads. The build typechecks
   these consumers. Keep fixture APIs out of the production renderer.

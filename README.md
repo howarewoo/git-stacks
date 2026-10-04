@@ -50,7 +50,9 @@ services; do not interrupt jobs or delete retained runner data during the cutove
 ## Commands
 
 Use Node 24, npm, and the committed `package-lock.json`. A local source build
-does not need GitHub credentials; GitHub sign-in is configured separately below.
+does not need GitHub credentials. GitHub collaboration requires an installed,
+authenticated GitHub CLI (`gh`); see [GitHub sign-in](#github-sign-in) for the
+current runtime mode and the remaining authentication cutover.
 
 ```sh
 npm ci                 # install
@@ -240,25 +242,56 @@ only part of the read that talks to anything.
 
 ## GitHub sign-in
 
-Git Stacks signs in to GitHub with a GitHub App device flow, so no `gh`
-executable is required. The registration is created out of band; the only value
-the build needs is its public client id, given as `GIT_STACKS_GITHUB_APP_CLIENT_ID`.
-Without it the account panel reports "not configured" and nothing else changes.
+The product authentication method is the GitHub CLI (`gh`). Install it from
+[cli.github.com](https://cli.github.com/), then authenticate for the host you
+intend to use:
 
 ```sh
-GIT_STACKS_GITHUB_APP_CLIENT_ID=Iv1... npm run dev
+gh --version
+gh auth login --hostname github.com --web
+gh auth status --hostname github.com
 ```
 
-Device sign-in must be enabled under the app's `Optional Features`, and
-user-to-server token expiration must stay enabled so a refresh token is issued.
-`GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` remain an explicit
-override: when one is set it is used instead of the app's own credential, is
-never written to application state, and is not removed by sign-out.
+Login is a user action; check status first if you already authenticated.
+`gh` owns credential storage, refresh, account selection, and logout. Git
+Stacks does not need a GitHub App registration, Client ID, client secret, or
+app-owned primary credential vault for this product model. Local Git remains
+available when the CLI is missing, signed out, or offline.
 
-Cancelling sign-in or starting a replacement retires the previous request; a
-late device-code response cannot reopen it. If saving the account record fails
-after its new credential was stored, that staged credential is removed and the
-previous account remains selected.
+**Current runtime versus the approved requirement.**
+[#11](https://github.com/howarewoo/git-stacks/issues/11) tracks the clean
+cutover: required-CLI detection and account guidance, removal of app-owned
+GitHub App/device-flow authentication, and retirement of alternate primary
+authentication paths. The existing code still supports `auto`, `direct`, and
+`gh` transports and the old App account panel; changing these documents does
+not change that code. An App panel reporting `not-configured` is not evidence
+that your CLI session is unauthenticated.
+Forcing CLI transport does not remove the legacy account service or establish
+OS credential-store isolation. Keep credential-bearing automated checks in
+the isolated fixtures; manual native-store tests need a designated test profile.
+
+Use the existing CLI-backed mode now:
+
+```sh
+GIT_STACKS_GITHUB_TRANSPORT=gh npm run dev
+```
+
+For this mode to use your CLI session, leave `GIT_STACKS_GITHUB_TOKEN`,
+host-scoped `GIT_STACKS_GITHUB_TOKEN_<HOST>`, `GITHUB_TOKEN`, and `GH_TOKEN`
+unset; the current adapter gives explicit environment tokens precedence.
+Do not copy the output of `gh auth token` into the app or into a shell command.
+The adapter resolves credentials privately in main and pins them to the host
+and request that uses them.
+
+GitHub CLI can fall back to plaintext token storage when its secure store is
+unavailable; [its login documentation](https://cli.github.com/manual/gh_auth_login)
+describes that behavior. Use a working secure credential store, do not select
+`--insecure-storage`, and never include credentials or credential paths in a
+support bundle. Requiring `gh` does not establish secure storage by itself.
+
+GitLab through `glab` is future provider direction, not supported behavior.
+It will need its own integration and capability decisions, not a GitHub App
+registration or a speculative provider framework in this cutover.
 
 ## GitHub Notifications
 
@@ -267,9 +300,11 @@ pull request inbox. It is off by default and nothing about sign-in, pull
 requests, stacks, or reviews changes when it is off, held off by policy, or
 stripped of its credential.
 
-GitHub serves its notifications endpoints to a token with the `notifications` scope
-rather than to a GitHub App user access credential, so this module authorizes one of its
-own. The order is deliberate and the UI follows it:
+The Notifications API needs an explicitly authorized token with the
+`notifications` scope. The current module keeps that credential separate from
+primary authentication and does not borrow the CLI session. The `gh` cutover
+does not add Notifications permission to the core account or remove this
+module's credential protection. Its consent flow remains:
 
 1. **Settings › Notifications** explains what authorizing adds — the credential
    kind, the `notifications` scope, how it is protected, and the fact
@@ -340,11 +375,11 @@ belongs to one host and one account: a host change, an account change, or a
 replacement credential ends any read, write, or authorization still in flight, so
 no list is ever published or written under another host's or account's name.
 
-This module seals its token in a store of its own, separate from the one the
-sign-in uses, so the two can never erase each other: signing in, signing out, or
-clearing the application's credential leaves the notification token alone, and
-discarding the notification token leaves the sign-in alone. What it superseded is
-retired when the replacement commits, not left sealed behind it.
+This module seals its token in its own store. Removing its credential does not
+log out the provider CLI. The #11 cutover must preserve that store and must not
+delete CLI credentials or unrelated operating-system keys while retiring old
+app-owned primary account records. A replaced Notifications credential is
+retired only after its replacement commits.
 
 Changing the selected GitHub host retires the previous host's center where the
 change happens, rather than at the next notification request: the window is
@@ -415,14 +450,12 @@ The count of what the host has been asked is taken before the write that changed
 its list, which is well before the wait, because a read the app sends by itself
 is exactly the one a baseline measured from too late would miss.
 
-**An isolated run has no GitHub App registration.** The environment this run
-starts from strips every `GITHUB_` variable, so no client id reaches the
-process and nothing in the run registers one. The account status the window
-reports through its own bridge is therefore `not-configured` — this build cannot
-sign in to this host at all — which is a different claim from `signed-out`,
-which is a build that could and has not, and the run asserts the state that is
-actually true rather than the one that would read better. It reads the
-credential reference and the login the same way, and both are absent.
+**The isolated smoke still observes the legacy App account panel.** Its
+environment strips App registration values, so that panel reports
+`not-configured`, with no credential reference or login. This is an assertion
+about the current fixture and account implementation, not the required-`gh`
+product contract or proof of a real CLI login. #11 must update affected
+fixtures when the account panel is replaced.
 
 The renderer surface is also exercised in the [gallery](#renderer-verification):
 `notifications-awaiting-credential`, `notifications-ready`,
@@ -497,9 +530,9 @@ a separate code path; it is the same path with a different name.
 
 ### Links opened outside the app
 
-Every **open in browser** control, the device sign-in page, and every pull
-request, issue, stack, and check link cross the same boundary in the main
-process, and the boundary is the host rather than the link. A link is opened
+Every **open in browser** control and every pull request, issue, stack, and
+check link cross the same main-process host boundary. The legacy device page
+also uses this boundary until its removal in #11. A link is opened
 only when it is HTTPS, carries no credentials, and names `github.com`, the
 configured host, or the host owning an open repository's origin. Public GitHub
 links remain available when an enterprise host is selected. The host is compared whole, so its port is
@@ -510,31 +543,23 @@ refused. A refused link never reaches the operating system.
 
 ### Authentication
 
-Each host needs its own credential. Sign-in uses the GitHub App device flow, and
-the public client id is read per host:
+Each host needs its own authenticated CLI account. An authenticated github.com
+session does not authenticate an enterprise host:
 
-| Host         | Client id environment variable                                           |
-| ------------ | ------------------------------------------------------------------------ |
-| `github.com` | `GIT_STACKS_GITHUB_APP_CLIENT_ID`                                        |
-| Any other    | `GIT_STACKS_GITHUB_APP_CLIENT_ID_<HOST>`, host as upper-case hexadecimal |
+```sh
+gh auth login --hostname ghe.example.com --web
+gh auth status --hostname ghe.example.com
+```
 
-`ghe.example.com` therefore reads
-`GIT_STACKS_GITHUB_APP_CLIENT_ID_6768652E6578616D706C652E636F6D`, named the
-way a per-host token is: the host is not spelled out, so two hosts can never
-produce one name, and a host with a custom port (`ghe.example.com:8443`) is
-named as well as one without. There is no other name to fall back to — spelling
-the host with underscores would let `ghe.a-b.example` sign in with
-`ghe.a.b.example`'s registration, and spelling it with its port would produce a
-name no shell accepts. A host with no client id configured reports "not
-configured" and nothing else changes. Whether a host can complete a device-flow
-sign-in depends on that host's configuration: a GitHub Enterprise Server
-instance must have the device flow enabled under the app's optional features,
-or no sign-in is possible.
+Use the actual configured host instead of the example. Git Stacks must select
+the repository's host explicitly for CLI authentication and API operations,
+and must never retry a failed enterprise request against github.com.
+GitHub Enterprise still needs its own capability probes; a successful CLI
+login is not proof of native-stack or merge-queue support.
 
-`GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, and an authenticated
-`gh` session are used when they are present. `gh` is optional and is never
-required. A credential belongs to the host it was issued for and is never sent
-to another host, so signing in to one host leaves the others unauthenticated.
+Per-host App Client IDs and device-flow registration are no longer product
+prerequisites. The old App implementation remains in the current runtime
+until #11; it must not be mistaken for the new CLI authentication contract.
 
 ### Capability matrix
 
@@ -547,34 +572,35 @@ that host actually answered:
 | GraphQL API                  | Whether the host serves GraphQL queries                                |
 | Native stacked pull requests | Whether the host serves the resource that groups stacked pull requests |
 | Repository discovery         | Whether the host can be asked which repositories are reachable         |
-| GitHub App sign-in           | Whether this build has a device-flow registration for that host        |
+| GitHub App sign-in (legacy)  | Whether the current, pre-cutover build has a device-flow registration  |
+
+The App sign-in row above describes the current runtime only. #11 and #38
+must replace it with truthful CLI availability/authentication reporting;
+missing App registration must no longer hold GitHub collaboration.
 
 Every host has its own endpoints: a GitHub Enterprise Server host serves REST
 from `/api/v3` and GraphQL from `/api/graphql` on its own name, while
 `github.com` answers from `api.github.com`. Neither is derived from the other,
 and a request is never retried against a different path or a different host.
 
-Credentials are per host. A sign-in belongs to the host that issued it and is
-never sent to another, and an ambient `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`,
-or `GH_TOKEN` is a `github.com` credential: another host only receives a token
-set in its own `GIT_STACKS_GITHUB_TOKEN_<HOST>`, where `<HOST>` is the host name
-written as upper-case hexadecimal: `github.com` is
-`GIT_STACKS_GITHUB_TOKEN_6769746875622E636F6D`. Two different hosts can never
-produce the same variable that way, and the name uses only characters a shell
-accepts. A `gh` child process is given that host's own token under the variable
-the CLI reads for that host — `GH_TOKEN` for github.com,
-`GH_ENTERPRISE_TOKEN` for any other — and none of the unscoped ones. A
-credential exchange never follows a redirect, so a host cannot forward a
-refresh token somewhere else.
+The current adapter also accepts explicit environment credentials. A token in
+`GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` belongs to github.com.
+Another host only receives its own `GIT_STACKS_GITHUB_TOKEN_<HOST>`, where
+`<HOST>` is the canonical host written as upper-case hexadecimal:
+`github.com` is `6769746875622E636F6D`. The CLI child receives only that
+host's credential under `GH_TOKEN` or `GH_ENTERPRISE_TOKEN`. Those legacy
+app-level overrides and transport-selection alternatives are cutover work
+in #11, not alternative product authentication methods. Never copy tokens
+into renderer state or redirect them to a different host.
 
-| State             | Meaning                                                                                                              |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `supported`       | The host answered and offers the capability.                                                                         |
-| `unsupported`     | The host answered and does not offer the capability.                                                                 |
-| `unauthenticated` | The host answered, but no credential for that host is available.                                                     |
-| `unreachable`     | The host did not answer.                                                                                             |
-| `not-configured`  | A prerequisite is missing, such as no GitHub App client id for that host, or no configured way to ask a host at all. |
-| `unknown`         | The capability has not been established, or the host answered something this build could not read.                   |
+| State             | Meaning                                                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------------------- |
+| `supported`       | The host answered and offers the capability.                                                          |
+| `unsupported`     | The host answered and does not offer the capability.                                                  |
+| `unauthenticated` | The host answered, but no credential for that host is available.                                      |
+| `unreachable`     | The host did not answer.                                                                              |
+| `not-configured`  | A prerequisite is missing; the legacy App sign-in probe can still report this before the #11 cutover. |
+| `unknown`         | The capability has not been established, or the host answered something this build could not read.    |
 
 Repository discovery is reported from an actual discovery run, not from the
 API answering at all: a host that serves its API root and refuses a repository
@@ -616,7 +642,7 @@ and validates; the renderer never chooses or writes that path.
 | Setting                              | Effect                                                                                                                                                                                                                          |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Git to run                           | Chooses the bundled runtime or the system `git` for every Git operation.                                                                                                                                                        |
-| GitHub host                          | The GitHub host every sign-in, discovery run, and API request addresses: `github.com` or an enterprise host name (an optional port). Each repository's own remote decides the host in use.                                      |
+| GitHub host                          | The host for CLI authentication, discovery, and API requests: `github.com` or an enterprise host name (an optional port). Each repository's own remote decides the host in use.                                                 |
 | Editor                               | Program used by **Open in editor** in the file inspector. Empty means the platform default.                                                                                                                                     |
 | Merge tool                           | Program Git runs to resolve a conflict. Takes precedence over `GIT_MERGE_TOOL` and `merge.tool`. Empty means Git's own configuration.                                                                                           |
 | Default pull strategy / merge method | Seeds the workflow dialog; still changeable per operation.                                                                                                                                                                      |
@@ -629,8 +655,9 @@ and validates; the renderer never chooses or writes that path.
 
 The GitHub host accepts a bare host name (a pasted `https://` URL is normalized
 down to its host) and refuses a path, a query, a non-HTTPS scheme, or embedded
-credentials. Changing it retires the sign-in for the previous host and forgets
-what this build had learned about that host.
+credentials. Changing it retires old-host reads and identity. The current App
+implementation also retires its old account; the #11 cutover must not log out
+the external CLI or delete the CLI's credentials on a host change.
 
 A value is validated before use. Editors and merge tools are restricted to a supported program allowlist (`code`, `cursor`, `vim`, `nvim`, `kdiff3`, etc.); arbitrary shell interpreters or commands with arguments are refused. Editor launching enforces repository containment following symlinks. An unreadable field falls back to its default and is reported on the Settings surface; the rest of the file still applies. A file that is not valid JSON is replaced by defaults on the next save. All settings reads and modifications are serialized through an atomic transactional queue.
 
@@ -724,16 +751,14 @@ Recent failures is included only when something was recorded. It carries the
 main-process failure summaries described under **Handled failures** above, and
 they pass through the same secret and path redaction as every other field.
 
-### The optional GitHub CLI
+### GitHub CLI diagnostics
 
-**Settings → Diagnostics** reports the adapter this build is configured to use.
-`GIT_STACKS_GITHUB_TRANSPORT` names the preference — `direct` for the GitHub
-API, `gh` for the GitHub CLI, and `auto` (the default, and what an unset or
-unrecognised value means) for whichever of the two can serve a request. The
-report names the mode as configured. Under `auto` it does **not** name the
-adapter in use, because that depends on whether this app holds a usable GitHub
-credential, and a diagnostics run does not read one; the line reads _not
-established_ instead.
+**Settings → Diagnostics** currently reports the adapter preference.
+`GIT_STACKS_GITHUB_TRANSPORT` still accepts `direct`, `gh`, and `auto`
+(the default). Under `auto`, the active adapter depends on whether a usable
+App or environment credential exists, so the version-only diagnostic does
+not establish the adapter in use. These are current implementation facts,
+not supported authentication choices after the #11 cutover.
 
 Detection is one bounded, fixed command: `gh --version`, run through the same
 allowlist as the Git probes, with a byte cap, a deadline, and an environment
@@ -745,11 +770,12 @@ believed. A CLI that exits non-zero, times out, or is absent produces the same
 safe _unavailable_ answer, and none of the CLI's own account, host, or
 credential is ever asked for or shown.
 
-`gh` is optional. A machine without it is reported, never failed: nothing in
-this app and no sign-in depends on it, so a missing CLI is a fact about the
-computer with nothing to go and fix. A configuration that resolved to `direct`
-does not run the CLI at all — this build will not use it — and the report says
-the CLI was _not asked_, which is a different fact from the CLI being missing.
+This is a version-only probe, not authentication evidence. The current direct
+mode can report the CLI as _not asked_; the required-`gh` product must instead
+surface a missing CLI as an actionable GitHub prerequisite. Account and
+host-authentication status, packaged executable discovery, and recovery
+guidance are tracked in #11 and #30. Missing CLI or authentication must not
+disable local Git.
 
 ## Signed updates
 
@@ -1471,7 +1497,8 @@ These are the extreme cases the app states rather than hanging or crashing on.
   pull requests incrementally; the main process collects the origin's open pull
   requests through paginated GraphQL reads on the host's typed transport, then
   reads any locally tracked pull requests missing from that listing individually.
-  `gh` is an optional transport path, not a required enumeration dependency.
+  Select `GIT_STACKS_GITHUB_TRANSPORT=gh` for the required CLI-backed path in
+  the current runtime; the default/legacy transport alternatives remain until #11.
 
 ## Renderer verification
 
@@ -2020,6 +2047,14 @@ The controlled target uses disposable repositories, a generated TLS authority, a
 the production services. Run it with the commands above and record measured results
 outside this README. It does not establish real github.com behavior, authentication,
 or desktop acceptance; those require separately authorized verification.
+
+Automated live GitHub E2E execution is deferred as a development gate.
+howarewoo owns manual live acceptance, recorded against a tested revision;
+the decisions are recorded on [#34](https://github.com/howarewoo/git-stacks/issues/34)
+and [#39](https://github.com/howarewoo/git-stacks/issues/39). The primary
+`gh` authentication pivot does not authorize live tests to spend an ambient
+personal CLI session: the automated runner still requires explicit dedicated
+credentials if used. Signing and human accessibility acceptance are unchanged.
 
 Recovery is a narrower claim than that, and it is stated as the mechanism rather
 than as a result. The command opens its own connection: a private agent, no

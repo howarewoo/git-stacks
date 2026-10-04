@@ -9,8 +9,11 @@ requiring users to install or learn a new stack-management CLI.
 The desktop app owns that workflow while repositories remain usable with ordinary
 Git tools. Local changes, history, and stashes support the pull-request workflow.
 
-This document describes the current product scope, not a new roadmap or a claim
-that every platform or host capability has been verified.
+This document describes the approved product scope, not a claim that every
+platform or host capability has been verified. The required-`gh` authentication
+cutover is tracked in [#11](https://github.com/howarewoo/git-stacks/issues/11);
+[README.md](README.md#github-sign-in) distinguishes the existing runtime from
+that requirement.
 
 ## Core workflows
 
@@ -30,9 +33,9 @@ that every platform or host capability has been verified.
   review diffs and conversations, keep unsent review drafts, submit reviews, and
   merge the reviewed downstack scope. Report confirmed outcomes separately from
   pending or unconfirmed remote state.
-- **Configure the desktop:** choose Git runtime and GitHub host, sign in, adjust
-  appearance and shortcuts, inspect diagnostics, preview support bundles, and use
-  signed updates where supported.
+- **Configure the desktop:** choose Git runtime and GitHub host, inspect the
+  host's `gh` authentication, adjust appearance and shortcuts, inspect
+  diagnostics, preview support bundles, and use signed updates where supported.
 
 Detailed behavior and limitations remain in the [README](README.md), including
 [onboarding](README.md#onboarding), [stack synchronization](README.md#stack-synchronization-and-recovery),
@@ -43,10 +46,13 @@ Detailed behavior and limitations remain in the [README](README.md), including
 - Repositories remain ordinary Git repositories, interoperable with terminals,
   editors, and other Git clients. Opening one is not a conversion step, and the
   app does not configure the user's Git identity or credential helper.
-- Core stack and pull-request management must be available in the desktop app
-  without a new user-facing CLI dependency. Existing Git tools remain
-  interoperable; terminal commands and optional `gh` integration are not the
-  required path through the product.
+- GitHub collaboration requires the GitHub CLI (`gh`) to be installed and
+  authenticated for the repository's host. The provider CLI owns sign-in,
+  credential storage, refresh, account switching, and logout; Git Stacks does
+  not require its own GitHub App registration or provider credential store.
+  Missing or rejected CLI authentication blocks GitHub work, not local Git.
+  The desktop still owns stack workflows; no additional stack-management CLI
+  or Graphite dependency is required.
 - GitHub features address the repository's host with host-specific credentials
   and observed capabilities. Unavailable remote features must not imply that
   local Git is unavailable. See [GitHub hosts](README.md#github-hosts).
@@ -63,6 +69,14 @@ Detailed behavior and limitations remain in the [README](README.md), including
 - Packaging for a platform is not proof of update or verification parity. See
   [Platform support](README.md#platform-support) for the update matrix and
   [Packaged desktop smoke](README.md#packaged-desktop-smoke) for verification limits.
+
+## Future provider direction
+
+GitLab integration may follow the same authentication ownership model through
+the GitLab CLI (`glab`). GitLab is not supported by the current product, and this
+direction does not add GitLab implementation to the GitHub authentication
+cutover. Reuse the typed main-process boundary; do not add a speculative
+provider framework or present GitHub-native stacks as a cross-provider feature.
 
 [DESIGN.md](DESIGN.md) owns interaction, visual, accessibility, and operation-safety
 rules. [AGENTS.md](AGENTS.md) owns repository working instructions. Future scope
