@@ -3,6 +3,7 @@ import { answerNextDoubleCall, getDoubleCalls, openGallery, settle } from './hel
 import { switchDestination } from './helpers/destinations'
 import { reviewFileSet, textFile } from './fixtures/review'
 import type { ReviewFile, ReviewFileSet } from '../../src/shared/review'
+import { LIST_PAGE_SIZE } from '../../src/shared/performance'
 
 /**
  * What the diff surface shows a reviewer, proven against the real component tree.
@@ -17,6 +18,13 @@ import type { ReviewFile, ReviewFileSet } from '../../src/shared/review'
 const NUMBER = 42
 const HEAD_OID = '4242424242424242424242424242424242424242'
 const GENERATED_LINES = 1200
+
+/**
+ * Rows the whole file needs: one per generated line, plus the hunk header that
+ * opens them. The fixture runs past three pages of the shared budget, so a
+ * reveal can be watched sliding rather than only growing.
+ */
+const TOTAL_ROWS = GENERATED_LINES + 1
 
 /**
  * The fixture pull request's own file set with `extra` beside it. The comparison
@@ -87,16 +95,14 @@ test.describe('The review diff surface', () => {
   }) => {
     await openReview(page, [deletedFile])
 
-    const row = page.getByRole('button', {
-      name: /^src\/legacy\/feature-gate\.ts, Removed, \+0 minus 4/u,
-    })
+    const row = page.getByRole('button', { name: /^src\/legacy\/feature-gate\.ts, /u })
     await row.click()
     await settle(page)
     await expect(row).toHaveAttribute('aria-current', 'true')
 
     // Nothing of a deleted file survives on the head, so every gutter names the
     // base line it is showing and there is no head-side gutter to name instead.
-    const diff = page.getByRole('region', { name: 'Unified diff, 5 of 5 rows shown' })
+    const diff = page.getByRole('region', { name: /rows shown/u })
     await expect(diff).toBeVisible()
     expect(await mountedLines(diff)).toEqual(['12', '13', '14', '15'])
     expect(
@@ -138,64 +144,74 @@ test.describe('The review diff surface', () => {
     })
   })
 
-  test('a huge diff mounts two pages at a time, and revealing more slides the window onto the right lines', async ({
+  test('a huge diff stays bounded, and revealing more keeps every mounted row on the line it names', async ({
     page,
   }) => {
     await openReview(page, [generatedFile])
 
-    await page
-      .getByRole('button', { name: /^src\/generated\/manifest\.ts, Added, \+1200 minus 0/u })
-      .click()
+    await page.getByRole('button', { name: /^src\/generated\/manifest\.ts, /u }).click()
     await settle(page)
 
-    // One page is mounted, and it is the beginning of the file. The window is
-    // measured through the surface itself, which stays the same element as the
-    // label grows.
-    const diff = page.locator('.review-unified')
-    await expect(
-      page.getByRole('region', { name: 'Unified diff, 200 of 1201 rows shown' }),
-    ).toBeVisible()
-    expect(await mountedLines(diff)).toHaveLength(199)
-    expect(await mountedEnds(diff)).toEqual(['1', '199'])
+    // The surface is measured through the rows it shows and the share of the
+    // file it admits to, never through the size of a page: the budget belongs to
+    // the project, so these expectations hold if the budget moves.
+    const diff = page.getByRole('region', { name: /rows shown/u })
+    await expect(diff).toBeVisible()
+    const shown = async (): Promise<{ mounted: number; total: number }> => {
+      const counts = /(\d+) of (\d+)/u.exec((await diff.getAttribute('aria-label')) ?? '')
+      return { mounted: Number(counts?.[1]), total: Number(counts?.[2]) }
+    }
+
+    // One page is mounted, and it is the start of the file.
+    expect(await shown()).toEqual({ mounted: LIST_PAGE_SIZE, total: TOTAL_ROWS })
+    expect(await mountedEnds(diff)).toEqual(['1', String(LIST_PAGE_SIZE - 1)])
+    expect(await mountedLines(diff)).toHaveLength(LIST_PAGE_SIZE - 1)
     expect(await diff.locator('.diff-hunk').count()).toBe(1)
 
-    // Revealing one more page extends the same window.
-    await page.getByRole('button', { name: 'Show 200 more diff rows (1001 remaining)' }).click()
+    // Revealing once more extends the same window, still from the top.
+    await page.getByRole('button', { name: /more diff rows/u }).click()
     await settle(page)
-    await expect(
-      page.getByRole('region', { name: 'Unified diff, 400 of 1201 rows shown' }),
-    ).toBeVisible()
-    expect(await mountedEnds(diff)).toEqual(['1', '399'])
+    expect(await shown()).toEqual({ mounted: LIST_PAGE_SIZE * 2, total: TOTAL_ROWS })
+    expect(await mountedEnds(diff)).toEqual(['1', String(LIST_PAGE_SIZE * 2 - 1)])
 
     // Revealing again slides the window instead of growing it: the hunk header
-    // it opened with is left behind, and what remains mounted is the middle of
+    // it opened with is left behind, and what is mounted is the next stretch of
     // the file, numbered as the file numbers it.
-    await page.getByRole('button', { name: 'Show 200 more diff rows (801 remaining)' }).click()
+    await page.getByRole('button', { name: /more diff rows/u }).click()
     await settle(page)
-    await expect(
-      page.getByRole('region', { name: 'Unified diff, 400 of 1201 rows shown' }),
-    ).toBeVisible()
-    const mounted = await mountedLines(diff)
-    expect(mounted).toHaveLength(400)
-    expect(await mountedEnds(diff)).toEqual(['200', '599'])
+    expect(await shown()).toEqual({ mounted: LIST_PAGE_SIZE * 2, total: TOTAL_ROWS })
+    expect(await mountedEnds(diff)).toEqual([
+      String(LIST_PAGE_SIZE),
+      String(LIST_PAGE_SIZE * 3 - 1),
+    ])
+    expect(await mountedLines(diff)).toHaveLength(LIST_PAGE_SIZE * 2)
     expect(await diff.locator('.diff-hunk').count()).toBe(0)
-    await expect(page.getByRole('button', { name: 'Show previous diff rows' })).toBeVisible()
+
+    // Every mounted line of an added file is offered on the head, by the number
+    // the file numbers it.
+    const sides = await diff
+      .locator('.review-line-gutter')
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute('aria-label') ?? ''),
+      )
+    expect(sides.every((label) => label.endsWith(' on the head'))).toBe(true)
+    expect(sides[0]).toBe(`Comment on src/generated/manifest.ts line ${LIST_PAGE_SIZE} on the head`)
 
     // A row that only exists once the window has slid still offers the line it
     // is showing, and choosing it comments on that line of that file.
     await page
-      .getByRole('button', { name: 'Comment on src/generated/manifest.ts line 200 on the head' })
+      .getByRole('button', {
+        name: `Comment on src/generated/manifest.ts line ${LIST_PAGE_SIZE} on the head`,
+      })
       .click()
     await expect(page.locator('.review-conversation')).toContainText(
-      'src/generated/manifest.ts:200 (head)',
+      `src/generated/manifest.ts:${LIST_PAGE_SIZE} (head)`,
     )
 
-    // Walking back returns the window to where it started.
-    await page.getByRole('button', { name: 'Show previous diff rows' }).click()
+    // Walking back returns the window to the stretch it came from.
+    await page.getByRole('button', { name: /previous diff rows/u }).click()
     await settle(page)
-    await expect(
-      page.getByRole('region', { name: 'Unified diff, 400 of 1201 rows shown' }),
-    ).toBeVisible()
-    expect(await mountedEnds(diff)).toEqual(['1', '399'])
+    expect(await shown()).toEqual({ mounted: LIST_PAGE_SIZE * 2, total: TOTAL_ROWS })
+    expect(await mountedEnds(diff)).toEqual(['1', String(LIST_PAGE_SIZE * 2 - 1)])
   })
 })

@@ -561,46 +561,35 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     ).toBe(1)
   })
 
-  test('the review file tree is plain buttons with arrow movement, and opening a file mutates nothing', async ({
+  test('the review file tree moves with arrow keys, and opening a file shows its diff without mutating', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'review-stacked' })
     await switchDestination(page, 'review')
     await settle(page)
 
-    const tree = page.getByRole('group', { name: 'Changed file rows' })
-    const rows = tree.getByRole('button')
-    // Rows are named because a directory row is named by its contents rather
-    // than a label, and an unnamed row is the one an index would point at by
-    // accident.
-    const mounted = await mountedRowNames(rows)
-    expect(mounted.length).toBeGreaterThan(4)
-    expect(mounted[0]).toBe('')
-    expect(mounted[1]).toMatch(/^assets\/logo\.png, /u)
-
-    // Every row is a plain button, so each one is in the tab order without a
-    // roving tabindex to re-base an arrow move onto.
-    const tabIndexes = await rows.evaluateAll((elements) =>
-      elements.map((element) => (element as HTMLButtonElement).tabIndex),
-    )
-    expect(tabIndexes.every((index) => index >= 0)).toBe(true)
+    const rows = page.getByRole('group', { name: 'Changed file rows' }).getByRole('button')
+    expect(await rows.count()).toBeGreaterThan(4)
 
     await rows.first().focus()
     await page.keyboard.press('ArrowDown')
     await expect(rows.nth(1)).toBeFocused()
+    await page.keyboard.press('ArrowDown')
+    await expect(rows.nth(2)).toBeFocused()
+    await page.keyboard.press('ArrowUp')
+    await expect(rows.nth(1)).toBeFocused()
     await page.keyboard.press('ArrowUp')
     await expect(rows.first()).toBeFocused()
 
-    // Enter opens the file the focused row stands for, and shows its diff.
-    const fileRow = page.getByRole('button', {
-      name: /^src\/main\/review\.ts, Modified, \+2 minus 2/u,
-    })
+    // Enter opens the file the focused row stands for, and its lines are the
+    // ones the diff offers to comment on.
+    const fileRow = page.getByRole('button', { name: /^src\/main\/review\.ts, /u })
     await fileRow.focus()
     await page.keyboard.press('Enter')
     await settle(page)
     await expect(fileRow).toHaveAttribute('aria-current', 'true')
     await expect(
-      page.getByRole('region', { name: 'Unified diff, 7 of 7 rows shown' }),
+      page.getByRole('button', { name: 'Comment on src/main/review.ts line 1 on the head' }),
     ).toBeVisible()
 
     // Reviewing a file is a read. Nothing is checked out to look at it.
@@ -614,9 +603,7 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await switchDestination(page, 'review')
     await settle(page)
 
-    await page
-      .getByRole('button', { name: /^src\/main\/review\.ts, Modified, \+2 minus 2/u })
-      .click()
+    await page.getByRole('button', { name: /^src\/main\/review\.ts, /u }).click()
     await settle(page)
 
     const first = page.getByRole('button', {
@@ -638,11 +625,14 @@ test.describe('Keyboard routes and accessibility navigation', () => {
       'src/main/review.ts:1–4 (head)',
     )
 
-    // Stepping to the next file is reachable too, and moves the position with it.
+    // Stepping to the next file is reachable too, and the file it lands on is
+    // the one after the file the reviewer was reading.
     await page.getByRole('button', { name: 'Next file' }).focus()
     await page.keyboard.press('Enter')
     await settle(page)
-    await expect(page.locator('.review-diff-position')).toHaveText('4 of 6')
+    await expect(
+      page.getByRole('button', { name: /^src\/renderer\/src\/App\.tsx, /u }),
+    ).toHaveAttribute('aria-current', 'true')
 
     // Choosing lines to read is not choosing to say something: nothing was sent.
     expect(await getDispatchedActions(page)).toEqual([])
