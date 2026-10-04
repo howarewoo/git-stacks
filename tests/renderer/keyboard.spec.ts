@@ -2,6 +2,7 @@ import { expect, type Locator, test } from '@playwright/test'
 import {
   failNextDoubleCall,
   getDispatchedActions,
+  getDoubleCalls,
   getOpenedExternalUrls,
   getViewFilterInput,
   openGallery,
@@ -559,6 +560,97 @@ test.describe('Keyboard routes and accessibility navigation', () => {
       ),
     ).toBe(1)
   })
+
+  test('the review file tree is plain buttons with arrow movement, and opening a file mutates nothing', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'review-stacked' })
+    await switchDestination(page, 'review')
+    await settle(page)
+
+    const tree = page.getByRole('group', { name: 'Changed file rows' })
+    const rows = tree.getByRole('button')
+    // Rows are named because a directory row is named by its contents rather
+    // than a label, and an unnamed row is the one an index would point at by
+    // accident.
+    const mounted = await mountedRowNames(rows)
+    expect(mounted.length).toBeGreaterThan(4)
+    expect(mounted[0]).toBe('')
+    expect(mounted[1]).toMatch(/^assets\/logo\.png, /u)
+
+    // Every row is a plain button, so each one is in the tab order without a
+    // roving tabindex to re-base an arrow move onto.
+    const tabIndexes = await rows.evaluateAll((elements) =>
+      elements.map((element) => (element as HTMLButtonElement).tabIndex),
+    )
+    expect(tabIndexes.every((index) => index >= 0)).toBe(true)
+
+    await rows.first().focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(rows.nth(1)).toBeFocused()
+    await page.keyboard.press('ArrowUp')
+    await expect(rows.first()).toBeFocused()
+
+    // Enter opens the file the focused row stands for, and shows its diff.
+    const fileRow = page.getByRole('button', {
+      name: /^src\/main\/review\.ts, Modified, \+2 minus 2/u,
+    })
+    await fileRow.focus()
+    await page.keyboard.press('Enter')
+    await settle(page)
+    await expect(fileRow).toHaveAttribute('aria-current', 'true')
+    await expect(
+      page.getByRole('region', { name: 'Unified diff, 7 of 7 rows shown' }),
+    ).toBeVisible()
+
+    // Reviewing a file is a read. Nothing is checked out to look at it.
+    expect(await getDispatchedActions(page)).toEqual([])
+  })
+
+  test('a review line and its range are chosen from the keyboard, and no review is sent', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'review-stacked' })
+    await switchDestination(page, 'review')
+    await settle(page)
+
+    await page
+      .getByRole('button', { name: /^src\/main\/review\.ts, Modified, \+2 minus 2/u })
+      .click()
+    await settle(page)
+
+    const first = page.getByRole('button', {
+      name: 'Comment on src/main/review.ts line 1 on the head',
+    })
+    await first.focus()
+    await expect(first).toBeFocused()
+    await page.keyboard.press('Enter')
+    await settle(page)
+    await expect(page.locator('.review-conversation')).toContainText('src/main/review.ts:1 (head)')
+
+    // The range is extended from the keyboard the way a pointer extends it.
+    await page
+      .getByRole('button', { name: 'Comment on src/main/review.ts line 4 on the head' })
+      .focus()
+    await page.keyboard.press('Shift+Enter')
+    await settle(page)
+    await expect(page.locator('.review-conversation')).toContainText(
+      'src/main/review.ts:1–4 (head)',
+    )
+
+    // Stepping to the next file is reachable too, and moves the position with it.
+    await page.getByRole('button', { name: 'Next file' }).focus()
+    await page.keyboard.press('Enter')
+    await settle(page)
+    await expect(page.locator('.review-diff-position')).toHaveText('4 of 6')
+
+    // Choosing lines to read is not choosing to say something: nothing was sent.
+    expect(await getDispatchedActions(page)).toEqual([])
+    expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSubmit')).toEqual(
+      [],
+    )
+  })
+
   test('a keyboard destination change moves focus to the new workspace heading', async ({
     page,
   }) => {
