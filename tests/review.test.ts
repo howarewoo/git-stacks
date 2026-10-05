@@ -493,22 +493,19 @@ test('a deleted file is addressed on the base, so a comment on it names the line
     '-  return `gate:${name}`',
     '-}',
   ]
-  const removed = parseReviewFileEntry(
-    apiFile({
-      filename: 'src/legacy/feature-gate.ts',
-      status: 'removed',
-      additions: 0,
-      deletions: 5,
-      changes: 5,
-      sha: null,
-      patch: body.join('\n'),
-    }),
-  )
-  assert.ok(removed, 'a removed file with a patch is still a reviewable file')
+  const entry = apiFile({
+    filename: 'src/legacy/feature-gate.ts',
+    status: 'removed',
+    additions: 0,
+    deletions: 5,
+    changes: 5,
+    sha: null,
+    patch: body.join('\n'),
+  })
+  const removed = parseReviewFileEntry(entry)
+  assert.ok(removed && removed.diff.kind === 'text', 'a removed patch is still reviewable')
   assert.equal(removed.status, 'removed')
   assert.equal(removed.sha, null, 'a removed file has no postimage blob to address')
-  assert.equal(removed.diff.kind, 'text')
-  if (removed.diff.kind !== 'text') return
 
   const [hunk_] = removed.diff.hunks
   assert.equal(hunk_.oldStart, 12)
@@ -562,20 +559,11 @@ test('a deleted file is addressed on the base, so a comment on it names the line
   const ref = refFor(hunk_, 2, { path: 'src/legacy/feature-gate.ts' })
   assert.equal(ref.side, 'base')
   assert.equal(ref.line, 14)
-  const shifted = parseReviewFileEntry(
-    apiFile({
-      filename: 'src/legacy/feature-gate.ts',
-      status: 'removed',
-      additions: 0,
-      deletions: 5,
-      changes: 5,
-      sha: null,
-      patch: body.map((line, index) => (index === 0 ? '@@ -40,5 +0,0 @@' : line)).join('\n'),
-    }),
-  )
-  assert.ok(shifted)
-  assert.equal(shifted.diff.kind, 'text')
-  if (shifted.diff.kind !== 'text') return
+  const shifted = parseReviewFileEntry({
+    ...entry,
+    patch: ['@@ -40,5 +0,0 @@', ...body.slice(1)].join('\n'),
+  })
+  assert.ok(shifted && shifted.diff.kind === 'text')
   const resolution = resolveReviewAnchor(fileSet(shifted), ref)
   assert.equal(resolution.match, 'exact')
   assert.equal(resolution.ref?.side, 'base')
@@ -594,9 +582,7 @@ test('a huge diff keeps every line addressable, on the first page and on a revea
   const generated = parseReviewFileEntry(
     apiFile({ filename: 'src/generated/manifest.ts', patch: patch.join('\n') }),
   )
-  assert.ok(generated)
-  assert.equal(generated.diff.kind, 'text')
-  if (generated.diff.kind !== 'text') return
+  assert.ok(generated && generated.diff.kind === 'text')
   assert.deepEqual(
     generated.diff.hunks.map((hunk_) => [hunk_.newStart, hunk_.newLines]),
     [
@@ -609,18 +595,18 @@ test('a huge diff keeps every line addressable, on the first page and on a revea
   const rows = reviewUnifiedRows(generated.diff.hunks, { hideWhitespace: false })
   assert.equal(rows.length, 3 + 3 * perHunk, 'a hunk header is a row of its own')
   assert.deepEqual(
-    rows.filter((row) => row.kind === 'hunk').map((row) => (row.kind === 'hunk' ? row.header : '')),
+    rows.filter((row) => row.kind === 'hunk').map((row) => row.header),
     generated.diff.hunks.map((hunk_) => hunk_.header),
     'each hunk header opens the block it belongs to, in order',
   )
   const lines = rows.filter((row) => row.kind === 'line')
   assert.deepEqual(
-    lines.map((row) => (row.kind === 'line' ? row.number : -1)),
+    lines.map((row) => row.number),
     Array.from({ length: 3 * perHunk }, (_, index) => index + 1),
     'every generated line carries the head number it lands on, in order',
   )
   assert.equal(
-    new Set(lines.map((row) => (row.kind === 'line' ? row.line.anchor : ''))).size,
+    new Set(lines.map((row) => row.line.anchor)).size,
     3 * perHunk,
     'no two lines of a huge diff answer to the same anchor',
   )
