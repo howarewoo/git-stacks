@@ -484,6 +484,145 @@ test('the file summary counts binary and unreadable files apart from text', () =
   })
 })
 
+test('a deleted file is addressed on the base, so a comment on it names the line it removed', () => {
+  const body = [
+    '@@ -12,5 +0,0 @@',
+    '-export const legacyGate = true',
+    '-',
+    '-export function gate(name: string): string {',
+    '-  return `gate:${name}`',
+    '-}',
+  ]
+  const entry = apiFile({
+    filename: 'src/legacy/feature-gate.ts',
+    status: 'removed',
+    additions: 0,
+    deletions: 5,
+    changes: 5,
+    sha: null,
+    patch: body.join('\n'),
+  })
+  const removed = parseReviewFileEntry(entry)
+  assert.ok(removed && removed.diff.kind === 'text', 'a removed patch is still reviewable')
+  assert.equal(removed.status, 'removed')
+  assert.equal(removed.sha, null, 'a removed file has no postimage blob to address')
+
+  const [hunk_] = removed.diff.hunks
+  assert.equal(hunk_.oldStart, 12)
+  assert.equal(hunk_.newStart, 0)
+  assert.equal(hunk_.newLines, 0, 'nothing of a deleted file survives on the head')
+  // Every removed line is addressed by the number it had on the base. Nothing in
+  // a deleted file has a head-side number at all, so a comment written on it
+  // cannot end up attached to a line the pull request never produced.
+  assert.deepEqual(
+    hunk_.lines.map((line) => [line.side, line.oldLine, line.newLine]),
+    [
+      ['base', 12, null],
+      ['base', 13, null],
+      ['base', 14, null],
+      ['base', 15, null],
+      ['base', 16, null],
+    ],
+  )
+  assert.equal(new Set(hunk_.lines.map((line) => line.anchor)).size, 5)
+
+  // Both layouts put that number where the reviewer reads it: down the single
+  // gutter of a unified diff, and on the left of a split one.
+  assert.deepEqual(
+    reviewUnifiedRows(removed.diff.hunks, { hideWhitespace: false })
+      .filter((row) => row.kind === 'line')
+      .map((row) => [row.number, row.line.side]),
+    [
+      [12, 'base'],
+      [13, 'base'],
+      [14, 'base'],
+      [15, 'base'],
+      [16, 'base'],
+    ],
+  )
+  assert.deepEqual(
+    reviewSplitRows(removed.diff.hunks, { hideWhitespace: false }).map((row) =>
+      row.kind === 'split' ? [row.left?.number, row.right] : null,
+    ),
+    [null, [12, null], [13, null], [14, null], [15, null], [16, null]],
+  )
+
+  // It stays a file in the tree, marked as the deletion it is.
+  const inTree = reviewFileRows([removed]).flatMap((row) => (row.kind === 'file' ? [row] : []))
+  assert.deepEqual(
+    inTree.map((row) => [row.path, row.file.status, reviewStatusLetter(row.file.status)]),
+    [['src/legacy/feature-gate.ts', 'removed', 'D']],
+  )
+
+  // The comment a reviewer leaves on a deleted line still names that line after
+  // the rest of the branch moves on: the same deletion, further down the file.
+  const ref = refFor(hunk_, 2, { path: 'src/legacy/feature-gate.ts' })
+  assert.equal(ref.side, 'base')
+  assert.equal(ref.line, 14)
+  const shifted = parseReviewFileEntry({
+    ...entry,
+    patch: ['@@ -40,5 +0,0 @@', ...body.slice(1)].join('\n'),
+  })
+  assert.ok(shifted && shifted.diff.kind === 'text')
+  const resolution = resolveReviewAnchor(fileSet(shifted), ref)
+  assert.equal(resolution.match, 'exact')
+  assert.equal(resolution.ref?.side, 'base')
+  assert.equal(resolution.ref?.line, 42, 'the comment follows the text to its new address')
+})
+
+test('a huge diff keeps every line addressable, on the first page and on a revealed one', () => {
+  const perHunk = 400
+  const patch: string[] = []
+  for (let block = 0; block < 3; block += 1) {
+    patch.push(`@@ -0,0 +${block * perHunk + 1},${perHunk} @@`)
+    for (let line = 0; line < perHunk; line += 1) {
+      patch.push(`+generated row ${block * perHunk + line + 1}`)
+    }
+  }
+  const generated = parseReviewFileEntry(
+    apiFile({ filename: 'src/generated/manifest.ts', patch: patch.join('\n') }),
+  )
+  assert.ok(generated && generated.diff.kind === 'text')
+  assert.deepEqual(
+    generated.diff.hunks.map((hunk_) => [hunk_.newStart, hunk_.newLines]),
+    [
+      [1, perHunk],
+      [401, perHunk],
+      [801, perHunk],
+    ],
+  )
+
+  const rows = reviewUnifiedRows(generated.diff.hunks, { hideWhitespace: false })
+  assert.equal(rows.length, 3 + 3 * perHunk, 'a hunk header is a row of its own')
+  assert.deepEqual(
+    rows.filter((row) => row.kind === 'hunk').map((row) => row.header),
+    generated.diff.hunks.map((hunk_) => hunk_.header),
+    'each hunk header opens the block it belongs to, in order',
+  )
+  const lines = rows.filter((row) => row.kind === 'line')
+  assert.deepEqual(
+    lines.map((row) => row.number),
+    Array.from({ length: 3 * perHunk }, (_, index) => index + 1),
+    'every generated line carries the head number it lands on, in order',
+  )
+  assert.equal(
+    new Set(lines.map((row) => row.line.anchor)).size,
+    3 * perHunk,
+    'no two lines of a huge diff answer to the same anchor',
+  )
+
+  // A comment written on a line far past the first mounted page still resolves
+  // to that line: the anchor belongs to the diff, not to where the row sits.
+  const deep = generated.diff.hunks[1]
+  const ref = refFor(deep, 49, { path: 'src/generated/manifest.ts' })
+  assert.equal(ref.line, 450)
+  assert.equal(ref.hunkId, deep.id)
+  const resolution = resolveReviewAnchor(fileSet(generated), ref)
+  assert.equal(resolution.match, 'exact')
+  assert.equal(resolution.ref?.side, 'head')
+  assert.equal(resolution.ref?.line, 450)
+})
+
 test('a viewed mark belongs to one comparison and is dropped when the head moves', () => {
   const at = comparison()
   const afterPush = comparison({ headOid: 'c'.repeat(40) })
