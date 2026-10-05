@@ -2209,18 +2209,17 @@ test('automatic timer expiry triggers inbox refresh without manual call', async 
     // Restoring is what makes the center ready, and a ready center arms its
     // timer for the interval the restored list was read under.
     assert.equal((await center.inbox()).staleReason, 'expired')
+    // Starting the center is itself allowed to read, so a publish on its own does
+    // not show what the timer did. What the timer causes is the read the host
+    // answers — the list carrying the host's own thread rather than the restored
+    // one — reaching this app as a published inbox. Waiting for that result,
+    // rather than for any publish or for a fixed moment, is what makes this
+    // about the refresh the timer triggered.
     center.start()
-    for (let i = 0; i < 30; i++) {
-      if (host.wire.some((req) => req.path.includes('/notifications'))) break
-      const { promise, resolve } = Promise.withResolvers<void>()
-      setTimeout(resolve, 100)
-      await promise
-    }
-    assert.ok(
-      host.wire.some((req) => req.path.includes('/notifications')),
-      'an automatic timer expiry triggered the inbox refresh without a manual refresh call',
+    await eventually(
+      () => published.some((inbox) => inbox.threads[0]?.id === '1'),
+      'the automatic timer expiry triggered the inbox refresh without a manual refresh call',
     )
-    assert.equal(published.length > 0, true, 'the automatic refresh published the inbox')
     assert.equal(published.at(-1)?.threads.length, 1)
   } finally {
     center.stop()

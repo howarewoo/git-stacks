@@ -1,29 +1,36 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
+import type { TestContext } from 'node:test'
 import {
   DirectGitHubTransport,
   GhGitHubTransport,
   GITHUB_API_VERSION,
-  environmentTokenName,
+  credentialEnvNames,
   GitHubTransportError,
   githubApiVersion,
   githubTransport,
+  githubTransportForHost,
+  githubRetryDeadlineFor,
+  lastGitHubRateLimit,
   lastGitHubRateLimitFor,
+  onGitHubRateLimit,
   resetGitHubRateLimit,
   setGitHubHostTransport,
   setGitHubObservationClock,
-  type GitHubCredential,
   type GitHubErrorKind,
+  type GitHubRateLimitReport,
 } from '../src/main/github-transport'
 import { readPullRequestInbox, resetInboxHostAllowances } from '../src/main/pr-inbox'
 import type { CachedGitHubResponse, GitHubResponseCache } from '../src/main/github-response-cache'
 import type { DesktopAPI } from '../src/shared/types'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 
 // The renderer bridge is the whole renderer capability surface; it must never gain one.
 type AssertNever<T extends never> = T
@@ -126,6 +133,10 @@ async function withoutGhOnPath(
   await mkdir(bin)
   await writeFile(join(bin, 'gh'), `#!/bin/sh\ntouch "${marker}"\nexit 1\n`, 'utf8')
   await chmod(join(bin, 'gh'), 0o755)
+  // Admitted, so it is this run's own CLI and could be started: the marker then
+  // proves this transport did not start one, rather than proving the boundary
+  // refused a CLI it was never given permission to reach.
+  admitOwnedProviderCliRoot(bin)
   const original = process.env.PATH
   process.env.PATH = `${bin}${delimiter}${original ?? ''}`
   try {
@@ -341,19 +352,112 @@ test('the API version is centralized and configurable', async () => {
   await version.rest({ path: 'user' })
 })
 
-test('gh stays optional and the selected transport follows the environment', () => {
-  assert.equal(githubTransport({}).kind, 'gh')
-  assert.equal(githubTransport({ GH_TOKEN: 'token' }).kind, 'direct')
-  assert.equal(
-    githubTransport({ GITHUB_TOKEN: 'token', GIT_STACKS_GITHUB_TRANSPORT: 'gh' }).kind,
-    'gh',
-  )
-  assert.equal(githubTransport({ GIT_STACKS_GITHUB_TRANSPORT: 'direct' }).kind, 'direct')
-  assert.equal(
-    githubTransport({ GIT_STACKS_GITHUB_TRANSPORT: 'nonsense', GH_TOKEN: 't' }).kind,
-    'direct',
-  )
+test('both primary factories answer through a gh child that is asked for the credential', async (t) => {
+  // There is no other primary transport to fall back to, and no environment
+  // that chooses one: a credential in the environment is a credential the CLI
+  // itself reads for a host, not a different way for this app to be GitHub. What
+  // proves that is the request itself — each of these leaves this process as a
+  // `gh api` child, carrying the host and the credential that were asked for.
+  // Both factories are exercised, because both are how production code reaches
+  // GitHub and a guarantee about one of them is not a guarantee about the other.
+  const cli = await stubGhOnPath(t)
+  const github = { ...process.env, PATH: cli.dir }
+  for (const factory of [
+    (env: NodeJS.ProcessEnv) => githubTransport(env),
+    (env: NodeJS.ProcessEnv) =>
+      githubTransportForHost('github.com', 'https://api.github.com', env, undefined),
+  ]) {
+    for (const env of [
+      {},
+      { GH_TOKEN: 'token' },
+      { GITHUB_TOKEN: 'token' },
+      { GH_ENTERPRISE_TOKEN: 'token' },
+      // Selection this build no longer has: naming one cannot move a request off
+      // the CLI or back onto an app-owned credential.
+      { GIT_STACKS_GITHUB_TRANSPORT: 'direct' },
+      { GIT_STACKS_GITHUB_TRANSPORT: 'nonsense' },
+    ]) {
+      await factory({ ...github, ...env }).rest({ path: 'user' })
+      const child = (await cli.recorded()).at(-1)
+      assert.equal(
+        child?.verb,
+        'api',
+        `no environment makes the primary transport a CLI request: ${JSON.stringify(env)}`,
+      )
+      // The child is asked for this host: a request that reached the CLI without
+      // naming it could be answered by any credential the CLI holds.
+      assert.match(
+        child?.args ?? '',
+        /api\b[^\n]*\bgithub\.com\b/u,
+        'the child was not asked for the host this transport serves',
+      )
+    }
+    // A second factory call with a different credential is a different request:
+    // the transport handed back is the one that will sign with what was
+    // supplied, not the one built for the environment before it. Reuse is keyed
+    // on the credential without the credential itself being kept to compare.
+    await factory({ ...github, GH_TOKEN: 'first' }).rest({ path: 'user' })
+    await factory({ ...github, GH_TOKEN: 'second' }).rest({ path: 'user' })
+    const requests = (await cli.recorded()).filter((child) => child.verb === 'api')
+    assert.deepEqual(
+      requests.slice(-2).map((child) => child.token),
+      ['first', 'second'],
+      'a replaced credential environment is still served by the transport built for the previous one',
+    )
+  }
 })
+
+interface StubbedGhChild {
+  verb: string
+  token: string | undefined
+  /** Every argument the child was given, so the host it was asked for is visible. */
+  args: string
+}
+
+/** A `gh` on PATH that records every child this app starts through it. */
+async function stubGhOnPath(t: TestContext): Promise<{
+  dir: string
+  recorded: () => Promise<StubbedGhChild[]>
+}> {
+  const dir = await mkdtemp(join(tmpdir(), 'git-stacks-gh-factory-'))
+  const log = join(dir, 'children.log')
+  const shell =
+    '#!/bin/sh\n' +
+    `printf '%s|%s|%s\\n' "$1" "$GH_TOKEN" "$*" >> ${log}\n` +
+    // A credential the CLI would resolve for itself, so an environment that
+    // carries none still reaches the request as a CLI answer.
+    'if [ "$1" = "auth" ]; then printf \'gho_stub_credential\\n\'; exit 0; fi\n' +
+    "printf 'HTTP/2 200 OK\\r\\nx-ratelimit-limit: 5000\\r\\n" +
+    'x-ratelimit-remaining: 4998\\r\\nx-ratelimit-reset: 1800000000\\r\\n' +
+    'x-ratelimit-resource: core\\r\\n\\r\\n{"login":"octocat"}\'\n'
+  await writeFile(join(dir, 'gh'), shell, { mode: 0o755 })
+  // Admitted by name: this is the directory the real transport resolves `gh` in,
+  // so the boundary answers for the file it starts and refuses the machine's
+  // own CLI.
+  admitOwnedProviderCliRoot(dir)
+  t.after(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+  return {
+    dir,
+    recorded: async () => {
+      let text = ''
+      try {
+        text = await readFile(log, 'utf8')
+      } catch {
+        return []
+      }
+      return text
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((line) => {
+          const [verb, token, args] = line.split('|')
+          return { verb: verb ?? '', token: token === '' ? undefined : token, args: args ?? '' }
+        })
+    },
+  }
+}
+
 test('gh parses HTTP status, rate headers, and paginated response bodies', async () => {
   const adapter = new GhGitHubTransport({
     env: { GIT_STACKS_GITHUB_API_VERSION: '2026-01-01' },
@@ -539,7 +643,11 @@ test('both transports distinguish primary and secondary rate limits on 429 and 4
       return true
     })
     const gh = new GhGitHubTransport({
-      run: async () => {
+      run: async (args: string[]) => {
+        // The credential this request will be pinned to, named the way the CLI
+        // names it. With none named there is nothing to pin to and no request is
+        // made, which is a different case and has its own test.
+        if (args[0] === 'auth') return 'gh-fixture-token\n'
         const headerLines = Object.entries(headers)
           .map(([k, v]) => `${k}: ${v}`)
           .join('\r\n')
@@ -629,6 +737,8 @@ test('pagination handles prefixed API base without next link and with next link'
     // prefixed base, the link header, and the second page are therefore the
     // transport's own work rather than a harness agreeing with it.
     const run = async (args: string[]): Promise<string> => {
+      // The credential this request is pinned to, named the way the CLI names it.
+      if (args[0] === 'auth') return 'gh-fixture-token\n'
       const target = new URL(args[args.length - 1] ?? '')
       const method = args.includes('--method')
         ? (args[args.indexOf('--method') + 1] ?? 'GET')
@@ -717,7 +827,7 @@ test('native gh sends JSON content type for REST and GraphQL bodies', async () =
     const gh = new GhGitHubTransport({
       apiUrl: `http://${host}`,
       host,
-      env: { [environmentTokenName(host)]: 'local-test-token' },
+      env: { [credentialEnvNames(host)[0]]: 'local-test-token' },
     })
     const body = { title: 'Next', nested: { labels: ['one', 'two'] } }
     await gh.rest({ method: 'PATCH', path: 'pulls/3', body })
@@ -761,7 +871,7 @@ test('native gh cancellation and deadline cleanup apply to subprocesses on a loc
     const gh = new GhGitHubTransport({
       apiUrl: `http://${host}`,
       host,
-      env: { [environmentTokenName(host)]: 'local-test-token' },
+      env: { [credentialEnvNames(host)[0]]: 'local-test-token' },
     })
 
     const pre = new AbortController()
@@ -835,6 +945,7 @@ process.stdout.write(token + '\\n')
 `,
     )
     await chmod(binary, 0o755)
+    admitOwnedProviderCliRoot(directory)
     return {
       path: directory,
       hold(host, token) {
@@ -873,37 +984,10 @@ test('an authority fences the credential its own requests would carry, whatever 
   )
   assert.equal(await rotated.credentialAuthority(), await rotated.credentialAuthority())
 
-  // The account credential, asked of the account each time. One transport object
-  // survives an account that hands it a different credential, and nothing calls
-  // `setGitHubCredentialSource` in between: the only way to see that is to read
-  // the credential the transport would actually use.
-  let held: GitHubCredential | null = {
-    token: 'account-a',
-    origin: 'account',
-    session: 'session-1',
-  }
-  const account = new DirectGitHubTransport({
-    env,
-    credential: {
-      host: 'github.com',
-      available: () => held !== null,
-      current: async () => held,
-    },
-  })
-  const admitted = await account.credentialAuthority()
-  assert.notEqual(admitted, first, 'an account credential is not the supplied token')
-  held = { token: 'account-b', origin: 'account', session: 'session-1' }
-  assert.notEqual(
-    await account.credentialAuthority(),
-    admitted,
-    'the account replaced its credential under the same session; the rows read as the old one must be retired',
-  )
-  held = null
-  assert.notEqual(
-    await account.credentialAuthority(),
-    admitted,
-    'a signed-out account holds no credential, which is not the one it held',
-  )
+  // A transport with no credential of its own holds none at all, which is not the
+  // one it would have carried: rows read under a credential are not kept by a
+  // process that has none.
+  assert.notEqual(await new DirectGitHubTransport({ env: {} }).credentialAuthority(), first)
 })
 
 test('the gh authority is the credential the CLI holds, from the CLI itself', async () => {
@@ -1026,23 +1110,28 @@ test('enterprise primary quota is isolated by the serving port', async () => {
 })
 
 test('the credential a child would carry is the one the authority names', async () => {
-  const scoped = environmentTokenName('github.com')
+  const scoped = credentialEnvNames('github.com')[0]
+  const otherHosts = credentialEnvNames('ghe.example.com')[0]
   const previous = process.env[scoped]
+  const previousOther = process.env[otherHosts]
   try {
     process.env[scoped] = 'inherited-credential-one'
-    const transport = new GhGitHubTransport({
-      env: { GH_TOKEN: 'credential-for-some-other-host' },
-      run: async () => answeredResponse(),
-    })
+    const transport = new GhGitHubTransport({ run: async () => answeredResponse() })
     const fenced = await transport.credentialAuthority()
-    // A credential handed over for whichever host the CLI last signed in to
-    // never reaches the child as itself, so swapping it swaps nothing the
-    // requests are fenced on and rows read under one stay under it.
-    const swapped = await new GhGitHubTransport({
-      env: { GH_TOKEN: 'a-second-unscoped-credential' },
-      run: async () => answeredResponse(),
-    }).credentialAuthority()
-    assert.equal(fenced, swapped, 'the unscoped credential is not the one requests carry')
+    assert.match(
+      fenced,
+      /^github\.com\u0000/iu,
+      'the authority names the host whose credential it is',
+    )
+
+    // A credential this host is not entitled to read is not the one its requests
+    // are fenced on, so replacing it retires nothing.
+    process.env[otherHosts] = 'a-credential-for-other-hosts'
+    assert.equal(
+      await transport.credentialAuthority(),
+      fenced,
+      "another host's credential is not the credential this host's requests carry",
+    )
 
     // Replacing the credential this host is entitled to, underneath the same
     // transport, is a different credential, and the rows read with the old one
@@ -1052,6 +1141,857 @@ test('the credential a child would carry is the one the authority names', async 
   } finally {
     if (previous === undefined) delete process.env[scoped]
     else process.env[scoped] = previous
+    if (previousOther === undefined) delete process.env[otherHosts]
+    else process.env[otherHosts] = previousOther
+  }
+})
+
+test('a request whose credential could not be pinned is refused, not made', async () => {
+  const scoped = credentialEnvNames('github.com')[0]
+  const previous = process.env[scoped]
+  delete process.env[scoped]
+  const apiCalls: string[][] = []
+  try {
+    // The CLI names no credential for this host. An authority that names that
+    // absence is the same authority before and after any replacement, so a request
+    // made under it could be answered by a credential the observation never saw,
+    // including one inserted between two otherwise agreeing observations.
+    const unresolved = new GhGitHubTransport({
+      run: async (args: string[]) => {
+        if (args[0] === 'auth') return '\n'
+        apiCalls.push(args)
+        return answeredResponse()
+      },
+    })
+    await assert.rejects(unresolved.rest({ path: 'user' }), (error: unknown) => {
+      assert.ok(error instanceof GitHubTransportError)
+      assert.equal(error.kind, 'unauthorized')
+      return true
+    })
+    assert.deepEqual(apiCalls, [], 'a request was made under an authority that named no credential')
+
+    // The same CLI once it does name one: the request is made, and the credential it
+    // carries is the one the observation named.
+    const carrying: string[][] = []
+    const resolved = new GhGitHubTransport({
+      run: async (args: string[]) => {
+        if (args[0] === 'auth') return 'gh-fixture-token\n'
+        carrying.push(args)
+        return answeredResponse()
+      },
+    })
+    const served = await resolved.rest({ path: 'user' })
+    assert.equal(served.status, 200)
+    assert.equal(carrying.length, 1, 'the request that carried the credential was made')
+  } finally {
+    if (previous === undefined) delete process.env[scoped]
+    else process.env[scoped] = previous
+  }
+})
+
+/**
+ * An owned `gh` that names whichever credential the store file holds, so one host
+ * can be read under two accounts: every child of a read resolves the credential
+ * the store held when that read started, and the next one resolves the other.
+ * Which credential this run's CLI hands out is a file the test writes, so the two
+ * reads really are one host under two accounts rather than two hosts.
+ */
+async function writeTwoCredentialCli(directory: string): Promise<string> {
+  const store = join(directory, 'store')
+  await writeFile(store, 'held')
+  const binary = join(directory, 'gh')
+  await writeFile(
+    binary,
+    `#!${process.execPath}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+const argv = process.argv.slice(2)
+const store = ${JSON.stringify(store)}
+if (argv[0] === 'auth' && argv[1] === 'token') {
+  const held = readFileSync(store, 'utf8') === 'held'
+  process.stdout.write((held ? 'held-credential' : 'current-credential') + '\\n')
+} else if (argv[0] === 'api') {
+  const held = readFileSync(store, 'utf8') === 'held'
+  // How this run's own CLI fails for the credential the store holds: it never
+  // reaches a host at all, so there is nothing to answer and nothing to meter.
+  // A child that never answers is stopped by the caller's own deadline; it waits
+  // for that deadline rather than outlasting the whole run.
+  if (held && existsSync(store + '.hang')) {
+    for (let waited = 0; waited < 2000; waited += 10) await new Promise((done) => setTimeout(done, 10))
+    process.exit(3)
+  }
+  if (held && existsSync(store + '.fail')) {
+    writeFileSync(store + '.started', '')
+    while (!existsSync(store + '.release')) await new Promise((done) => setTimeout(done, 5))
+    process.stderr.write('the CLI could not reach the host\\n')
+    process.exit(3)
+  }
+  const endpoint = argv.find((arg) => arg.startsWith('http://'))
+  const token = readFileSync(store, 'utf8')
+  const response = await fetch(endpoint, {
+    method: endpoint.endsWith('/graphql') ? 'POST' : 'GET',
+    headers: { authorization: 'Bearer ' + token },
+  })
+  process.stdout.write('HTTP/1.1 ' + response.status + ' OK\\r\\n')
+  for (const [name, value] of response.headers) process.stdout.write(name + ': ' + value + '\\r\\n')
+  process.stdout.write('\\r\\n' + await response.text() + '\\n')
+} else if (argv.includes('--version')) {
+  process.stdout.write('gh version 2.62.0\\n')
+} else process.exit(2)
+`,
+  )
+  await chmod(binary, 0o755)
+  admitOwnedProviderCliRoot(directory)
+  return store
+}
+
+test('a refusal that lands after another credential answered is not this host latest report', async () => {
+  for (const kind of ['rate-limited', 'secondary-rate-limit'] as const) {
+    for (const transport of ['direct', 'cli'] as const) {
+      const observed: GitHubRateLimitReport[] = []
+      resetGitHubRateLimit()
+      let now = Date.parse('2026-03-01T12:00:00.000Z')
+      setGitHubObservationClock(() => now)
+      const stopListening = onGitHubRateLimit((report) => observed.push(report))
+      const directory = await mkdtemp(join(tmpdir(), 'git-stacks-late-refusal-'))
+      const restoreCredentials = withoutInheritedCredentials()
+      let holdNext = true
+      // Held behind a function, because the gate is opened from inside the
+      // request the server is still holding.
+      const gate: { open: (() => void) | null } = { open: null }
+      const releaseHeld = (): void => gate.open?.()
+      // Resolved by the server once it is actually holding a request, so the
+      // answering read really does run while this one is waiting.
+      const holding = Promise.withResolvers<void>()
+      const refusalMessage =
+        kind === 'secondary-rate-limit'
+          ? 'You have exceeded a secondary rate limit'
+          : 'API rate limit exceeded for this installation'
+      const server = createServer((request, response) => {
+        const isHeld = holdNext
+        if (isHeld) holdNext = false
+        const send = (status: number, body: unknown, remaining: string): void => {
+          response.statusCode = status
+          response.setHeader('content-type', 'application/json')
+          response.setHeader('x-ratelimit-limit', '5000')
+          response.setHeader('x-ratelimit-remaining', remaining)
+          response.setHeader('x-ratelimit-reset', String(Math.floor(now / 1000) + 3600))
+          response.end(JSON.stringify(body))
+        }
+        if (isHeld) {
+          holding.resolve()
+          void new Promise<void>((release) => {
+            gate.open = release
+          }).then(() =>
+            send(
+              kind === 'secondary-rate-limit' ? 200 : 403,
+              kind === 'secondary-rate-limit'
+                ? { errors: [{ message: refusalMessage }] }
+                : { message: refusalMessage },
+              '0',
+            ),
+          )
+          return
+        }
+        send(200, { data: { viewer: { login: 'ada' } } }, '4998')
+      })
+      let host: string | undefined
+      try {
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+        const address = server.address()
+        assert.ok(address && typeof address !== 'string')
+        host = `127.0.0.1:${address.port}`
+        const apiUrl = `http://${host}/api/v3`
+
+        // The CLI this run owns serves whichever credential the store names, and
+        // names the next one as it answers: the first child of the read carries
+        // the held credential, and every child after it carries the other.
+        const store = await writeTwoCredentialCli(directory)
+
+        // Both arms serve the same host from the same base. The direct arm is
+        // asked for the credential its caller supplied, which it only sends to
+        // the base this run configured, exactly as it would in the app.
+        const build = (token: string) =>
+          transport === 'direct'
+            ? new DirectGitHubTransport({
+                host: 'github.com',
+                apiUrl,
+                graphqlUrl: `${apiUrl}/graphql`,
+                env: { GIT_STACKS_GITHUB_API_URL: apiUrl },
+                token,
+                fetch: globalThis.fetch,
+              })
+            : new GhGitHubTransport({ host, apiUrl, env: { PATH: directory } })
+        // Each transport authenticates as one credential, so the two reads below
+        // are one host under two accounts rather than two hosts.
+        const held = build('held-credential')
+        const current = build('current-credential')
+        // The credential each read authenticates as is resolved before it is
+        // asked, so the fence is judged against the identity each one carries.
+        const heldAuthority =
+          transport === 'cli' ? await held.credentialAuthority() : await held.credentialAuthority()
+
+        // GraphQL, because that is where both of a host's refusals arrive: a
+        // primary one as a 403, and a secondary one carried in a 200.
+        const heldRead = held.graphql('{ viewer { login } }').catch((error: unknown) => {
+          throw error
+        })
+        // Wait until the host is really holding this read: its answer has to be
+        // judged against the report that was current when it was sent.
+        await holding.promise
+        await writeFile(store, 'current')
+        const currentAuthority = await current.credentialAuthority()
+        now += 1_000
+        // The other credential answers first, and this host's report is its answer.
+        await current.graphql('{ viewer { login } }')
+        assert.equal(
+          lastGitHubRateLimitFor(host, currentAuthority).rateLimit.remaining,
+          4998,
+          'the answering credential did not record its own allowance',
+        )
+        const deadlineBefore = githubRetryDeadlineFor(host)
+        now += 1_000
+        releaseHeld?.()
+
+        await assert.rejects(heldRead, (error: unknown) => {
+          assert.ok(error instanceof GitHubTransportError)
+          assert.equal(error.kind, kind)
+          return true
+        })
+
+        // The host still reports what the credential that answered last said: in
+        // its own record, in the per-credential record, and process-wide.
+        assert.equal(
+          lastGitHubRateLimitFor(host, currentAuthority).rateLimit.remaining,
+          4998,
+          "the late refusal replaced the answering credential's allowance for this host",
+        )
+        assert.equal(
+          lastGitHubRateLimitFor(host).rateLimit.remaining,
+          4998,
+          "the late refusal became this host's own latest report",
+        )
+        assert.equal(
+          lastGitHubRateLimit().rateLimit.remaining,
+          4998,
+          'the late refusal became this process latest report',
+        )
+        assert.equal(
+          lastGitHubRateLimitFor(host, heldAuthority).rateLimit.remaining,
+          null,
+          "the refused credential's allowance was recorded as this host's answer",
+        )
+        assert.deepEqual(
+          observed.filter((report) => report.authority === heldAuthority),
+          [],
+          'a listener was told about a refusal from a credential that has left',
+        )
+        // The wait is the host's own: a secondary limit binds whoever asks next,
+        // so it survives the answer that carried it being held back.
+        const deadline = githubRetryDeadlineFor(host)
+        if (kind === 'secondary-rate-limit')
+          assert.ok(
+            deadline !== null && deadline > deadlineBefore!,
+            'a late secondary refusal left the host no wait',
+          )
+        else assert.equal(deadline, deadlineBefore, 'a primary refusal left the host a wait')
+      } finally {
+        stopListening()
+        if (host) setGitHubHostTransport(host, null)
+        releaseHeld?.()
+        resetGitHubRateLimit()
+        setGitHubObservationClock(null)
+        restoreCredentials()
+        server.closeAllConnections()
+        if (server.listening)
+          await new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          )
+        await rm(directory, { recursive: true, force: true })
+      }
+    }
+  }
+})
+test('a held response this build cannot use leaves another credential answer in place, for a conditional request and for a page it cannot read', async () => {
+  for (const shape of ['conditional-304', 'unreadable-page'] as const) {
+    for (const transport of ['direct', 'cli'] as const) {
+      const observed: GitHubRateLimitReport[] = []
+      resetGitHubRateLimit()
+      let now = Date.parse('2026-03-01T12:00:00.000Z')
+      setGitHubObservationClock(() => now)
+      const stopListening = onGitHubRateLimit((report) => observed.push(report))
+      const directory = await mkdtemp(join(tmpdir(), 'git-stacks-late-unusable-'))
+      const restoreCredentials = withoutInheritedCredentials()
+      let holdNext = true
+      const gate: { open: (() => void) | null } = { open: null }
+      const releaseHeld = (): void => gate.open?.()
+      const holding = Promise.withResolvers<void>()
+      const server = createServer((request, response) => {
+        const isHeld = holdNext
+        if (isHeld) holdNext = false
+        const send = (status: number, body: unknown, remaining: string): void => {
+          response.statusCode = status
+          response.setHeader('content-type', 'application/json')
+          response.setHeader('x-ratelimit-limit', '5000')
+          response.setHeader('x-ratelimit-remaining', remaining)
+          response.setHeader('x-ratelimit-reset', String(Math.floor(now / 1000) + 3600))
+          response.end(JSON.stringify(body))
+        }
+        if (isHeld) {
+          holding.resolve()
+          void new Promise<void>((release) => {
+            gate.open = release
+          }).then(() =>
+            // A host that answers a conditional request with nothing to replay, and
+            // a host that answers a page with something that is not a page, have
+            // both said what this host offers. Neither is this build's to record.
+            shape === 'conditional-304' ? send(304, null, '0') : send(200, { items: 'no' }, '0'),
+          )
+          return
+        }
+        send(200, [{ number: 1 }], '4998')
+      })
+      let host: string | undefined
+      try {
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+        const address = server.address()
+        assert.ok(address && typeof address !== 'string')
+        host = `127.0.0.1:${address.port}`
+        const apiUrl = `http://${host}/api/v3`
+        const store = await writeTwoCredentialCli(directory)
+
+        const build = (token: string) =>
+          transport === 'direct'
+            ? new DirectGitHubTransport({
+                host: 'github.com',
+                apiUrl,
+                graphqlUrl: `${apiUrl}/graphql`,
+                env: { GIT_STACKS_GITHUB_API_URL: apiUrl },
+                token,
+                fetch: globalThis.fetch,
+              })
+            : new GhGitHubTransport({ host, apiUrl, env: { PATH: directory } })
+        const held = build('held-credential')
+        const current = build('current-credential')
+        const heldAuthority = await held.credentialAuthority()
+
+        // The read this host holds is a conditional one with nothing stored, and a
+        // page it cannot read as a page: both are answered by the host, and both
+        // are raised as this build's own failure.
+        const heldRead = (
+          shape === 'conditional-304'
+            ? held.rest({ path: 'repos/acme/app/pulls', cache: true })
+            : held.paginate({ path: 'repos/acme/app/pulls' })
+        ).catch((error: unknown) => {
+          throw error
+        })
+        await holding.promise
+        await writeFile(store, 'current')
+        const currentAuthority = await current.credentialAuthority()
+        now += 1_000
+        // The other credential answers first, and this host's report is its answer.
+        await current.rest({ path: 'repos/acme/app/pulls' })
+        assert.equal(
+          lastGitHubRateLimitFor(host, currentAuthority).rateLimit.remaining,
+          4998,
+          'the answering credential did not record its own allowance',
+        )
+        now += 1_000
+        releaseHeld?.()
+
+        await assert.rejects(heldRead, (error: unknown) => {
+          assert.ok(error instanceof GitHubTransportError)
+          assert.equal(error.kind, 'invalid-response')
+          return true
+        })
+
+        // The host still reports what the credential that answered last said, in
+        // every record a caller can read, and told nobody about the answer that
+        // was held back.
+        assert.equal(
+          lastGitHubRateLimitFor(host, currentAuthority).rateLimit.remaining,
+          4998,
+          "the held answer replaced the answering credential's allowance for this host",
+        )
+        assert.equal(
+          lastGitHubRateLimitFor(host).rateLimit.remaining,
+          4998,
+          "the held answer became this host's own latest report",
+        )
+        assert.equal(
+          lastGitHubRateLimit().rateLimit.remaining,
+          4998,
+          'the held answer became this process latest report',
+        )
+        assert.equal(
+          lastGitHubRateLimitFor(host, heldAuthority).rateLimit.remaining,
+          null,
+          "the held credential's allowance was recorded as this host's answer",
+        )
+        assert.deepEqual(
+          observed.filter((report) => report.authority === heldAuthority),
+          [],
+          'a listener was told about an answer from a credential that has left',
+        )
+        // Nothing here refuses whoever asks next: an answer this build cannot use
+        // is not a rate limit, so it leaves no wait behind.
+        assert.equal(githubRetryDeadlineFor(host), null, 'an unusable answer left this host a wait')
+      } finally {
+        stopListening()
+        if (host) setGitHubHostTransport(host, null)
+        releaseHeld?.()
+        resetGitHubRateLimit()
+        setGitHubObservationClock(null)
+        restoreCredentials()
+        server.closeAllConnections()
+        if (server.listening)
+          await new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          )
+        await rm(directory, { recursive: true, force: true })
+      }
+    }
+  }
+})
+
+test('a request that never got an answer records nothing, so another credential answer stays in place', async () => {
+  for (const shape of ['no-answer', 'timeout', 'cancelled'] as const) {
+    for (const transport of ['direct', 'cli'] as const) {
+      const observed: GitHubRateLimitReport[] = []
+      resetGitHubRateLimit()
+      const now = Date.parse('2026-03-01T12:00:00.000Z')
+      setGitHubObservationClock(() => now)
+      const stopListening = onGitHubRateLimit((report) => observed.push(report))
+      const directory = await mkdtemp(join(tmpdir(), 'git-stacks-late-no-answer-'))
+      const restoreCredentials = withoutInheritedCredentials()
+      let holdNext = true
+      const gate: { open: (() => void) | null } = { open: null }
+      const releaseHeld = (): void => gate.open?.()
+      const holding = Promise.withResolvers<void>()
+      // Only a request that really reaches this host can be held by it: the CLI
+      // arms that never get that far cannot be held by a host that never sees
+      // them, and B's answer must not be mistaken for the read being held.
+      const serverHolds = transport === 'direct' || shape === 'cancelled'
+      const server = createServer((request, response) => {
+        const isHeld = serverHolds && holdNext
+        if (isHeld) holdNext = false
+        if (!isHeld) {
+          response.setHeader('content-type', 'application/json')
+          response.setHeader('x-ratelimit-limit', '5000')
+          response.setHeader('x-ratelimit-remaining', '4998')
+          response.setHeader('x-ratelimit-reset', String(Math.floor(now / 1000) + 3600))
+          response.end(JSON.stringify([{ number: 1 }]))
+          return
+        }
+        holding.resolve()
+        void new Promise<void>((release) => {
+          gate.open = release
+        }).then(() => {
+          // A host that stops answering mid-request leaves no response for anyone
+          // to record: the socket goes away rather than answering.
+          if (shape === 'no-answer') request.socket.destroy()
+        })
+      })
+      let host: string | undefined
+      try {
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+        const address = server.address()
+        assert.ok(address && typeof address !== 'string')
+        host = `127.0.0.1:${address.port}`
+        const apiUrl = `http://${host}/api/v3`
+        const store = await writeTwoCredentialCli(directory)
+        // The CLI this run owns fails for the held credential before it reaches a
+        // host at all, and hangs there for the timeout case: this is the CLI's own
+        // failure, not a host's answer.
+        if (transport === 'cli' && shape !== 'cancelled')
+          await writeFile(shape === 'timeout' ? `${store}.hang` : `${store}.fail`, '')
+
+        const build = (token: string) =>
+          transport === 'direct'
+            ? new DirectGitHubTransport({
+                host: 'github.com',
+                apiUrl,
+                graphqlUrl: `${apiUrl}/graphql`,
+                env: { GIT_STACKS_GITHUB_API_URL: apiUrl },
+                token,
+                fetch: globalThis.fetch,
+              })
+            : new GhGitHubTransport({ host, apiUrl, env: { PATH: directory } })
+        const held = build('held-credential')
+        const current = build('current-credential')
+        const heldAuthority = await held.credentialAuthority()
+        const controller = new AbortController()
+
+        // This read is going to be answered by nothing: the child dies without an
+        // HTTP response, the request outlives its own deadline, or the caller
+        // abandons it. None of those is a rate limit.
+        // Its outcome is held rather than thrown, because this read can fail
+        // before the account that replaces it has even answered, and a rejection
+        // nobody is waiting for yet is not a failure of anything.
+        const heldRead = held
+          .rest({
+            path: 'repos/acme/app/pulls',
+            signal: controller.signal,
+            ...(shape === 'timeout' ? { timeoutMs: 50 } : {}),
+          })
+          .then(
+            (value) => ({ value }) as { value?: unknown; error?: unknown },
+            (error: unknown) => ({ error }) as { value?: unknown; error?: unknown },
+          )
+        if (shape === 'cancelled') {
+          await holding.promise
+          controller.abort()
+        }
+        if (transport === 'cli' && shape !== 'cancelled') {
+          // Wait until the child really is inside the failure, so this read is
+          // overtaken by the account that answers, not before it started.
+          for (let attempt = 0; attempt < 400; attempt += 1) {
+            try {
+              await stat(`${store}.started`)
+              break
+            } catch {
+              await new Promise((done) => setTimeout(done, 5))
+            }
+          }
+        } else {
+          await holding.promise
+        }
+        await writeFile(store, 'current')
+        const currentAuthority = await current.credentialAuthority()
+        // The other credential answers first, and this host's report is its answer.
+        await current.rest({ path: 'repos/acme/app/pulls' })
+        assert.equal(
+          lastGitHubRateLimitFor(host, currentAuthority).rateLimit.remaining,
+          4998,
+          'the answering credential did not record its own allowance',
+        )
+        if (transport === 'cli' && shape === 'no-answer') await writeFile(`${store}.release`, '')
+        releaseHeld?.()
+
+        const outcome = await heldRead
+        assert.ok(
+          outcome.error instanceof GitHubTransportError,
+          `the read ended with something other than a typed refusal: ${String(outcome.value)}`,
+        )
+        // The typed class still says what happened; it just says nothing about
+        // what this host offers.
+        assert.equal(
+          (outcome.error as GitHubTransportError).kind,
+          shape === 'cancelled' ? 'cancelled' : shape === 'timeout' ? 'timeout' : 'network',
+        )
+
+        // Nothing about a request that never got an answer is recorded anywhere:
+        // not the host, not the credential, not the process, and no listener is
+        // told, so the allowance the answering credential reported still stands.
+        assert.equal(
+          lastGitHubRateLimitFor(host, currentAuthority).rateLimit.remaining,
+          4998,
+          "the unanswered request replaced the answering credential's allowance for this host",
+        )
+        assert.equal(
+          lastGitHubRateLimitFor(host).rateLimit.remaining,
+          4998,
+          "the unanswered request became this host's own latest report",
+        )
+        assert.equal(
+          lastGitHubRateLimit().rateLimit.remaining,
+          4998,
+          'the unanswered request became this process latest report',
+        )
+        assert.equal(
+          lastGitHubRateLimitFor(host, heldAuthority).rateLimit.remaining,
+          null,
+          "the unanswered request's credential was recorded as this host's answer",
+        )
+        assert.deepEqual(
+          observed.filter((report) => report.authority === heldAuthority),
+          [],
+          'a listener was told about a request that never got an answer',
+        )
+        assert.equal(
+          githubRetryDeadlineFor(host),
+          null,
+          'an unanswered request left this host a wait',
+        )
+      } finally {
+        stopListening()
+        if (host) setGitHubHostTransport(host, null)
+        releaseHeld?.()
+        resetGitHubRateLimit()
+        setGitHubObservationClock(null)
+        restoreCredentials()
+        server.closeAllConnections()
+        if (server.listening)
+          await new Promise<void>((resolve, reject) =>
+            server.close((error) => (error ? reject(error) : resolve())),
+          )
+        await rm(directory, { recursive: true, force: true })
+      }
+    }
+  }
+})
+
+test('an account that answers three times around a replacement never lowers the line the replacement stands behind', async () => {
+  for (const transport of ['direct', 'cli'] as const) {
+    const observed: GitHubRateLimitReport[] = []
+    resetGitHubRateLimit()
+    const sameInstant = Date.parse('2026-03-01T12:00:00.000Z')
+    setGitHubObservationClock(() => sameInstant)
+    const stopListening = onGitHubRateLimit((report) => observed.push(report))
+    const directory = await mkdtemp(join(tmpdir(), 'git-stacks-abab-'))
+    const restoreCredentials = withoutInheritedCredentials()
+    // Three requests leave in order and none of them is answered until it is
+    // released: the first by the account that is about to be replaced, the second
+    // by the replacement, the third by the account that is still current.
+    const waiting: Array<() => void> = []
+    const held = Promise.withResolvers<void>()
+    const replacementHeld = Promise.withResolvers<void>()
+    const allHeld = Promise.withResolvers<void>()
+    let seen = 0
+    const server = createServer((request, response) => {
+      const slot = seen
+      seen += 1
+      const send = (
+        status: number,
+        body: unknown,
+        remaining: string,
+        retryAfter?: string,
+      ): void => {
+        response.statusCode = status
+        response.setHeader('content-type', 'application/json')
+        response.setHeader('x-ratelimit-limit', '5000')
+        response.setHeader('x-ratelimit-remaining', remaining)
+        // A host refusing everyone says how long, in the only unit it has.
+        if (retryAfter === undefined) response.removeHeader('retry-after')
+        else response.setHeader('retry-after', retryAfter)
+        response.end(JSON.stringify(body))
+      }
+      held.resolve()
+      if (seen === 2) replacementHeld.resolve()
+      if (seen === 3) allHeld.resolve()
+      void new Promise<void>((release) => waiting.push(release)).then(() => {
+        // The first account asks twice, and both of its answers say the same
+        // ordinary thing about itself. The replacement asks once, in between, and
+        // is the one that meets a host refusing everyone at once.
+        if (slot === 1)
+          send(
+            200,
+            { errors: [{ message: 'You have exceeded a secondary rate limit' }] },
+            '0',
+            '600',
+          )
+        else send(200, { data: { viewer: { login: 'ada' } } }, '4999')
+      })
+    })
+    let host: string | undefined
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const address = server.address()
+      assert.ok(address && typeof address !== 'string')
+      host = `127.0.0.1:${address.port}`
+      const apiUrl = `http://${host}/api/v3`
+      const store = await writeTwoCredentialCli(directory)
+
+      const build = (token: string) =>
+        transport === 'direct'
+          ? new DirectGitHubTransport({
+              host: 'github.com',
+              apiUrl,
+              graphqlUrl: `${apiUrl}/graphql`,
+              env: { GIT_STACKS_GITHUB_API_URL: apiUrl },
+              token,
+              fetch: globalThis.fetch,
+            })
+          : new GhGitHubTransport({ host, apiUrl, env: { PATH: directory } })
+      const ask = (account: DirectGitHubTransport | GhGitHubTransport) =>
+        account.graphql('{ viewer { login } }').then(
+          (value) => ({ value }) as { value?: unknown; error?: unknown },
+          (error: unknown) => ({ error }) as { value?: unknown; error?: unknown },
+        )
+      // The account that signs in first is current until the store says
+      // otherwise, which is how this account is named as well as carried.
+      await writeFile(store, 'held')
+      const firstAccount = build('held-credential')
+      const firstAuthority = await firstAccount.credentialAuthority()
+      const firstRead = ask(firstAccount)
+      await held.promise
+      // The replacement signs in and is current for as long as it stays signed in.
+      await writeFile(store, 'current')
+      const replacement = build('current-credential')
+      const replacementAuthority = await replacement.credentialAuthority()
+      assert.notEqual(firstAuthority, replacementAuthority)
+      const replacementRead = ask(replacement)
+      // The replacement's own request has left, pinned to the credential that
+      // signed in, and only then does anyone else sign in.
+      await replacementHeld.promise
+      // And the account behind this host signs in again, which is an ordinary
+      // thing for a user to do and asks for its own answer.
+      await writeFile(store, 'held')
+      const backAgain = build('held-credential')
+      assert.equal(await backAgain.credentialAuthority(), firstAuthority)
+      const currentRead = ask(backAgain)
+      await allHeld.promise
+
+      // The answers come back in the order no clock could have predicted: the
+      // account that is current answers first, then its own earlier request
+      // answers behind it, and the account that was replaced answers last.
+      waiting[2]?.()
+      await currentRead
+      waiting[0]?.()
+      await firstRead
+      waiting[1]?.()
+      const refused = await replacementRead
+      assert.ok(refused.error instanceof GitHubTransportError)
+      assert.equal(refused.error.kind, 'secondary-rate-limit')
+
+      // What the account that is current last said stands: it is the host's own
+      // report, in every scope that reports it.
+      assert.equal(lastGitHubRateLimitFor(host, firstAuthority).rateLimit.remaining, 4999)
+      assert.equal(lastGitHubRateLimitFor(host).rateLimit.remaining, 4999)
+      assert.equal(lastGitHubRateLimit().rateLimit.remaining, 4999)
+      assert.equal(
+        lastGitHubRateLimitFor(host, replacementAuthority).rateLimit.remaining,
+        null,
+        "the replaced account's window became the replacement's report",
+      )
+      assert.deepEqual(
+        observed.filter((report) => report.authority === replacementAuthority),
+        [],
+        'a listener heard the account that had already been replaced',
+      )
+      // And the only thing the late answer of that replaced account still decides
+      // is the wait it named for everyone, because a secondary limit is the host
+      // refusing everyone at once.
+      const until = githubRetryDeadlineFor(host)
+      assert.ok(until !== null && until > sameInstant, 'the host-wide wait was dropped with it')
+    } finally {
+      stopListening()
+      if (host) setGitHubHostTransport(host, null)
+      for (const release of waiting) release()
+      resetGitHubRateLimit()
+      setGitHubObservationClock(null)
+      restoreCredentials()
+      server.closeAllConnections()
+      if (server.listening)
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        )
+      await rm(directory, { recursive: true, force: true })
+    }
+  }
+})
+
+test('a held answer that started before a newer one is held back even when both are dated the same instant', async () => {
+  for (const transport of ['direct', 'cli'] as const) {
+    const observed: GitHubRateLimitReport[] = []
+    resetGitHubRateLimit()
+    // One clock for the whole run: the two answers are dated the same instant, so
+    // nothing about the order they arrived in can be read off the wall clock.
+    const sameInstant = Date.parse('2026-03-01T12:00:00.000Z')
+    setGitHubObservationClock(() => sameInstant)
+    const stopListening = onGitHubRateLimit((report) => observed.push(report))
+    const directory = await mkdtemp(join(tmpdir(), 'git-stacks-same-instant-'))
+    const restoreCredentials = withoutInheritedCredentials()
+    let holdNext = true
+    const gate: { open: (() => void) | null } = { open: null }
+    const releaseHeld = (): void => gate.open?.()
+    const holding = Promise.withResolvers<void>()
+    const server = createServer((request, response) => {
+      const isHeld = holdNext
+      if (isHeld) holdNext = false
+      const send = (status: number, body: unknown, remaining: string): void => {
+        response.statusCode = status
+        response.setHeader('content-type', 'application/json')
+        response.setHeader('x-ratelimit-limit', '5000')
+        response.setHeader('x-ratelimit-remaining', remaining)
+        response.setHeader('x-ratelimit-reset', String(Math.floor(sameInstant / 1000) + 3600))
+        response.end(JSON.stringify(body))
+      }
+      if (isHeld) {
+        holding.resolve()
+        void new Promise<void>((release) => {
+          gate.open = release
+        }).then(() => send(403, { message: 'API rate limit exceeded for this installation' }, '0'))
+        return
+      }
+      send(200, { data: { viewer: { login: 'ada' } } }, '4998')
+    })
+    let host: string | undefined
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const address = server.address()
+      assert.ok(address && typeof address !== 'string')
+      host = `127.0.0.1:${address.port}`
+      const apiUrl = `http://${host}/api/v3`
+      const store = await writeTwoCredentialCli(directory)
+
+      const build = (token: string) =>
+        transport === 'direct'
+          ? new DirectGitHubTransport({
+              host: 'github.com',
+              apiUrl,
+              graphqlUrl: `${apiUrl}/graphql`,
+              env: { GIT_STACKS_GITHUB_API_URL: apiUrl },
+              token,
+              fetch: globalThis.fetch,
+            })
+          : new GhGitHubTransport({ host, apiUrl, env: { PATH: directory } })
+      const held = build('held-credential')
+      const current = build('current-credential')
+      const heldAuthority = await held.credentialAuthority()
+
+      const heldRead = held.graphql('{ viewer { login } }').then(
+        (value) => ({ value }) as { value?: unknown; error?: unknown },
+        (error: unknown) => ({ error }) as { value?: unknown; error?: unknown },
+      )
+      await holding.promise
+      await writeFile(store, 'current')
+      const currentAuthority = await current.credentialAuthority()
+      // The replacement answers, and both answers carry the same instant.
+      await current.graphql('{ viewer { login } }')
+      releaseHeld?.()
+      const outcome = await heldRead
+      assert.ok(outcome.error instanceof GitHubTransportError)
+      assert.equal(outcome.error.kind, 'rate-limited')
+
+      assert.equal(
+        lastGitHubRateLimitFor(host, currentAuthority).rateLimit.remaining,
+        4998,
+        "the held answer replaced the answering credential's allowance for this host",
+      )
+      assert.equal(
+        lastGitHubRateLimitFor(host).rateLimit.remaining,
+        4998,
+        "the held answer became this host's own latest report",
+      )
+      assert.equal(
+        lastGitHubRateLimit().rateLimit.remaining,
+        4998,
+        'the held answer became this process latest report',
+      )
+      assert.equal(
+        lastGitHubRateLimitFor(host, heldAuthority).rateLimit.remaining,
+        null,
+        "the held answer was recorded as the refused credential's own report",
+      )
+      assert.deepEqual(
+        observed.filter((report) => report.authority === heldAuthority),
+        [],
+        'a listener was told about an answer from a credential that has left',
+      )
+    } finally {
+      stopListening()
+      if (host) setGitHubHostTransport(host, null)
+      releaseHeld?.()
+      resetGitHubRateLimit()
+      setGitHubObservationClock(null)
+      restoreCredentials()
+      server.closeAllConnections()
+      if (server.listening)
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        )
+      await rm(directory, { recursive: true, force: true })
+    }
   }
 })
 
@@ -1119,6 +2059,7 @@ test('native CLI pins the credential resolved before a profile replacement and c
       binary,
       `#!${process.execPath}
 import { readFileSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 const argv = process.argv.slice(2)
 const store = ${JSON.stringify(store)}
 if (argv[0] === 'auth' && argv[1] === 'token') {
@@ -1139,6 +2080,7 @@ if (argv[0] === 'auth' && argv[1] === 'token') {
 `,
     )
     await chmod(binary, 0o755)
+    admitOwnedProviderCliRoot(directory)
     const transport = new GhGitHubTransport({
       host,
       apiUrl: `http://${host}/api/v3`,

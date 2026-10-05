@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 import { assertNoAxeViolations } from './helpers/axe'
 import { switchDestination } from './helpers/destinations'
 import { scenarios } from './fixtures/scenarios'
+import type { GitHubCliStatus } from '../../src/shared/types'
 import {
   answerNextDoubleCall,
   changeScenario,
@@ -9,11 +10,23 @@ import {
   getDoubleCalls,
   holdDoubleCall,
   openGallery,
+  publishCliStatus,
   releaseDoubleCalls,
+  serveCliStatus,
   settle,
-  switchGalleryRoute,
   STANDARD_VIEWPORTS,
+  switchGalleryRoute,
 } from './helpers/gallery'
+
+/** The account the newly named host authenticates as, as the CLI reports it. */
+const HOST_B: GitHubCliStatus = {
+  state: 'authenticated',
+  host: 'ghe.example.com',
+  login: 'octo',
+  version: '2.62.0',
+  identity: 'cli:ghe.example.com:octo:1',
+  message: null,
+}
 
 /** The six groups, in the order the queue declares them, with the counts its fixture facts decide. */
 const GROUP_COUNTS: readonly (readonly [string, number])[] = [
@@ -714,7 +727,7 @@ test.describe('PR Inbox transitions', () => {
 })
 
 test.describe('PR Inbox identity', () => {
-  test('naming another host retires this one’s rows, and the account that arrives late cannot bring them back', async ({
+  test('naming another host retires this one’s rows, and the CLI status that arrives late cannot bring them back', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'pr-inbox-host-switch' })
@@ -727,10 +740,10 @@ test.describe('PR Inbox identity', () => {
     await search.click()
     await search.pressSequentially('native-stack')
     await expect(rows(page)).toHaveCount(1)
-    // The account read is still outstanding, and the window says so rather
+    // The CLI status read is still outstanding, and the window says so rather
     // than claiming an identity it has not been told about.
-    const account = page.getByTitle('GitHub account')
-    await expect(account).toHaveText('GitHub: signed out')
+    const cliStatus = page.getByTitle('GitHub CLI status')
+    await expect(cliStatus).toHaveText('GitHub CLI: checking')
 
     // A refresh for github.com is asked for and admitted before any of this
     // happens; only its answer is held back. That is the case the fence is for:
@@ -757,46 +770,75 @@ test.describe('PR Inbox identity', () => {
     await expect(dialog).toBeVisible()
     await dialog
       .getByRole('navigation', { name: 'Settings sections' })
-      .getByRole('button', { name: 'GitHub' })
+      .getByRole('button', { name: 'GitHub', exact: true })
       .click()
     await dialog.getByRole('textbox', { name: 'Host' }).fill('ghe.example.com')
+    // The host now selected has a session of its own, which this installation
+    // answers reads with. Serving it before the switch is what makes the read
+    // the window is about to start a real one: without it the double could only
+    // answer with github.com's session, and refusing that answer would prove
+    // the fence rather than the host change.
+    await serveCliStatus(page, {
+      state: 'authenticated',
+      host: 'ghe.example.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:ghe.example.com:octo:1',
+      message: null,
+    })
     await dialog.getByRole('button', { name: 'Use this host' }).click()
     await expect(dialog.getByText('GitHub host set to ghe.example.com.')).toBeVisible()
     await page.keyboard.press('Escape')
     await settle(page)
 
     // The host is half the identity, so the rows read for the previous host go
-    // on the change alone — before any account has said anything about it, and
-    // without waiting for a read that would name nothing.
+    // on the change alone — before any CLI status has said anything about this
+    // host, and without waiting for a read that would name nothing. This
+    // window's very first status never answered, so there is nothing else to
+    // retire them: the host those rows were read for is the whole of what
+    // changes, and it has changed.
     await expect(rows(page)).toHaveCount(0)
     await expect(search).toHaveValue('native-stack')
     await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(cliStatus).toHaveText('GitHub CLI: checking')
 
     // The refresh that was admitted for github.com answers now, late, and it
-    // succeeded. Publishing it would put a queue on screen that answers to a
-    // host this window is no longer reading for, so the answer is taken and
-    // the rows stay gone.
+    // succeeded: it is github.com's own queue, read for the account this window
+    // opened with. Painting it would put one host's pull requests on screen
+    // under another host's name, so the answer is taken and the rows stay gone.
     expect(await releaseDoubleCalls(page, 'pullRequestInbox', 'oldest')).toBe(1)
     await settle(page)
     await expect(rows(page)).toHaveCount(0)
     await expect(page.getByRole('alert')).toHaveCount(0)
 
-    // github.com's account answers too, late. Adopting it must not resurrect
-    // the queue that host read before it was replaced: the window is showing a
-    // queue read by nobody, which is the state it belongs in until it reads
-    // again.
-    expect(await releaseDoubleCalls(page, 'githubAccountStatus')).toBe(1)
+    // github.com's CLI status answers too, late, and it succeeds: it is that
+    // host's account, for a host this window is no longer pointed at. Adopting
+    // it would both name an obsolete host's session and resurrect the queue
+    // that host read before it was replaced, so the window keeps saying it is
+    // still reading the host it now names, with nothing of the old one left.
+    expect(await releaseDoubleCalls(page, 'githubCliStatus', 'oldest')).toBe(1)
     await settle(page)
-    await expect(account).toHaveText('GitHub: signed in')
     await expect(rows(page)).toHaveCount(0)
     await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(cliStatus).toHaveText('GitHub CLI: checking')
 
-    // None of that wedged the destination: a read asked for now answers. Which
-    // rows it answers with is this double's business — it serves one queue
-    // whatever host is named — so this says the window still reads, not whose
-    // pull requests it found.
-    await refresh.click()
+    // The host that was named answers for itself, and only then does this
+    // window have an account to read GitHub as. This fixture serves each
+    // account its own queue, naming the host that asked for it, so what lands
+    // now cannot be the queue github.com's account could see.
+    await publishCliStatus(page, HOST_B)
+    await settle(page)
+    await expect(cliStatus).toHaveText('GitHub CLI: signed in')
+    await page.getByRole('button', { name: 'Refresh the PR Inbox' }).click()
     await settle(page)
     await expect(rows(page)).toHaveCount(1)
+    await expect(rows(page).first()).toContainText('on ghe.example.com')
+    // The row that is left is the new host's own, and github.com's queue is not
+    // on screen in any form: the row that host's account read carries no host
+    // label, so its absence is what says the replaced account's work is gone.
+    await expect(
+      page.getByText('Charge every native-stack page to the refresh budget', { exact: true }),
+    ).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
   })
 })

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test from 'node:test'
 import { parseRemote } from '../src/main/git-core'
 import { discoverRepositories } from '../src/main/github-repositories'
 import { ghCloneCommandText, summarizeRepository } from '../src/main/github-repositories'
@@ -18,19 +22,158 @@ import {
 } from '../src/main/github-host'
 import {
   DirectGitHubTransport,
+  GhGitHubTransport,
   GITHUB_STACKS_API_VERSION,
   GitHubTransportError,
   credentialEnvNames,
   githubTransportForHost,
   hostScopedEnvironment,
+  setGitHubHostTransport,
   resolveGitHubToken,
 } from '../src/main/github-transport'
+import { GitHubResponseCacheStore } from '../src/main/github-response-cache'
 import {
   detectNativeStacksCapability,
   listPullRequestStacks,
   NativeStackError,
 } from '../src/main/native-stacks'
 import type { GitHubCapability, GitHubCapabilityId, GitHubHostStatus } from '../src/shared/host'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
+
+/**
+ * A GitHub host served entirely by a `gh` on a PATH of this test's own.
+ *
+ * Production reaches GitHub only through the CLI, so a test that answers by
+ * replacing `fetch` proves nothing about the code it is about: the requests it
+ * recorded were never the ones that left the process. This answers the API half
+ * of what the app actually runs — `api --include --hostname`, in the wire form
+ * the transport parses — and the credential half (`auth token --hostname`) from
+ * the same executable and the same store, so the rows a read produced and the
+ * identity that read is fenced on cannot disagree.
+ *
+ * The credential is consumed rather than reported: every invocation records what
+ * it would present and refuses a request made with a credential this CLI's store
+ * does not hold, so a case can assert on the credential the rows were read with.
+ * Nothing reaches this machine's real CLI — the PATH holds only this directory.
+ */
+async function installSyntheticHost(initial: {
+  /** The one host this CLI holds a credential for; any other names none. */
+  host: string
+  material: string
+  /**
+   * What this host answers each endpoint with, keyed by the request path as the
+   * transport spells it (already including any query string).
+   */
+  routes: Array<[path: string, answer: { status?: number; body?: unknown }]>
+}): Promise<{
+  /** Every `gh` invocation, in order, as the app issued it. */
+  asked: () => string[]
+  /** The endpoint each API invocation was asked for, in order. */
+  reached: () => string[]
+  /** The credential each invocation would authenticate with, in order. */
+  presented: () => string[]
+  remove: () => Promise<void>
+}> {
+  const directory = await mkdtemp(join(tmpdir(), 'git-stacks-host-cli-'))
+  const control = join(directory, 'host.json')
+  const invocations = join(directory, 'invocations')
+  const endpoints = join(directory, 'endpoints')
+  const presentedCredentials = join(directory, 'presented')
+  const profile: Record<string, unknown> = { ...initial }
+  await writeFile(control, JSON.stringify(profile))
+  await writeFile(
+    join(directory, 'gh'),
+    `#!${process.execPath}
+import { appendFileSync, readFileSync } from 'node:fs'
+
+const argv = process.argv.slice(2)
+appendFileSync(${JSON.stringify(invocations)}, argv.join(' ') + '\\n')
+const profile = JSON.parse(readFileSync(${JSON.stringify(control)}, 'utf8'))
+const flag = (name) => {
+  const at = argv.indexOf(name)
+  return at === -1 ? null : argv[at + 1]
+}
+
+const presented = process.env.GH_TOKEN || process.env.GH_ENTERPRISE_TOKEN || profile.material || ''
+appendFileSync(${JSON.stringify(presentedCredentials)}, presented + '\\n')
+
+if (argv[0] === 'auth' && argv[1] === 'token') {
+  if (!profile.material || profile.host !== flag('--hostname')) {
+    process.stderr.write('not logged in to any host\\n')
+    process.exit(1)
+  }
+  process.stdout.write(profile.material + '\\n')
+  process.exit(0)
+}
+
+if (argv[0] !== 'api') {
+  process.stderr.write('unexpected gh invocation: ' + argv.join(' ') + '\\n')
+  process.exit(2)
+}
+
+const send = (status, body) => {
+  process.stdout.write(
+    'HTTP/2.0 ' + status + ' ' + (status === 200 ? 'OK' : 'Not Found') + '\\r\\n' +
+      'content-type: application/json; charset=utf-8\\r\\n' +
+      'x-ratelimit-limit: 5000\\r\\n' +
+      'x-ratelimit-remaining: 4998\\r\\n' +
+      '\\r\\n' + JSON.stringify(body) + '\\n',
+  )
+}
+
+// A credential this CLI's store does not hold is refused the way a real one is.
+if (presented !== profile.material) {
+  send(401, { message: 'Bad credentials' })
+  process.exit(0)
+}
+
+// The endpoint is the last argument that is neither a flag nor a flag's value: a
+// request with a body ends with the --input - that feeds it. Recorded as the CLI
+// was actually asked for it, so a case can assert on where a request went
+// rather than on the shape of the arguments that carried it.
+const path =
+  argv.filter((value, at) => !value.startsWith('--') && !argv[at - 1]?.startsWith('--')).pop() ?? ''
+appendFileSync(${JSON.stringify(endpoints)}, path + '\\n')
+const route = profile.routes.find(([wanted]) => wanted === path)
+if (!route) {
+  process.stderr.write('no route answered ' + path + '\\n')
+  process.exit(1)
+}
+send(route[1].status ?? 200, route[1].body ?? {})
+`,
+    { mode: 0o755 },
+  )
+  // Admitted by name, so the boundary answers for this file and refuses the
+  // machine's own CLI.
+  admitOwnedProviderCliRoot(directory)
+  // Installed the way the app resolves a host: by host name, serving that host's
+  // own API base, so every request for this host is answered by this CLI and a
+  // request for another host's is never one this fixture could answer.
+  const context = githubHostContext(initial.host)
+  setGitHubHostTransport(
+    initial.host,
+    new GhGitHubTransport({
+      env: { PATH: directory },
+      host: initial.host,
+      apiUrl: context.apiBase,
+      graphqlUrl: context.graphqlUrl,
+    }),
+  )
+  return {
+    asked: () =>
+      existsSync(invocations) ? readFileSync(invocations, 'utf8').split('\n').filter(Boolean) : [],
+    reached: () =>
+      existsSync(endpoints) ? readFileSync(endpoints, 'utf8').split('\n').filter(Boolean) : [],
+    presented: () =>
+      existsSync(presentedCredentials)
+        ? readFileSync(presentedCredentials, 'utf8').split('\n').filter(Boolean)
+        : [],
+    async remove() {
+      setGitHubHostTransport(initial.host, null)
+      await rm(directory, { force: true, recursive: true })
+    },
+  }
+}
 
 interface Recorded {
   url: string
@@ -134,58 +277,67 @@ test('an enterprise origin remote routes every request to that host, never to gi
   assert.equal(ssh.host, ENTERPRISE)
   assert.equal(ssh.apiBase, ENTERPRISE_API)
 
-  const { fetch, recorded } = hostFetch([
-    [`${ENTERPRISE_API}/repos/acme/widgets/stacks`, { body: [] }],
-    [`${ENTERPRISE_API}/`, { body: { current_user_url: `${ENTERPRISE_API}/user` } }],
-    [`${ENTERPRISE_API}/meta`, { body: { installed_version: '3.11.4' } }],
-    [ENTERPRISE_GRAPHQL, { body: { data: { __typename: 'Query' } } }],
-    [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
-    [`${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`, { body: [] }],
-  ])
-
-  const probed = await withFetch(fetch, () =>
-    withEnv(
-      {
-        // The credential is set in the enterprise host's own variable class. An
-        // ambient github.com token is never used for a host that did not issue it.
-        GH_ENTERPRISE_TOKEN: 'ghe-token',
-        GITHUB_ENTERPRISE_TOKEN: undefined,
-        GITHUB_TOKEN: undefined,
-        GH_TOKEN: undefined,
-      },
-      async () => {
-        const stacks = await listPullRequestStacks('acme', 'widgets', { host: https })
-        assert.deepEqual(stacks, [])
-        // The one request the list made went to the enterprise host's own API,
-        // authenticated with the credential that host was given.
-        assert.equal(recorded.length, 1)
-        assert.equal(recorded[0].url, `${ENTERPRISE_API}/repos/acme/widgets/stacks`)
-        assert.equal(recorded[0].headers.get('authorization'), 'Bearer ghe-token')
-        assert.equal(recorded[0].headers.get('x-github-api-version'), GITHUB_STACKS_API_VERSION)
-
-        return probeGitHubHost(https, {
-          repository: { owner: 'acme', name: 'widgets' },
-          now: () => new Date('2026-02-03T04:05:06.000Z'),
-        })
-      },
-    ),
-  )
-
-  assert.deepEqual(
-    recorded.map((entry) => entry.url),
-    [
-      `${ENTERPRISE_API}/repos/acme/widgets/stacks`,
-      `${ENTERPRISE_API}/`,
-      `${ENTERPRISE_API}/meta`,
-      ENTERPRISE_GRAPHQL,
-      `${ENTERPRISE_API}/repos/acme/widgets`,
-      `${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`,
+  // Served by a CLI of this test's own, so every request below is one that
+  // actually left this process as a `gh api` child. The credential belongs to
+  // the enterprise host's own variable class; an ambient github.com token is
+  // never used for a host that did not issue it.
+  const cli = await installSyntheticHost({
+    host: ENTERPRISE,
+    material: 'ghe-token',
+    routes: [
+      [`${ENTERPRISE_API}/repos/acme/widgets/stacks`, { body: [] }],
+      [`${ENTERPRISE_API}/`, { body: { current_user_url: `${ENTERPRISE_API}/user` } }],
+      [`${ENTERPRISE_API}/meta`, { body: { installed_version: '3.11.4' } }],
+      [ENTERPRISE_GRAPHQL, { body: { data: { __typename: 'Query' } } }],
+      [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
+      [`${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`, { body: [] }],
     ],
+  })
+  const probed = await withEnv(
+    {
+      GH_ENTERPRISE_TOKEN: 'ghe-token',
+      GITHUB_ENTERPRISE_TOKEN: undefined,
+      GITHUB_TOKEN: undefined,
+      GH_TOKEN: undefined,
+    },
+    async () => {
+      const stacks = await listPullRequestStacks('acme', 'widgets', { host: https })
+      assert.deepEqual(stacks, [])
+      // The one request the list made left this process as a `gh api` child, for
+      // the enterprise host's own stacks endpoint, with that host's credential.
+      const asked = cli.asked()
+      assert.equal(asked.length, 1)
+      assert.match(asked[0], /^api\b/u, 'the list did not leave this process as a gh request')
+      assert.ok(
+        asked[0].includes(`${ENTERPRISE_API}/repos/acme/widgets/stacks`),
+        `the list asked ${asked[0]} rather than the enterprise host's own stacks endpoint`,
+      )
+      assert.ok(cli.presented().includes('ghe-token'), 'the rows were read with no credential')
+
+      return probeGitHubHost(https, {
+        repository: { owner: 'acme', name: 'widgets' },
+        now: () => new Date('2026-02-03T04:05:06.000Z'),
+      })
+    },
   )
-  for (const entry of recorded) {
-    assert.ok(entry.url.includes(ENTERPRISE), `${entry.url} left the configured host`)
-    assert.equal(entry.url.includes('api.github.com'), false)
-    assert.equal(entry.url.includes('github.com/login'), false)
+  // Read before the fixture is torn down: these are the endpoints the CLI was
+  // actually asked for, so a request that reached another host cannot pass by
+  // matching a pattern.
+  const reached = cli.reached()
+  await cli.remove()
+
+  assert.deepEqual(reached, [
+    `${ENTERPRISE_API}/repos/acme/widgets/stacks`,
+    `${ENTERPRISE_API}/`,
+    `${ENTERPRISE_API}/meta`,
+    ENTERPRISE_GRAPHQL,
+    `${ENTERPRISE_API}/repos/acme/widgets`,
+    `${ENTERPRISE_API}/repos/acme/widgets/stacks?per_page=1`,
+  ])
+  for (const endpoint of reached) {
+    assert.ok(endpoint.includes(ENTERPRISE), `${endpoint} left the configured host`)
+    assert.equal(endpoint.includes('api.github.com'), false)
+    assert.equal(endpoint.includes('github.com/login'), false)
   }
 
   const status = probed
@@ -400,69 +552,62 @@ test('a host that never answered is unreachable, never unsupported', async () =>
 
 test('a credential for one host never reaches another host, and the transport cache never crosses hosts', async () => {
   forgetHost()
-  const { fetch, recorded } = hostFetch([
-    [`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }],
-    [
-      'https://other.example.com/api/v3/repos/acme/widgets',
-      { body: { full_name: 'acme/widgets' } },
-    ],
-  ])
-
-  const own = new DirectGitHubTransport({
+  // One CLI per host, each holding only its own credential. A request that reached
+  // the other host's CLI would be refused by it rather than answered, so a
+  // credential crossing hosts cannot pass by going unnoticed.
+  const ownCli = await installSyntheticHost({
     host: ENTERPRISE,
-    apiUrl: ENTERPRISE_API,
-    token: 'ghe-secret',
-    env: {},
-    fetch,
+    material: 'ghe-cache-token',
+    routes: [[`${ENTERPRISE_API}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }]],
   })
-  await own.rest({ path: 'repos/acme/widgets' })
-  assert.equal(recorded.length, 1)
-  assert.equal(recorded[0].headers.get('authorization'), 'Bearer ghe-secret')
+  const foreignHost = 'other.example.com'
+  const foreignApi = 'https://other.example.com/api/v3'
+  const foreignCli = await installSyntheticHost({
+    host: foreignHost,
+    material: 'other-cache-token',
+    routes: [[`${foreignApi}/repos/acme/widgets`, { body: { full_name: 'acme/widgets' } }]],
+  })
 
-  // The same credential handed to a transport for a different host is refused
-  // before anything leaves the process: this build's own transport authenticates
-  // with the one credential its caller owns, and never another host's.
-  const foreign = new DirectGitHubTransport({
-    host: 'other.example.com',
-    apiUrl: 'https://other.example.com/api/v3',
-    env: {},
-    fetch,
-  })
-  await assert.rejects(
-    () => foreign.rest({ path: 'repos/acme/widgets' }),
-    (error: unknown) => {
-      assert.ok(error instanceof GitHubTransportError)
-      assert.equal(error.kind, 'unauthorized')
-      return true
-    },
-  )
-  assert.equal(recorded.length, 1)
+  try {
+    // Each host is resolved through the factory with its own credential in that
+    // host's variable class, and the transport handed back is the one that will
+    // authenticate with it: a transport built for the other host would present
+    // the wrong credential and be refused.
+    const cachedOwn = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, {
+      GH_ENTERPRISE_TOKEN: 'ghe-cache-token',
+    })
+    const cachedForeign = githubTransportForHost(foreignHost, foreignApi, {
+      GH_ENTERPRISE_TOKEN: 'other-cache-token',
+    })
+    // Asking for the first host again returns the transport built for it rather
+    // than the one the second host's request left in place.
+    const cachedOwnAgain = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, {
+      GH_ENTERPRISE_TOKEN: 'ghe-cache-token',
+    })
 
-  // Each host is resolved through the cache with its own headless credential, so
-  // a transport handed over from the other host would show up in the header.
-  const ownEnv = { GH_ENTERPRISE_TOKEN: 'ghe-cache-token' }
-  const foreignEnv = { GH_ENTERPRISE_TOKEN: 'other-cache-token' }
-  const cachedOwn = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, ownEnv)
-  const cachedForeign = githubTransportForHost(
-    'other.example.com',
-    'https://other.example.com/api/v3',
-    foreignEnv,
-  )
-  const cachedOwnAgain = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, ownEnv)
-  await withFetch(fetch, async () => {
-    await cachedOwn.rest({ path: 'repos/acme/widgets' })
-    await cachedForeign.rest({ path: 'repos/acme/widgets' })
-    await cachedOwnAgain.rest({ path: 'repos/acme/widgets' })
-  })
-  assert.deepEqual(
-    recorded.map((entry) => [entry.url, entry.headers.get('authorization')]),
-    [
-      [`${ENTERPRISE_API}/repos/acme/widgets`, 'Bearer ghe-secret'],
-      [`${ENTERPRISE_API}/repos/acme/widgets`, 'Bearer ghe-cache-token'],
-      ['https://other.example.com/api/v3/repos/acme/widgets', 'Bearer other-cache-token'],
-      [`${ENTERPRISE_API}/repos/acme/widgets`, 'Bearer ghe-cache-token'],
-    ],
-  )
+    const read = await cachedOwn.rest<{ full_name: string }>({ path: 'repos/acme/widgets' })
+    assert.equal(read.data.full_name, 'acme/widgets')
+    const other = await cachedForeign.rest<{ full_name: string }>({ path: 'repos/acme/widgets' })
+    assert.equal(other.data.full_name, 'acme/widgets')
+    const again = await cachedOwnAgain.rest<{ full_name: string }>({ path: 'repos/acme/widgets' })
+    assert.equal(again.data.full_name, 'acme/widgets')
+
+    assert.deepEqual(ownCli.reached(), [
+      `${ENTERPRISE_API}/repos/acme/widgets`,
+      `${ENTERPRISE_API}/repos/acme/widgets`,
+    ])
+    assert.deepEqual(foreignCli.reached(), [`${foreignApi}/repos/acme/widgets`])
+    // Every request presented the credential of the host it was addressed to.
+    assert.deepEqual(
+      [...new Set(ownCli.presented())],
+      ['ghe-cache-token'],
+      "one host's rows were read with another host's credential",
+    )
+    assert.deepEqual([...new Set(foreignCli.presented())], ['other-cache-token'])
+  } finally {
+    await ownCli.remove()
+    await foreignCli.remove()
+  }
 })
 
 test('github.com keeps its own API origin and the credential class the CLI reads for it', () => {
@@ -572,9 +717,16 @@ test('a credential is read from the variable class the CLI reads for that host, 
     [...credentialEnvNames('ghe.example.com')],
     ['GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'],
   )
-  for (const tenant of ['acme.ghe.com', 'GHE.com']) {
+  // A tenancy host is a subdomain of ghe.com, so the case of the name does not
+  // change its class. Bare `ghe.com` is the domain itself rather than a tenant
+  // under it, which is what the CLI reads it as: an enterprise server host.
+  for (const tenant of ['acme.ghe.com', 'ACME.GHE.COM']) {
     assert.deepEqual([...credentialEnvNames(tenant)], ['GH_TOKEN', 'GITHUB_TOKEN'])
   }
+  assert.deepEqual(
+    [...credentialEnvNames('ghe.com')],
+    ['GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'],
+  )
   // A host on the default port is one host, so it is one class, and a trailing
   // dot is not a different host.
   assert.deepEqual(
@@ -738,35 +890,47 @@ test('a repository on its own host is trusted only while that host is in the set
 
 test('a credential replaced outside this app is never answered from a read made under the old one', async () => {
   forgetHost()
-  const { fetch, recorded } = hostFetch([
-    [
-      `${ENTERPRISE_API}/repos/acme/widgets`,
-      { body: { full_name: 'acme/widgets' }, headers: { etag: 'W/"first"' } },
-    ],
-  ])
   const env: NodeJS.ProcessEnv = { GH_ENTERPRISE_TOKEN: 'first-secret' }
-  const transport = githubTransportForHost(ENTERPRISE, ENTERPRISE_API, env)
-  await withFetch(fetch, () => transport.rest({ path: 'repos/acme/widgets', cache: true }))
+  const calls: string[][] = []
+  const cache = new GitHubResponseCacheStore()
+  const transport = () =>
+    new GhGitHubTransport({
+      host: ENTERPRISE,
+      apiUrl: ENTERPRISE_API,
+      cache,
+      env,
+      run: async (args) => {
+        calls.push(args)
+        return [
+          'HTTP/2.0 200 OK',
+          'etag: W/"first"',
+          '',
+          JSON.stringify({ name: 'widgets' }),
+          '',
+        ].join('\r\n')
+      },
+    })
+
+  const before = await transport().credentialAuthority()
+  await transport().rest({ path: 'repos/acme/widgets', cache: true })
 
   // The account is switched in the CLI itself, between two reads. The transport
-  // is the same object, and it must still carry the credential the CLI now
-  // holds: a validator recorded for the previous credential is not an answer to
-  // the next request, so nothing the previous one was allowed to see is replayed.
+  // reads the credential again, and a validator recorded for the previous one is
+  // not an answer to the next request: nothing the previous credential was
+  // allowed to see is replayed under the new one.
   env.GH_ENTERPRISE_TOKEN = 'second-secret'
-  await withFetch(fetch, () => transport.rest({ path: 'repos/acme/widgets', cache: true }))
-
-  assert.deepEqual(
-    recorded.map((entry) => entry.headers.get('authorization')),
-    ['Bearer first-secret', 'Bearer second-secret'],
+  const after = await transport().credentialAuthority()
+  assert.notEqual(
+    before,
+    after,
+    'a credential replaced outside this app is still the one the transport authenticates with',
   )
-  assert.equal(recorded[1].headers.get('if-none-match'), null)
-
-  // The same credential read again is a conditional read, and the body it
-  // already holds is what a 304 replays.
-  await withFetch(fetch, () => transport.rest({ path: 'repos/acme/widgets', cache: true }))
-  assert.equal(recorded[2].headers.get('if-none-match'), 'W/"first"')
+  // Both reads reached the API: a validator recorded for the previous credential
+  // is not an answer to the next request, so nothing the previous one was
+  // allowed to see is replayed under the new one.
+  await transport().rest({ path: 'repos/acme/widgets', cache: true })
+  assert.equal(calls.length, 2)
 })
-
 
 test('a probe cancelled before it finishes records nothing about the host', async () => {
   forgetHost()

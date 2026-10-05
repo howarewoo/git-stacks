@@ -1367,21 +1367,25 @@ button:disabled {
   display: grid;
   gap: 12px;
   min-height: 0;
+  min-width: 0;
 }
 
 .onboarding-search {
   display: flex;
   align-items: end;
   gap: 8px;
+  min-width: 0;
 }
 
 .onboarding-search > :first-child {
   flex: 1;
+  min-width: 0;
 }
 
 .onboarding-results {
   display: grid;
   gap: 6px;
+  min-width: 0;
   max-height: 40vh;
   margin: 0;
   padding: 0;
@@ -1430,31 +1434,54 @@ button:disabled {
 .onboarding-clone {
   display: grid;
   gap: 12px;
+  min-width: 0;
   border-top: 1px solid var(--gs-semantic-border-decorative);
   padding-top: 12px;
 }
 
 .onboarding-clone-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  /* The folder column takes what is left and may shrink to nothing; the
+     protocol control keeps its own width and may shrink with it, so this row is
+     never the reason the dialog's contents run past its frame. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, max-content);
   gap: 12px;
   align-items: end;
+  min-width: 0;
+}
+
+.onboarding-clone-grid > * {
+  min-width: 0;
 }
 
 .onboarding-folder {
   display: flex;
   gap: 8px;
+  min-width: 0;
+}
+
+/* The name the person chose gives up its width before the control that opens
+   the folder picker does, so that control is always reachable. */
+.onboarding-folder > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.onboarding-folder > :last-child {
+  flex: 0 0 auto;
 }
 
 .onboarding-commands {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .onboarding-command {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 6px 8px;
   border-radius: var(--gs-semantic-radius-item);
   background: var(--gs-semantic-surface-inset);
@@ -1481,7 +1508,9 @@ button:disabled {
 .onboarding-clone-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
+  min-width: 0;
 }
 
 .browser-disclaimer {

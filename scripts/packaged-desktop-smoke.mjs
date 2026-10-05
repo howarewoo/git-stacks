@@ -29,10 +29,11 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
 import { createWriteStream, existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { extractFile, listPackage } from '@electron/asar'
 import { chromium, expect } from '@playwright/test'
@@ -159,9 +160,19 @@ async function createWorkspace() {
     repo: join(root, FIXTURE),
     origin: join(root, 'origin.git'),
     gitconfig: join(root, 'gitconfig'),
+    // The one directory this run owns the contents of: the CLI the app is
+    // allowed to start is the file written here and nothing else.
+    bin: join(root, 'bin'),
+    // A second CLI this run also writes, deliberately not in the owned
+    // directory, so a launch that reached past the boundary would run this one
+    // and leave a mark. Nothing on this machine can produce that mark.
+    sentinel: join(root, 'sentinel-bin'),
+    sentinelStamp: join(root, 'unowned-sentinel.log'),
     evidence: join(ROOT, 'out', 'packaged-smoke', new Date().toISOString().replace(/[:.]/g, '-')),
   }
   for (const directory of [
+    workspace.bin,
+    workspace.sentinel,
     workspace.home,
     workspace.userData,
     workspace.temp,
@@ -173,6 +184,26 @@ async function createWorkspace() {
   // helper, or include directive from the machine can reach the fixture.
   await writeFile(workspace.gitconfig, '')
   return workspace
+}
+
+/**
+ * The CLI this run writes outside its owned directory: a fallback that only runs
+ * if a launch escapes the boundary, and whose whole behaviour is to leave a mark
+ * saying so. It holds no account and answers nothing, and the machine's own gh
+ * is never substituted for it.
+ */
+async function writeSentinelGh(workspace) {
+  await writeFile(
+    join(workspace.sentinel, 'gh'),
+    [
+      '#!/bin/sh',
+      `printf 'sentinel %s\\n' "$*" >> ${JSON.stringify(workspace.sentinelStamp)}`,
+      `printf 'gh version 0.0.0-sentinel\\n'`,
+      'exit 0',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
 }
 
 // Nothing the host shell exports may reach the app: git and gh state, GitHub credentials, any
@@ -191,7 +222,7 @@ const UNSAFE_INHERITED =
 const INHERITED_HOME = process.platform === 'darwin'
 const homeEnvironment = (workspace) => (INHERITED_HOME ? homedir() : workspace.home)
 
-function environment(workspace) {
+function environment(workspace, apiBase) {
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !UNSAFE_INHERITED.test(key)),
   )
@@ -208,11 +239,233 @@ function environment(workspace) {
     // smoke can never reuse a real GitHub login, so no GitHub call can succeed or write.
     GH_CONFIG_DIR: join(workspace.home, '.config', 'gh'),
     GH_PROMPT_DISABLED: '1',
+    // This run's own bin directory leads PATH and the sentinel follows it, so a
+    // launch that stepped past the process boundary would resolve the sentinel
+    // and leave its mark instead of touching any account on this machine.
+    PATH: [workspace.bin, workspace.sentinel, process.env.PATH ?? '']
+      .filter(Boolean)
+      .join(delimiter),
+    // PATH alone cannot keep a packaged launch away from the machine's own CLI:
+    // a Finder launch inherits none, and the production bootstrap adds the usual
+    // installation directories back. The fixture's process boundary, installed
+    // at the paused main entry, is what makes the CLI this run finds exclusively
+    // the one it wrote - so "the CLI is missing" is an owned absence rather than
+    // a PATH the app outgrew.
+    GIT_STACKS_OWNED_GH_DIR: workspace.bin,
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: workspace.gitconfig,
     ELECTRON_ENABLE_LOGGING: '1',
+    // This run's own GitHub API, when it has one. The variable names an endpoint
+    // and carries no credential, so it is the app's real request path being
+    // observed rather than a credential being supplied.
+    ...(apiBase ? { GIT_STACKS_GITHUB_API_URL: apiBase } : {}),
   }
+}
+
+/**
+ * The GitHub CLI this run owns, written as a real executable on the PATH the app
+ * is given, so the machine this executes on contributes no account of its own.
+ *
+ * It is not an echo of what it is asked: `auth token` answers with a credential
+ * only this CLI holds, and `api` performs a real request to the endpoint the app
+ * named, authenticated with whatever credential its own environment carries, and
+ * prints the response the way `gh api --include` does. Every invocation is
+ * appended to a log this run reads, so what the app asked is evidence too.
+ */
+/**
+ * The GitHub API this run serves, so the app's real request path can be observed
+ * rather than inferred. It answers the two shapes the primary path actually reads
+ * — the authenticated account on `/user`, GraphQL data on `/graphql` — and
+ * refuses anything else with the status GitHub would refuse it with, so a read
+ * this run did not prepare for fails honestly instead of being answered by a
+ * catch-all. Nothing here is GitHub, and no credential that reaches it came from
+ * the machine. A request is recorded without its credential; the credential is
+ * held in memory only, and is never written to a file or an assertion message.
+ */
+async function startApiDouble(workspace) {
+  const requests = []
+  const received = []
+  const account = 'smoke-account'
+  const send = (response, status, body) => {
+    response.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'x-ratelimit-limit': '5000',
+      'x-ratelimit-remaining': status === 200 ? '4999' : '4998',
+      'x-ratelimit-reset': '0',
+    })
+    response.end(JSON.stringify(body))
+  }
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    const authorization = request.headers.authorization ?? null
+    requests.push({
+      method: request.method ?? '',
+      path: url.pathname,
+      authenticated: authorization !== null,
+    })
+    received.push(authorization)
+    if (authorization === null) {
+      send(response, 401, { message: 'Requires authentication', documentation_url: 'x' })
+      return
+    }
+    // The account read is a REST read of `/user`, and answers with the shape
+    // GitHub returns for it: a login and an id, not GraphQL data.
+    if (request.method === 'GET' && url.pathname === '/user') {
+      send(response, 200, { login: account, id: 1, type: 'User', name: 'Packaged Smoke' })
+      return
+    }
+    if (request.method === 'POST' && url.pathname.endsWith('/graphql')) {
+      send(response, 200, {
+        data: {
+          viewer: { login: account, id: 'U_kgDO' },
+          rateLimit: { limit: 5000, remaining: 4999, resetAt: '1970-01-01T00:00:00Z', cost: 1 },
+        },
+      })
+      return
+    }
+    send(response, 404, { message: 'Not Found', documentation_url: 'x' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  return {
+    base: `http://127.0.0.1:${port}`,
+    requests,
+    /** The credentials this run's API received, in the order they arrived. */
+    credentials: () => received,
+    close: () => new Promise((resolve) => server.close(resolve)),
+    workspace,
+  }
+}
+
+/**
+ * The GitHub CLI this run owns, written as a real executable on the PATH the app
+ * is given, so the machine this executes on contributes no account of its own.
+ *
+ * It is not an echo of what it is asked. `auth status` answers with the JSON the
+ * CLI itself writes — the account list under its host key — for a host this run
+ * configured and no other; `auth token` answers with the synthetic credential it
+ * holds; and `api` makes a real request to the endpoint the app named, with the
+ * method, the headers and the request body the app supplied, and prints the
+ * response the way `gh api --include` does, so a nonzero status leaves the API's
+ * own answer on stdout exactly as the real CLI leaves it there.
+ *
+ * Nothing it writes records a credential: the invocation log and the request log
+ * carry the arguments and the endpoint, and the credential travels only in the
+ * request itself and in this run's own memory.
+ */
+async function writeControlledGh(workspace, { token, hosts, apiBase }) {
+  const log = join(workspace.root, 'gh-invocations.log')
+  const requests = join(workspace.root, 'gh-requests.log')
+  const tokenFile = join(workspace.root, 'gh-token')
+  const hostsFile = join(workspace.root, 'gh-hosts.json')
+  const bodyFile = join(workspace.root, 'gh-request-body')
+  await writeFile(tokenFile, `${token}\n`)
+  // The shape `gh auth status --json hosts` actually writes: the account list is
+  // under a host key, and each entry names the account as `login` — the field the
+  // CLI's own `authEntry` marshals it from — so the app's parser sees what it
+  // would see from the CLI itself rather than a map it would have to guess about.
+  await writeFile(hostsFile, JSON.stringify({ hosts }))
+  await writeFile(
+    join(workspace.bin, 'gh'),
+    [
+      '#!/bin/sh',
+      // Every invocation is recorded before it is answered, so what the app asked
+      // is evidence even for a request this CLI refuses.
+      `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`,
+      // The host the app addressed this read to, and whether this CLI holds an
+      // account for it. A host this run never configured is refused rather than
+      // answered with somebody else's account.
+      'named_host() {',
+      '  previous=""',
+      '  for argument in "$@"; do',
+      '    if [ "$previous" = "--hostname" ]; then printf "%s" "$argument"; return 0; fi',
+      '    previous="$argument"',
+      '  done',
+      '  return 1',
+      '}',
+      'refused_host() {',
+      '  if ! known_host "$1"; then printf "gh: no account for that host\\n" >&2; exit 1; fi',
+      '}',
+      'known_host() {',
+      `  case "$1" in`,
+      ...Object.keys(hosts).map((name) => `    ${name}) return 0 ;;`),
+      '    *) return 1 ;;',
+      '  esac',
+      '}',
+      // Whichever credential variable this host's CLI reads: the CLI-owned names
+      // are not this run's business, and the one that is set is the one that
+      // authenticates the request.
+      'credential="${GH_TOKEN:-${GITHUB_TOKEN:-${GH_ENTERPRISE_TOKEN:-${GITHUB_ENTERPRISE_TOKEN:-}}}}"',
+      'case "$1" in',
+      "  --version) printf 'gh version 2.62.0\\n'; exit 0 ;;",
+      '  auth)',
+      '    case "$*" in',
+      "      *--show-token*) printf 'gh: refusing to print a token\\n' >&2; exit 1 ;;",
+      '    esac',
+      '    case "$2" in',
+      `      status) refused_host "$(named_host "$@" || printf github.com)"; cat ${JSON.stringify(hostsFile)}; exit 0 ;;`,
+      `      token) refused_host "$(named_host "$@" || printf github.com)"; cat ${JSON.stringify(tokenFile)}; exit 0 ;;`,
+      "      *) printf 'gh: unsupported auth subcommand\\n' >&2; exit 1 ;;",
+      '    esac ;;',
+      '  api)',
+      '    endpoint=""',
+      '    method="GET"',
+      '    wants_input="no"',
+      '    awaiting=""',
+      '    for argument in "$@"; do',
+      '      if [ -n "$awaiting" ]; then',
+      '        if [ "$awaiting" = "--method" ]; then method="$argument"; fi',
+      '        awaiting=""',
+      '        continue',
+      '      fi',
+      '      case "$argument" in',
+      "        --show-token) printf 'gh: refusing to print a token\\n' >&2; exit 1 ;;",
+      '        --method|--hostname|--header) awaiting="$argument"; continue ;;',
+      '        --include) continue ;;',
+      '        --input) wants_input="yes"; awaiting="--input"; continue ;;',
+      '        -*) printf "gh: unsupported api argument\\n" >&2; exit 1 ;;',
+      '        *) endpoint="$argument" ;;',
+      '      esac',
+      '    done',
+      '    if [ -z "$endpoint" ]; then printf "gh: no endpoint\\n" >&2; exit 1; fi',
+      // An endpoint this run does not serve is refused: this CLI answers for the
+      // API it was written against and nothing else.
+      `    case "$endpoint" in`,
+      `      ${JSON.stringify(apiBase)}/*) ;;`,
+      '      *) printf "gh: endpoint this CLI does not serve\\n" >&2; exit 1 ;;',
+      '    esac',
+      '    body=""',
+      // A body is read from this command\'s own input, and only when the request
+      // asked for one: a read has no body, and waiting on input it will never be
+      // given is how a request hangs.
+      '    if [ "$wants_input" = "yes" ]; then',
+      `      cat > ${JSON.stringify(bodyFile)}`,
+      `      body=${JSON.stringify(bodyFile)}`,
+      '    fi',
+      `    printf 'api %s %s input=%s\\n' "$method" "$endpoint" "$wants_input" >> ${JSON.stringify(requests)}`,
+      // This CLI is this run's own, and every request it makes goes to the loopback
+      // server this run started. `--disable` is the first option on purpose: curl
+      // otherwise reads the person's own ~/.curlrc, which can carry credentials,
+      // proxies and directives that have nothing to do with this run. `--noproxy`
+      // keeps a proxy directive out of a loopback request as well.
+      '    if [ -n "$body" ]; then',
+      '      curl --disable --noproxy \'*\' --silent --show-error --include --request "$method" --header "Authorization: Bearer $credential" --header "Accept: application/vnd.github+json" --header "Content-Type: application/json" --data-binary "@$body" "$endpoint"',
+      '    else',
+      '      curl --disable --noproxy \'*\' --silent --show-error --include --request "$method" --header "Authorization: Bearer $credential" --header "Accept: application/vnd.github+json" --header "Content-Type: application/json" "$endpoint"',
+      '    fi',
+      '    status=$?',
+      '    rm -f "$body"',
+      // The response is what the app reads, and its own status is this status.
+      '    exit $status ;;',
+      'esac',
+      `printf 'gh: unsupported invocation\\n' >&2`,
+      'exit 1',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
+  return log
 }
 
 const gitEnv = (workspace) => ({
@@ -450,6 +703,10 @@ return {
     // rather than assumed: both values have to point away from the machine's own configuration.
     GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
     GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+    // The two this run names for itself, read back rather than tolerated: each has
+    // to still point at the CLI this run wrote and the API this run stood up.
+    GIT_STACKS_OWNED_GH_DIR: process.env.GIT_STACKS_OWNED_GH_DIR,
+    GIT_STACKS_GITHUB_API_URL: process.env.GIT_STACKS_GITHUB_API_URL,
   },
   // Names only, never values: evidence that no inherited credential or git state reached the app.
   gitEnvKeys: Object.keys(process.env).filter((key) => /^(GIT_|GH_|GITHUB_)/iu.test(key)).sort(),
@@ -697,7 +954,7 @@ for (const frame of window.webContents.mainFrame.frames) {
 return { frames: report }`,
 )
 
-function launch(target, workspace) {
+function launch(target, workspace, apiBase) {
   const logStream = createWriteStream(join(workspace.evidence, 'packaged-app.log'))
   const child = spawn(
     target.executable,
@@ -712,7 +969,7 @@ function launch(target, workspace) {
       `--user-data-dir=${workspace.userData}`,
     ],
     {
-      env: environment(workspace),
+      env: environment(workspace, apiBase),
       cwd: workspace.root,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
@@ -1066,6 +1323,7 @@ async function run(options) {
 
   const deadline = Date.now() + options.timeout * 1000
   let app = null
+  let api = null
   let inspector = null
   let page = null
   const report = async (failure) => {
@@ -1083,6 +1341,7 @@ async function run(options) {
     cleanupPromise ??= (async () => {
       inspector?.close()
       await stop(app)
+      await api?.close()
       app?.logStream.end()
       if (options.keep) log(`Disposable workspace kept at ${workspace.root}`)
       else await rm(workspace.root, { recursive: true, force: true })
@@ -1105,16 +1364,46 @@ async function run(options) {
 
   try {
     await seedFixture(workspace)
+    // The CLI this run does not own, written before the app is launched: a launch
+    // that stepped past the process boundary would resolve it on PATH and leave
+    // its mark, and nothing on this machine can produce that mark.
+    await writeSentinelGh(workspace)
+    api = await startApiDouble(workspace)
+
+    await check(
+      'the PATH this run gives the app really does reach a CLI it does not own',
+      async () => {
+        // The empty directory leads PATH and the sentinel follows it, so with no
+        // CLI of this run's own installed the operating system resolves the
+        // sentinel. That is what makes the end-of-run assertion about the sentinel
+        // mean something: the sentinel was reachable, and only the process boundary
+        // kept the app out of it.
+        const found = spawnSync('/bin/sh', ['-c', 'command -v gh'], {
+          env: environment(workspace, api.base),
+          encoding: 'utf8',
+        })
+        assertEqual(
+          found.stdout.trim(),
+          join(workspace.sentinel, 'gh'),
+          'the PATH this run gives the app does not fall through to a CLI it does not own',
+        )
+        return `with no owned CLI installed, the PATH this run hands the app resolves gh to ${join(workspace.sentinel, 'gh')}`
+      },
+    )
     const canonicalRepo = realpathSync(workspace.repo)
-    app = launch(target, workspace)
+    app = launch(target, workspace, api.base)
     inspector = await Cdp.open(
       await endpoint(app, 'inspector', deadline, 'a main-process inspector endpoint'),
     )
     const paused = await inspector.pauseAtEntry()
     log(`paused main entry  : ${paused.reason}`)
     // The entry pause (--inspect-brk) means no production statement has run
-    // yet. Install the synthetic sealing backend through the same shared
-    // helper the dev-main fixture uses, then resume the app.
+    // yet. Install the synthetic sealing backend and the owned-CLI process
+    // boundary through the same shared helper the dev-main fixture uses, then
+    // resume the app. The boundary is installed here, at the entry this packaged
+    // launch actually reaches, because requiring the helper is not installing it:
+    // without this the app would resolve the machine's own CLI through the
+    // installation directories the production bootstrap appends to PATH.
     const fixtureRoot = join(workspace.root, 'credential-fixture')
     const installed = await inspector.callPaused(
       paused.callFrames[0].callFrameId,
@@ -1147,6 +1436,9 @@ async function run(options) {
             keyFile: `${root}/synthetic-key.bin`,
             fixtureRoot: root,
           })
+          // Before the production main is imported, and before it can hold a
+          // reference to a spawn function: this is the child's own boundary.
+          helper.installOwnedProviderCliBoundary(root)
           return true
         })(),
       join(ROOT, 'tests', 'fixtures', 'isolated-desktop.cjs'),
@@ -1228,7 +1520,7 @@ async function run(options) {
       )
       const unexpected = probe.gitEnvKeys.filter(
         (key) =>
-          !/^(GIT_CONFIG_GLOBAL|GIT_CONFIG_NOSYSTEM|GIT_TERMINAL_PROMPT|GIT_AUTHOR_(NAME|EMAIL)|GIT_COMMITTER_(NAME|EMAIL)|GH_CONFIG_DIR|GH_PROMPT_DISABLED)$/u.test(
+          !/^(GIT_CONFIG_GLOBAL|GIT_CONFIG_NOSYSTEM|GIT_TERMINAL_PROMPT|GIT_AUTHOR_(NAME|EMAIL)|GIT_COMMITTER_(NAME|EMAIL)|GH_CONFIG_DIR|GH_PROMPT_DISABLED|GIT_STACKS_OWNED_GH_DIR|GIT_STACKS_GITHUB_API_URL)$/u.test(
             key,
           ),
       )
@@ -1236,6 +1528,20 @@ async function run(options) {
         unexpected.join(','),
         '',
         `Unexpected git or gh variables reached the app: ${unexpected.join(', ')}`,
+      )
+      // The two this run names itself are not inherited state and are not left
+      // merely tolerated: each one has to still be pointing at the CLI this run
+      // wrote and the API this run stood up, so a variable that arrived from
+      // outside cannot hide behind a name this run also uses.
+      assertEqual(
+        probe.env.GIT_STACKS_OWNED_GH_DIR,
+        workspace.bin,
+        'The app was not fenced to the GitHub CLI this run wrote',
+      )
+      assertEqual(
+        probe.env.GIT_STACKS_GITHUB_API_URL,
+        api === null ? '' : api.base,
+        'The app was not pointed at the API this run stood up',
       )
       note(
         `Inherited GIT_*/GH_*/GITHUB_* state, NODE_OPTIONS, ELECTRON_RUN_AS_NODE, and SSH_AUTH_SOCK are dropped; git reads only the empty ${workspace.gitconfig} (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL set), so the host home it inherits carries no identity, credential helper or include directive into the fixture.`,
@@ -1746,13 +2052,33 @@ async function run(options) {
       return `opened ${opened}`
     })
 
-    await check('GitHub stays unavailable without credentials', async () => {
+    await check('GitHub stays unavailable without a CLI, and local Git still works', async () => {
+      // This run owns the CLI on PATH and has not written one yet, so the machine
+      // this executes on cannot contribute an account of its own. The API it is
+      // pointed at is this run's own, and is reachable: what is missing is the
+      // CLI, so nothing can be asked for a credential with which to reach it.
       await gotoView(locators, 'Pull requests')
       const banner = page.locator('.gh-banner[role="status"]')
       await banner.waitFor()
       assert(
         (await banner.innerText()).includes('GitHub data unavailable'),
         'The pull request view did not report GitHub as unavailable',
+      )
+      const absent = await page.evaluate(async () => await window.desktop.githubCliStatus())
+      assertEqual(
+        absent === null ? 'none' : absent.state,
+        'missing-cli',
+        'A machine with no GitHub CLI on its PATH reports that, and not an account',
+      )
+      assertEqual(
+        absent === null ? 'none' : absent.login,
+        null,
+        'A machine with no CLI names no account, rather than inheriting one',
+      )
+      assertEqual(
+        api.requests.length,
+        0,
+        'The app reached its API without a CLI to authenticate the request with',
       )
       const pullRequests = await page.evaluate(
         async () => (await window.desktop.refresh()).pullRequests,
@@ -1762,8 +2088,121 @@ async function run(options) {
         0,
         'Pull requests appeared without an authenticated gh session',
       )
+      const footer = page.locator('button[title="GitHub CLI status"]')
+      await footer.waitFor()
+      assert(
+        (await footer.innerText()).includes('not installed'),
+        `The GitHub CLI footer did not report the CLI as absent: ${await footer.innerText()}`,
+      )
       await gotoView(locators, 'Branches')
-      return 'the pull request view reports GitHub as unavailable and lists nothing'
+      assertEqual(
+        git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD']),
+        'main',
+        'Local Git after no CLI',
+      )
+      return 'no CLI on this machine, GitHub unavailable, and local Git unaffected'
+    })
+
+    await check('the real API path runs on the credential this CLI holds', async () => {
+      const first = 'gho_smoke_credential_0000000000000000000000000000000000'
+      const second = 'gho_smoke_credential_1111111111111111111111111111111111'
+      // The host this run serves its API from is the host the app decides first:
+      // a configured base outranks the host a repository names, because the CLI
+      // is sent to that base and authenticates as whoever serves it. The account
+      // this CLI holds therefore belongs to that host, and a request to any other
+      // host is refused rather than answered with this account.
+      const apiHost = new URL(api.base).host
+      const log = await writeControlledGh(workspace, {
+        token: first,
+        apiBase: api.base,
+        hosts: {
+          [apiHost]: [
+            {
+              state: 'success',
+              active: true,
+              host: apiHost,
+              login: 'smoke-account',
+            },
+          ],
+        },
+      })
+      const statusOf = () =>
+        page.evaluate(async () => {
+          const status = await window.desktop.githubCliStatus()
+          return status === null ? null : { ...status }
+        })
+      try {
+        // A real read: the CLI is asked what account it holds, and that account's
+        // own authenticated request to this run's API has to answer before this
+        // window is told anyone is signed in.
+        const firstRead = await statusOf()
+        assertEqual(firstRead?.state, 'authenticated', 'the first status this window received')
+        assertEqual(firstRead?.login, 'smoke-account', 'the account the CLI named')
+        // The account is proved against the host that serves this run's API, and
+        // published under the host this repository names: which host the CLI is
+        // asked about and which host the answer belongs to are two different
+        // questions, and a base in between is exactly why.
+        assertEqual(firstRead?.host, 'github.com', 'the host the status was published for')
+        assert(firstRead?.identity, 'a proven credential has an identity to fence on')
+        assert(
+          api.credentials().some((credential) => credential === `Bearer ${first}`),
+          `The API never received the credential this CLI holds (${api.requests.length} requests reached it)`,
+        )
+
+        // A credential replaced in the CLI, outside this app, with no status
+        // pushed and nothing rebuilt: the next read proves the new one, and the
+        // identity that fences rows moves with it.
+        await writeFile(join(workspace.root, 'gh-token'), `${second}\n`)
+        const secondRead = await statusOf()
+        assertEqual(
+          secondRead?.state,
+          'authenticated',
+          'a credential replaced in the CLI still proves itself',
+        )
+        assert(
+          secondRead?.identity !== firstRead.identity,
+          'A credential replaced in the CLI did not change the identity rows are fenced on',
+        )
+        assert(
+          api.credentials().some((credential) => credential === `Bearer ${second}`),
+          `The API never received the replacement credential (${api.requests.length} requests reached it)`,
+        )
+        // The window is told what it may act on and nothing else: this CLI
+        // refuses to print a token, so an app that asked for one would have got
+        // a failure rather than a credential.
+        const asked = readFileSync(log, 'utf8')
+        assert(!asked.includes('--show-token'), `The app asked the CLI to show its token: ${asked}`)
+        for (const published of [firstRead, secondRead]) {
+          const text = JSON.stringify(published)
+          for (const secret of [/gh[pousr]_[A-Za-z0-9]+/u, /Bearer\s/iu]) {
+            assert(!secret.test(text), `The status carried credential-shaped text: ${text}`)
+          }
+        }
+        // The footer is a state indicator and names the state the read
+        // established. Which account that state belongs to was proved through the
+        // bridge above and again by the credential the API received, and the dialog
+        // is the surface that names the account in full.
+        const footer = page.locator('button[title="GitHub CLI status"]')
+        await footer.waitFor()
+        assert(
+          (await footer.innerText()).includes('signed in'),
+          `The GitHub CLI footer did not report the state it read: ${await footer.innerText()}`,
+        )
+        await footer.click()
+        const dialog = page.locator('[role="dialog"]').filter({ hasText: 'GitHub account' })
+        await dialog.waitFor()
+        assert(
+          (await dialog.innerText()).includes('smoke-account'),
+          `The GitHub CLI status dialog did not name the account it read: ${await dialog.innerText()}`,
+        )
+        await page.keyboard.press('Escape')
+      } finally {
+        // Removing the controlled executable is the fault injection: the fixture
+        // answers any `gh` that is not it with ENOENT, exactly as a machine
+        // without the CLI would, and records the attempt.
+        await rm(join(workspace.bin, 'gh'), { force: true })
+      }
+      return 'the CLI status came from a real authenticated request, and a replaced credential moved the identity'
     })
 
     await check('fetch transfers the published commit', async () => {
@@ -2074,6 +2513,34 @@ async function run(options) {
     })
 
     await report(null)
+    // Nothing in this run may have reached a CLI that is not the one it wrote:
+    // a machine's own gh would have answered the version probe, the auth status
+    // or a token read with somebody's real account, and the "missing CLI" step
+    // would have proved nothing.
+    const refusals = join(workspace.root, 'credential-fixture', 'unowned-gh-launches.log')
+    const attempts = existsSync(refusals)
+      ? readFileSync(refusals, 'utf8')
+          .split('\n')
+          .filter((line) => line !== '')
+      : []
+    const whileInstalled = attempts.filter((line) => line.startsWith('owned-present'))
+    assert(
+      whileInstalled.length === 0,
+      `The app started a CLI it did not own while one was installed: ${whileInstalled.join(', ')}`,
+    )
+    // The stronger of the two: a launch that reached past the boundary at all
+    // would have resolved the sentinel this run put on PATH behind its own
+    // directory and written its mark. The machine's own CLI could not have.
+    assertEqual(
+      existsSync(workspace.sentinelStamp) ? readFileSync(workspace.sentinelStamp, 'utf8') : '',
+      '',
+      'The packaged app ran a GitHub CLI outside the directory this run owns',
+    )
+    note(
+      attempts.length === 0
+        ? "No gh outside this run's own executable was ever started, and the CLI this run put on PATH behind its own directory never ran."
+        : `Every gh start this run blocked (${attempts.length}) was for the fault-injected absence; ${attempts.join('; ')}. The CLI behind this run's own directory on PATH never ran.`,
+    )
     return { evidence: workspace.evidence, passed: results.filter((result) => result.ok).length }
   } catch (error) {
     if (page) {

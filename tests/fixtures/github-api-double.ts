@@ -2469,7 +2469,7 @@ export function createGitHubApiDouble(): typeof globalThis.fetch {
         const rule = (state.lostResponses ?? [])[lost]
         state.lostResponses = (state.lostResponses ?? []).filter((_, index) => index !== lost)
         saveState(state)
-        return json(rule.status, { message: rule.message })
+        return json(rule.status, { message: rule.message }, rule.headers ?? {})
       }
       return json(result.status, result.body, result.headers ?? {})
     } catch (error) {

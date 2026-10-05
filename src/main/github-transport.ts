@@ -59,16 +59,22 @@ export interface GitHubTransportFailure {
    */
   body?: unknown
   authority?: string | null
-  /**
-   * Whether this failure's rate-limit metadata becomes the process-wide report
-   * every other caller budgets against. Off for a transport that keeps its own
-   * accounting to itself: an optional module's exhausted token would otherwise
-   * park an unrelated, healthy credential against a wall it never hit.
-   */
-  publish?: boolean
 }
 
-/** Every transport failure carries a typed kind plus the rate-limit metadata GitHub returned. */
+/**
+ * Every transport failure carries a typed kind plus the rate-limit metadata GitHub
+ * returned.
+ *
+ * Raising one records nothing. A report belongs to an answer: what a host served,
+ * metered against that host and the credential the request carried, dated from the
+ * moment the request left. A failure of this build's own — a request that never
+ * reached a host, a child that died, a response it cannot read — is evidence about
+ * nothing, and publishing it would name no host, which is process-wide by
+ * construction: it would replace what another host, or another account of this one,
+ * last reported, with the absence of an answer, and a caller budgeting on that
+ * would read a known allowance as unknown. So the reports are written where the
+ * response is seen, and only there.
+ */
 export class GitHubTransportError extends Error {
   readonly kind: GitHubErrorKind
   readonly status: number | null
@@ -90,8 +96,6 @@ export class GitHubTransportError extends Error {
     this.rateLimit = failure.rateLimit ?? emptyRateLimit()
     this.body = failure.body
     this.authority = failure.authority ?? null
-    if (failure.publish !== false)
-      publishRateLimit(this.rateLimit, failure.kind, null, this.authority)
   }
 }
 
@@ -141,56 +145,123 @@ export function setGitHubObservationClock(clock: (() => number) | null): void {
   observationClock = clock ?? Date.now
 }
 
-function publishRateLimit(
-  rateLimit: GitHubRateLimit,
-  kind: GitHubErrorKind | null = null,
-  host: string | null = null,
-  authority?: string | null,
-  initiatedAt?: number,
-): void {
-  latestRateLimit = {
-    rateLimit,
-    kind,
-    at: observationClock(),
-    ...(authority !== undefined && authority !== null ? { authority } : {}),
-  }
-  if (host) {
-    const current = rateLimitByHost.get(host)
-    const isStale =
-      current !== undefined &&
-      initiatedAt !== undefined &&
-      current.at > initiatedAt &&
-      current.authority !== (authority ?? null)
-    if (!isStale) {
-      rateLimitByHost.set(host, latestRateLimit)
-    }
-    rateLimitByHost.set(rateLimitAuthorityKey(host, null, rateLimit.resource), latestRateLimit)
-    if (authority !== undefined && authority !== null) {
-      rateLimitByHostAuthority.set(rateLimitAuthorityKey(host, authority), latestRateLimit)
-      rateLimitByHostAuthority.set(
-        rateLimitAuthorityKey(host, authority, rateLimit.resource),
-        latestRateLimit,
-      )
-    }
-    noteGitHubRetryDeadline(host, rateLimit, latestRateLimit.at, kind)
-  }
-  for (const listener of rateLimitListeners) listener(latestRateLimit)
+/**
+ * Every request takes the next number as it leaves, so the order requests left in
+ * is known exactly and is never inferred from a clock.
+ */
+let requestsLeft = 0
+
+/**
+ * The newest request whose answer this host has accepted, per host.
+ *
+ * This is a barrier, not a report: it only ever moves forward. An answer from the
+ * same credential that is still current is allowed to say what the account has
+ * left, which is the ordinary case of one account reading itself several times
+ * over — and it is not allowed to lower the barrier, because the answer that
+ * lowered it may be an old one from that same account, replayed late, and a
+ * barrier that moves backwards re-admits every answer the host has already
+ * answered after it.
+ */
+const hostAnswerOrder = new Map<string, number>()
+
+/** Which request leaves now. Captured once per request, before it is made. */
+export function nextGitHubRequestOrder(): number {
+  requestsLeft += 1
+  return requestsLeft
 }
 
 /**
- * When each host asked to be left alone until.
+ * Records what one host's response said, against that host and the credential the
+ * request carried, dated from the request it belongs to.
  *
- * A wait belongs to the host that named it and to the answer that carried the
- * name, so it is recorded where the refusal was observed — at the moment the
- * response arrived, not the moment the request left — and read by whoever
- * admits the next request. It outlives the allowance that came with it: what is
- * left of a host's budget says when the window ends, not when the host is
- * willing to answer again, so a later success publishes an allowance without
- * ending a wait that is still in force.
+ * This is the only writer of a report, and the only writer of a host wait. A
+ * transport calls it where it reads a response — success, refusal, or a body it
+ * cannot read — and names the host, the credential, and the order of the request
+ * it captured while that request was in flight. Every one of those is required:
+ * an answer that named no host, no credential or no request could not be
+ * attributed to anyone, and this is the only way one can be published. A typed
+ * failure does not publish at all: it names no host and has no moment of
+ * departure, so it can be neither attributed nor held back. An answer
+ * that arrives after a newer one from another credential is held back from every
+ * scope, with the one exception a secondary refusal keeps: that wait binds
+ * whoever asks next, whoever that is.
+ */
+export function publishRateLimit(
+  rateLimit: GitHubRateLimit,
+  kind: GitHubErrorKind | null,
+  host: string,
+  authority: string | null,
+  requestOrder: number,
+): void {
+  const observation: GitHubRateLimitReport = {
+    rateLimit,
+    kind,
+    at: observationClock(),
+    authority,
+    requestOrder,
+  }
+  const barrier = hostAnswerOrder.get(host) ?? 0
+  {
+    const current = rateLimitByHost.get(host)
+    // A request that was already running when the credential behind this host was
+    // replaced answers for an account that has left, and it lands late: a newer
+    // answer from the credential that replaced it is already recorded. It is held
+    // back from every scope it could be read back in - the host, that host's
+    // resource, that authority, the host's deadline and the listeners - because a
+    // replaced credential's late refusal is not what this host, or this account,
+    // last said, and one scope taking it while another refused it would publish
+    // the same answer as both current and retired.
+    if (current !== undefined && barrier > requestOrder && current.authority !== authority) {
+      // A secondary limit is the host refusing everyone at once, so the wait it
+      // names binds whoever asks next — including the credential that replaced
+      // this one — and it is recorded exactly where every other wait is, before
+      // the answer that carried it is held back. A primary reset belongs to the
+      // principal it was measured against: a replaced principal's window is not
+      // the new account's to serve, so nothing else about a late answer is kept.
+      if (kind === 'secondary-rate-limit') {
+        noteGitHubRetryDeadline(host, rateLimit, observation.at, kind)
+      }
+      return
+    }
+  }
+  // Accepted: the account it names is still speaking for this host, so what it
+  // says is recorded — and the barrier moves forward to the request it belongs to,
+  // never back to an older one.
+  hostAnswerOrder.set(host, Math.max(barrier, requestOrder))
+  latestRateLimit = observation
+  {
+    rateLimitByHost.set(host, observation)
+    rateLimitByHost.set(rateLimitAuthorityKey(host, null, rateLimit.resource), observation)
+    if (authority !== null) {
+      rateLimitByHostAuthority.set(rateLimitAuthorityKey(host, authority), observation)
+      rateLimitByHostAuthority.set(
+        rateLimitAuthorityKey(host, authority, rateLimit.resource),
+        observation,
+      )
+    }
+    noteGitHubRetryDeadline(host, rateLimit, observation.at, kind)
+  }
+  for (const listener of rateLimitListeners) listener(observation)
+}
+
+/**
+ * When each host asked everyone to be left alone until.
+ *
+ * Only a secondary limit is in here. That refusal is the host refusing every
+ * account at once, so its wait outlives the credential that met it: whoever asks
+ * next waits, and a later success under another account does not end it.
+ *
+ * A primary window is not here, and must not be. It belongs to the one
+ * authenticated principal GitHub counted, so it is kept where that principal's
+ * allowance is kept — against the host and the credential that read it — and a
+ * caller asks there before spending a request. Putting it in a host-wide map
+ * instead would hand one account's exhausted window to whichever account asked
+ * next, in either arrival order, and the account that caused it would keep
+ * spending it.
  */
 const retryDeadlineByHost = new Map<string, number>()
 
-export function noteGitHubRetryDeadline(
+function noteGitHubRetryDeadline(
   host: string,
   rateLimit: GitHubRateLimit,
   at: number,
@@ -200,20 +271,14 @@ export function noteGitHubRetryDeadline(
   // the credential cannot see still carries that host's ordinary quota headers,
   // and a reset an hour away is a statement about the window, not an
   // instruction to stop asking the host for the hour.
-  if (kind !== 'rate-limited' && kind !== 'secondary-rate-limit') return
+  if (kind !== 'secondary-rate-limit') return
   const retryAfter =
     typeof rateLimit.retryAfterSeconds === 'number' ? rateLimit.retryAfterSeconds * 1000 : 0
-  // Primary reset windows belong to the authenticated principal, not the host.
-  if (kind !== 'secondary-rate-limit' && retryAfter <= 0) return
   const reset = rateLimit.reset instanceof Date ? rateLimit.reset.getTime() : null
   const wait = Math.max(
     retryAfter,
-    kind === 'secondary-rate-limit' && retryAfter <= 0 ? 60_000 : 0,
-    kind === 'secondary-rate-limit' &&
-      rateLimit.remaining === 0 &&
-      reset !== null &&
-      Number.isFinite(reset) &&
-      reset > at
+    retryAfter <= 0 ? 60_000 : 0,
+    rateLimit.remaining === 0 && reset !== null && Number.isFinite(reset) && reset > at
       ? reset - at
       : 0,
   )
@@ -238,6 +303,12 @@ export function clearGitHubRetryDeadline(host: string): void {
 /**
  * Every response and every typed failure records its rate-limit metadata, so a
  * caller that only sees a rendered snapshot can still budget its next read.
+ *
+ * A record made here is attributed: it names the host that served the response
+ * and, where one was resolved, the credential the request carried, and it is
+ * stamped with the moment that request left. Nothing publishes without those, so
+ * there is no process-wide report and no listener call a response could make on
+ * its way to the fence that decides whether it is still current.
  */
 export function onGitHubRateLimit(listener: (report: GitHubRateLimitReport) => void): () => void {
   rateLimitListeners.add(listener)
@@ -287,6 +358,9 @@ export function resetGitHubRateLimit(): void {
   rateLimitByHost.clear()
   rateLimitByHostAuthority.clear()
   retryDeadlineByHost.clear()
+  // What this host has already answered is a fact about the requests that left,
+  // and those orders are not rewound: only what has been recorded here is.
+  hostAnswerOrder.clear()
 }
 
 export type GitHubRestMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
@@ -339,6 +413,16 @@ export interface GitHubRateLimitReport {
    * observed without a credential.
    */
   authority?: string | null
+  /**
+   * Which request this answer belongs to, counted in the order requests leave.
+   *
+   * `at` is a wall clock, and a wall clock cannot order two answers that landed
+   * inside the same millisecond — or that this run dated identically on purpose.
+   * This is what says which request left first, which is the only question the
+   * fence below actually asks: an answer whose request left before another
+   * answer was already recorded describes an account that has been replaced.
+   */
+  requestOrder?: number
 }
 
 export interface GitHubGraphqlOptions {
@@ -368,13 +452,37 @@ export interface GitHubTransport {
     options?: GitHubGraphqlOptions,
   ): Promise<T>
   /**
+   * The same GraphQL request, and the opaque credential authority the answer
+   * was actually observed under — the credential that request carried, not one
+   * resolved before it or after it.
+   *
+   * Those two are what a proof pins on either side, and between them a
+   * credential that changed and changed back would look untouched: both pins
+   * would match while the request between them was authenticated as something
+   * else entirely. This is the leg that closes that, so a caller proving which
+   * credential answered reads the request's own report. Optional because a
+   * transport that cannot report one is not silently trusted instead: a caller
+   * that needs this asks for it in its own type, so its absence there is a
+   * compile error rather than a weaker proof at runtime.
+   */
+  graphqlWithAuthority?<T = Record<string, unknown>>(
+    query: string,
+    variables?: Record<string, unknown>,
+    options?: GitHubGraphqlOptions,
+  ): Promise<{ data: T; authority: string }>
+  /**
    * An opaque identity for the credential this transport would authenticate
    * with right now, asked of the transport itself because only the transport
    * knows how it actually resolves one. It carries no secret and cannot
    * authenticate anything: two answers that match are the same credential, and
    * two that differ are a credential that was replaced.
+   *
+   * Resolving one can start a child, so it takes the same cancellation and
+   * deadline every other request here takes: a caller that has been retired must
+   * be able to end this too, rather than leaving a child running for a host it
+   * has already left.
    */
-  credentialAuthority(): Promise<string>
+  credentialAuthority(options?: GitHubGraphqlOptions): Promise<string>
 }
 
 export function emptyRateLimit(): GitHubRateLimit {
@@ -459,9 +567,7 @@ function gitHubHostOfConfiguredBase(base: string | null): string | null {
 export function credentialEnvNames(host: string | null = null): readonly string[] {
   const canonical = canonicalHostName(host ?? GITHUB_HOST)
   const server = canonical !== GITHUB_HOST && !canonical.endsWith('.ghe.com')
-  return server
-    ? ['GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']
-    : ['GH_TOKEN', 'GITHUB_TOKEN']
+  return server ? ['GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN'] : ['GH_TOKEN', 'GITHUB_TOKEN']
 }
 
 /**
@@ -532,9 +638,43 @@ function parseRateLimit(headers: Headers): GitHubRateLimit {
 
 function apiMessage(value: unknown): string | null {
   if (!isRecord(value)) return null
-  if (typeof value.message === 'string' && value.message.trim()) return value.message.trim()
+  if (typeof value.message === 'string' && value.message.trim())
+    return sanitizedDetail(value.message)
   return null
 }
+
+/**
+ * What a failure is allowed to say about itself, in one bounded line.
+ *
+ * A host's own error message is worth keeping: it names what was refused and is
+ * the difference between a useful failure and a shrug. What is not kept is
+ * anything that echoes the request back — a credential a message quoted, a
+ * header it repeated, or a path into this computer's own storage — because this
+ * text reaches windows, logs, and support bundles. It is one line of bounded
+ * length with those removed, and a message that was nothing else is dropped for
+ * the fixed wording rather than carried in part.
+ */
+function sanitizedDetail(text: string): string | null {
+  const oneLine = text.replace(/\s+/gu, ' ').trim()
+  if (oneLine === '') return null
+  const scrubbed = oneLine
+    // Anything shaped like a credential, wherever in the line it appears.
+    .replace(
+      /\b(?:gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+|oauth2:[A-Za-z0-9-]+)\b/giu,
+      '[redacted]',
+    )
+    .replace(/\b[A-Za-z0-9._-]{0,64}[-_]token\b/giu, '[redacted]')
+    .replace(/\bauthorization\b:?\s*\S+/giu, 'authorization [redacted]')
+    // A path into this computer's storage is not the caller's business.
+    .replace(
+      /(?:^|[\s"'(])(?:~\/|\/(?:home|Users|root|var|etc|private)\/|\.config\/)[^\s"')]*/gu,
+      '$1[path]',
+    )
+  return scrubbed.length > DETAIL_LIMIT ? `${scrubbed.slice(0, DETAIL_LIMIT)}…` : scrubbed
+}
+
+/** How much of a failure's own words is ever carried. */
+const DETAIL_LIMIT = 240
 
 function graphqlMessages(value: unknown): string | null {
   if (!isRecord(value) || !Array.isArray(value.errors) || value.errors.length === 0) return null
@@ -580,36 +720,50 @@ function graphqlData<T>(
   status: number,
   rateLimit: GitHubRateLimit,
   authority: string,
-  onRefusal?: (rateLimit: GitHubRateLimit, kind: GitHubErrorKind) => void,
-  publish: boolean = true,
+  onResponse?: (rateLimit: GitHubRateLimit, kind: GitHubErrorKind) => void,
 ): T {
+  // Every answer this function reads is one a host served, so it is recorded
+  // through the transport that received it: attributed to that host and that
+  // credential, and stamped with the moment the request left, which is what lets
+  // a response that arrives after a newer one be held back. Nothing here
+  // publishes without a host to name, because a host-less publication is
+  // process-wide — it would replace what another host, or another account of this
+  // one, last reported, and it cannot be held back afterwards.
   const errors = graphqlMessages(body)
   if (errors) {
-    const kind = statusKind(403, rateLimit, errors)
-    if (kind === 'rate-limited' || kind === 'secondary-rate-limit') onRefusal?.(rateLimit, kind)
+    const refusal = statusKind(403, rateLimit, errors)
+    const kind: GitHubErrorKind =
+      refusal === 'rate-limited' || refusal === 'secondary-rate-limit'
+        ? refusal
+        : 'invalid-response'
+    onResponse?.(rateLimit, kind)
     throw new GitHubTransportError({
-      kind: kind === 'rate-limited' || kind === 'secondary-rate-limit' ? kind : 'invalid-response',
+      kind,
       status,
       detail: errors,
       rateLimit,
       authority,
-      publish,
     })
   }
   if (!isRecord(body) || !isRecord(body.data)) {
+    onResponse?.(rateLimit, 'invalid-response')
     throw new GitHubTransportError({
       kind: 'invalid-response',
       status,
       detail: 'GitHub returned a GraphQL response without data',
       rateLimit,
       authority,
-      publish,
     })
   }
   return body.data as T
 }
 
-function parseJsonBody(text: string, publish: boolean = true): unknown {
+/**
+ * A body this build cannot read is still a host's answer, and the transport that
+ * received it records the allowance it carried, against that host. Nothing is
+ * recorded from here: this function knows no host and no credential.
+ */
+function parseJsonBody(text: string): unknown {
   if (!text.trim()) return null
   try {
     return JSON.parse(text)
@@ -617,7 +771,6 @@ function parseJsonBody(text: string, publish: boolean = true): unknown {
     throw new GitHubTransportError({
       kind: 'invalid-response',
       detail: 'GitHub returned a response that is not valid JSON',
-      publish,
     })
   }
 }
@@ -711,21 +864,14 @@ export class DirectGitHubTransport implements GitHubTransport {
     return this.options.reportRateLimit !== false
   }
 
-  /**
-   * A failure of this transport's own, reported to the process-wide listener
-   * only when this transport is allowed to report what it saw.
-   */
-  private failure(failure: Omit<GitHubTransportFailure, 'publish'>): GitHubTransportError {
-    return new GitHubTransportError({
-      ...failure,
-      publish: this.options.reportRateLimit !== false,
-    })
+  /** A failure this transport raises. It records nothing; the fences do. */
+  private failure(failure: GitHubTransportFailure): GitHubTransportError {
+    return new GitHubTransportError(failure)
   }
 
   private get env(): NodeJS.ProcessEnv {
     return this.options.env ?? process.env
   }
-
 
   private get graphqlUrl(): string {
     return this.options.graphqlUrl?.replace(/\/+$/u, '') ?? `${this.apiUrl}/graphql`
@@ -872,7 +1018,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       else request.signal.addEventListener('abort', forward, { once: true })
     }
     const request$ = (this.options.fetch ?? globalThis.fetch) as typeof globalThis.fetch
-    const initiatedAt = observationClock()
+    const requestOrder = nextGitHubRequestOrder()
     // Which credential this request authenticates as, so a refusal is only ever
     // attributed to the credential that actually caused it.
     let requestAuthority: string | null = null
@@ -901,7 +1047,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       // body stands, and `response.ok` would otherwise report it as unknown.
       if (response.status === 304) {
         if (this.reportsRateLimit)
-          publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
+          publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, requestOrder)
         return {
           status: 304,
           body: null,
@@ -910,8 +1056,27 @@ export class DirectGitHubTransport implements GitHubTransport {
           authority: requestAuthority,
         }
       }
-      const body = parseJsonBody(await response.text(), this.reportsRateLimit)
+      let body: unknown
+      try {
+        body = parseJsonBody(await response.text())
+      } catch (error) {
+        // A body this build cannot read is still this host's answer, and its
+        // allowance is recorded here, against this host, through the same fence
+        // every other response of this request goes through.
+        if (this.reportsRateLimit && error instanceof GitHubTransportError)
+          publishRateLimit(
+            rateLimit,
+            error.kind,
+            this.destinationHost,
+            requestAuthority,
+            requestOrder,
+          )
+        throw error
+      }
       if (!response.ok) {
+        // Raising this records nothing; the publication below does, against this
+        // host and the order this request left in, so that an answer arriving
+        // after a newer one is held back instead of replacing it.
         const failure = this.failure({
           kind: statusKind(response.status, rateLimit, apiMessage(body)),
           status: response.status,
@@ -928,12 +1093,12 @@ export class DirectGitHubTransport implements GitHubTransport {
             failure.kind,
             this.destinationHost,
             requestAuthority,
-            initiatedAt,
+            requestOrder,
           )
         throw failure
       }
       if (this.reportsRateLimit)
-        publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, initiatedAt)
+        publishRateLimit(rateLimit, null, this.destinationHost, requestAuthority, requestOrder)
       return {
         status: response.status,
         body,
@@ -1012,6 +1177,8 @@ export class DirectGitHubTransport implements GitHubTransport {
       if (!cached && method !== 'GET' && request.acceptNoChange === true) {
         return { status, data: null as T, headers, rateLimit, notModified: true }
       }
+      // The 304 is already recorded against this host by the response that
+      // carried it; raising this must not record it again without a host.
       if (!cached)
         throw this.failure({
           status,
@@ -1047,6 +1214,9 @@ export class DirectGitHubTransport implements GitHubTransport {
         request.body,
         request,
       )
+      // The response has already been recorded against this host. A publication
+      // naming no host is process-wide: it would replace what another host, or
+      // another account of this one, last reported.
       if (!Array.isArray(body)) {
         throw this.failure({
           kind: 'invalid-response',
@@ -1065,6 +1235,8 @@ export class DirectGitHubTransport implements GitHubTransport {
       currentUrl = resolved.origin === origin ? resolved.toString() : null
     }
     if (currentUrl !== null) {
+      // Every page read here was this host's own answer and was recorded against
+      // it as it arrived; the refusal to keep paging adds no allowance to record.
       throw this.failure({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} pages`,
@@ -1078,6 +1250,10 @@ export class DirectGitHubTransport implements GitHubTransport {
     variables: Record<string, unknown> = {},
     options: GitHubGraphqlOptions = {},
   ): Promise<T> {
+    // When this request left, so that an answer carrying a refusal is judged
+    // against the report that was current when it was sent: one that lands after
+    // a newer answer describes a credential that has left.
+    const requestOrder = nextGitHubRequestOrder()
     const { status, body, rateLimit, authority } = await this.send(
       this.graphqlUrl,
       'POST',
@@ -1090,10 +1266,38 @@ export class DirectGitHubTransport implements GitHubTransport {
       rateLimit,
       authority,
       this.reportsRateLimit
-        ? (limit, kind) => publishRateLimit(limit, kind, this.destinationHost, authority)
+        ? (limit, kind) =>
+            publishRateLimit(limit, kind, this.destinationHost, authority, requestOrder)
         : undefined,
-      this.reportsRateLimit,
     )
+  }
+
+  async graphqlWithAuthority<T = Record<string, unknown>>(
+    query: string,
+    variables: Record<string, unknown> = {},
+    options: GitHubGraphqlOptions = {},
+  ): Promise<{ data: T; authority: string }> {
+    // When this request left, so that an answer carrying a refusal is judged
+    // against the report that was current when it was sent: one that lands after
+    // a newer answer describes a credential that has left.
+    const requestOrder = nextGitHubRequestOrder()
+    const { status, body, rateLimit, authority } = await this.send(
+      this.graphqlUrl,
+      'POST',
+      { query, variables },
+      options,
+    )
+    const data = graphqlData<T>(
+      body,
+      status,
+      rateLimit,
+      authority,
+      this.reportsRateLimit
+        ? (limit, kind) =>
+            publishRateLimit(limit, kind, this.destinationHost, authority, requestOrder)
+        : undefined,
+    )
+    return { data, authority }
   }
 
   /**
@@ -1103,7 +1307,12 @@ export class DirectGitHubTransport implements GitHubTransport {
    * which would leave work read under one credential sitting beside work read
    * under the next one. The material is digested and never returned.
    */
-  async credentialAuthority(): Promise<string> {
+  async credentialAuthority(_options: GitHubGraphqlOptions = {}): Promise<string> {
+    // Resolved once at construction, so there is nothing here to cancel: this
+    // answers from the credential it was built with rather than starting a child.
+    if (_options.signal?.aborted) {
+      throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+    }
     return this.requestAuthority
   }
 }
@@ -1122,6 +1331,11 @@ function includedResponse(output: string): { status: number; headers: Headers; b
   let block: RegExpExecArray | null
   let last: RegExpExecArray | null = null
   while ((block = match.exec(output))) last = block
+  // Output this build cannot read as a response carries no headers and therefore
+  // no allowance, so there is nothing to record against a host. It is raised
+  // without publishing rather than with a report that names no host: that one is
+  // process-wide, and it would replace what every other host last reported with
+  // the absence of an answer.
   if (!last)
     throw new GitHubTransportError({
       kind: 'invalid-response',
@@ -1192,10 +1406,17 @@ export function hostScopedEnvironment(
   for (const [name, value] of Object.entries(env)) {
     if (typeof value !== 'string') continue
     if (CREDENTIAL_ENV[name] === true && !allowed.includes(name)) continue
+    // This application's own configuration never reaches the CLI: a variable
+    // that named a credential earlier builds no longer describes one, and a
+    // child that inherited it could answer with something this app never held.
+    if (name.startsWith(APP_ENVIRONMENT_PREFIX)) continue
     scoped[name] = value
   }
   return scoped
 }
+
+/** This app's own environment, none of which the CLI is ever told about. */
+const APP_ENVIRONMENT_PREFIX = 'GIT_STACKS_'
 
 /** Every credential variable a `gh` child may be given, in no host's favour. */
 const CREDENTIAL_ENV: Record<string, true> = {
@@ -1303,9 +1524,20 @@ export class GhGitHubTransport implements GitHubTransport {
     if (request.signal?.aborted) controller.abort()
 
     try {
-      const initiatedAt = observationClock()
-      const { authority, environment } =
+      const requestOrder = nextGitHubRequestOrder()
+      const snapshot =
         pinned ?? (await this.credentialSnapshot({ signal: controller.signal, timeoutMs }))
+      // No credential of this build's, and none the CLI could name for this host:
+      // there is nothing for this request to be pinned to. The child would resolve
+      // a credential of its own, and the answer would belong to an observation
+      // that never happened, so the request is refused rather than made.
+      if (!snapshot.credentialPinned) {
+        throw new GitHubTransportError({
+          kind: 'unauthorized',
+          detail: `no GitHub CLI credential for ${this.destinationHost} could be pinned`,
+        })
+      }
+      const { authority, environment } = snapshot
       if (request.signal?.aborted)
         throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
       if (timedOut)
@@ -1362,7 +1594,7 @@ export class GhGitHubTransport implements GitHubTransport {
       const response = includedResponse(output)
       const rateLimit = parseRateLimit(response.headers)
       if (response.status === 304) {
-        publishRateLimit(rateLimit, null, this.destinationHost, authority, initiatedAt)
+        publishRateLimit(rateLimit, null, this.destinationHost, authority, requestOrder)
         return { status: 304, headers: response.headers, body: null, authority }
       }
       if (response.status < 200 || response.status >= 300) {
@@ -1373,11 +1605,16 @@ export class GhGitHubTransport implements GitHubTransport {
           rateLimit,
           body: response.body,
           authority,
+          // Published by the fence below, once, against this host and the moment
+          // this request left. Constructing the error must not publish it as well:
+          // a publication naming no host is process-wide, so it would replace
+          // what another host — or another account of this one — last reported,
+          // and unlike the attributed one it cannot be held back afterwards.
         })
-        publishRateLimit(rateLimit, failure.kind, this.destinationHost, authority, initiatedAt)
+        publishRateLimit(rateLimit, failure.kind, this.destinationHost, authority, requestOrder)
         throw failure
       }
-      publishRateLimit(rateLimit, null, this.destinationHost, authority, initiatedAt)
+      publishRateLimit(rateLimit, null, this.destinationHost, authority, requestOrder)
       return { ...response, authority }
     } catch (error) {
       if (request.signal?.aborted)
@@ -1394,7 +1631,11 @@ export class GhGitHubTransport implements GitHubTransport {
         throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
       throw new GitHubTransportError({
         kind: 'network',
-        detail: commandDetail(error),
+        // What the CLI wrote about its own failure is its to print, not this
+        // build's to carry: it can carry a header it echoed, a path into
+        // this computer's storage, or a request it was debugging. The typed
+        // kind carries the failure; this line says which class it was.
+        detail: 'The GitHub CLI could not complete this request.',
       })
     } finally {
       clearTimeout(timer)
@@ -1486,7 +1727,7 @@ export class GhGitHubTransport implements GitHubTransport {
             ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
           })
     const key = snapshot ? conditionalCacheKey(request, snapshot.authority) : null
-    const cached: CachedGitHubResponse | null = key === null ? null : cache?.get(key) ?? null
+    const cached: CachedGitHubResponse | null = key === null ? null : (cache?.get(key) ?? null)
     const conditional =
       key === null
         ? request
@@ -1503,6 +1744,8 @@ export class GhGitHubTransport implements GitHubTransport {
       if (!cached && method !== 'GET' && request.acceptNoChange === true) {
         return { status, data: null as T, headers, rateLimit, notModified: true }
       }
+      // The 304 is already recorded against this host by the response that
+      // carried it; raising this must not record it again without a host.
       if (!cached)
         throw new GitHubTransportError({
           status,
@@ -1535,6 +1778,9 @@ export class GhGitHubTransport implements GitHubTransport {
     const origin = new URL(this.apiUrl).origin
     for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
       const response = await this.request<unknown>({ ...request, path })
+      // The response has already been recorded against this host. A publication
+      // naming no host is process-wide: it would replace what another host, or
+      // another account of this one, last reported.
       if (!Array.isArray(response.data)) {
         throw new GitHubTransportError({
           kind: 'invalid-response',
@@ -1553,6 +1799,8 @@ export class GhGitHubTransport implements GitHubTransport {
       path = url.origin === origin ? url.toString() : null
     }
     if (path !== null) {
+      // Every page read here was this host's own answer and was recorded against
+      // it as it arrived; the refusal to keep paging adds no allowance to record.
       throw new GitHubTransportError({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} pages`,
@@ -1566,6 +1814,9 @@ export class GhGitHubTransport implements GitHubTransport {
     variables: Record<string, unknown> = {},
     options: GitHubGraphqlOptions = {},
   ): Promise<T> {
+    // When this request left, so that a refusal carried in a 200 is judged against
+    // the report that was current when its child was started.
+    const requestOrder = nextGitHubRequestOrder()
     const response = await this.request<unknown>({
       method: 'POST',
       // A host that serves GraphQL from its own path is given that path; the
@@ -1579,8 +1830,42 @@ export class GhGitHubTransport implements GitHubTransport {
       response.status,
       response.rateLimit,
       response.authority,
-      (limit, kind) => publishRateLimit(limit, kind, this.destinationHost, response.authority),
+      (limit, kind) =>
+        publishRateLimit(limit, kind, this.destinationHost, response.authority, requestOrder),
     )
+  }
+
+  async graphqlWithAuthority<T = Record<string, unknown>>(
+    query: string,
+    variables: Record<string, unknown> = {},
+    options: GitHubGraphqlOptions = {},
+  ): Promise<{ data: T; authority: string }> {
+    // The authority is the credential this request's own child was pinned to,
+    // which is the credential `credentialAuthority` resolves separately. A proof
+    // that pins the credential before and after its request needs the one in the
+    // middle too: a credential replaced and put back while the request was in
+    // flight leaves both pins agreeing while the request answered as another
+    // account, and that answer is the one being published.
+    // When this request left, so that a refusal carried in a 200 is judged against
+    // the report that was current when its child was started.
+    const requestOrder = nextGitHubRequestOrder()
+    const response = await this.request<unknown>({
+      method: 'POST',
+      // A host that serves GraphQL from its own path is given that path; the
+      // default host keeps `/graphql` under its API base.
+      path: this.options.graphqlUrl ?? 'graphql',
+      body: { query, variables },
+      ...options,
+    })
+    const data = graphqlData<T>(
+      response.data,
+      response.status,
+      response.rateLimit,
+      response.authority,
+      (limit, kind) =>
+        publishRateLimit(limit, kind, this.destinationHost, response.authority, requestOrder),
+    )
+    return { data, authority: response.authority }
   }
 
   /**
@@ -1597,22 +1882,29 @@ export class GhGitHubTransport implements GitHubTransport {
     return (await this.credentialSnapshot(options)).authority
   }
 
-  /** Resolve once: the API child must use the material its observation names. */
-  private async credentialSnapshot(
-    options: GitHubGraphqlOptions,
-  ): Promise<GitHubCliSnapshot> {
+  /**
+   * Resolve once: the API child must use the material its observation names.
+   *
+   * `credentialPinned` says whether that material was actually found. It is false
+   * when this build had no credential of its own and the CLI held none it could
+   * name either. That is not a weaker credential, it is no credential: the digest
+   * below then names the absence rather than an account, and a request must not
+   * be made under it, because the child would look the credential up again and
+   * could find one this observation never saw.
+   */
+  private async credentialSnapshot(options: GitHubGraphqlOptions): Promise<GitHubCliSnapshot> {
     const host = this.destinationHost
     const environment = this.childEnvironment
     const own = githubHostCredentialIdentity(host, environment)
     const ambient = resolveGitHubToken(environment, host)
-    if (ambient !== null) return { authority: own, environment }
+    if (ambient !== null) return { authority: own, environment, credentialPinned: true }
     const material = await this.cliCredentialMaterial(host, options)
     if (material !== null) environment[credentialEnvNames(host)[0]] = material
     const digest =
       material === null
         ? credentialDigest(`gh-unavailable\u0000${host}`)
         : credentialDigest(`gh\u0000${host}\u0000${material}`)
-    return { authority: `${own}\u0000${digest}`, environment }
+    return { authority: `${own}\u0000${digest}`, environment, credentialPinned: material !== null }
   }
 
   /** The CLI's material remains private and is pinned only to its API child. */
@@ -1670,6 +1962,12 @@ export const GITHUB_CREDENTIAL_ORIGIN = githubApiOriginForHost(GITHUB_HOST)
 export interface GitHubCliSnapshot {
   authority: string
   environment: Record<string, string>
+  /**
+   * Whether `authority` names a credential that was actually pinned to the API
+   * child. False means it names the absence of one, and no authenticated request
+   * may be made under it.
+   */
+  credentialPinned: boolean
 }
 
 let installed: GitHubTransport | null = null
@@ -1742,7 +2040,11 @@ export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTra
   // The endpoints this process was configured for are part of the identity of
   // the transport that serves them, so a changed base or API version builds a
   // new one instead of reusing the transport another configuration made.
-  const key = `${githubApiUrl(env)}:${githubApiVersion(env)}`
+  // The environment is part of what a transport is: a caller that hands over a
+  // different one is asking for a different credential, and reusing the previous
+  // transport would keep signing its requests with the old one. Only a digest of
+  // the host's own credential names it, so nothing readable is kept to compare.
+  const key = `default\u0000${githubApiUrl(env)}\u0000${githubApiVersion(env)}\u0000${credentialEnvironmentIdentity(env)}`
   if (cached?.key === key) return cached.transport
   if (cached) responseCache.clear()
   const transport: GitHubTransport = new GhGitHubTransport({ env, cache: responseCache })
@@ -1756,6 +2058,30 @@ export function githubTransport(env: NodeJS.ProcessEnv = process.env): GitHubTra
  * an enterprise host is never served a github.com endpoint and a github.com
  * credential is never offered to another host.
  */
+/**
+ * What a caller would have to name for a transport to be reused: which hosts it
+ * is serving, and whether the credential this environment carries for them is
+ * the one the cached transport was built with. The credential itself is digested,
+ * never kept in the key.
+ */
+function credentialEnvironmentIdentity(env: NodeJS.ProcessEnv): string {
+  return digestOf(
+    Object.entries(CREDENTIAL_ENV)
+      .flatMap(([name]) => [name, env[name] ?? ''])
+      .join('\u0000'),
+  )
+}
+
+/** A bounded digest of text that identifies it without carrying it. */
+function digestOf(text: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
 export function githubTransportForHost(
   host: string,
   apiBase: string,
@@ -1766,7 +2092,7 @@ export function githubTransportForHost(
   const hostTransport = installedByHost.get(key)
   if (hostTransport) return hostTransport
   if (installed) return installed
-  const cacheKey = `${key}:${apiBase}:${graphqlUrl ?? ''}:${githubApiVersion(env)}`
+  const cacheKey = `${key}:${apiBase}:${graphqlUrl ?? ''}:${githubApiVersion(env)}:${credentialEnvironmentIdentity(env)}`
   if (cached?.key === cacheKey) return cached.transport
   const transport: GitHubTransport = new GhGitHubTransport({
     env,
@@ -1778,4 +2104,3 @@ export function githubTransportForHost(
   cached = { key: cacheKey, transport }
   return transport
 }
-

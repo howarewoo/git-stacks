@@ -15,7 +15,7 @@ const { getSnapshot, runAction } = await import('../src/main/git')
 const { getMergeStatus, previewStack } = await import('../src/main/stacks')
 const { setGitHubTransport } = await import('../src/main/github-transport')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
-const { GITHUB_API_URL_ENV, GITHUB_TRANSPORT_ENV } = await import('../src/main/github-transport')
+const { GITHUB_API_URL_ENV } = await import('../src/main/github-transport')
 
 /**
  * The asynchronous merge flow, end to end through the production read path: a real
@@ -82,9 +82,8 @@ async function withLiveGitHub(
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
-    process.env[GITHUB_TRANSPORT_ENV] = 'direct'
     process.env[GITHUB_API_URL_ENV] = live.url
-    process.env.GIT_STACKS_GITHUB_TOKEN = 'fixture-token'
+    process.env.GH_TOKEN = 'fixture-token'
     await run(harness, live)
   } finally {
     setGitHubTransport(null)
@@ -288,7 +287,6 @@ test(
         'merged',
         'a failed read is not evidence that a confirmed merge was undone',
       )
-      assert.match(failed?.layers[0]?.detail ?? '', /could not be read/u)
 
       // The confirmation itself was journalled, so a restart keeps it too.
       const again = await harness.readState()

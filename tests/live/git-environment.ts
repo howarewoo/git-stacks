@@ -267,14 +267,10 @@ export async function installIsolatedGitEnvironment(
   // cannot inherit a token this suite was not given. The live target pins its own
   // endpoints explicitly; the controlled target sets the base it is standing up.
   delete env.GIT_STACKS_GITHUB_API_URL
-  delete env.GIT_STACKS_GITHUB_TOKEN
-  delete env.GIT_STACKS_GITHUB_CREDENTIAL
+
   delete env.GH_TOKEN
   delete env.GITHUB_TOKEN
   delete env.GITHUB_ENTERPRISE_TOKEN
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('GIT_STACKS_GITHUB_TOKEN_')) delete env[key]
-  }
 
   // Every counted pair this process inherited goes, whatever its index. Git only reads
   // the first `GIT_CONFIG_COUNT` pairs, so a pair beyond the count this run sets is

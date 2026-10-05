@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import test from 'node:test'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 import {
   assetNameFor,
   historyFileName,
@@ -164,6 +165,9 @@ function workspace(): Workspace {
   mkdirSync(tools, { recursive: true })
   mkdirSync(join(root, 'resources'), { recursive: true })
   writeFileSync(join(tools, 'gh'), GH_STAND_IN, { mode: 0o755 })
+  // Admitted by name, so the boundary answers for this stand-in and refuses a
+  // real `gh` on this machine.
+  admitOwnedProviderCliRoot(tools)
   // The repository's published key history starts empty, as the committed file
   // does; a release declares its keys here before they sign anything.
   writeFileSync(

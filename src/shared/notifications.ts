@@ -2,11 +2,11 @@
  * The optional GitHub Notifications Center.
  *
  * Everything here is a fact about one account's notification inbox on one
- * GitHub host. Nothing in this module widens the GitHub App credential: the
- * notifications endpoints are served to classic personal access tokens, so the
- * inbox is a second, separately authorized thing with its own sealed
- * credential, its own transport, and its own cache. It is not the pull-request
- * inbox, and no field here is one.
+ * GitHub host. Nothing in this module widens the GitHub CLI session: the
+ * notifications endpoints are served to classic personal access tokens, not to
+ * the credential the CLI holds for a host, so the inbox is a second, separately
+ * authorized thing with its own sealed credential, its own transport, and its
+ * own cache. It is not the pull-request inbox, and no field here is one.
  */
 
 /** The credential kind the notifications endpoints accept. */
@@ -27,9 +27,9 @@ export const NOTIFICATION_CREDENTIAL_SCOPE = 'notifications'
 export const NOTIFICATION_CONSENT_TITLE = 'GitHub Notifications needs its own credential'
 
 export const NOTIFICATION_CONSENT_POINTS: readonly string[] = [
-  'GitHub serves the notifications endpoints to a classic personal access token with the notifications scope. The GitHub App credential this app signs in with cannot read them, so the App’s own permissions are left exactly as they are.',
+  'GitHub serves the notifications endpoints to a classic personal access token with the notifications scope, not to the credential the GitHub CLI holds for a host. Nothing here asks the CLI for that scope, so the CLI account keeps exactly the permissions it already has.',
   'The token crosses into this app once, when you submit it, and is never handed back to this window after that. It is sealed with a key your operating system protects and stored as ciphertext in this app’s own notification credential file; ordinary application state holds only an opaque reference to it, and the token never reaches a log, a diagnostic report, or a support bundle.',
-  'The token is pinned to one GitHub host and one account. Removing it disables the Notification Center and nothing else — sign-in, pull requests, stacks, and reviews keep working on the credential they already use.',
+  'The token is pinned to one GitHub host and one account. Removing it disables the Notification Center and nothing else — the GitHub CLI session, pull requests, stacks, and reviews keep working on the credential they already use.',
 ]
 
 /** Why the module is in the state it is in. */

@@ -6,7 +6,7 @@ import type { GitHubHostStatus } from '../shared/host'
 import type { DiagnosticEntry, DiagnosticReport } from '../shared/settings'
 import type { GitEnvironmentStatus, GitHubCliStatus, GitRuntimeStatus } from '../shared/types'
 import { NOTIFICATION_STATE_LABELS, type NotificationModuleStatus } from '../shared/notifications'
-import { GH_VERSION_ARGS, probeGitHubCliVersion } from './github-cli'
+import { GH_VERSION_ARGS, probeGitHubCliVersion, type GitHubCliVersionProbe } from './github-cli'
 import { hostScopedEnvironment } from './github-transport'
 
 const exec = promisify(execFile)
@@ -36,18 +36,6 @@ const MAX_PROBE_SECONDS = 5
  */
 export const GH_DIAGNOSTIC_COMMAND = { label: 'gh --version', args: GH_VERSION_ARGS } as const
 
-/** What one installed-version probe was observed to be. */
-export interface GitHubAdapterProbe {
-  /**
-   * Whether `gh --version` ran and answered. `false` covers both an absent CLI
-   * and one that could not be started, because this report cannot tell those
-   * apart without reading an error this module deliberately never inspects.
-   */
-  ran: boolean
-  /** The version the CLI named, or null when it named none this build reads. */
-  version: string | null
-}
-
 /**
  * What this computer's GitHub CLI is, kept separate from what it can
  * authenticate: an installed version is a fact about the machine, and the
@@ -55,7 +43,7 @@ export interface GitHubAdapterProbe {
  */
 export interface GitHubCliSources {
   /** Omitted when nothing has read the CLI on this machine yet. */
-  probe?: GitHubAdapterProbe
+  probe?: GitHubCliVersionProbe
   /** Omitted until a status read established what the CLI can authenticate to. */
   status?: GitHubCliStatus | null
 }
@@ -208,11 +196,16 @@ function cliEntries(sources: GitHubCliSources | undefined): DiagnosticEntry[] {
     entries.push({
       source: 'github',
       label: GH_DIAGNOSTIC_COMMAND.label,
-      value: sources.probe.version ?? 'could not be read',
+      value:
+        sources.probe.version ??
+        (sources.probe.install === 'missing' ? 'not installed' : 'could not be read'),
       status: sources.probe.version ? 'confirmed' : 'unavailable',
-      detail: sources.probe.ran
-        ? 'The CLI was asked for its version and nothing else.'
-        : 'The GitHub CLI is required for GitHub collaboration and did not answer on this machine.',
+      detail:
+        sources.probe.install === 'present'
+          ? 'The CLI was asked for its version and nothing else.'
+          : sources.probe.install === 'missing'
+            ? 'The GitHub CLI is required for GitHub collaboration and is not installed here.'
+            : 'The GitHub CLI is installed but did not answer a local version query.',
     })
   }
   const status = sources.status
@@ -328,7 +321,6 @@ function githubHostEntries(status: GitHubHostStatus | null): DiagnosticEntry[] {
   }
   return entries
 }
-
 
 function stackEntries(environment: GitEnvironmentStatus | null): DiagnosticEntry[] {
   const credentials = environment?.httpsCredentials

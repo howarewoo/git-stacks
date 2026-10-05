@@ -834,7 +834,6 @@ export class NotificationCenter {
           record.failureKind === 'offline'
             ? 'The last notification read could not reach GitHub.'
             : 'The last notification read failed.',
-        publish: false,
       })
     }
     this.pendingBulkRead = record.pendingRead ?? null
@@ -1230,7 +1229,6 @@ export class NotificationCenter {
             kind: 'invalid-response',
             status: response.status,
             detail: 'GitHub returned an unexpected notification list',
-            publish: false,
           })
         }
         for (const entry of response.data) {
@@ -1253,7 +1251,6 @@ export class NotificationCenter {
           throw new GitHubTransportError({
             kind: 'invalid-response',
             detail: 'GitHub pointed the notification list at another origin',
-            publish: false,
           })
         }
         const path = resolved.pathname.startsWith(`${base}/`)
@@ -1264,7 +1261,6 @@ export class NotificationCenter {
       throw new GitHubTransportError({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} notification pages`,
-        publish: false,
       })
     } catch (error) {
       // The transport recorded the page it did read. Without the rest of the
@@ -1376,7 +1372,6 @@ export class NotificationCenter {
           : new GitHubTransportError({
               kind: 'unknown',
               detail: 'The notification read did not complete.',
-              publish: false,
             })
       const failedAt = this.now()
       this.memory.checkedAt = new Date(failedAt).toISOString()
@@ -1895,7 +1890,6 @@ export class NotificationCenter {
             : new GitHubTransportError({
                 kind: 'unknown',
                 detail: 'The change did not complete.',
-                publish: false,
               })
         if (!holds()) throw new Error(BOUNDARY_LOST_MESSAGE)
         if (failure.kind === 'unauthorized' || failure.kind === 'forbidden') {

@@ -4648,6 +4648,8 @@ interface ConfirmedGitHubPayload {
    * older one that only finishes later.
    */
   read: number
+  /** The credential generation this payload was confirmed under. */
+  generation: number
 }
 
 // The order reads reach GitHub in, as a single counter: no per-repository
@@ -4658,7 +4660,48 @@ let confirmedReadOrder = 0
 const MAX_CONFIRMED_PAYLOADS = 8
 const confirmedPayloads = new Map<string, ConfirmedGitHubPayload>()
 
-function rememberConfirmedPayload(root: string, payload: ConfirmedGitHubPayload): void {
+/**
+ * The generation of the credential these confirmed payloads belong to. A
+ * credential replaced behind this app's back is a different generation, and
+ * every payload a read confirmed under the old one describes pull requests and
+ * issues that are not this account's to serve.
+ */
+let confirmedPayloadGeneration = 0
+
+/**
+ * Retires every confirmed GitHub payload, and refuses any read that is already
+ * in flight from confirming another under the credential being replaced. Called
+ * when the CLI's credential is actually replaced, and nothing else: local Git
+ * state is not involved, and the next read repopulates what is dropped here.
+ */
+export function retireConfirmedGitHubPayloads(): void {
+  confirmedPayloadGeneration += 1
+  confirmedPayloads.clear()
+}
+
+/** The generation a payload was confirmed in, compared against the current one. */
+export function confirmedGitHubPayloadGeneration(): number {
+  return confirmedPayloadGeneration
+}
+
+/**
+ * Keeps a payload a read confirmed, unless that read belongs to a credential
+ * that has since been replaced.
+ *
+ * `generation` is the generation the read *started* in, not the one current
+ * when it finished: stamping the current generation here would file a payload
+ * read under the previous credential as this credential's, which is exactly the
+ * rows the retirement dropped.
+ */
+function rememberConfirmedPayload(
+  root: string,
+  payload: ConfirmedGitHubPayload,
+  generation: number,
+): void {
+  // A read that finished under a credential this process has left describes pull
+  // requests and issues that are not this account's to serve, so it confirms
+  // nothing and is not kept.
+  if (generation !== confirmedPayloadGeneration) return
   // A read that started earlier may answer after a newer one already confirmed
   // this repository: it must not republish its older answer through the next
   // read that does not ask GitHub.
@@ -4680,6 +4723,11 @@ export function confirmedGitHubPayload(
 ): ConfirmedGitHubPayload | null {
   const cached = confirmedPayloads.get(root) ?? null
   if (!cached) return null
+  // A payload a replaced credential confirmed is not an answer for this one.
+  if (cached.generation !== confirmedPayloadGeneration) {
+    confirmedPayloads.delete(root)
+    return null
+  }
   if (originUrl !== undefined && cached.originUrl !== originUrl) {
     confirmedPayloads.delete(root)
     return null
@@ -4693,10 +4741,19 @@ export async function getSnapshot(
   // instead of materialising SNAPSHOT_BRANCH_BUDGET of them.
   branchBudget = SNAPSHOT_BRANCH_BUDGET,
   remote: SnapshotGitHubRemote = 'live',
+  // Internal: this read is the bounded second attempt of one that asked GitHub
+  // nothing and found its confirmed answer had been retired, so it consults no
+  // confirmed payload at all and is assembled from the local work alone.
+  localOnly = false,
 ): Promise<RepositorySnapshot> {
   // Claimed on entry, not at the GitHub read: local Git work differs per read,
   // so arrival at the request is not the order the reads began in.
   const read = (confirmedReadOrder += 1)
+  // Claimed on entry for the same reason: the credential this read may confirm
+  // under is the one that was current when it started, so a credential replaced
+  // while it runs retires its answer instead of adopting it.
+  const generation = confirmedPayloadGeneration
+
   const root = await resolveRepository(repoPath, signal)
   await recoverStashDropForRepository(root)
   await recoverFileActionJournals(root)
@@ -4815,13 +4872,26 @@ export async function getSnapshot(
   }
 
   const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
-  const cached = confirmedPayloads.get(root) ?? null
-  // Bind confirmed payloads to the remote identity: if the origin URL changed,
-  // reject and drop the confirmed payload from the previous repository.
-  const confirmed = cached && cached.originUrl === originUrl ? cached : null
-  if (cached && cached.originUrl !== originUrl) {
-    confirmedPayloads.delete(root)
-  }
+  // Read through the accessor rather than off the map: that is where a payload
+  // confirmed under a credential this process has left is refused, so a reuse
+  // or on-failure refresh cannot render another account's pull requests and
+  // issues from a snapshot read that started before the replacement.
+  //
+  // A read that is already the bounded local-only retry asks for nothing. It took
+  // this path because the answer it had was read under an account that has since
+  // been replaced, so it consults no confirmed payload at all: there is no
+  // snapshot to fall back to and no second thing to lose. Everything it reports —
+  // the branches, the parent each one stacks on, how far it is behind it, whether
+  // it needs a restack, the stashes, the files — is read from the local work
+  // itself, which is what the person asked of it and the only thing this app can
+  // show without an account. That also means it cannot be overtaken the same way
+  // again: there is nothing here for a second replacement to take away.
+  const confirmed = localOnly ? null : confirmedGitHubPayload(root, originUrl)
+  // The generation this payload was confirmed under, read beside it and not at
+  // the read's entry: this read may have outlived one credential already, and the
+  // question at the end is whether the account behind *this* payload is still the
+  // one in force — not whether the read itself began under it.
+  const confirmedGeneration = confirmedPayloadGeneration
   const confirmedAt = new Date().toISOString()
   // A background refresh of local Git must not spend a GitHub request, and a
   // refresh whose GitHub answer was lost must keep the last confirmed payload
@@ -4842,14 +4912,22 @@ export async function getSnapshot(
   const issuesAnswered = live !== null && live[1].message === ''
   if (answered) {
     // A failed issue read never becomes the confirmed inbox, so the last
-    // confirmed one survives a refresh that could not reach the issues.
-    rememberConfirmedPayload(root, {
-      originUrl,
-      data: live[0],
-      issues: issuesAnswered ? live[1] : (confirmed?.issues ?? live[1]),
-      fetchedAt: confirmedAt,
-      read,
-    })
+    // confirmed one survives a refresh that could not reach the issues. The
+    // generation is this read's own: a credential replaced while it ran means
+    // these answers describe pull requests and issues that are not this
+    // account's, so nothing about them is kept.
+    rememberConfirmedPayload(
+      root,
+      {
+        originUrl,
+        data: live[0],
+        issues: issuesAnswered ? live[1] : (confirmed?.issues ?? live[1]),
+        fetchedAt: confirmedAt,
+        read,
+        generation,
+      },
+      generation,
+    )
   }
   // A live read is authoritative by definition: a caller that asked for one
   // (a mutation preview, a publication) must never be handed an older payload
@@ -5090,9 +5168,48 @@ export async function getSnapshot(
     githubStale,
     githubFailure,
   }
+  // This snapshot was assembled under the credential the read started with, and it
+  // is about to be handed to whoever publishes snapshots. A credential replaced
+  // while the last reconciliation was running retires the answers read under it,
+  // and dropping the cache cannot recall a snapshot that is already on its way to
+  // the window, so a read that did ask GitHub is refused here rather than
+  // delivered. A read that never asked GitHub carries no such answer of its own,
+  // so a local refresh after a local commit still completes even if the signed-in
+  // account changed while it ran — it simply goes on to answer that refresh by
+  // asking nothing at all, which is what the check below it arranges.
+  const staleCredential = () => live !== null && generation !== confirmedPayloadGeneration
+  if (staleCredential() || signal?.aborted) throw new CommandCancelled()
   // Read-only: the report compares submitted membership with the local graph
   // and never rewrites a branch, a local hint, or a pull-request base.
   snapshot.reconciliation = await buildReconciliationReport(root, snapshot, configParents)
+  if (signal?.aborted) throw new CommandCancelled()
+  if (staleCredential()) throw new CommandCancelled()
+  // The account behind a confirmed payload can also be replaced while that last
+  // local report was being built. Retirement drops the payload, and a payload
+  // already read into this snapshot cannot be recalled: the accessor refused a
+  // payload confirmed by a replaced account when it was taken, not after the
+  // account behind it was replaced. A read that asked GitHub nothing holds no
+  // answer of its own, so it finishes as the local read it was — re-read with
+  // the payload gone — rather than handing over another account's pull requests,
+  // issues, branches or reconciliation. The local Git work is all it returns and
+  // all the person asked of it, so the work is not thrown away; a re-read that
+  // is overtaken the same way is cancelled instead of repeated.
+  if (
+    !localOnly &&
+    live === null &&
+    confirmed !== null &&
+    confirmedGeneration !== confirmedPayloadGeneration
+  ) {
+    // The payload this read would hand over was confirmed by an account that has
+    // since been replaced, and an answer already taken cannot be recalled by
+    // dropping the cache: the accessor refuses a stale payload when it is read,
+    // not one this read took a moment earlier. Nothing here was asked of GitHub,
+    // so this read is answered again by asking nothing at all — the local work,
+    // assembled once, with the replaced account's answers never consulted. A
+    // commit that succeeded is not undone by an account changing while it was
+    // measured, and the retry reads it for itself exactly once.
+    return getSnapshot(repoPath, signal, branchBudget, 'reuse', true)
+  }
   return snapshot
 }
 async function runRenameBranch(

@@ -18,7 +18,7 @@ import type { ReviewHistory, ReviewHistoryDiff } from '../../../src/shared/revie
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { PullRequestInboxReport } from '../../../src/shared/pr-inbox'
 import type { AppSettings } from '../../../src/shared/settings'
-import type { GitHubAccountStatus } from '../../../src/shared/types'
+import type { GitHubCliStatus } from '../../../src/shared/types'
 import type { NotificationInbox } from '../../../src/shared/notifications'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
@@ -76,7 +76,7 @@ export type FixtureCall =
   | 'savePullRequestInboxFilters'
   | 'settings'
   | 'updateSettings'
-  | 'githubAccountStatus'
+  | 'githubCliStatus'
   | 'notifications'
   | 'notificationSave'
   | 'notificationRemove'
@@ -85,7 +85,6 @@ export type FixtureCall =
   | 'notificationSubscription'
   | 'notificationRefresh'
   | 'notificationDone'
-  | 'githubAccountStatus'
   | 'notificationSettings'
   | 'notificationSettingsHost'
   | 'notificationSettingsEnable'
@@ -118,7 +117,7 @@ export interface FixtureScenario {
    */
   readonly snapshotsByPath?: Readonly<Record<string, RepositorySnapshot>>
   /**
-   * The settings file this window reads and the account behind it.
+   * The settings file this window reads and the GitHub CLI status behind it.
    *
    * Both surfaces are installed only where a scenario declares them. A window
    * with neither has no host to compare its queue against, so nothing retires
@@ -127,8 +126,8 @@ export interface FixtureScenario {
    */
   readonly identity?: {
     settings: AppSettings
-    /** Main always answers with a status; a host that has named none is signed out. */
-    account: GitHubAccountStatus
+    /** Main always answers with a status; a CLI that is installed and signed out reports that. */
+    cli: GitHubCliStatus
   }
   /** Calls that start pending; `release()` settles them. */
   readonly pending?: readonly FixtureCall[]
@@ -188,22 +187,15 @@ export interface FixtureScenario {
    */
   readonly notificationsBoxes?: Readonly<Record<string, NotificationInbox>>
   /**
-   * Whether this scenario answers the optional `githubAccountStatus` bridge at
-   * all. It is optional in the product, so the answer to leaving it off is not
-   * a signed-out account but no method: a window talking to a main process
-   * without it holds no account, which is what every scenario that never
-   * asked about this window's own sign-in already behaved as. Only a scenario
-   * whose own state depends on that read opts in, because a fixture that
-   * answered a read nothing asked for would move the account footer of every
-   * other scenario to a sign-in no one staged.
+   * The status this installation's required GitHub CLI reports, for a scenario
+   * that states one. It is also what installs the optional `githubCliStatus`
+   * bridge: leaving it off is not a signed-out CLI but no method at all, which
+   * is what every scenario that never staged a CLI session already behaved as.
+   * Only a scenario whose own state depends on that read states one, because a
+   * fixture answering a read nothing asked for would move the GitHub status
+   * footer of every other scenario to a session no one staged.
    */
-  readonly exposesGithubAccount?: boolean
-  /**
-   * The account this installation's own GitHub sign-in reports. Enterprise
-   * authorization keeps the admitted host, account, and URLs, so a scenario
-   * states the signed-in login alongside them.
-   */
-  readonly githubAccount?: { readonly login: string | null }
+  readonly githubCliStatus?: GitHubCliStatus
 }
 
 /** Typed gallery control surface. Every field is plain serializable data. */
@@ -281,6 +273,21 @@ export interface FixtureControl {
    * must refuse rows belonging to a host it is no longer pointed at.
    */
   publishRetiredHostInbox(name: string): void
+  /**
+   * Installs the status this installation answers the GitHub CLI status with
+   * from now on, without publishing it. A window pointed at a host it has just
+   * been switched to reads that host for itself, so a switch test has to say
+   * what the new host's own answer is rather than leave the double answering
+   * with the previous host's session.
+   */
+  serveCliStatus(status: GitHubCliStatus): void
+  /**
+   * Replaces the session and publishes it, as the main process does when the
+   * CLI signs in, switches account, or logs out in a terminal: the window is
+   * told about a change it did not ask for, and a read it had already started
+   * for the previous session can still answer afterwards.
+   */
+  publishCliStatus(status: GitHubCliStatus): void
 }
 
 declare global {

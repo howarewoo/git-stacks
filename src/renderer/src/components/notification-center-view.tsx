@@ -204,7 +204,8 @@ export function NotificationCredentialDialog({
         <DialogHeader>
           <DialogTitle>GitHub Notifications needs its own credential</DialogTitle>
           <DialogDescription>
-            This is separate from the GitHub App sign-in, and it does not change it.
+            This credential is separate from the GitHub CLI session used for pull requests, stacks,
+            and reviews, and it neither borrows from nor widens that session.
           </DialogDescription>
         </DialogHeader>
         <div className="dialog-form">
@@ -256,7 +257,7 @@ export function NotificationCredentialDialog({
           </div>
           <Checkbox
             checked={accepted}
-            description="It is stored separately from the GitHub App sign-in and is removed on its own, without affecting pull requests, stacks, or reviews."
+            description="It is stored separately from the GitHub CLI credential, is removed on its own, and asks nothing of the CLI session — pull requests, stacks, and reviews keep working on the account they already use."
             label="I understand the boundary this credential adds."
             onChange={(event) => setAccepted(event.target.checked)}
           />
@@ -452,10 +453,10 @@ export function NotificationCenterView({
         ) : null}
         {off ? (
           <InlineAlert tone={tone} title="This module is off">
-            GitHub serves its notifications endpoints to a classic personal access token, not to a
-            GitHub App credential. Turn it on in Settings › Notifications, which says what it adds
-            before you turn it on; a token is only asked for after that, and the rest of the app
-            keeps the permissions it already has either way.
+            GitHub serves its notifications endpoints to a classic personal access token, not to the
+            credential the GitHub CLI holds for this host. Turn it on in Settings › Notifications,
+            which says what it adds before you turn it on; a token is only asked for after that, and
+            the rest of the app keeps the permissions it already has either way.
           </InlineAlert>
         ) : null}
         {needsCredential ? (

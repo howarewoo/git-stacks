@@ -83,12 +83,24 @@ function readableError(value: unknown): string {
 }
 
 export function ReviewView({
+  authority,
   desktop,
   pullRequests,
   number,
   onSelectNumber,
   commands,
 }: {
+  /**
+   * The CLI authority the review data on screen was read under: the host, the
+   * state, the account, and the opaque credential generation behind it.
+   *
+   * Everything this view shows — the pull request's own files and comments,
+   * the threads, and the pending words the reviewer typed — was read as that
+   * authority, so a replacement retires all of it by itself rather than
+   * waiting for the selected pull request number to change. A number can
+   * survive an account switch and describe somebody else's pull request.
+   */
+  authority: string
   desktop: DesktopAPI | undefined
   pullRequests: readonly PullRequest[]
   number: number | null
@@ -139,7 +151,10 @@ export function ReviewView({
 
   // Progressive loading: the headline answers first, and only then are the files
   // and commits requested. Each stage carries its own request id so leaving for
-  // another pull request cancels the read that is now obsolete.
+  // another pull request cancels the read that is now obsolete. The CLI
+  // authority is a dependency for the same reason: one authority's pull request
+  // number can be another account's pull request, so the number on its own
+  // cannot say the read on screen is still this view's.
   React.useEffect(() => {
     const claim = headlineGate.current
     claim.reset()
@@ -172,7 +187,33 @@ export function ReviewView({
     return () => {
       void desktop.cancel?.('review-headline')
     }
-  }, [desktop, number, reloadToken])
+  }, [authority, desktop, number, reloadToken])
+
+  // The comment authorities retire with the credential that read them, on the
+  // authority's own change rather than when a number happens to move: the
+  // threads, the viewed paths, and the drafts journalled beside them were all
+  // read as this authority, and pending words belong to the conversation they
+  // were written into. Nothing is deleted — the journal read brings them back
+  // under whichever authority owns them next — so a reviewer's own unsent
+  // words survive the switch on disk even though they leave this screen.
+  const authorityRef = React.useRef(authority)
+  React.useEffect(() => {
+    if (authorityRef.current === authority) return
+    authorityRef.current = authority
+    threadsGate.current.reset()
+    setThreadRead(null)
+    setThreadState('idle')
+    setViewed(null)
+    setDraftRecord(null)
+    setResolutions([])
+    setSelection(null)
+    // A draft composed against the retired pull request must not silence the
+    // journal read that would restore it.
+    draftEdits.current += 1
+    return () => {
+      void desktop?.cancel?.('review-threads')
+    }
+  }, [authority, desktop])
 
   React.useEffect(() => {
     if (!headline || desktop?.reviewFiles === undefined) return

@@ -4,7 +4,8 @@ import type {
   ConflictFile,
   DesktopAPI,
   GitAction,
-  GitHubAccountStatus,
+  GitHubCliStatus,
+  GitHubRepositorySummary,
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
@@ -288,6 +289,15 @@ export function installFixtureControl(options: {
   let scenario = scenarioFor(options.scenario)
   startsPending = new Set(scenario.pending ?? [])
 
+  /** One destination path as a copied terminal command writes it. */
+  function mockCloneDestination(parentDirectory: string, directoryName: string): string {
+    return mockShellWord(`${parentDirectory.replace(/[/\\]+$/u, '')}/${directoryName}`)
+  }
+
+  /** Quoting a command argument only when it is not already a plain word. */
+  function mockShellWord(value: string): string {
+    return /^[A-Za-z0-9._\-/:]+$/u.test(value) ? value : `'${value.replace(/'/gu, `'\\''`)}'`
+  }
   const record = (call: FixtureCall, args: readonly unknown[]): void => {
     calls.push({ call, args })
   }
@@ -416,6 +426,61 @@ export function installFixtureControl(options: {
     hostInboxes.set(host, inbox)
     return inbox
   }
+
+  /**
+   * The GitHub CLI session this double currently reports, moved the way the
+   * main process moves it: a settings change points the installation at another
+   * host, and a sign-in, switch, or logout in a terminal replaces the session
+   * behind the host it is pointed at. `null` means the scenario's own
+   * declaration still answers, which is the state a scenario starts in.
+   */
+  let servedCliStatus: GitHubCliStatus | null = null
+  /** The one window listening for the session to change outside it. */
+  let cliStatusListener: ((status: GitHubCliStatus) => void) | null = null
+
+  /**
+   * The GitHub answer this double may give a repository read, which belongs to
+   * the credential that read it and to nothing else.
+   *
+   * Main answers a repository read with whatever the credential behind this
+   * installation can actually reach, and a credential that was replaced leaves
+   * nothing confirmed to reuse: the identity change retires the confirmed
+   * payload, so the next read is a fresh one that either answers as the account
+   * now in effect or reports that GitHub could not be read. This double holds
+   * one static snapshot, so it has to answer the same way or it would hand a
+   * window the previous account's private pull requests as the new account's —
+   * which is not a thing the real process can do, and which would make every
+   * assertion about authority after a replacement prove nothing.
+   *
+   * A scenario that declares no CLI status has no credential to be bound to, so
+   * its snapshot is answered as it always was.
+   */
+  const answeredForServedCredential = (snapshot: RepositorySnapshot): RepositorySnapshot => {
+    const declared = scenario.identity?.cli ?? scenario.githubCliStatus ?? null
+    if (declared === null) return snapshot
+    const served = servedCliStatus ?? declared
+    if (served.host === declared.host && served.identity === declared.identity) return snapshot
+    return {
+      ...snapshot,
+      pullRequests: [],
+      issues: [],
+      nativeStacks: [],
+      nativeStackPreviewAvailable: undefined,
+      nativeStackMessage: undefined,
+      github: {
+        available: false,
+        message: 'GitHub could not be read',
+      },
+      // What a branch carries from a pull request is GitHub's account of where
+      // the branch came from, not a local relationship, so it goes with the
+      // credential that read it. Everything local about the branch stays.
+      branches: snapshot.branches.map((branch) => ({
+        ...branch,
+        pr: null,
+        ...(branch.parentSource === 'pullRequest' ? { parentSource: null, parentTip: null } : {}),
+      })),
+    }
+  }
   /**
    * A write is addressed to the host that was selected when it was admitted, so
    * that is the inbox it changes and the inbox its answer carries — even when
@@ -479,10 +544,16 @@ export function installFixtureControl(options: {
     },
     openRepository: (path) => {
       record('openRepository', path === undefined ? [] : [path])
+      const requested = path === undefined ? undefined : scenario.snapshotsByPath?.[path]
+      const opened = requested ?? scenario.snapshot
+      if (!opened) throw new Error('No repository is open in this fixture.')
+      // What this read answers is settled when it is admitted, under the
+      // credential that admitted it: a read that answers late after the session
+      // was replaced still answers as the account it was made for. Only the
+      // answer is held — opening the repository is what actually happens, and it
+      // happens when the answer lands.
+      const admitted = answeredForServedCredential(opened)
       return answer('openRepository', () => {
-        const requested = path === undefined ? undefined : scenario.snapshotsByPath?.[path]
-        const opened = requested ?? scenario.snapshot
-        if (!opened) throw new Error('No repository is open in this fixture.')
         // Opened is the repository that is now on screen, so every read after it
         // is answered from it. Returning the snapshot is not the same thing: the
         // selected pull request's headline, files, and threads are looked up in
@@ -490,15 +561,14 @@ export function installFixtureControl(options: {
         // how a row for a second repository reaches a Review workspace that says
         // the pull request is not there.
         active = opened
-        return opened
+        return admitted
       })
     },
     refresh: () => {
       record('refresh', [])
-      return answer('refresh', () => {
-        if (!active) throw new Error('No repository is open in this fixture.')
-        return active
-      })
+      if (!active) throw new Error('No repository is open in this fixture.')
+      const admitted = answeredForServedCredential(active)
+      return answer('refresh', () => admitted)
     },
     // The settings the double is running with, including the host the
     // Notification Center is pinned to. It answers with the stored value, not
@@ -546,41 +616,42 @@ export function installFixtureControl(options: {
       const stored = settingsSnapshot()
       return answer(call, () => stored)
     },
-    // This installation's own GitHub sign-in, which the App reads for the
-    // account panel and to know which host it is signed in to. It is optional
-    // in the product, so the method is only there for a scenario that named
-    // it: every other scenario leaves it off, which is what a main process
-    // without this bridge looks like, and answering it unasked would move the
-    // account footer of scenarios that never staged a sign-in. The answer is
-    // taken when the read is admitted, so a read held across a host change
-    // delivers the account of the host it was asked about — never one rebuilt
-    // for the host selected afterwards, which would be an answer nobody asked
-    // for.
-    get githubAccountStatus(): (() => Promise<GitHubAccountStatus>) | undefined {
-      const identity = scenario.identity
-      if (identity) {
+    // The required GitHub CLI's status: which host is being read for, whether
+    // that host is signed in, as which account, and which version is installed.
+    // It is optional in the product, so the method exists only where a scenario
+    // declared a status: every other scenario leaves it off, which is what a
+    // main process without this bridge looks like, and answering it unasked
+    // would move the GitHub status footer of scenarios that never staged a CLI.
+    // The answer is taken when the read is admitted, so a read held across a
+    // host change delivers the status of the host it was asked about — never
+    // one rebuilt for the host selected afterwards, which would be an answer
+    // nobody asked for.
+    get githubCliStatus(): (() => Promise<GitHubCliStatus>) | undefined {
+      // What this double reports is the session it currently serves, which a
+      // test can have moved: the scenario's own declaration until something
+      // serves the status this installation now answers with.
+      const declared = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      if (!declared) return undefined
+      if (scenario.identity) {
         return () => {
-          record('githubAccountStatus', [])
-          return answer('githubAccountStatus', () => identity.account)
+          record('githubCliStatus', [])
+          return answer('githubCliStatus', () => declared)
         }
       }
-      if (!scenario.exposesGithubAccount) return undefined
       return () => {
-        record('githubAccountStatus', [])
-        return admittedAnswer('githubAccountStatus', (): GitHubAccountStatus => ({
-          state: 'signed-in',
-          reference: 'app-credential-reference',
-          host: notificationSettings.github.host,
-          login: scenario.githubAccount?.login ?? 'octo',
-          permissions: [],
-          expiresAt: null,
-          refreshExpiresAt: null,
-          store: { available: true, name: 'fixture key store', reason: null },
-          signingIn: false,
-          challenge: null,
-          message: null,
-          externalCredential: false,
-        }))
+        record('githubCliStatus', [])
+        return admittedAnswer('githubCliStatus', () => declared)
+      }
+    },
+    // The CLI session changes outside this window — a sign-in, a switch, a
+    // logout, a revocation — so the main process publishes the new status
+    // rather than waiting to be asked. The bridge is installed wherever the
+    // window asked for a status at all: a build without the optional read has
+    // nothing to change either.
+    onGitHubCliStatus: (listener) => {
+      cliStatusListener = listener
+      return () => {
+        if (cliStatusListener === listener) cliStatusListener = null
       }
     },
     // The optional Notification Center answers on its own calls, with its own
@@ -657,9 +728,12 @@ export function installFixtureControl(options: {
         const canonicalHost = canonicalHostName(host)
         const isDefault = canonicalHost === 'github.com'
         const webOrigin = isDefault ? 'https://github.com' : `https://${canonicalHost}`
+        // An enterprise host's inbox names whichever account this scenario says
+        // the CLI reports for it; the token is authorized for the host and
+        // account it names, never for the account another host serves.
         const login = isDefault
           ? served.login
-          : (scenario.githubAccount?.login ?? served.login ?? 'enterprise-user')
+          : (scenario.githubCliStatus?.login ?? served.login ?? 'enterprise-user')
         const threads = served.threads.map((t) => ({
           ...t,
           url: isDefault ? t.url : t.url ? t.url.replace('https://github.com', webOrigin) : null,
@@ -1292,7 +1366,15 @@ export function installFixtureControl(options: {
     },
     searchRepositories: (request) => {
       record('searchRepositories', [request])
-      return answer('searchRepositories', () => {
+      // What an account can reach is that account's own, and it is answered from
+      // the credential this read was admitted under rather than from the one in
+      // effect when the answer is released: a search asked for by the replaced
+      // account answers late with the replaced account's repositories, and
+      // rebuilding it from the replacement is the one thing this fence exists to
+      // catch. The list is derived here, at admission, and only the delivery of
+      // the answer is held.
+      const admittedCli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      const produce = () => {
         const query = request.query?.trim() ?? ''
         if (query === 'sso-error') {
           return {
@@ -1303,7 +1385,27 @@ export function installFixtureControl(options: {
             },
           }
         }
-        const items =
+        // A search reads GitHub as the CLI account for this host, so a scenario
+        // that staged a status this host cannot use cannot answer with results
+        // the CLI could not have produced. A scenario that staged none is a
+        // window whose main process never reported one, which keeps serving.
+        const cli = admittedCli
+        if (cli && cli.state !== 'authenticated') {
+          return {
+            ok: false as const,
+            failure:
+              cli.state === 'missing-cli'
+                ? {
+                    reason: 'unavailable' as const,
+                    message: 'The GitHub CLI could not be run on this computer.',
+                  }
+                : {
+                    reason: 'signed-out' as const,
+                    message: `The GitHub CLI has no account signed in for ${cli.host}.`,
+                  },
+          }
+        }
+        const items: GitHubRepositorySummary[] =
           query === 'empty-repo'
             ? [
                 {
@@ -1363,6 +1465,28 @@ export function installFixtureControl(options: {
                   host: 'github.com',
                 },
               ]
+        // What an account can reach is that account's own, and the private
+        // repository it may clone is named after it: an answer that arrives
+        // for a replaced account has to be recognizable as somebody else's.
+        const account = cli?.login ?? 'octo'
+        items.push({
+          name: `${account}-private`,
+          fullName: `acme/${account}-private`,
+          owner: 'acme',
+          description: `Private to ${account}`,
+          private: true,
+          fork: false,
+          archived: false,
+          empty: false,
+          language: 'TypeScript',
+          defaultBranch: 'main',
+          pushedAt: '2026-09-29T00:00:00Z',
+          url: `https://${cli?.host ?? 'github.com'}/acme/${account}-private`,
+          httpsUrl: `https://${cli?.host ?? 'github.com'}/acme/${account}-private.git`,
+          sshUrl: `git@${cli?.host ?? 'github.com'}:acme/${account}-private.git`,
+          canPush: true,
+          host: cli?.host ?? 'github.com',
+        })
         return {
           ok: true as const,
           value: {
@@ -1372,17 +1496,27 @@ export function installFixtureControl(options: {
             truncated: false,
           },
         }
-      })
+      }
+      return admittedAnswer('searchRepositories', produce)
     },
     previewCloneCommand: (request) => {
       record('previewCloneCommand', [request])
       const url =
         request.protocol === 'ssh' ? request.repository.sshUrl : request.repository.httpsUrl
+      // The two commands the main process composes for this request: the same
+      // depth flag, the same quoting rule, and the same host-qualified target
+      // off github.com. The renderer only shows what it is handed, so a double
+      // that answered with a differently-shaped string would be proving a copy
+      // of the command rather than the command the request asks for.
+      const destination = mockCloneDestination(request.parentDirectory, request.directoryName)
+      const depth = request.shallow ? ' --depth 1' : ''
+      const ghTarget = request.repository.host === 'github.com' ? request.repository.fullName : url
+      const ghFlags = request.shallow ? ' -- --depth 1' : ''
       return answer('previewCloneCommand', () => ({
         ok: true as const,
         value: {
-          gitCommand: `git clone ${url} "${request.parentDirectory}/${request.directoryName}"`,
-          ghCommand: `gh repo clone ${request.repository.fullName} "${request.parentDirectory}/${request.directoryName}"`,
+          gitCommand: `git clone${depth} ${mockShellWord(url)} ${destination}`,
+          ghCommand: `gh repo clone ${mockShellWord(ghTarget)} ${destination}${ghFlags}`,
         },
       }))
     },
@@ -1456,9 +1590,28 @@ export function installFixtureControl(options: {
     },
     pullRequestInbox: (request) => {
       record('pullRequestInbox', request ? [request] : [])
+      // The queue a host reads is that host's own, and it is that host's from the
+      // moment the read is admitted rather than from the moment it is released: a
+      // read that answers late, after the window has moved to another host, still
+      // carries the rows the host it asked about read. Reading the served status
+      // inside a released producer would rebuild a held read as the replacement
+      // account's answer, which is the one thing this boundary exists to catch.
+      const served = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus ?? null
+      const admitted = !scenario.inbox
+        ? null
+        : served && served.host !== 'github.com'
+          ? {
+              ...scenario.inbox,
+              items: scenario.inbox.items.map((item) => ({
+                ...item,
+                host: served.host,
+                title: `${item.title} on ${served.host}`,
+              })),
+            }
+          : scenario.inbox
       return answer('pullRequestInbox', () => {
-        if (!scenario.inbox) throw new Error('This fixture has no PR Inbox read behind it.')
-        return scenario.inbox
+        if (!admitted) throw new Error('This fixture has no PR Inbox read behind it.')
+        return admitted
       })
     },
     pullRequestInboxFilters: () => {
@@ -1504,8 +1657,8 @@ export function installFixtureControl(options: {
   }
 
   /**
-   * The settings file and the account behind it, for a scenario that declares
-   * them.
+   * The settings file and the GitHub CLI status behind it, for a scenario that
+   * declares them.
    *
    * Both surfaces are installed only where they were asked for. A window with
    * no settings has no host to compare its queue against, so nothing retires
@@ -1580,6 +1733,7 @@ export function installFixtureControl(options: {
       if (scenario.notifications)
         hostInboxes.set(scenario.notifications.host, scenario.notifications)
       notificationSettings.github = { host: scenario.notifications?.host ?? GITHUB_DEFAULT_HOST }
+      servedCliStatus = null
       released.clear()
       options.onScenarioChange(scenario.name)
     },
@@ -1599,6 +1753,24 @@ export function installFixtureControl(options: {
       // holding another host's inbox, which is what has to stay on screen.
       const retired = scenarioFor(name).notifications
       if (retired) notificationListener?.(retired)
+    },
+    serveCliStatus(status) {
+      // What this installation answers the CLI status with from now on, without
+      // publishing anything. A window pointed at a host it has just selected
+      // has to ask for that host's own status, and the answer it gets is this
+      // one: the fixture cannot rebuild a scenario's status for a host that
+      // scenario never declared, and inventing a session for it would prove
+      // nothing about the host switch.
+      servedCliStatus = status
+    },
+    publishCliStatus(status) {
+      // The session changed outside the window, which is what the main process
+      // does when `gh` signs in, switches account, or logs out. The stored
+      // session becomes the new one, so a read asked for afterwards answers as
+      // the replacement rather than as the session it replaced, and the window
+      // is told about it without having asked.
+      servedCliStatus = status
+      cliStatusListener?.(status)
     },
     hold(call) {
       holds.add(call)

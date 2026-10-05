@@ -79,7 +79,7 @@ function checkEntry(pr) {
   return null
 }
 
-function graphPullRequest(pr, withBody, fixture) {
+function graphPullRequest(pr, withBody, fixture, state) {
   const merged = pr.state === 'MERGED'
   const value = {
     id: `PR_${pr.number}`,
@@ -100,7 +100,37 @@ function graphPullRequest(pr, withBody, fixture) {
   const checks = checkEntry(pr)
   if (checks) value.commits.nodes.push({ commit: { statusCheckRollup: checks } })
   if (withBody) value.body = pr.body || ''
+  // This run's own merge queue: the repository's setting, and whether this pull
+  // request holds an entry in it. A state that says what the queue is doing with
+  // it is what the pull request itself carries.
+  value.isMergeQueueEnabled = state !== undefined && state.mergeQueueEnabled === true
+  value.isInMergeQueue = pr.mergeQueue === true
+  value.mergeQueueEntry = pr.mergeQueue === true ? (pr.mergeQueueEntry ?? queueEntry(pr)) : null
   return value
+}
+
+/** The entry a queued pull request holds in this run's own merge queue. */
+function queueEntry(pr) {
+  return {
+    position: pr.mergeQueuePosition ?? 1,
+    state: pr.mergeQueueState ?? 'QUEUED',
+    enqueuedAt: pr.mergeQueueEnqueuedAt ?? '2026-03-01T12:00:00Z',
+  }
+}
+
+/**
+ * Every pull request this run merges as one group: the ones sharing a stack, or
+ * the one itself when it is published on its own.
+ */
+function groupFor(state, number) {
+  const target = findPr(state, number)
+  const stack = (state.stacks ?? []).find((entry) =>
+    entry.pull_requests.some((entry_) => entry_.number === target.number),
+  )
+  const numbers = stack
+    ? new Set(stack.pull_requests.map((entry_) => entry_.number))
+    : new Set([target.number])
+  return state.prs.filter((pr) => numbers.has(pr.number))
 }
 
 function restPullRequest(state, pr, fixture) {
@@ -256,7 +286,16 @@ function commentResponse(state, comment) {
 function handleApi(state, args, fixture) {
   const forms = new Map(Object.entries(jsonValues(args, fixture.input)))
   requireRepository(state, args, forms)
-  const endpoint = args.find((arg) => /^repos\//u.test(arg) || arg === 'user')
+  // The endpoint is the one argument that is a path, absolute or not: a
+  // configured API base is prepended to every path the app asks for, so the
+  // fixture is handed `http://host/repos/...` where the app wrote `repos/...`.
+  const endpointArgument = args.find(
+    (arg) => !arg.startsWith('-') && /^(?:https?:\/\/[^/]+)?\/?(?:repos\/|user(?:$|\/))/u.test(arg),
+  )
+  const endpoint =
+    endpointArgument === undefined
+      ? undefined
+      : endpointArgument.replace(/^https?:\/\/[^/]+\/?/u, '')
   const method = valueFor(args, '--method') || 'GET'
   if (endpoint === 'user') return actor(state.currentUser)
   if (!endpoint) fail(`unknown gh api endpoint: ${args.join(' ')}`)
@@ -421,7 +460,71 @@ function handleApi(state, args, fixture) {
     if (method === 'PATCH') comment.body = forms.get('body') || ''
     return commentResponse(state, comment)
   }
-  if (endpoint.endsWith('/merge')) fail(`unhandled merge endpoint ${endpoint}`)
+  // The asynchronous merge queue: this run answers with whatever its own state
+  // says the merge is doing, so a case can hold a run open, accept it, or let it
+  // land, and read what the queue reports on the next refresh.
+  // The asynchronous merge queue, which this run answers from its own state: the
+  // group moves together, so the outcome applies to every pull request in the
+  // same stack rather than to whichever one was read first.
+  const asyncMerge = /^(repos\/[^/]+\/[^/]+)\/pulls\/(\d+)\/merge-async(?:\/([^/?]+))?$/u.exec(
+    endpoint,
+  )
+  if (asyncMerge) {
+    if (method !== 'PUT' && method !== 'GET') fail(`unsupported merge method ${method}`)
+    const number = Number(asyncMerge[2])
+    const result = state.asyncMergeResult ?? { status: 'merged' }
+    const group = groupFor(state, number)
+    // A merge this host reports as landed has landed. Applying it on the answer that
+    // says so is what makes the report mean anything: a read taken after a merge that
+    // came back merged would otherwise find the pull request still open, and the
+    // answer the client was just given would contradict its own next read.
+    const landMerged = () => {
+      for (const entry of group) {
+        entry.state = 'MERGED'
+        entry.mergedAt = new Date(0).toISOString()
+        entry.mergeQueue = false
+        entry.mergeQueueEntry = null
+      }
+    }
+    if (asyncMerge[3] === undefined) {
+      if (state.asyncMergeStaysPending === true) {
+        // A run this host is still executing: the pull request holds a queue entry
+        // while it runs, which is what a reader is told about it.
+        for (const entry of group) entry.mergeQueue = true
+        return { status: 'pending', details: { uuid: 'fixture-merge-uuid' } }
+      }
+      if (result.status === 'merged') landMerged()
+      return {
+        status: result.status,
+        details: { uuid: 'fixture-merge-uuid', ...(result.details ?? {}) },
+      }
+    }
+    if (state.asyncMergeStaysPending === true) {
+      // Still running: reading it again says so, and moves nothing.
+      for (const entry of group) entry.mergeQueue = true
+      return { status: 'pending', details: { uuid: asyncMerge[3] } }
+    }
+    if (result.status === 'merged') landMerged()
+    if (result.status === 'enqueued') {
+      for (const entry of group) {
+        entry.mergeQueue = true
+        entry.mergeQueueState = 'QUEUED'
+      }
+    }
+    return { status: result.status, details: { uuid: asyncMerge[3] } }
+  }
+  // A direct merge: this host lands it and says so, the way GitHub's own merge
+  // endpoint does, and the pull request is merged for every later read.
+  const directMerge = /^(repos\/[^/]+\/[^/]+\/pulls\/(\d+))\/merge$/u.exec(endpoint)
+  if (directMerge) {
+    if (method !== 'PUT') fail(`unsupported merge method ${method}`)
+    const pull = findPr(state, Number(directMerge[2]))
+    if (pull.state !== 'OPEN') fail('Pull request is not open')
+    pull.state = 'MERGED'
+    pull.mergedAt = new Date(0).toISOString()
+    pull.mergeOid = '4444444444444444444444444444444444444444'
+    return { merged: true, sha: pull.mergeOid, message: 'Pull Request successfully merged' }
+  }
   fail(`unknown gh api endpoint ${endpoint}`)
 }
 
@@ -430,6 +533,13 @@ function handleGraphql(state, args, fixture) {
   const forms = new Map(Object.entries(body.variables || {}))
   requireRepository(state, args, forms)
   const query = body.query || ''
+  // The current-principal proof this build pins: `query UserCurrent { viewer {
+  // login } }`, which is how the CLI itself resolves the account a credential
+  // authenticates as. The answer is the account this run's fixture state names
+  // and nothing else — no REST fiction, no second shape to guess between.
+  if (/\bviewer\s*\{[^}]*\blogin\b/u.test(query)) {
+    return { data: { viewer: { login: state.currentUser } } }
+  }
   const field = query.includes('convertPullRequestToDraft')
     ? 'convertPullRequestToDraft'
     : query.includes('markPullRequestReadyForReview')
@@ -509,7 +619,7 @@ function handleGraphql(state, args, fixture) {
   }
   if (query.includes('pullRequest(number:')) {
     const pr = findPr(state, Number(forms.get('number')))
-    return { data: { repository: { pullRequest: graphPullRequest(pr, true, fixture) } } }
+    return { data: { repository: { pullRequest: graphPullRequest(pr, true, fixture, state) } } }
   }
   const open = state.prs.filter((pr) => pr.state === 'OPEN')
   // One PR per page, so a second request carrying a cursor proves pagination advanced.
@@ -520,7 +630,9 @@ function handleGraphql(state, args, fixture) {
     data: {
       repository: {
         pullRequests: {
-          nodes: open.slice(start, start + 1).map((pr) => graphPullRequest(pr, false, fixture)),
+          nodes: open
+            .slice(start, start + 1)
+            .map((pr) => graphPullRequest(pr, false, fixture, state)),
           pageInfo: {
             hasNextPage: next < open.length,
             endCursor: next < open.length ? `cursor:${next}` : null,
@@ -565,6 +677,55 @@ function createPullRequest(state, forms, fixture) {
 }
 
 /**
+ * What `gh auth status` writes, in the shape the CLI itself writes it.
+ *
+ * Asked for JSON — which is how this build always asks, with `--json hosts` —
+ * that is a map of host to the accounts the CLI holds for it, and each account
+ * carries the state it is in (`success`, `error` or `timeout`), whether it is
+ * the active one, the host it belongs to, and its `login`. The account name is
+ * the `login` field, which is what the CLI's own account entry marshals it
+ * from; no other spelling is answered, and no token field exists in this shape
+ * for a caller to read.
+ *
+ * Which accounts a host holds comes from this run's own fixture state, so a
+ * rejected account, a host that did not answer, an account that is not the
+ * active one and a host this run holds nothing for are each expressible by a
+ * test rather than needing a second fixture. A host with no entry is reported
+ * as one the CLI holds no account for — an empty map, which the CLI also writes
+ * while exiting zero — and never as somebody else's account. Without `--json`
+ * the human-readable lines the CLI prints are written instead, because a test
+ * that asked for those is asking about those.
+ */
+function authStatus(state, args) {
+  const host = valueFor(args, '--hostname') ?? 'github.com'
+  const configured = state.cliAccounts ?? null
+  // A host this run says nothing about holds the one account the fixture state
+  // names; a host it says about holds exactly what it listed, and an empty list
+  // is a host the CLI holds no account for.
+  const accounts =
+    configured === null
+      ? [{ state: 'success', active: true, login: state.currentUser }]
+      : (configured[host] ?? [])
+  if (!args.includes('--json')) {
+    if (accounts.length === 0) return 'You are not logged into any GitHub hosts.\n'
+    return accounts
+      .map((entry) => `${host}\n  Logged in to ${host} as ${entry.login ?? state.currentUser}\n`)
+      .join('')
+  }
+  if (accounts.length === 0) return { hosts: {} }
+  return {
+    hosts: {
+      [host]: accounts.map((entry) => ({
+        state: entry.state ?? 'success',
+        active: entry.active ?? false,
+        host,
+        login: entry.login ?? state.currentUser,
+      })),
+    },
+  }
+}
+
+/**
  * Answers one `gh` request the way the CLI would and returns what it would have
  * written to stdout. The harness calls this in the test process instead of
  * launching a `gh` executable, because `child_process` cannot run a shebang
@@ -579,15 +740,32 @@ function runGitHubCli({ statePath, barePath, realGit, args, cwd, input }) {
   record(state, args, cwd)
   let result
   try {
-    if (args.includes('--hostname')) {
+    // `auth status` names the host whose accounts are being asked about; `auth
+    // token` is this run's own host serving, whatever it is spelled, because a
+    // configured API base decides which host the CLI is asked about.
+    if (args.includes('--hostname') && !(args[0] === 'auth' && args[1] === 'token')) {
       const hostname = valueFor(args, '--hostname')
-      if (hostname !== 'github.com') fail(`fixture does not serve hostname ${hostname}`)
+      // The hosts this run serves: the public host, and any host whose accounts
+      // this run's state declares, because a run that pointed the app at another
+      // provider holds that provider's session and the account answering those
+      // requests is the one on that host. Nothing else is served.
+      const held = state.cliAccounts ?? {}
+      if (hostname !== 'github.com' && !Object.hasOwn(held, hostname))
+        fail(`fixture does not serve hostname ${hostname}`)
     }
-    if (args[0] === 'api' && args.includes('graphql')) result = handleGraphql(state, args, fixture)
-    else if (args[0] === 'api') result = handleApi(state, args, fixture)
-    else if (args[0] === 'auth' && args[1] === 'status')
-      result = 'github.com\n  Logged in to github.com as fixture-user\n'
-    else if (args[0] === 'auth' && args[1] === 'token') result = 'fixture-token\n'
+    // The endpoint is the one argument that is an endpoint, wherever it sits in
+    // the flags: an absolute GraphQL URL addresses its host in place of the
+    // `--hostname` flag a relative endpoint needs.
+    const endpointArgument = args.find((arg) => /graphql$/u.test(arg) && !arg.startsWith('-'))
+    if (args[0] === 'auth' && args[1] === 'token') result = 'fixture-token\n'
+    else if (
+      args[0] === 'api' &&
+      endpointArgument !== undefined &&
+      /graphql$/u.test(endpointArgument)
+    ) {
+      result = handleGraphql(state, args, fixture)
+    } else if (args[0] === 'api') result = handleApi(state, args, fixture)
+    else if (args[0] === 'auth' && args[1] === 'status') result = authStatus(state, args)
     else fail(`unknown gh request: ${args.join(' ')}`)
     saveState(state, statePath)
     return response(state, result, args)

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { getGitHubData, getGitHubIssues, getPullRequest } from '../src/main/github'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 
 /**
  * Fake `gh` answering the three GraphQL shapes Git Stacks sends: the paginated
@@ -31,10 +32,30 @@ const entry = argv.findIndex((value) => basename(value) === 'api')
 const args = entry === -1 ? argv.slice(1) : argv.slice(entry)
 const input = args.includes('--input') ? JSON.parse(readFileSync(0, 'utf8')) : {}
 let response = null
+// The credential this run's CLI holds, the account it names, and the way it
+// reports both are the CLI's own protocol: an app that cannot ask the CLI who it
+// is has no account to read as, so a fixture that answers only queries would
+// fail a run that is otherwise answering them.
+const credential = 'fixture-token'
+const account = 'fixture-user'
+if (args[0] === 'auth' && args[1] === 'token') {
+  writeSync(1, credential + '\\n')
+  process.exit(0)
+}
+if (args[0] === 'auth' && args[1] === 'status') {
+  if (args.includes('--json')) {
+    writeSync(1, JSON.stringify({ hosts: { 'github.com': [{ state: 'success', active: true, login: account, host: 'github.com' }] } }))
+  } else {
+    writeSync(1, 'github.com\\n  Logged in to github.com as ' + account + '\\n')
+  }
+  process.exit(0)
+}
 if (basename(args[0] || '') === 'api' && args.includes('graphql')) {
   const text = String(input.query || '')
   if (text.includes('pullRequest(number:') && input.variables?.number === 7) {
     response = { data: { repository: { pullRequest: tracked } } }
+  } else if (text.includes('viewer')) {
+    response = { data: { viewer: { login: account } } }
   } else if (text.includes('issues(first:')) {
     response = { data: { repository: { issues: { nodes: issues, pageInfo: { hasNextPage: false, endCursor: null } } } } }
   } else {
@@ -80,6 +101,9 @@ async function installFakeGitHubCli(root: string, bin: string): Promise<string |
   const gh = join(bin, 'gh')
   await writeFile(gh, `#!/usr/bin/env node\n${fakeGitHubCli}`, 'utf8')
   await chmod(gh, 0o755)
+  // Admitted by name, so the boundary answers for the file the real app would
+  // start and refuses the machine's own CLI.
+  admitOwnedProviderCliRoot(bin)
   return null
 }
 

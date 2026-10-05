@@ -8,7 +8,7 @@ import {
 import { scenarios } from '../fixtures/scenarios'
 import type { FixtureCall, FixtureCallRecord } from '../fixtures/types'
 import { galleryUrl } from '../fixtures/urls'
-import type { GitAction } from '../../../src/shared/types'
+import type { GitAction, GitHubCliStatus } from '../../../src/shared/types'
 
 /**
  * Fixed instant pinned for all gallery tests so relative timestamps
@@ -256,6 +256,32 @@ export async function answerNextDoubleCall(
 }
 
 /**
+ * Installs the GitHub CLI status this installation answers its status read
+ * with, without telling the window about it. A window that has just been
+ * pointed at another host reads that host for itself, so its read has to have
+ * an answer that is genuinely that host's.
+ */
+export async function serveCliStatus(page: Page, status: GitHubCliStatus): Promise<void> {
+  await page.evaluate((value) => {
+    window.fixture.serveCliStatus(value)
+  }, status)
+}
+
+/**
+ * Replaces the GitHub CLI session and publishes it, the way a sign-in, an
+ * account switch, or a logout in a terminal does: the window is told about a
+ * change it did not ask for, and any read it had already started for the
+ * previous session can still answer afterwards.
+ */
+export async function publishCliStatus(page: Page, status: GitHubCliStatus): Promise<void> {
+  await page.evaluate((value) => {
+    window.fixture.publishCliStatus(value)
+  }, status)
+}
+
+/**
+ * Clears the accumulated logs, holds, and one-shot failures while keeping the
+ * mounted scenario and the session it is serving.
  */
 export async function resetDouble(page: Page): Promise<void> {
   await page.evaluate(() => {

@@ -1925,23 +1925,23 @@ async function main() {
       `document.body.innerText.includes(${JSON.stringify(`GitHub host set to ${secondName}`)})`,
       900,
     )
-    // The account this window would push with, read from the app's own status
-    // through its own bridge: what a person signing in or out would change, and
-    // not an inference from a file that happens to be absent. This run has no
-    // GitHub account of its own and no remote to push anything to, and both are
-    // facts about this window rather than about the module under test.
-    const accountStatus = await page(
-      `(async () => { const bridge = Object.values(window).find((value) => value && typeof value.githubAccountStatus === 'function'); return bridge ? await bridge.githubAccountStatus() : null })()`,
+    // The status this window is reading for, read from the app's own bridge:
+    // what GitHub CLI session is in effect, and not an inference from a file that
+    // happens to be absent. This run has no CLI signed in and no remote to push
+    // anything to, and both are facts about this window rather than about the
+    // module under test.
+    const cliStatus = await page(
+      `(async () => { const bridge = Object.values(window).find((value) => value && typeof value.githubCliStatus === 'function'); return bridge ? await bridge.githubCliStatus() : null })()`,
     )
     // The status has to have been read before it can say anything: a bridge this
-    // build does not expose would otherwise read the same as an account that is
+    // build does not expose would otherwise read the same as a CLI that is
     // absent, and "nothing answered" is not the claim being made here.
     assert.ok(
-      accountStatus !== null && typeof accountStatus === 'object',
-      `the app's own account status was read through its bridge: ${JSON.stringify(accountStatus)}`,
+      cliStatus !== null && typeof cliStatus === 'object',
+      `the app's own CLI status was read through its bridge: ${JSON.stringify(cliStatus)}`,
     )
     assert.equal(
-      accountStatus.host,
+      cliStatus.host,
       secondName,
       `the account status answered for the host the window is now pointed at, not the one it came from: ${JSON.stringify(accountStatus)}`,
     )
@@ -2045,7 +2045,7 @@ async function main() {
     assert.equal(
       existsSync(join(userData, 'github-account.json')),
       false,
-      "the application's own GitHub sign-in is still absent through the host change",
+      'the app-owned primary record of an earlier build is still absent through the host change',
     )
     // A real read at the zoom on a row this second host still has unread, with
     // the host's own answer, so the 200% camera covers a real write too.

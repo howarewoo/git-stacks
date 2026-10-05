@@ -21,7 +21,7 @@ import {
 } from '../src/renderer/src/design-system/DialogSpecimenData'
 import { workflowAction } from '../src/renderer/src/components/workflow-action'
 import { workflowBlocker } from '../src/renderer/src/components/workflow-policy'
-import { OneTimeCodeSection } from '../src/renderer/src/components/github-account-dialog'
+
 test('loading buttons retain their label, busy state, and disabled lock', () => {
   const markup = renderToStaticMarkup(
     React.createElement(
@@ -221,42 +221,6 @@ test('the guarded publish specimen is ready only when the builder produces a sub
     context,
   )
   assert.equal(noOffer, null)
-})
-
-test('the one-time code and its cancel control do not depend on the account state', () => {
-  const challenge = {
-    userCode: 'ABCD-1234',
-    verificationUri: 'https://github.com/login/device',
-    expiresAt: Date.UTC(2026, 8, 29, 12, 0, 0),
-  }
-  // A renewal can complete while this code is still waiting to be entered; the
-  // code and the control that abandons it must render regardless of that.
-  for (const state of ['signed-in', 'signing-in', 'offline'] as const) {
-    const markup = renderToStaticMarkup(
-      React.createElement(OneTimeCodeSection, {
-        challenge,
-        onCancelSignIn: () => {},
-        onOpenVerification: () => {},
-      }),
-    )
-    assert.ok(markup.includes('ABCD-1234'), `the code is shown while the state is ${state}`)
-    assert.ok(markup.includes('Cancel sign-in'), `the flow can be abandoned in ${state}`)
-    assert.ok(markup.includes('Open device page'), `the device page is reachable in ${state}`)
-  }
-
-  // Before the code arrives the flow is still abandonable, and no device page is
-  // offered for a code that does not exist.
-  const waiting = renderToStaticMarkup(
-    React.createElement(OneTimeCodeSection, {
-      challenge: null,
-      onCancelSignIn: () => {},
-      onOpenVerification: () => {},
-    }),
-  )
-  assert.ok(waiting.includes('Asking GitHub for a one-time code'))
-  assert.ok(waiting.includes('Cancel sign-in'))
-  assert.equal(waiting.includes('Open device page'), false)
-  assert.equal(waiting.includes('ABCD-1234'), false)
 })
 
 test('merge outcome text distinguishes retained queue membership from a fresh read', () => {

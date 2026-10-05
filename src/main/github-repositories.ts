@@ -367,6 +367,10 @@ async function searchRepositories(
         status: response.status,
         detail: 'GitHub returned a search response without repository items',
         rateLimit: response.rateLimit,
+        // The transport that read this response has already recorded its
+        // allowance against this host. Publishing it here as well would name no
+        // host, which is process-wide: it would replace what every other host
+        // last reported with an answer this read cannot use.
       })
     }
     if (typeof response.data.total_count === 'number') {

@@ -21,7 +21,7 @@ import {
 } from '../src/main/review-threads'
 import {
   DirectGitHubTransport,
-  environmentTokenName,
+  credentialEnvNames,
   GhGitHubTransport,
   setGitHubHostTransport,
   setGitHubTransport,
@@ -29,8 +29,8 @@ import {
   type GitHubRestResponse,
   type GitHubTransport,
 } from '../src/main/github-transport'
-import type { GitHubCredentialSource } from '../src/main/github-transport'
 import { GITHUB_DEFAULT_HOST } from '../src/shared/host'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 
 /**
  * A real GitHub host on a real socket, not a stubbed fetch. The certificate is
@@ -106,19 +106,19 @@ async function startHost(
   }
 }
 
-const transportFor = (host: RealHost, credential?: GitHubCredentialSource): GitHubTransport =>
+const transportFor = (host: RealHost, token: string | null = 'host-token'): GitHubTransport =>
   new DirectGitHubTransport({
     host: host.host,
     apiUrl: host.context.apiBase,
     graphqlUrl: host.context.graphqlUrl,
-    token: credential ? null : 'host-token',
-    ...(credential ? { credential } : {}),
+    token,
     env: {},
   })
 
 /** The environment a host's own token is set in, and nowhere else. */
+/** The headless credential a host is given, in the variable the CLI reads. */
 const tokenEnvFor = (host: RealHost): NodeJS.ProcessEnv => ({
-  [environmentTokenName(host.host)]: 'host-token',
+  [credentialEnvNames(host.host)[0]]: 'host-token',
 })
 
 test('a real enterprise host answers on its own origin, and a credential bound elsewhere is refused there', async () => {
@@ -137,11 +137,14 @@ test('a real enterprise host answers on its own origin, and a credential bound e
   })
   const other = await startHost('other', () => ({ body: { ok: true } }))
   try {
-    // No transport is supplied: the host picks the one a repository on that host
-    // would use, from the token set for that host alone.
+    // The transport is supplied rather than resolved from the environment: a
+    // credential in the environment is one the CLI reads for a host, not a way
+    // for this build to be GitHub. What is under test here is the probe against a
+    // real socket, so the direct transport is handed over explicitly — which is
+    // the only way this build makes a request that is not a `gh` child.
     const status = await probeGitHubHost(enterprise.context, {
       repository: { owner: 'acme', name: 'widgets' },
-      env: tokenEnvFor(enterprise),
+      transport: transportFor(enterprise),
     })
     assert.equal(status.host, enterprise.host)
     assert.equal(status.serverVersion, '3.13.1')
@@ -167,18 +170,10 @@ test('a real enterprise host answers on its own origin, and a credential bound e
     )
     assert.equal(other.requested.length, 0)
 
-    // A credential minted for the other host is not this host's to use.
-    const foreign: GitHubCredentialSource = {
-      host: other.host,
-      available: () => true,
-      current: async () => ({
-        token: 'other-secret',
-        session: 'other',
-        origin: 'account' as const,
-      }),
-    }
+    // A credential minted for the other host is not this host's to use: this
+    // build's own transport authenticates with the one credential it was given.
     await assert.rejects(
-      transportFor(enterprise, foreign).rest({ path: 'user' }),
+      transportFor(enterprise, null).rest({ path: 'user' }),
       (error: unknown) => (error as { kind?: string }).kind === 'unauthorized',
     )
     assert.equal(
@@ -261,12 +256,16 @@ test('an ambient github.com token is never sent to an enterprise host on this so
     assert.equal(enterprise.requested.length, 0, 'the ambient token reached the enterprise host')
     assert.equal(other.requested.length, 0)
 
-    // The same host, with a token set in that host's own variable, is served.
+    // The same host, with a credential handed to this transport for it, is
+    // served. An ambient variable is not one: a token the CLI would read for
+    // some other host is never how this build reaches this host, so it is given
+    // as the token its caller owns or not at all.
     const served = new DirectGitHubTransport({
       host: enterprise.host,
       apiUrl: enterprise.context.apiBase,
       graphqlUrl: enterprise.context.graphqlUrl,
-      env: { [environmentTokenName(enterprise.host)]: 'enterprise-secret' },
+      token: 'enterprise-secret',
+      env: {},
     })
     const response = await served.rest<{ full_name: string }>({ path: 'repos/acme/widgets' })
     assert.equal(response.data.full_name, 'acme/widgets')
@@ -331,6 +330,9 @@ test('a real gh child is given this host’s token and no other credential', asy
     'utf8',
   )
   await chmod(join(bin, 'gh'), 0o755)
+  // Admitted by name, so the boundary answers for the file the real transport
+  // starts and refuses the machine's own CLI.
+  admitOwnedProviderCliRoot(bin)
   const original = process.env.PATH
   process.env.PATH = `${bin}${pathDelimiter}${original ?? ''}`
   try {
@@ -343,7 +345,7 @@ test('a real gh child is given this host’s token and no other credential', asy
         GH_ENTERPRISE_TOKEN: 'enterprise-secret',
         GITHUB_ENTERPRISE_TOKEN: 'enterprise-secret-two',
         GIT_STACKS_GITHUB_TOKEN: 'this-build-secret',
-        [environmentTokenName('ghe.example.com')]: 'ghe-secret',
+        [credentialEnvNames('ghe.example.com')[0]]: 'ghe-secret',
       },
     })
     await transport.rest({ path: 'meta' })
@@ -352,18 +354,21 @@ test('a real gh child is given this host’s token and no other credential', asy
       const equals = line.indexOf('=')
       if (equals > 0) seen[line.slice(0, equals)] = line.slice(equals + 1)
     }
+    // The child is given the variable pair the CLI reads for this host, and the
+    // first of them holds this host's credential: the CLI resolves its token for
+    // a server host from that pair in that order, so this is what makes it
+    // resolve this host's credential rather than any other's.
     assert.equal(
       seen.GH_ENTERPRISE_TOKEN,
       'ghe-secret',
-      'a custom host’s token is handed over under the name the CLI reads for it',
+      "a custom host's token is handed over under the name the CLI reads for it",
     )
-    assert.equal(seen.GH_TOKEN, undefined)
-    for (const name of [
-      'GITHUB_TOKEN',
-      'GITHUB_ENTERPRISE_TOKEN',
-      'GIT_STACKS_GITHUB_TOKEN',
-      environmentTokenName('ghe.other.example.com'),
-    ]) {
+    assert.equal(seen.GITHUB_ENTERPRISE_TOKEN, 'enterprise-secret-two')
+    // No variable of the other class and none of this host's own configuration
+    // reaches the child. The credential pair is the CLI's own, not this build's:
+    // a variable the CLI reads for one host is the same name it reads for every
+    // host in that class, which is why the value is scoped rather than named.
+    for (const name of ['GH_TOKEN', 'GITHUB_TOKEN', 'GIT_STACKS_GITHUB_TOKEN']) {
       assert.equal(seen[name], undefined, `${name} reached the child`)
     }
   } finally {
@@ -380,32 +385,49 @@ test('a token for one host never reaches another host that differs only in its n
   const issued = await startHost('internal', () => ({ body: { full_name: 'acme/widgets' } }))
   const lookalike = await startHost('internal-dash', () => ({ body: { full_name: 'acme/other' } }))
   try {
-    const transportFor = (host: string, context: ReturnType<typeof githubHostContext>) =>
+    // The credential is handed to the transport rather than left in an
+    // environment: a variable the CLI reads for a host is not a way for this
+    // build to be GitHub, and a direct transport authenticates with the one
+    // credential its caller owns.
+    const transportFor = (
+      host: string,
+      context: ReturnType<typeof githubHostContext>,
+      token: string,
+    ) =>
       new DirectGitHubTransport({
         host,
         apiUrl: context.apiBase,
         graphqlUrl: context.graphqlUrl,
-        env: { [environmentTokenName(issued.host)]: 'the-one-secret' },
+        token,
+        env: {},
       })
     // The host the token was issued by is served with it.
-    const served = await transportFor(issued.host, issued.context).rest<{ full_name: string }>({
-      path: 'repos/acme/widgets',
-    })
+    const served = await transportFor(issued.host, issued.context, 'the-one-secret').rest<{
+      full_name: string
+    }>({ path: 'repos/acme/widgets' })
     assert.equal(served.data.full_name, 'acme/widgets')
     assert.equal(issued.requested[0]?.authorization, 'Bearer the-one-secret')
     assert.notEqual(
-      environmentTokenName(issued.host),
-      environmentTokenName(lookalike.host),
+      credentialEnvNames(issued.host),
+      credentialEnvNames(lookalike.host),
       'two hosts whose names differ only in digits share a token name',
     )
-    // The other host answers on its own socket, and answers only a request that
-    // carries a credential of its own: a request made in the belief that it
-    // shares the first host's name is refused rather than served.
+    // A host is served on the origin its name derives, and by nothing else. A
+    // request that carries the first host's credential to the second host's
+    // socket is refused before anything leaves, because the second host's name
+    // does not derive the origin the first host's name does — even though the
+    // two names differ only in the digits that pick the port.
     await assert.rejects(
-      transportFor(lookalike.host, lookalike.context).rest({ path: 'repos/acme/other' }),
+      new DirectGitHubTransport({
+        host: lookalike.host,
+        apiUrl: issued.context.apiBase,
+        graphqlUrl: lookalike.context.graphqlUrl,
+        token: 'the-one-secret',
+        env: {},
+      }).rest({ path: 'repos/acme/other' }),
       (error: unknown) => (error as { kind?: string }).kind === 'unauthorized',
     )
-    assert.equal(lookalike.requested.length, 0, 'the first host’s token reached the lookalike host')
+    assert.equal(lookalike.requested.length, 0, "the first host's token reached the lookalike host")
     assert.equal(issued.requested.length, 1, 'the token went to its own host exactly once')
   } finally {
     delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
@@ -417,28 +439,17 @@ test('an enterprise-issued credential is refused by a transport that names no ho
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
   const enterprise = await startHost('issuer', () => ({ body: { full_name: 'acme/widgets' } }))
   try {
-    let asked = 0
-    const credential: GitHubCredentialSource = {
-      host: enterprise.host,
-      available: () => true,
-      current: async () => {
-        asked += 1
-        return { token: 'enterprise-app-secret', origin: 'account' as const, session: null }
-      },
-    }
     // A transport built for no host in particular serves the default one, so an
-    // application credential minted for an enterprise host is not its own and
-    // must not be read, let alone sent to the public API.
+    // enterprise credential is not its own and must not be sent to the public
+    // API. It is refused before a request is made, so nothing is even read.
     const hostless = new DirectGitHubTransport({
       apiUrl: 'https://api.github.com',
       env: {},
-      credential,
     })
     await assert.rejects(
       hostless.rest({ path: 'repos/acme/widgets' }),
       (error: unknown) => (error as { kind?: string }).kind === 'unauthorized',
     )
-    assert.equal(asked, 0, 'an enterprise credential was read for a hostless transport')
     assert.equal(enterprise.requested.length, 0, 'an enterprise credential reached its own host')
   } finally {
     delete process.env.NODE_TLS_REJECT_UNAUTHORIZED

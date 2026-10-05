@@ -10,8 +10,9 @@ import {
   shell,
 } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
+import { isRecord } from '../shared/guards'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   getSnapshot,
@@ -22,6 +23,7 @@ import {
   getHistory,
   getCommitDiff,
   getPushPreview,
+  retireConfirmedGitHubPayloads,
 } from './git'
 import { CommandCancelled, getOriginUrl } from './git-core'
 import { getGitHubIssues, getPullRequest } from './github'
@@ -48,7 +50,12 @@ import {
   setThreadResolved,
   submitReview,
 } from './review-threads'
-import { getPullRequestChecks, rerunPullRequestCheck } from './pull-request-checks'
+import {
+  clearCredentialCheckBackoffs,
+  retirePullRequestChecks,
+  getPullRequestChecks,
+  rerunPullRequestCheck,
+} from './pull-request-checks'
 import type { PullRequestChecksOptions } from './pull-request-checks'
 import type {
   ReviewDraft,
@@ -69,7 +76,7 @@ import type {
   SyncActivity,
 } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
-import { RequestRegistry, performBackgroundRead } from './request-registry'
+import { RequestRegistry, performBackgroundRead, type ReadPurpose } from './request-registry'
 import { RepositoryScheduler } from './repository-scheduler'
 import { RepositorySyncCoordinator, type SyncIntervals } from './sync-coordinator'
 import { RepositoryWatcher } from './git-watcher'
@@ -96,6 +103,7 @@ import {
 import { CloneError, cloneRepository, readGitEnvironment } from './clone-repository'
 import { runCloneRequest, type ValidatedClone } from './clone-request'
 import { configurePromotionHelper } from './promote-repository'
+import { canonicalHostName } from '../shared/host'
 import { isCancelled as isCommandCancelled } from './git-core'
 import type {
   CloneCommandPreview,
@@ -219,6 +227,7 @@ export function backgroundRead<T>(
   signal: AbortSignal | undefined,
   operation: (root: string, signal: AbortSignal) => Promise<T>,
   requestId: string,
+  purpose: ReadPurpose = 'local',
 ): Promise<T> {
   return performBackgroundRead(
     readKeys,
@@ -229,6 +238,7 @@ export function backgroundRead<T>(
       return withGitRuntime(runtime, () => operation(root, combined))
     },
     requestId,
+    purpose,
   )
 }
 
@@ -239,6 +249,7 @@ const sync = new RepositorySyncCoordinator({
       signal,
       (path, readSignal) => getSnapshot(path, readSignal, undefined, request.github.remote),
       request.requestId,
+      'github',
     ),
   readIssues: (root, signal) =>
     backgroundRead(
@@ -252,6 +263,7 @@ const sync = new RepositorySyncCoordinator({
         return issues.issues
       },
       'sync-issues',
+      'github',
     ),
   scheduler,
 })
@@ -317,9 +329,8 @@ let inboxIdentity = 'unchecked'
  *
  * It is the CLI status this process last established AND the credential identity
  * of every host the registered repositories resolve to. The status alone is not
- * an authority: a scoped GIT_STACKS_GITHUB_TOKEN_<HOST> written into the
- * environment, or the unscoped variables github.com reads, replaces a host's
- * credential without any status changing at all, and rows read under the
+ * an authority: a credential the GitHub CLI resolves for itself replaces a
+ * host's credential without any status changing at all, and rows read under the
  * credential that was replaced belong to somebody else. The credential identity
  * is opaque, holds no secret, and is never logged or persisted.
  */
@@ -392,7 +403,8 @@ function retireInboxIdentity(identity: string): void {
  * as somebody else.
  */
 function cliIdentity(status: GitHubCliStatus): string {
-  return status.identity ?? `${status.host}|${status.state}`
+  // The host is part of it: one generation on two hosts is two accounts.
+  return `${canonicalHostName(status.host)}|${status.identity ?? status.state}`
 }
 
 // The stored filter list is read once, on the same promise every list and save
@@ -514,7 +526,28 @@ function githubCli() {
       // A credential replaced outside this app — in the CLI itself — changes the
       // identity, and everything read under the old one is dropped with it.
       const identity = cliIdentity(status)
-      if (identity !== inboxIdentity) retireInboxIdentity(identity)
+      if (identity !== inboxIdentity) {
+        retireInboxIdentity(identity)
+        // A credential replaced outside this app changes whose GitHub answers
+        // every cached read belongs to, not only the queue's. Everything host-
+        // scoped in flight is stopped and its generation retired, what was
+        // observed about hosts is forgotten, and the reports keyed by validator
+        // are dropped: none of them may answer for a credential that no longer
+        // exists. Local Git state and the notification inbox's own host
+        // credential are untouched by this.
+        for (const controller of hostWork) controller.abort()
+        hostWork.clear()
+        hostGeneration += 1
+        forgetHost()
+        // Every GitHub read still running is pinned to the credential that has
+        // just been replaced, so none of them may repopulate a cache, a payload,
+        // or a row that now belongs to another account. Local Git is untouched:
+        // none of these readers can reach it.
+        readKeys.cancelGitHub()
+        retireConfirmedGitHubPayloads()
+        retirePullRequestChecks()
+        clearCredentialCheckBackoffs()
+      }
       window?.webContents.send('github-cli:status', status)
     },
   })
@@ -536,6 +569,32 @@ let notificationHost: string | null = null
 /** The file name suffix that keeps one host's stored state out of another's. */
 function notificationScope(host: string): string {
   return Buffer.from(host, 'utf8').toString('hex')
+}
+
+/**
+ * The credential references the Notifications centers currently hold, named from
+ * their own public state.
+ *
+ * Read as names only: a file that cannot be read, or that names no reference, is
+ * simply not protection, and a state file this app does not recognise leaves
+ * every credential in place rather than guessing which of them it may delete.
+ * Every host's state is read, not only a selected one, because a credential kept
+ * for a host that is not selected now is still stored.
+ */
+async function notificationCredentialReferences(userData: string): Promise<string[]> {
+  const scopes = await readdir(userData).catch(() => [] as string[])
+  const references: string[] = []
+  for (const name of scopes) {
+    const match = /^github-notifications\.([0-9a-f]+)\.json$/u.exec(name)
+    if (match === null) continue
+    const parsed: unknown = JSON.parse(
+      await readFile(join(userData, name), 'utf8').catch(() => 'null'),
+    )
+    if (!isRecord(parsed)) continue
+    const reference = parsed.reference
+    if (typeof reference === 'string' && reference) references.push(reference)
+  }
+  return references
 }
 
 /**
@@ -769,7 +828,6 @@ async function trustedExternalLinkHosts(): Promise<GitHubHostContext[]> {
   return hosts
 }
 
-
 function validateSender(event: IpcMainInvokeEvent) {
   if (
     !window ||
@@ -797,9 +855,11 @@ function repository() {
 function readRepository<T>(
   operation: (root: string, signal: AbortSignal) => Promise<T>,
   requestId = 'read',
+  /** What this read depends on; only a GitHub read dies with a replaced credential. */
+  purpose: ReadPurpose = 'local',
 ): Promise<T> {
   const root = repository()
-  const controller = readKeys.claim(root, requestId)
+  const controller = readKeys.claim(root, requestId, purpose)
   const superseded = () =>
     new Error('The active repository changed. Reopen this view to load its current state.')
   return operations
@@ -1283,7 +1343,9 @@ async function currentDiagnostics(settings: AppSettings) {
   const repository = activeRepository
     ? await openRepositoryOnHost(activeRepository, selected.context)
     : null
-  const cli = await githubCli().read().catch(() => null)
+  const cli = await githubCli()
+    .read()
+    .catch(() => null)
   const githubHost = await forSelectedHost(
     (signal) => probeGitHubHost(selected.context, { repository, signal, ...(cli ? { cli } : {}) }),
     selected,
@@ -1537,20 +1599,27 @@ function installHandlers() {
   })
   ipcMain.handle('repository:stack-preview', (event, kind: StackKind, branch: string) => {
     validateSender(event)
-    return readRepository(async (root, signal) =>
-      previewStack(root, await getSnapshot(root, signal), kind, branch),
+    return readRepository(
+      async (root, signal) => previewStack(root, await getSnapshot(root, signal), kind, branch),
+      'stack-preview',
+      'github',
     )
   })
   ipcMain.handle('repository:surgery-preview', (event, request: unknown) => {
     validateSender(event)
-    return readRepository(async (root, signal) =>
-      previewSurgery(root, await getSnapshot(root, signal), validateSurgeryRequest(request)),
+    return readRepository(
+      async (root, signal) =>
+        previewSurgery(root, await getSnapshot(root, signal), validateSurgeryRequest(request)),
+      'surgery-preview',
+      'github',
     )
   })
   ipcMain.handle('repository:reconciliation-preview', (event, stackKey: string) => {
     validateSender(event)
-    return readRepository(async (root) =>
-      previewReconciliationRepair(root, await getSnapshot(root), stackKey),
+    return readRepository(
+      async (root) => previewReconciliationRepair(root, await getSnapshot(root), stackKey),
+      'reconciliation-preview',
+      'github',
     )
   })
   ipcMain.handle('repository:submit-stack-progress', (event) => {
@@ -1561,7 +1630,7 @@ function installHandlers() {
   // never by asking for another merge.
   ipcMain.handle('repository:merge-status', (event) => {
     validateSender(event)
-    return readRepository((root) => getMergeStatus(root))
+    return readRepository((root) => getMergeStatus(root), 'merge-status', 'github')
   })
   // A running submission pushes its own progress. The renderer cannot poll for it: the read
 
@@ -1580,13 +1649,14 @@ function installHandlers() {
     return readRepository(
       (root, signal) => getPullRequest(root, number, signal),
       `pull-request:${number}`,
+      'github',
     )
   })
   ipcMain.handle('repository:search-issues', (event, query: unknown, requestId?: unknown) => {
     validateSender(event)
     const q = typeof query === 'string' ? query : ''
     const reqId = typeof requestId === 'string' ? requestId : 'search-issues'
-    return readRepository((root, signal) => searchGitHubIssues(root, q, signal), reqId)
+    return readRepository((root, signal) => searchGitHubIssues(root, q, signal), reqId, 'github')
   })
   ipcMain.handle('repository:pull-request-issue-links', (event, number: unknown) => {
     validateSender(event)
@@ -1596,6 +1666,7 @@ function installHandlers() {
     return readRepository(
       (root, signal) => getPullRequestIssueLinks(root, number, signal),
       `issue-links:${number}`,
+      'github',
     )
   })
   ipcMain.handle(
@@ -1617,6 +1688,7 @@ function installHandlers() {
       return readRepository(
         (root, signal) => previewIssueLink(root, prNumber, issueNumber, relation, action, signal),
         `preview-issue-link:${prNumber}:${issueNumber}`,
+        'github',
       )
     },
   )
@@ -1631,6 +1703,7 @@ function installHandlers() {
     return readRepository(
       (root, signal) => readReviewHeadline(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-headline'),
+      'github',
     )
   })
   ipcMain.handle('repository:review-files', (event, number: unknown, requestId?: unknown) => {
@@ -1638,6 +1711,7 @@ function installHandlers() {
     return readRepository(
       (root, signal) => readReviewFiles(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-files'),
+      'github',
     )
   })
   ipcMain.handle('repository:review-commits', (event, number: unknown, requestId?: unknown) => {
@@ -1645,18 +1719,23 @@ function installHandlers() {
     return readRepository(
       (root, signal) => readReviewCommits(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-commits'),
+      'github',
     )
   })
   ipcMain.handle('repository:review-viewed', (event, number: unknown) => {
     validateSender(event)
-    return readRepository((root, signal) =>
-      readViewedRecord(root, requirePullRequestNumber(number), signal),
+    return readRepository(
+      (root, signal) => readViewedRecord(root, requirePullRequestNumber(number), signal),
+      'review-viewed',
+      'github',
     )
   })
   ipcMain.handle('repository:review-set-viewed', (event, value: unknown) => {
     validateSender(event)
-    return readRepository((root, signal) =>
-      writeViewedRecord(root, requireViewedRecord(value), signal),
+    return readRepository(
+      (root, signal) => writeViewedRecord(root, requireViewedRecord(value), signal),
+      'review-set-viewed',
+      'github',
     )
   })
   ipcMain.handle('repository:review-threads', (event, number: unknown, requestId?: unknown) => {
@@ -1664,46 +1743,55 @@ function installHandlers() {
     return readRepository(
       (root, signal) => readReviewThreads(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-threads'),
+      'github',
     )
   })
   ipcMain.handle('repository:review-drafts', (event, number: unknown) => {
     validateSender(event)
-    return readRepository(async (root, signal) => {
-      const remote = await originRemote(root, signal)
-      // The journal is shared by every worktree of the repository, so the record
-      // is what says whose drafts these are. Reading them without naming the
-      // account and the repository would hand one account another's unsent
-      // words to submit.
-      const permissions = await readReviewPermissions(
-        root,
-        requirePullRequestNumber(number),
-        signal,
-      )
-      return readReviewDrafts(
-        root,
-        `${remote.owner}/${remote.name}`,
-        permissions.viewer,
-        requirePullRequestNumber(number),
-        signal,
-      )
-    })
+    return readRepository(
+      async (root, signal) => {
+        const remote = await originRemote(root, signal)
+        // The journal is shared by every worktree of the repository, so the record
+        // is what says whose drafts these are. Reading them without naming the
+        // account and the repository would hand one account another's unsent
+        // words to submit.
+        const permissions = await readReviewPermissions(
+          root,
+          requirePullRequestNumber(number),
+          signal,
+        )
+        return readReviewDrafts(
+          root,
+          `${remote.owner}/${remote.name}`,
+          permissions.viewer,
+          requirePullRequestNumber(number),
+          signal,
+        )
+      },
+      'review-drafts',
+      'github',
+    )
   })
   ipcMain.handle('repository:review-set-drafts', (event, value: unknown) => {
     validateSender(event)
-    return readRepository(async (root, signal) => {
-      const incoming = requireDraftRecord(value)
-      const remote = await originRemote(root, signal)
-      // The repository and the account are stamped here, from the ones Git and
-      // GitHub name, rather than taken from the renderer. The renderer does not
-      // know either, and a record that adopted a caller-supplied owner would be
-      // exactly the record that could be planted under the wrong one.
-      const permissions = await readReviewPermissions(root, incoming.number, signal)
-      return writeReviewDrafts(
-        root,
-        { ...incoming, repo: `${remote.owner}/${remote.name}`, viewer: permissions.viewer },
-        signal,
-      )
-    })
+    return readRepository(
+      async (root, signal) => {
+        const incoming = requireDraftRecord(value)
+        const remote = await originRemote(root, signal)
+        // The repository and the account are stamped here, from the ones Git and
+        // GitHub name, rather than taken from the renderer. The renderer does not
+        // know either, and a record that adopted a caller-supplied owner would be
+        // exactly the record that could be planted under the wrong one.
+        const permissions = await readReviewPermissions(root, incoming.number, signal)
+        return writeReviewDrafts(
+          root,
+          { ...incoming, repo: `${remote.owner}/${remote.name}`, viewer: permissions.viewer },
+          signal,
+        )
+      },
+      'review-set-drafts',
+      'github',
+    )
   })
   ipcMain.handle('repository:review-submit', (event, number: unknown, value: unknown) => {
     validateSender(event)
@@ -1746,13 +1834,16 @@ function installHandlers() {
   )
   ipcMain.handle('repository:review-resolve-drafts', (event, number: unknown, value: unknown) => {
     validateSender(event)
-    return readRepository((root, signal) =>
-      resolveReviewDraftsAt(
-        root,
-        requirePullRequestNumber(number),
-        Array.isArray(value) ? value.map(requireDraft) : [],
-        signal,
-      ),
+    return readRepository(
+      (root, signal) =>
+        resolveReviewDraftsAt(
+          root,
+          requirePullRequestNumber(number),
+          Array.isArray(value) ? value.map(requireDraft) : [],
+          signal,
+        ),
+      'review-resolve-drafts',
+      'github',
     )
   })
   ipcMain.handle('repository:review-history', (event, number: unknown, requestId?: unknown) => {
@@ -1760,6 +1851,7 @@ function installHandlers() {
     return readRepository(
       (root, signal) => readReviewHistory(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-history'),
+      'github',
     )
   })
   ipcMain.handle(
@@ -1775,13 +1867,16 @@ function installHandlers() {
             signal,
           ),
         requestIdClaim(requestId, 'review-history-diff'),
+        'github',
       )
     },
   )
   ipcMain.handle('repository:review-clear-history', (event, number: unknown) => {
     validateSender(event)
-    return readRepository((root, signal) =>
-      clearReviewHistory(root, requirePullRequestNumber(number), signal),
+    return readRepository(
+      (root, signal) => clearReviewHistory(root, requirePullRequestNumber(number), signal),
+      'review-clear-history',
+      'github',
     )
   })
 
@@ -1795,6 +1890,7 @@ function installHandlers() {
       return readRepository(
         (root, signal) => getPullRequestChecks(root, number, { ...options, signal }),
         `pull-request-checks:${number}`,
+        'github',
       )
     },
   )
@@ -1922,7 +2018,11 @@ function installHandlers() {
     // aborts it and refuses its answer, so a retired host's late result cannot
     // recreate the record that was just forgotten or overwrite a newer status.
     return forSelectedHost(
-      (signal) => probeGitHubHost(selected.context, { repository, signal }),
+      // The CLI status is what established, or refused, this host's
+      // authentication; a probe that reported it as unknown would contradict a
+      // read this app has already made.
+      (signal) =>
+        probeGitHubHost(selected.context, { repository, signal, cli: githubCli().current() }),
       selected,
     )
   })
@@ -2094,7 +2194,13 @@ function installHandlers() {
   // endpoint cannot block local Git work.
   ipcMain.handle('github-cli:status', async (event) => {
     validateSender(event)
-    return githubCli().read()
+    // A read that started for a host that is no longer selected is discarded: the
+    // answer comes from the host that replaced it, so a late read never describes
+    // a host this window has left.
+    const selected = captureSelectedHost()
+    const status = await githubCli().read()
+    if (selected.generation !== hostGeneration) return githubCli().current()
+    return status
   })
 
   // The optional Notification Center. It carries its own separately authorized
@@ -2344,7 +2450,9 @@ app
     // system store, or another module's entry.
     await retirePrimaryGitHubRecord({
       vault: applicationVault(),
+      vaultFile: join(app.getPath('userData'), 'credentials.vault.json'),
       stateFile: join(app.getPath('userData'), 'github-account.json'),
+      protectedReferences: await notificationCredentialReferences(app.getPath('userData')),
     }).catch(() => null)
     // The CLI is read once before the window opens, so what the first render
     // shows is established rather than assumed. Nothing here waits on GitHub: a

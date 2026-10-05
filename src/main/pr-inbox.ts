@@ -31,7 +31,6 @@ import {
   clearGitHubRetryDeadline,
   githubRetryDeadlineFor,
   lastGitHubRateLimitFor,
-  noteGitHubRetryDeadline,
   resetGitHubRateLimit,
 } from './github-transport'
 import { loadRepositoryNativeStacks } from './native-stacks'
@@ -153,16 +152,38 @@ function hostAllowanceFor(
   at: number,
   authority?: string | null,
   resource: string = 'graphql',
-): GitHubRateLimit | null {
+): GitHubRateLimitReport | null {
   if (!authority) return null
   const live = (report: GitHubRateLimitReport | undefined): GitHubRateLimitReport | null => {
     if (report === undefined || report.at === 0) return null
-    const reset = report.rateLimit.reset
-    if (reset !== null && reset.getTime() <= at) return null
     if (report.authority !== authority) return null
-    return report.kind === 'rate-limited' && reset !== null && reset.getTime() > at
-      ? { ...report, rateLimit: { ...report.rateLimit, remaining: 0 } }
-      : report
+    // The moment this account's window ends. A host names a window in two ways
+    // and the longer one is the window: an account told to come back in a minute
+    // by a counter that resets in an hour has an hour, not a minute. A report
+    // that names neither describes no window this build can wait out, and a
+    // window that has already ended says what was true while it lasted rather
+    // than what is true now.
+    const retryAfter = report.rateLimit.retryAfterSeconds
+    const retryUntil =
+      retryAfter === null || retryAfter === undefined ? null : report.at + retryAfter * 1000
+    const resetUntil = report.rateLimit.reset?.getTime() ?? null
+    const until =
+      retryUntil === null
+        ? resetUntil
+        : resetUntil === null
+          ? retryUntil
+          : Math.max(retryUntil, resetUntil)
+    if (until !== null && until <= at) return null
+    // Only a primary refusal spends an account's allowance: that answer says this
+    // window is empty for this account, whatever count it carried alongside, so
+    // admission reads it as empty until the window passes. A secondary refusal is
+    // the host refusing everyone at once — it is bounded by the shared wait every
+    // account on that host is already held to, and a positive count in it is
+    // still true of this account, so it is kept as the host reported it. A
+    // refusal about a repository the credential cannot see is not about its
+    // allowance either, and parks nothing.
+    const spent = report.kind === 'rate-limited' && until !== null
+    return spent ? { ...report, rateLimit: { ...report.rateLimit, remaining: 0 } } : report
   }
   // Seeded from this host's own last response for this authority, never from
   // another authority or host: a count another principal reported is not evidence
@@ -171,20 +192,40 @@ function hostAllowanceFor(
   const theirs = own.at === 0 ? null : live(own)
   const key = `${host.trim().toLowerCase()}\u0000${authority}\u0000`
   const mine = live(hostAllowances.get(`${key}${resource}`) ?? hostAllowances.get(key))
-  if (theirs === null) return mine?.rateLimit ?? null
-  if (mine === null) return theirs.rateLimit
+  if (theirs === null) return mine
+  if (mine === null) return theirs
   // Between the two of them only this host and authority reported, so the newer report is the
   // one that describes the window the next request lands in: an ordinary
   // repository read can lower this host's allowance after a queue read raised
   // it.
-  if (theirs.at > mine.at) return theirs.rateLimit
-  if (mine.at > theirs.at) return mine.rateLimit
+  if (theirs.at > mine.at) return theirs
+  if (mine.at > theirs.at) return mine
   // Two live reports from the same instant say the same thing about when, not
   // about how much is left, and the one that admits less is the one this build
   // can still defend.
-  if (theirs.rateLimit.remaining === null) return mine.rateLimit
-  if (mine.rateLimit.remaining === null) return theirs.rateLimit
-  return theirs.rateLimit.remaining < mine.rateLimit.remaining ? theirs.rateLimit : mine.rateLimit
+  if (theirs.rateLimit.remaining === null) return mine
+  if (mine.rateLimit.remaining === null) return theirs
+  return theirs.rateLimit.remaining < mine.rateLimit.remaining ? theirs : mine
+}
+
+/**
+ * The window one report describes, in the terms admission decides against.
+ *
+ * A host names a window in two ways and it lasts as long as the later of them:
+ * a counter that resets in ten minutes does not shorten an account that was told
+ * to come back in an hour, and a retry named past the reset does not shorten the
+ * window the counter opens.
+ */
+function inboxWindow(
+  report: GitHubRateLimitReport | null,
+  now: number,
+): { reset: Date | null; now: number; retryAfterSeconds: number | null; reportedAt: number } {
+  return {
+    reset: report?.rateLimit.reset ?? null,
+    now,
+    retryAfterSeconds: report?.rateLimit.retryAfterSeconds ?? null,
+    reportedAt: report?.at ?? 0,
+  }
 }
 
 /** Clears all quota observations for isolated fixture runs. */
@@ -235,15 +276,16 @@ function chargedTransport(
     } catch (error) {
       if (error instanceof GitHubTransportError) {
         // The same moment for the same reason, and recorded with the refusal's
-        // own kind: a host that asked to be left alone must still be believed
-        // after the read that met it has ended and taken no rows with it, and a
-        // permission failure that merely carried that host's quota headers is
-        // not such a request.
+        // own kind: the allowance a host reported belongs to the credential that
+        // read it, so it is kept against that credential here, and the wait it
+        // implies is that credential's to serve. A host-wide wait is the
+        // transport's to record, against the host, at the moment it read the
+        // response — repeating it from a refusal that named no host would make
+        // one account's exhausted window the whole host's.
         const at = clock()
         const authority = error.authority
         if (authority)
           rememberHostAllowance(destination, error.rateLimit, at, authority, error.kind)
-        noteGitHubRetryDeadline(destination, error.rateLimit, at, error.kind)
       }
       throw error
     }
@@ -251,16 +293,19 @@ function chargedTransport(
   const rest = async <T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> => {
     const authority = await transport.credentialAuthority()
     const reported = hostAllowanceFor(destination, clock(), authority, 'core')
-    const allow = pullRequestInboxBudgetAllows(reported?.remaining ?? null, budget, {
-      reset: reported?.reset ?? null,
-      now: clock(),
+    const allow = pullRequestInboxBudgetAllows(reported?.rateLimit.remaining ?? null, budget, {
+      ...inboxWindow(reported, clock()),
     })
     if (!allow.allowed)
       throw new GitHubTransportError({
         kind: 'rate-limited',
         detail: allow.reason,
-        rateLimit: reported ?? undefined,
+        rateLimit: reported?.rateLimit,
         authority,
+        // This queue decided not to ask, from the allowance it already recorded
+        // for this host below. GitHub refused nothing, so this is not a host's
+        // latest answer to publish process-wide: the allowance stays where it was
+        // recorded, against this host.
       })
     charge.take()
     return observed(() => transport.rest<T>(request))
@@ -863,9 +908,8 @@ export async function readPullRequestInbox(
       continue
     }
     const reported = hostAllowanceFor(destination, admittedAt, authority)
-    const allow = pullRequestInboxBudgetAllows(reported?.remaining ?? null, budget, {
-      reset: reported?.reset ?? null,
-      now: admittedAt,
+    const allow = pullRequestInboxBudgetAllows(reported?.rateLimit.remaining ?? null, budget, {
+      ...inboxWindow(reported, admittedAt),
     })
     if (!allow.allowed) {
       if (principalKey) refusedPrincipals.set(principalKey, allow.reason)

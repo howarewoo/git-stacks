@@ -579,15 +579,37 @@ export interface PullRequestInboxRequest {
 export function pullRequestInboxBudgetAllows(
   remaining: number | null,
   budget: PullRequestInboxBudget = DEFAULT_PULL_REQUEST_INBOX_BUDGET,
-  window: { reset?: Date | null; now?: number } = {},
+  window: {
+    reset?: Date | null
+    now?: number
+    /** How long this answer told this account to come back, when it said. */
+    retryAfterSeconds?: number | null
+    /** When that answer arrived, which is when a wait it names runs from. */
+    reportedAt?: number
+  } = {},
 ): { allowed: boolean; reason: string } {
   const reset = window.reset ?? null
   const now = window.now ?? Date.now()
-  if (reset !== null && Number.isFinite(reset.getTime()) && now >= reset.getTime()) {
+  const retryAfter = window.retryAfterSeconds ?? null
+  const reportedAt = window.reportedAt ?? 0
+  // A window is over when every moment that answer named has passed: a counter
+  // that resets in ten minutes does not end a window the answer also said to come
+  // back to in an hour, and it does not start one on its own either.
+  const moments = [
+    reset !== null && Number.isFinite(reset.getTime()) ? reset.getTime() : null,
+    retryAfter !== null && Number.isFinite(retryAfter) ? reportedAt + retryAfter * 1000 : null,
+  ].filter((moment): moment is number => moment !== null)
+  if (moments.length > 0 && moments.every((moment) => now >= moment)) {
     return { allowed: true, reason: '' }
   }
   if (remaining === null || !Number.isFinite(remaining)) {
     return { allowed: true, reason: 'No rate limit has been reported yet.' }
+  }
+  // An empty window is an empty window: no request is left to spend, whatever
+  // headroom this queue keeps. A reserve of zero says there is no headroom to
+  // protect, not that the remaining zero can be spent.
+  if (remaining <= 0) {
+    return { allowed: false, reason: 'GitHub has no requests left in this window.' }
   }
   if (remaining >= budget.reserve) return { allowed: true, reason: '' }
   return {

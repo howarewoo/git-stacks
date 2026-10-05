@@ -705,14 +705,14 @@ test.describe('Notification Center states and transitions', () => {
     await expect(page.getByRole('alert')).toHaveCount(0)
   })
 
-  test('the account read held for the first host cannot repopulate the window after a host change', async ({
+  test('the CLI status read held for the first host cannot repopulate the window after a host change', async ({
     page,
   }) => {
-    // This window's own GitHub account read was admitted and is still
+    // This window's own GitHub CLI status read was admitted and is still
     // outstanding, so it holds no account at all — which is a different thing
     // from the Notification Center having no credential, and the two must not
     // be substituted for one another.
-    await openNotifications(page, 'notifications-account-pending')
+    await openNotifications(page, 'notifications-cli-status-pending')
     await expect(inbox(page).getByRole('button', { name: 'Authorize notifications' })).toBeVisible()
     await page.evaluate(() =>
       window.fixture.serveNotificationHost('ghe.acme.internal', 'notifications-other-host'),
@@ -726,8 +726,8 @@ test.describe('Notification Center states and transitions', () => {
     await expect(row(page, 'Review the internal deploy queue')).toBeVisible()
 
     // The answer that was admitted for the host this window left now arrives.
-    await unholdDoubleCall(page, 'githubAccountStatus')
-    await releaseDoubleCalls(page, 'githubAccountStatus')
+    await unholdDoubleCall(page, 'githubCliStatus')
+    await releaseDoubleCalls(page, 'githubCliStatus')
     await settle(page)
 
     // The host this window is pointed at, and the rows that host serves, are

@@ -70,10 +70,12 @@ test.describe('Onboarding and repository discovery', () => {
     // Visual proof of the clone dialog with command previews and empty repo guidance
     await page.screenshot({ path: 'test-results/onboarding-clone-flow.png' })
 
-    // Protocol switch updates commands
+    // Protocol switch updates commands. The SSH target is quoted the way the
+    // main process quotes any word a shell would read differently, so the copy
+    // here is the command a clone would actually run.
     await dialog.getByRole('button', { name: 'SSH', exact: true }).click()
     await expect(
-      dialog.getByText('git clone git@github.com:acme/empty-repo.git', { exact: false }),
+      dialog.getByText("git clone 'git@github.com:acme/empty-repo.git'", { exact: false }),
     ).toBeVisible()
 
     // Destination collision handling
