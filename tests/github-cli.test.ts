@@ -17,7 +17,11 @@ import { retirePrimaryGitHubRecord } from '../src/main/github-primary-record'
 import { claimOwnedFile, CredentialVault, type SecretProtector } from '../src/main/credentials'
 import { githubHostContext } from '../src/main/github-host'
 import { GitHubResponseCacheStore } from '../src/main/github-response-cache'
-import type { GitHubRestRequest, GitHubRestResponse } from '../src/main/github-transport'
+import type {
+  GitHubErrorKind,
+  GitHubRestRequest,
+  GitHubRestResponse,
+} from '../src/main/github-transport'
 import { GitHubTransportError } from '../src/main/github-transport'
 import type { GitHubCliStatus } from '../src/shared/types'
 import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
@@ -140,6 +144,18 @@ function provingTransport(
 function refusingTransport(): GitHubCliProvingTransport {
   return provingTransport(() => {
     throw new GitHubTransportError({ kind: 'unauthorized', detail: 'refused' })
+  })
+}
+
+/**
+ * One answer this read cannot get past a real transport, in the way a real host
+ * produces that failure. The kind is the only thing that differs between them,
+ * and it is what the read classifies: a credential refused is not a host that
+ * did not answer, and an account the host will not serve is neither.
+ */
+function failingTransport(kind: GitHubErrorKind): GitHubCliProvingTransport {
+  return provingTransport(() => {
+    throw new GitHubTransportError({ kind, detail: `${kind} failure` })
   })
 }
 
@@ -308,7 +324,12 @@ process.exit(1)`,
 test('an account refused by the CLI, one that timed out, and an empty map are three states', async () => {
   await withTempDir(async (dir) => {
     const host = githubHostContext(ENTERPRISE)
-    const withAnswer = async (answer: string, exit: number, name: string) => {
+    const withAnswer = async (
+      answer: string,
+      exit: number,
+      name: string,
+      transport?: GitHubCliProvingTransport,
+    ) => {
       const path = join(dir, name)
       const cli = await installControlledGh(
         `const args = process.argv.slice(2)
@@ -317,17 +338,27 @@ process.stdout.write(${JSON.stringify(answer)} + '\\n')
 process.exit(${exit})`,
         path,
       )
-      return readGitHubCli(host, { env: { PATH: cli.path } })
+      return readGitHubCli(host, {
+        env: { PATH: cli.path },
+        // Only an answer this build has to prove reaches the transport at all,
+        // so the ones that do not need one are read without it.
+        ...(transport === undefined ? {} : { transport }),
+      })
     }
-    // An authentication problem the CLI prints and then exits nonzero for.
+    // An authentication problem the CLI prints and then exits nonzero for. The
+    // CLI reports that its own check failed without saying why, so this read
+    // proves the credential itself rather than taking the word `error` for a
+    // refusal, and the host is what settles it.
     const refused = await withAnswer(
       authJson(ENTERPRISE, [{ state: 'error', active: true, login: 'octocat' }]),
       1,
       'refused',
+      failingTransport('unauthorized'),
     )
     assert.equal(refused.state, 'rejected')
 
-    // A host that did not answer while the CLI checked it.
+    // A host that did not answer while the CLI checked it. That is the CLI's own
+    // account of what happened, so it needs no proof of its own.
     const timedOut = await withAnswer(
       authJson(ENTERPRISE, [{ state: 'timeout', active: true, login: 'octocat' }]),
       1,
@@ -347,11 +378,231 @@ process.exit(${exit})`,
     )
     assert.equal(inactive.state, 'signed-out')
 
+    // An account the CLI could not check, and does not consider the one requests
+    // carry, is not the account it would authenticate as either.
+    const inactiveFailure = await withAnswer(
+      authJson(ENTERPRISE, [{ state: 'error', active: false, login: 'octocat' }]),
+      1,
+      'inactive-failure',
+    )
+    assert.equal(inactiveFailure.state, 'unavailable')
+
     // An answer this build does not read is unavailable rather than a guess.
     const unknown = await withAnswer(JSON.stringify({ hosts: { [ENTERPRISE]: {} } }), 0, 'unknown')
     assert.equal(unknown.state, 'unavailable')
     const notJson = await withAnswer('gh: not json', 0, 'notjson')
     assert.equal(notJson.state, 'unavailable')
+  })
+})
+
+test('the CLI reports a failed check as one state, and what it was is proved here', async () => {
+  await withTempDir(async (dir) => {
+    const host = githubHostContext(ENTERPRISE)
+    // The one answer `gh auth status` writes for every account it could not
+    // check. Reading it as a rejection would name a refused credential for a host
+    // that could not be resolved, a connection it could not make, and an account
+    // name it could not look up — so this read asks the host instead.
+    const cli = await installControlledGh(
+      `const args = process.argv.slice(2)
+if (args[0] === '--version') { process.stdout.write('gh version 2.62.0\\n'); process.exit(0) }
+process.stdout.write(${JSON.stringify(
+        // A credential taken from the environment has no stored login to name, so
+        // the entry carries none: this is the shape `gh auth status` writes when
+        // it cannot resolve one either.
+        authJson(ENTERPRISE, [{ state: 'error', active: true, login: '' }]),
+      )} + '\\n')
+process.exit(1)`,
+      dir,
+    )
+    const env = { PATH: cli.path }
+
+    // The host cannot be reached at all: a DNS or TLS failure and a refused
+    // connection all reach this read as the CLI's `error`, and neither is a
+    // credential anybody refused.
+    for (const kind of ['network', 'timeout'] as const) {
+      const offline = await readGitHubCli(host, { env, transport: failingTransport(kind) })
+      assert.equal(
+        offline.state,
+        'offline',
+        `a host that failed with ${kind} is not a rejected credential`,
+      )
+      assert.equal(offline.login, null)
+    }
+
+    // The credential itself: refused by the host, and accepted for an account the
+    // host will not serve. Those are two different facts about one credential,
+    // and the one the proof reports is the one published.
+    const refused = await readGitHubCli(host, { env, transport: failingTransport('unauthorized') })
+    assert.equal(refused.state, 'rejected')
+    const forbidden = await readGitHubCli(host, { env, transport: failingTransport('forbidden') })
+    assert.equal(forbidden.state, 'permission-denied')
+
+    // A failure this read cannot place is not published as one of the states it
+    // can place. `not-configured` is this machine rather than this host, and
+    // `unknown` is the CLI's own refusal to classify what it saw.
+    for (const kind of ['not-configured', 'unknown', 'cancelled'] as const) {
+      const unplaced = await readGitHubCli(host, { env, transport: failingTransport(kind) })
+      assert.equal(
+        unplaced.state,
+        'unavailable',
+        `${kind} is not one of the states this build can name from it`,
+      )
+      assert.equal(unplaced.login, null)
+    }
+
+    // The same answer, where the credential is in fact good: the account is the
+    // one the request itself reported, not the one the CLI could not check, and
+    // it is published as an account rather than as a failure.
+    const proven = await readGitHubCli(host, {
+      env,
+      transport: provingTransport(
+        () => ({ login: 'github-actions[bot]' }),
+        () => 'app-authority',
+      ),
+    })
+    assert.equal(proven.state, 'authenticated')
+    assert.equal(proven.login, 'github-actions[bot]')
+    assert.equal(proven.authority, 'app-authority')
+
+    // A host that answered without naming an account established nothing, and
+    // the CLI's own report of the same account is not read over the absence.
+    const unnamed = await readGitHubCli(host, {
+      env,
+      transport: provingTransport(
+        () => ({}),
+        () => 'app-authority',
+      ),
+    })
+    assert.equal(unnamed.state, 'unavailable')
+    assert.equal(unnamed.login, null)
+    assert.equal(unnamed.authority, null)
+
+    // A credential this build cannot pin cannot prove one, whatever the host
+    // would answer for it.
+    const unpinned = await readGitHubCli(host, {
+      env,
+      transport: {
+        ...provingTransport(() => ({ login: 'octocat' })),
+        credentialAuthority: async () => {
+          throw new GitHubTransportError({ kind: 'unknown', detail: 'no credential to pin' })
+        },
+      },
+    })
+    assert.equal(unpinned.state, 'unavailable')
+    assert.equal(unpinned.login, null)
+  })
+})
+
+test("the CLI's own account of a failed check never reaches the status", async () => {
+  await withTempDir(async (dir) => {
+    const host = githubHostContext(ENTERPRISE)
+    // Everything the CLI writes about an account it could not check: the
+    // account name it holds, the token source, and the diagnostic it explains
+    // itself with — which names a path on this computer and a credential.
+    const secret = 'ghp_thisoutputcredential0000000000000'
+    const cli = await installControlledGh(
+      `const args = process.argv.slice(2)
+if (args[0] === '--version') { process.stdout.write('gh version 2.62.0\\n'); process.exit(0) }
+process.stdout.write(JSON.stringify({
+  hosts: {
+    '${ENTERPRISE}': [
+      {
+        state: 'error',
+        active: true,
+        host: '${ENTERPRISE}',
+        login: 'octocat',
+        tokenSource: '${secret}',
+        token: '${secret}',
+        error: 'dial tcp: lookup ${ENTERPRISE}: no such host (${secret} at /Users/someone/.config/gh/hosts.yml)',
+      },
+    ],
+  },
+}) + '\\n')
+process.stderr.write('gh: could not resolve ${ENTERPRISE} (${secret})\\n')
+process.exit(1)`,
+      dir,
+    )
+    // The same account, refused by the host rather than never checked by the CLI:
+    // the state is settled by the proof, and nothing the CLI printed about it is
+    // carried into the answer that is published.
+    const refused = await readGitHubCli(host, {
+      env: { PATH: cli.path },
+      transport: failingTransport('unauthorized'),
+    })
+    assert.equal(refused.state, 'rejected')
+    const published = JSON.stringify(refused)
+    for (const leaked of [secret, '/Users/someone', 'hosts.yml', 'no such host', 'tokenSource']) {
+      assert.equal(published.includes(leaked), false, `the status carried ${leaked}: ${published}`)
+    }
+  })
+})
+
+test('an App installation token is an account, and the brackets belong to its suffix', async () => {
+  await withTempDir(async (dir) => {
+    const host = githubHostContext('github.com')
+    // The account an installation token authenticates as: the App's own name
+    // with `[bot]` after it. GitHub vends these credentials, so refusing this
+    // login form would refuse a credential the provider issues and the CLI
+    // accepts.
+    const cli = await installControlledGh(
+      `const args = process.argv.slice(2)
+if (args[0] === '--version') { process.stdout.write('gh version 2.62.0\\n'); process.exit(0) }
+process.stdout.write(${JSON.stringify(
+        authJson('github.com', [{ state: 'success', active: true, login: 'github-actions[bot]' }]),
+      )} + '\\n')
+process.exit(0)`,
+      dir,
+    )
+    const read = await readGitHubCli(host, {
+      env: { PATH: cli.path },
+      transport: provingTransport(
+        () => ({ login: 'github-actions[bot]' }),
+        () => 'installation-authority',
+        null,
+        'github.com',
+      ),
+    })
+    assert.equal(read.state, 'authenticated')
+    assert.equal(read.login, 'github-actions[bot]')
+    assert.equal(read.authority, 'installation-authority')
+
+    // The brackets are the suffix's, not the name's: a login that opens with one
+    // mirrors the shape without being an account GitHub has, in the CLI's answer
+    // and in the answer a request reported alike.
+    for (const answer of [
+      '[github-actions]bot',
+      'github-actions[bot',
+      '[bot]',
+      'github-actions[Bot]',
+    ]) {
+      for (const claimed of [answer, 'github-actions[bot]']) {
+        const path = join(dir, `brackets-${claimed}-${answer}`)
+        const mirrored = await installControlledGh(
+          `const args = process.argv.slice(2)
+if (args[0] === '--version') { process.stdout.write('gh version 2.62.0\\n'); process.exit(0) }
+process.stdout.write(${JSON.stringify(
+            authJson('github.com', [{ state: 'success', active: true, login: claimed }]),
+          )} + '\\n')
+process.exit(0)`,
+          path,
+        )
+        const refused = await readGitHubCli(host, {
+          env: { PATH: mirrored.path },
+          transport: provingTransport(
+            () => ({ login: answer }),
+            () => 'installation-authority',
+            null,
+            'github.com',
+          ),
+        })
+        assert.equal(
+          refused.state,
+          'unavailable',
+          `a login naming ${answer} was read as an account`,
+        )
+        assert.equal(refused.login, null)
+      }
+    }
   })
 })
 
@@ -391,8 +642,12 @@ process.stderr.write('gh: ${secret} at /Users/someone/.config/gh\\n')
 process.exit(1)`,
       dir,
     )
+    // The CLI reported that checking its active account failed, which this read
+    // proves for itself; the credential the host refuses is what settles it, and
+    // nothing the CLI printed travels with the answer.
     const status = await readGitHubCli(githubHostContext(ENTERPRISE), {
       env: { PATH: cli.path },
+      transport: refusingTransport(),
     })
     const published = JSON.stringify(status)
     assert.equal(published.includes(secret), false)

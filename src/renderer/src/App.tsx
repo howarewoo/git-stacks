@@ -548,10 +548,9 @@ function App() {
   const [showDetails, setShowDetails] = React.useState(true)
   const busyRef = React.useRef<string | null>(null)
   /**
-   * The open this window is waiting for, held as the claim that started it
-   * rather than as a bare flag. A retired identity ends its ownership, so
-   * that open's own completion cannot release the newer one that has taken the
-   * window in the meantime.
+   * The local repository open this window is waiting for. Credential changes
+   * retire its remote data, not the switch itself: main may already have
+   * persisted the selection, so its completed local identity must be adopted.
    */
   const openingRef = React.useRef<RequestClaim | null>(null)
   const searchRef = React.useRef<HTMLInputElement>(null)
@@ -800,8 +799,10 @@ function App() {
           mode === 'add'
             ? await desktop.addRepository?.(path ?? '')
             : await desktop.openRepository(path)
-        if (next && repositoryGate.current(claim)) {
-          setSnapshotAndSelection(next)
+        if (next && openingRef.current === claim) {
+          setSnapshotAndSelection(
+            repositoryGate.current(claim) ? next : withoutReplacedCredential(next),
+          )
           setDeleteTarget(null)
           setWorkflow(null)
           setInspectedPath(null)
@@ -816,11 +817,10 @@ function App() {
         const repositories = await desktop.recentRepositories().catch(() => null)
         if (repositories) setRecentRepositories(repositories)
       } catch (value) {
-        if (repositoryGate.current(claim)) setError(readableError(value))
+        if (openingRef.current === claim) setError(readableError(value))
       } finally {
-        // Only the open that still owns the window ends it: a retired open
-        // releases nothing, so a newer one started after it is never unlocked
-        // by an answer the window has already refused.
+        // The switch keeps its lock until main settles and the window adopts
+        // the completed repository, including across credential retirement.
         if (openingRef.current === claim) {
           openingRef.current = null
           setOpening(false)
@@ -1038,11 +1038,9 @@ function App() {
     setInboxReport(null)
     setInboxError(null)
     repositoryGate.reset()
-    // The open this window was waiting for no longer owns it, so its own
-    // completion cannot release the window to a second open.
-    openingRef.current = null
+    // Keep an outstanding local switch locked until its completion is adopted.
+    // Its gate is stale, so only the returned local Git facts can land.
     setRefreshing(false)
-    setOpening(false)
     setSnapshot((current) => (current === null ? current : withoutReplacedCredential(current)))
     setReviewNumber(null)
   }, [leaveInbox, repositoryGate])

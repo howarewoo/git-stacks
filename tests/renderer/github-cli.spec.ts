@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 import {
+  answerNextDoubleCall,
+  changeScenario,
   getDispatchedActions,
   getDoubleCalls,
   getOpenedExternalUrls,
@@ -11,6 +13,7 @@ import {
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import type { GitHubCliStatus } from '../../src/shared/types'
+import { scenarios } from './fixtures/scenarios'
 
 /**
  * The GitHub CLI status is a report, never a control. These checks are about what
@@ -248,6 +251,80 @@ test.describe('Required GitHub CLI status', () => {
     // The session on screen is still the one that replaced it.
     await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
     expect(await getDispatchedActions(page)).toEqual([])
+  })
+
+  test('a repository open keeps its local switch locked across credential retirement', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-authenticated' })
+    await changeScenario(page, 'shell-long-content')
+    await holdDoubleCall(page, 'openRepository')
+    await page.getByRole('button', { name: 'Open a repository', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'New branch' })).toBeDisabled()
+
+    await publishCliStatus(page, ACCOUNT_B)
+    // Main can have persisted B already. Neither a second open nor a local
+    // mutation against B may run while the renderer still displays A.
+    await expect(page.getByRole('button', { name: 'New branch' })).toBeDisabled()
+    await expect(
+      page.getByRole('button', { name: 'Open a repository', exact: true }),
+    ).toBeDisabled()
+    expect(await releaseDoubleCalls(page, 'openRepository')).toBe(1)
+    await settle(page)
+
+    const opened = scenarios['shell-long-content'].snapshot!
+    await expect(page.getByText(opened.name, { exact: true }).first()).toBeVisible()
+    await expect(page.getByText(opened.currentBranch!, { exact: true }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'New branch' })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Review changes' })).toHaveCount(0)
+    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
+  })
+
+  test('credential retirement removes submitted reconciliation and its repair controls', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-authenticated' })
+    const withReport = {
+      ...scenarios['github-cli-authenticated'].snapshot!,
+      reconciliation: {
+        available: true,
+        message: 'Private submitted stack from the old account',
+        stacks: [
+          {
+            key: 'private-stack',
+            base: 'main',
+            stackNumber: 17,
+            stackUrl: 'https://github.com/acme/widgets/stack/17',
+            state: 'reordered',
+            summary: 'Private submitted order',
+            submittedOrder: ['private-parent', 'private-child'],
+            members: [],
+            repairs: [],
+            blockers: [],
+          },
+        ],
+        blockers: [],
+        evidence: null,
+      },
+    }
+    await answerNextDoubleCall(page, 'refresh', withReport)
+    await page.getByRole('button', { name: 'Refresh repository' }).click()
+    await switchDestination(page, 'stacks')
+    const reconciliation = page.getByRole('region', { name: 'Submitted stack reconciliation' })
+    await expect(reconciliation).toContainText('Private submitted stack from the old account')
+    await expect(reconciliation.getByRole('button', { name: /Review repairs/ })).toBeEnabled()
+    await reconciliation.getByRole('button', { name: /Review repairs/ }).click()
+    const repairDialog = page.getByRole('dialog', { name: 'Reconcile submitted stack' })
+    await expect(repairDialog).toBeVisible()
+    await publishCliStatus(page, ACCOUNT_C)
+    await expect(reconciliation).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Review repairs/ })).toHaveCount(0)
+    await expect(repairDialog).toHaveCount(0)
+    // A later report must not revive the retired account's open preview.
+    await answerNextDoubleCall(page, 'refresh', withReport)
+    await page.getByRole('button', { name: 'Refresh repository' }).click()
+    await expect(reconciliation).toBeVisible()
+    await expect(repairDialog).toHaveCount(0)
   })
 
   test('a replaced account takes the private repositories it had discovered with it, and a held search cannot bring them back', async ({

@@ -1,3 +1,5 @@
+import type { SnapshotGitHubRequest } from './sync-coordinator'
+
 /**
  * Tracks in-flight repository reads by the request id the renderer supplied.
  * Claiming a key ends the previous holder, so switching repository, ref, or
@@ -10,6 +12,24 @@
  * read was pinned to one credential and must not answer for another.
  */
 export type ReadPurpose = 'local' | 'github'
+
+/**
+ * What a background snapshot read depends on, from the request that asked for
+ * it.
+ *
+ * `live` and `on-failure` both reach GitHub now, so both were read under one
+ * credential and both are ended when that credential is replaced. `reuse` asks
+ * GitHub nothing at all: its answer is this repository's last confirmed payload
+ * plus its own local Git, and a replacement costs it no answer of its own — its
+ * generation check drops the payload and the read is rebuilt from local state.
+ * Tagging it `github` would end it in `cancelGitHub` instead, which is the one
+ * outcome that read is built to survive: the local refresh a filesystem event
+ * asked for would be discarded, and the external edit behind it would stay
+ * unseen until something else happened to trigger another read.
+ */
+export function snapshotReadPurpose(request: SnapshotGitHubRequest): ReadPurpose {
+  return request.remote === 'reuse' ? 'local' : 'github'
+}
 
 export class RequestRegistry {
   private readonly live = new Map<

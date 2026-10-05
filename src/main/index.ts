@@ -10,9 +10,8 @@ import {
   shell,
 } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
-import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
-import { isRecord } from '../shared/guards'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   getSnapshot,
@@ -76,7 +75,12 @@ import type {
   SyncActivity,
 } from '../shared/types'
 import { RepositoryOperations } from './repository-operations'
-import { RequestRegistry, performBackgroundRead, type ReadPurpose } from './request-registry'
+import {
+  RequestRegistry,
+  performBackgroundRead,
+  snapshotReadPurpose,
+  type ReadPurpose,
+} from './request-registry'
 import { RepositoryScheduler } from './repository-scheduler'
 import { RepositorySyncCoordinator, type SyncIntervals } from './sync-coordinator'
 import { RepositoryWatcher } from './git-watcher'
@@ -90,7 +94,7 @@ import {
 import { CredentialVault } from './credentials'
 import { safeStorageProtector } from './secret-storage'
 import { forgetGitHubCliServices, gitHubCliStatusService } from './github-cli'
-import { retirePrimaryGitHubRecord } from './github-primary-record'
+import { retireLegacyPrimaryRecord } from './notification-protection'
 import { NotificationCenter, notificationCredentialStore } from './notifications'
 import {
   assertDirectoryName,
@@ -242,6 +246,8 @@ export function backgroundRead<T>(
   )
 }
 
+// A `reuse` refresh — what every filesystem event asks for — is claimed as the
+// local read it is, so replacing the signed-in account cannot end it.
 const sync = new RepositorySyncCoordinator({
   readSnapshot: (root, signal, request) =>
     backgroundRead(
@@ -249,7 +255,7 @@ const sync = new RepositorySyncCoordinator({
       signal,
       (path, readSignal) => getSnapshot(path, readSignal, undefined, request.github.remote),
       request.requestId,
-      'github',
+      snapshotReadPurpose(request.github),
     ),
   readIssues: (root, signal) =>
     backgroundRead(
@@ -566,35 +572,13 @@ function githubCli() {
 let notifications: NotificationCenter | null = null
 let notificationHost: string | null = null
 
-/** The file name suffix that keeps one host's stored state out of another's. */
+/**
+ * The file name suffix that keeps one host's stored state out of another's, and
+ * the half of the credential file name the retirement gate matches on: the two
+ * must keep naming the same file.
+ */
 function notificationScope(host: string): string {
   return Buffer.from(host, 'utf8').toString('hex')
-}
-
-/**
- * The credential references the Notifications centers currently hold, named from
- * their own public state.
- *
- * Read as names only: a file that cannot be read, or that names no reference, is
- * simply not protection, and a state file this app does not recognise leaves
- * every credential in place rather than guessing which of them it may delete.
- * Every host's state is read, not only a selected one, because a credential kept
- * for a host that is not selected now is still stored.
- */
-async function notificationCredentialReferences(userData: string): Promise<string[]> {
-  const scopes = await readdir(userData).catch(() => [] as string[])
-  const references: string[] = []
-  for (const name of scopes) {
-    const match = /^github-notifications\.([0-9a-f]+)\.json$/u.exec(name)
-    if (match === null) continue
-    const parsed: unknown = JSON.parse(
-      await readFile(join(userData, name), 'utf8').catch(() => 'null'),
-    )
-    if (!isRecord(parsed)) continue
-    const reference = parsed.reference
-    if (typeof reference === 'string' && reference) references.push(reference)
-  }
-  return references
 }
 
 /**
@@ -2447,13 +2431,20 @@ app
     // authenticates through the GitHub CLI, so the sealed credential and the
     // state file naming it belong to nothing this app still owns. Only what the
     // record itself names is removed — never the CLI's credential, the operating
-    // system store, or another module's entry.
-    await retirePrimaryGitHubRecord({
-      vault: applicationVault(),
-      vaultFile: join(app.getPath('userData'), 'credentials.vault.json'),
-      stateFile: join(app.getPath('userData'), 'github-account.json'),
-      protectedReferences: await notificationCredentialReferences(app.getPath('userData')),
-    }).catch(() => null)
+    // system store, or another module's entry. That last claim is the gate's: a
+    // Notifications credential is a sealed entry of the same shape for the same
+    // host, so it is protected by the name its own state publishes, and state
+    // that cannot be read protects everything by retiring nothing. A corrupt
+    // optional file costs this startup nothing else: it is no reason to refuse
+    // the window, or the local Git work behind it.
+    await retireLegacyPrimaryRecord(
+      {
+        vault: applicationVault(),
+        vaultFile: join(app.getPath('userData'), 'credentials.vault.json'),
+        stateFile: join(app.getPath('userData'), 'github-account.json'),
+      },
+      app.getPath('userData'),
+    ).catch(() => null)
     // The CLI is read once before the window opens, so what the first render
     // shows is established rather than assumed. Nothing here waits on GitHub: a
     // machine with no CLI, or with none signed in, starts regardless.

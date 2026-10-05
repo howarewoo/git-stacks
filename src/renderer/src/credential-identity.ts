@@ -48,21 +48,25 @@ export function withoutReplacedCredential(snapshot: RepositorySnapshot): Reposit
     nativeStacks: [],
     nativeStackPreviewAvailable: undefined,
     nativeStackMessage: undefined,
+    reconciliation: undefined,
     github: { available: false, message: 'Reading GitHub again as this account.' },
     branches: snapshot.branches.map(withoutReplacedCredentialBranch),
   }
 }
 
-/** One branch, keeping every local fact and dropping the pull request it held. */
+/** One branch, dropping remote ancestry as well as the pull request it held. */
 export function withoutReplacedCredentialBranch(branch: Branch): Branch {
-  if (branch.pr === null && branch.parentSource !== 'pullRequest') return branch
+  const remoteParent = branch.parentSource === 'pullRequest' || branch.parentSource === 'stack'
+  if (branch.pr === null && !remoteParent) return branch
   return {
     ...branch,
     pr: null,
-    // A parent tip this branch learned from a pull request is GitHub's account of
-    // where the branch came from, not a local relationship: it goes with it, and
-    // the local ones recorded or inferred here stay as they are.
-    parentSource: branch.parentSource === 'pullRequest' ? null : branch.parentSource,
-    parentTip: branch.parentSource === 'pullRequest' ? null : branch.parentTip,
+    // Native-stack and pull-request ancestry came from the retired authority.
+    // Recorded and locally inferred relationships remain valid.
+    parent: remoteParent ? null : branch.parent,
+    parentBehind: remoteParent ? null : branch.parentBehind,
+    parentSource: remoteParent ? null : branch.parentSource,
+    parentTip: remoteParent ? null : branch.parentTip,
+    needsRestack: remoteParent ? undefined : branch.needsRestack,
   }
 }

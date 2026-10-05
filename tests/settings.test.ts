@@ -2092,8 +2092,7 @@ test('a real CLI child proves the account the loopback fixture serves', async ()
     )
     assert.ok(answer.authority, 'a proven account has a credential identity to fence on')
 
-    // The account the CLI names is a claim until a request proves it, and an
-    // account it reports as failed is a rejection rather than a signed-out host.
+    // An inactive failed check establishes no active account and no rejection.
     await writeFile(
       statePath,
       JSON.stringify({
@@ -2107,8 +2106,8 @@ test('a real CLI child proves the account the loopback fixture serves', async ()
     const refused = await readGitHubCli(githubHostContext('github.com'), { env: { PATH: bin } })
     assert.equal(
       refused.state,
-      'rejected',
-      'a host whose only account the CLI reports as failed is not a signed-out host',
+      'unavailable',
+      'a failed inactive check cannot establish that a credential was rejected',
     )
 
     // A host this run's CLI does not serve is refused rather than answered, and a

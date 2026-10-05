@@ -294,6 +294,12 @@ and response validation. The proof also receives the opaque authority of the
 credential that request carried; both paths attribute quota and refusal reports
 to that credential and the destination host.
 
+App installation-token accounts use GitHub's actual `name[bot]` login form.
+An active CLI account reported as `error` is not assumed rejected: the bounded
+viewer proof distinguishes a refused credential, insufficient permissions, and
+an unreachable host. An inactive failed check establishes no active credential
+and is reported as unavailable; raw CLI diagnostics are never published.
+
 Private clones authenticate as ordinary private Git operations, separately from
 this CLI session.
 
@@ -301,6 +307,9 @@ Legacy primary-record retirement verifies the claimed state file before removing
 its owned vault entry and restores the record when removal is refused or fails.
 Vault reads share the mutation queue; Notifications references and foreign vault
 metadata are preserved.
+If any Notifications credential-state file is malformed or unreadable, or its
+directory cannot be enumerated, retirement is skipped without aborting startup.
+An unknown protected reference is never treated as an empty protection list.
 
 GitHub CLI can fall back to plaintext token storage when its secure store is
 unavailable; [its login documentation](https://cli.github.com/manual/gh_auth_login)
@@ -424,6 +433,13 @@ made. And an answer this build cannot use — a conditional response with nothin
 stored to replay, a page that is not a page — or a request that never got an answer
 at all is not this host's current state either: it changes nothing another host or
 another account last reported, and leaves no wait behind for whoever asks next.
+
+Filesystem-triggered reuse-only snapshots remain local reads during credential
+retirement; their existing generation checks rebuild from local Git when needed.
+In the renderer, retirement also clears submitted reconciliation, its repair
+preview, and ancestry learned from pull requests or native stacks. A repository
+open remains locked until main settles, then adopts the completed repository's
+local identity even if the remote part of its answer was retired.
 
 This module seals its token in its own store. Removing it leaves the CLI account
 intact. Retiring app-owned primary account records must preserve Notifications

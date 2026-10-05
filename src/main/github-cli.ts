@@ -117,10 +117,18 @@ function missingExecutable(error: unknown): boolean {
  * never passed and no token field is read however the CLI shapes its output.
  */
 interface CliAccountAnswer {
-  state: Extract<
-    GitHubCliState,
-    'authenticated' | 'signed-out' | 'rejected' | 'offline' | 'unavailable'
-  >
+  state:
+    | Extract<
+        GitHubCliState,
+        'authenticated' | 'signed-out' | 'rejected' | 'offline' | 'unavailable'
+      >
+    /**
+     * The CLI holds an account it calls active and could not check it. It says
+     * only that its check failed — not that the credential was refused — so this
+     * is never published as a state: the read proves the credential with its own
+     * bounded request, and that request classifies it.
+     */
+    | 'unverified'
   login: string | null
 }
 
@@ -140,13 +148,15 @@ function sanitizedLogin(value: unknown): string | null {
   const login = value.trim()
   // GitHub's own bound, and the three shapes a real account name has here: the
   // ordinary one, the Enterprise Managed User form that appends the
-  // organization's shortcode after an underscore, and the App bot form that
-  // appends `[bot]` in brackets. That last one is a real account on github.com —
-  // it is what an installation token authenticates as — and rejecting it would
-  // refuse a credential the provider itself vends. Anything else is not an
-  // account, and is never published, however it reached here.
+  // organization's shortcode after an underscore, and the App bot form, which is
+  // the app's own name with `[bot]` appended after it. That last one is a real
+  // account on github.com — it is what an installation token authenticates as —
+  // and rejecting it would refuse a credential the provider itself vends. The
+  // brackets belong to that suffix and to nothing else: `[name]bot` mirrors the
+  // shape without being an account GitHub has. Anything else is not an account,
+  // and is never published, however it reached here.
   if (login.length === 0 || login.length > 39) return null
-  return /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:_[A-Za-z0-9]{3,8})?|\[[A-Za-z0-9-_.]+\]bot)$/u.test(
+  return /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:_[A-Za-z0-9]{3,8})?|[A-Za-z0-9](?:[A-Za-z0-9-_.]*[A-Za-z0-9])?\[bot\])$/u.test(
     login,
   )
     ? login
@@ -163,6 +173,15 @@ function sanitizedLogin(value: unknown): string | null {
  * not the one its requests would authenticate as, so it is never reported as the
  * signed-in one. An answer this build does not recognise is unavailable rather
  * than a guess, and no token field is read out of it however it is shaped.
+ *
+ * `error` is where the CLI reports that checking one account failed, and it is
+ * the one state that is not a finding. The CLI writes it for a DNS or TLS
+ * failure, for a host that refused the connection, for a credential it can no
+ * longer use, and for the `viewer` lookup it makes on behalf of a credential
+ * that came from the environment and has no stored login to name. None of those
+ * is a rejection, and the CLI does not say which one it was, so this build does
+ * not read one out of them: an active account in that state is `unverified`, and
+ * the read settles it with one bounded request of its own.
  */
 function accountAnswer(output: string, host: string): CliAccountAnswer {
   let parsed: unknown
@@ -182,7 +201,7 @@ function accountAnswer(output: string, host: string): CliAccountAnswer {
   if (!Array.isArray(entries)) return { state: 'unavailable', login: null }
   if (entries.length === 0) return { state: 'signed-out', login: null }
 
-  let refused = false
+  let failed = false
   for (const entry of entries) {
     if (!isRecord(entry)) return { state: 'unavailable', login: null }
     const state = typeof entry.state === 'string' ? entry.state : null
@@ -196,9 +215,20 @@ function accountAnswer(output: string, host: string): CliAccountAnswer {
     if (canonicalHostName(typeof entry.host === 'string' ? entry.host : '') !== wanted) {
       return { state: 'unavailable', login: null }
     }
+    // A timeout is the CLI's own account of a host that did not answer while it
+    // was checking, which is that fact and says nothing about the credential.
     if (state === 'timeout') return { state: 'offline', login: null }
     if (state === 'error') {
-      refused = true
+      // Which of the failures behind this state it was is not in the answer, so
+      // the account the CLI calls active is left for the proof to classify rather
+      // than named a rejection here. Its login is not carried along: an entry
+      // that failed before the CLI could resolve a name carries none at all, and
+      // one that names a name is still only the CLI's claim about an account it
+      // could not verify.
+      if (entry.active === true) return { state: 'unverified', login: null }
+      // An inactive failed check establishes neither the active credential nor
+      // a rejection. With no active entry to prove, authentication is unknown.
+      failed = true
       continue
     }
     if (entry.active !== true) continue
@@ -207,9 +237,9 @@ function accountAnswer(output: string, host: string): CliAccountAnswer {
       ? { state: 'unavailable', login: null }
       : { state: 'authenticated', login }
   }
-  // The CLI holds accounts for this host and every one of them failed, or none of
-  // them is active: nothing usable, and the distinction matters to a reader.
-  return refused ? { state: 'rejected', login: null } : { state: 'signed-out', login: null }
+  // A failed inactive check cannot establish authentication; successful inactive
+  // entries establish only that the CLI has no active account for this host.
+  return failed ? { state: 'unavailable', login: null } : { state: 'signed-out', login: null }
 }
 
 /** Why the status is what it is, in this build's own words and never the CLI's. */
@@ -285,15 +315,20 @@ export interface GitHubCliReadOptions {
 
 /**
  * What one read established for a host: whether the CLI is installed here, the
- * account it says is active for this host, and — when it claims one — what an
- * authenticated request made with that credential actually does.
+ * account it says is active for this host, and — when it claims one, or claims
+ * one it could not check — what an authenticated request made with that
+ * credential actually does.
  *
  * Nothing is taken on trust below the CLI's own answer. An account it named is a
  * claim, so one bounded authenticated request either confirms it or reports the
  * refusal, an offline host, or an account that is not authorized for it. An
- * installed version is never read as authentication, an exit code is never read
- * as an account, and a credential this process was given for the host is never
- * read as one either: it authenticates through the same proof.
+ * account it reported as active but could not check is a claim of the same kind:
+ * the CLI writes that state for a name it could not resolve, a host it could not
+ * reach, and a credential it could not use, and it does not say which, so it is
+ * proved the same way rather than read as a rejection. An installed version is
+ * never read as authentication, an exit code is never read as an account, and a
+ * credential this process was given for the host is never read as one either: it
+ * authenticates through the same proof.
  */
 export async function readGitHubCli(
   context: GitHubHostContext,
@@ -344,18 +379,26 @@ export async function readGitHubCli(
       stdout === null ? { state: 'unavailable', login: null } : accountAnswer(stdout, destination)
   }
   if (options.signal?.aborted) return ABANDONED
-  if (answer.state !== 'authenticated') {
+  // A signed-out host, a host the CLI holds nothing usable for, and an answer it
+  // could not be read out of have all established what they are. An account it
+  // named, and an account it named as active but could not check, have not:
+  // either is a claim about a credential that only a request settles.
+  if (answer.state !== 'authenticated' && answer.state !== 'unverified') {
     return { state: answer.state, login: null, version, authority: null }
   }
 
-  // The account exists, so one bounded authenticated request establishes who it
-  // is, whether the credential is still accepted, and whether the host answers.
+  // So one bounded authenticated request establishes who this credential is,
+  // whether it is still accepted, and whether the host answers.
   //
   // It asks the way the CLI itself asks: the current user is read as GraphQL's
   // `viewer { login }`, which is what `gh auth status` resolves a login through.
   // That matters because a REST `/user` endpoint is not universal — an
   // installation token authenticates as a bot account without one — so requiring
-  // it would refuse credentials the provider vends and the CLI accepts.
+  // it would refuse credentials the provider vends and the CLI accepts. It also
+  // matters for an account the CLI could not check: the same lookup it failed to
+  // make for a credential taken from the environment is the one that names the
+  // account here, so the account is read from the request itself and never from
+  // what the CLI claimed about it.
   // The credential this answer is fenced on, pinned on both sides of the request.
   // Resolving one can start a child, so each resolution takes the same deadline
   // and cancellation as the request it belongs to.

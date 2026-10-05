@@ -30,7 +30,11 @@ import {
   RemoteMutationLedger,
   unknownRemoteOutcome,
 } from '../src/main/remote-mutations'
-import { RequestRegistry, performBackgroundRead } from '../src/main/request-registry'
+import {
+  RequestRegistry,
+  performBackgroundRead,
+  snapshotReadPurpose,
+} from '../src/main/request-registry'
 import {
   classifyRemoteFailure,
   DEFAULT_INTERVALS,
@@ -2404,6 +2408,64 @@ test('a replaced credential ends the GitHub read and leaves local Git reading', 
   assert.equal(await githubAborted.promise, true, 'the read pinned to the old credential survived')
   assert.equal(await localRead, 'read', 'local Git reading was cancelled by a credential change')
   await githubRead
+})
+
+test('a replaced credential leaves a reuse-only snapshot reading and ends a live one', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  try {
+    git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+    const registry = new RequestRegistry()
+    const hold = Promise.withResolvers<void>()
+    const localStarted = Promise.withResolvers<void>()
+    const liveStarted = Promise.withResolvers<void>()
+    const liveAborted = Promise.withResolvers<boolean>()
+
+    // The refresh the filesystem event asked for, held where this test can see
+    // it, and a live refresh asked for at the same time.
+    const localRead = performBackgroundRead(
+      registry,
+      repo,
+      undefined,
+      async (signal) => {
+        localStarted.resolve()
+        await hold.promise
+        // The external edit behind that event, made while the read was in flight.
+        git(repo, 'checkout', '-b', 'external/edit')
+        return getSnapshot(repo, signal, undefined, 'reuse')
+      },
+      'sync-local',
+      snapshotReadPurpose({ remote: 'reuse' }),
+    )
+    const liveRead = performBackgroundRead(
+      registry,
+      repo,
+      undefined,
+      (signal) =>
+        new Promise<string>((resolve) => {
+          liveStarted.resolve()
+          signal.addEventListener('abort', () => liveAborted.resolve(true), { once: true })
+          hold.promise.then(() => resolve('live read'))
+        }),
+      'sync-refresh',
+      snapshotReadPurpose({ remote: 'live' }),
+    )
+    await Promise.all([localStarted.promise, liveStarted.promise])
+
+    // The account behind the signed-in credential was replaced.
+    registry.cancelGitHub()
+    hold.resolve()
+
+    assert.equal(await liveAborted.promise, true, 'the live read pinned to the old credential ran')
+    await liveRead
+    const snapshot = await localRead
+    assert.deepEqual(
+      snapshot.branches.map((branch) => branch.name).sort(),
+      ['external/edit', 'main'],
+      'the local refresh was ended with the credential, and the external edit with it',
+    )
+  } finally {
+    await cleanup()
+  }
 })
 
 test('overlapping local read defers and reschedules remote polling without losing it', async () => {

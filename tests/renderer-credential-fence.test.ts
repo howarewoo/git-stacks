@@ -152,3 +152,59 @@ test('a replaced credential takes every GitHub answer with it, on the list and o
   assert.match(String(publishedPullRequest?.checks?.[0]?.link ?? ''), /github\.com/u)
   assert.equal(fenced.branches[0].pr?.checks, undefined)
 })
+
+test('retirement removes reconciliation and all remote-derived ancestry, not local parent hints', () => {
+  const held = snapshot({
+    reconciliation: {
+      available: true,
+      message: 'Private submitted stack',
+      stacks: [
+        {
+          key: 'private-stack',
+          base: 'main',
+          stackNumber: 17,
+          stackUrl: 'https://github.com/acme/widgets/stack/17',
+          state: 'reordered',
+          summary: 'Private submitted order',
+          submittedOrder: ['private-parent', 'private-child'],
+          members: [],
+          repairs: [],
+          blockers: [],
+        },
+      ],
+      blockers: [],
+      evidence: null,
+    },
+    branches: [
+      branch({ parent: 'private-parent', parentBehind: 3, needsRestack: true }),
+      branch({
+        pr: null,
+        parentSource: 'stack',
+        parent: 'private-parent',
+        parentBehind: 2,
+        needsRestack: true,
+      }),
+      branch({ parentSource: 'recorded' }),
+      branch({ pr: null, parentSource: 'inferred' }),
+    ],
+  })
+  const fenced = withoutReplacedCredential(held)
+  assert.equal(fenced.reconciliation, undefined)
+  assert.equal(JSON.stringify(fenced).includes('private-'), false)
+  for (const remote of fenced.branches.slice(0, 2)) {
+    assert.equal(remote.parent, null)
+    assert.equal(remote.parentBehind, null)
+    assert.equal(remote.parentTip, null)
+    assert.equal(remote.parentSource, null)
+    assert.equal(remote.needsRestack, undefined)
+  }
+  for (const index of [2, 3]) {
+    const local = fenced.branches[index]
+    const before = held.branches[index]
+    assert.equal(local.parent, before.parent)
+    assert.equal(local.parentTip, before.parentTip)
+    assert.equal(local.parentSource, before.parentSource)
+    assert.equal(local.parentBehind, before.parentBehind)
+    assert.equal(local.pr, null)
+  }
+})

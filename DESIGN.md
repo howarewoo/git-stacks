@@ -826,6 +826,12 @@ Provider commands are fixed, argument-based, host-scoped main-process operations
 
 Identity, host, and credential changes invalidate reads and caches from the previous authority before publishing new data. A late rejection belongs only to the credential that authenticated its request; it cannot invalidate a replacement account. A stale answer never lands under another account or host, and a refused or unanswered request never becomes an empty authenticated result.
 
+Credential retirement drops submitted reconciliation reports and ancestry learned
+from pull requests or native stacks; recorded and locally inferred parent hints
+remain local facts. A repository open keeps its operation lock until main settles:
+the window adopts the completed local repository identity even when its remote
+answer was retired, so displayed and mutation-target repositories cannot diverge.
+
 The separately authorized Notifications module retains its consent, credential isolation, and operating-system-backed encryption. Nothing this app does to its own authentication state deletes a Notifications credential, a provider CLI credential, or an unrelated operating-system key. Notifications never silently expands the permissions of the core CLI account.
 
 Authentication checks stay outside the repository mutation gate. A missing CLI, a signed-out account, or a stalled GitHub endpoint blocks only the remote action that needs it; local stage, commit, branch, and recovery workflows remain available.
