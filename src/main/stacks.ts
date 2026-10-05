@@ -929,6 +929,23 @@ async function commitParents(repoPath: string, oid: string): Promise<string[]> {
   return tokens.slice(1).filter(Boolean)
 }
 
+// Preview and revalidation must use the same proof: a recorded head takes
+// precedence; otherwise a merge commit's second parent names the merged head.
+async function resolveMergedHeadOid(
+  repoPath: string,
+  recordedOid: string | null,
+  mergeCommitOid: string | null,
+): Promise<string | null> {
+  if (recordedOid || !mergeCommitOid) return recordedOid
+  try {
+    const parents = await commitParents(repoPath, mergeCommitOid)
+    if (parents.length >= 2 && isOid(parents[1])) return parents[1]
+  } catch {
+    // A merge commit this repository cannot read proves no boundary.
+  }
+  return recordedOid
+}
+
 interface MergedPrRecord {
   branch: string
   pr: number
@@ -1533,19 +1550,13 @@ async function branchRecords(
     const journalEntry =
       mergedJournal.get(name) ?? (pr ? mergedJournal.get(String(pr.number)) : null)
     const mergedHeadPr = configuredMergedHeadPr ?? (journalEntry ? String(journalEntry.pr) : null)
-    let mergedHeadOid = configuredMergedHeadOid ?? journalEntry?.headOid ?? null
-    let mergedCommitOid =
+    const mergedCommitOid =
       configuredMergedCommitOid ?? journalEntry?.mergeOid ?? pr?.mergeOid ?? null
-    if (!mergedHeadOid && mergedCommitOid) {
-      try {
-        const parents = await commitParents(repoPath, mergedCommitOid)
-        if (parents.length >= 2 && isOid(parents[1])) {
-          mergedHeadOid = parents[1]
-        }
-      } catch {
-        // Ignore
-      }
-    }
+    const mergedHeadOid = await resolveMergedHeadOid(
+      repoPath,
+      configuredMergedHeadOid ?? journalEntry?.headOid ?? null,
+      mergedCommitOid,
+    )
     records.set(name, {
       name,
       oid,
@@ -2956,6 +2967,8 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
       throw new Error(`Stack preview is stale: branch ${branch} changed`)
   }
   const revalidateMergedJournal = await readMergedPrJournal(repoPath)
+  // Reuse the live merge-proof read for the later pull request checks.
+  let remoteRead: GitHubResult | undefined
   for (const [branch, expected] of Object.entries(plan.capturedMergedHeads)) {
     const [configPr, configOid, configCommit] = await Promise.all([
       getConfigValue(repoPath, `branch.${branch}.gitStacksMergedHeadPr`),
@@ -2966,8 +2979,17 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
       revalidateMergedJournal.get(branch) ??
       (expected.pr ? revalidateMergedJournal.get(expected.pr) : null)
     const pr = configPr ?? (journalEntry ? String(journalEntry.pr) : null)
-    const oid = configOid ?? journalEntry?.headOid ?? null
-    const commit = configCommit ?? journalEntry?.mergeOid ?? null
+    const recordedOid = configOid ?? journalEntry?.headOid ?? null
+    let commit = configCommit ?? journalEntry?.mergeOid ?? null
+    if (recordedOid === null && expected.oid !== null) {
+      // Re-prove unrecorded heads from GitHub now, not from the captured preview.
+      remoteRead ??= await getGitHubData(repoPath, plan.originUrl)
+      commit ??=
+        remoteRead.pullRequests.find(
+          (pullRequest) => pullRequest.number === plan.capturedPrs[branch]?.number,
+        )?.mergeOid ?? null
+    }
+    const oid = await resolveMergedHeadOid(repoPath, recordedOid, commit)
     if (pr !== expected.pr || oid !== expected.oid || commit !== expected.commit) {
       throw new Error(`Stack preview is stale: merged pull request boundary for ${branch} changed`)
     }
@@ -3012,7 +3034,7 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
   const hasCapturedPrs = Object.values(plan.capturedPrs).some(Boolean)
   const hasCapturedStacks = plan.capturedStacks.length > 0
   if (!hasCapturedPrs && !hasCapturedStacks) return
-  const data = await getGitHubData(repoPath, plan.originUrl)
+  const data = remoteRead ?? (await getGitHubData(repoPath, plan.originUrl))
   if (!data.available) {
     throw new Error(`Stack preview is stale: GitHub is no longer reachable (${data.message})`)
   }

@@ -2085,7 +2085,20 @@ Before executing any mutation, the preview compares local and remote branch tips
 - **Trunk drift**: Evaluates whether the trunk is up to date, behind, ahead, or diverged. If the remote trunk was force-pushed or rewritten upstream (`diverged`), syncing is blocked until the local trunk is reconciled to avoid replaying onto an inconsistent upstream history.
 - **Merged layers**: Detects whether a lower layer's PR was merged (via merge commit, squash, or rebase). Merged layers are dropped from the replay cascade. Descendant layers are automatically retargeted onto the updated trunk or the highest surviving predecessor.
 - **Rebase boundaries**: For squash- or rebase-merged predecessors, the replay boundary is derived from the immutable head recorded at merge time (`isProvenMergeHead`). If a safe boundary cannot be proven from Git history or the merge journal, syncing is refused to prevent replaying duplicate commits or dropping unmerged work.
+- **Merged layers Git Stacks did not merge**: Branch config and the merge journal
+  take precedence when proving a merged head. Without a recorded head, a two-parent
+  merge commit can prove it through its second parent. Sync leaves the merged layer
+  untouched and replays only the descendant's own commits onto the merge, preserving
+  the surviving pull request's base GitHub already retargeted. Before mutation, the
+  same proof is resolved again using a live GitHub read shared with the pull request
+  checks. Changed or unreadable proof refuses the run. Squash and rebase landings
+  have no second parent and still require a recorded merge-time head.
 - **Layer states**: Each branch is classified as `up-to-date`, `needs-rebase`, `retargeted`, `needs-push`, `needs-force`, `merged`, or `blocked`.
+- **A stack that is already current**: When every layer is published and matches the
+  trunk and its predecessor, every layer is classified `up-to-date`, no lease is
+  requested, and running the sync changes nothing — no branch is replayed, no remote
+  branch is pushed, no ref is rewritten, and no pull request or native stack is
+  written. The result reports the stack as already in sync with the remote it compared.
 
 ### Force-with-lease safety
 

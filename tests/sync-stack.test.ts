@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { writeFile, readFile, unlink } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { createGitHubHarness } from './fixtures/github-harness'
 import type { GitHubFixtureState, GitHubHarness } from './fixtures/github-harness'
 import type { GitHubTransport } from '../src/main/github-transport'
@@ -17,6 +18,27 @@ function git(harness: GitHubHarness, args: string[]): string {
 
 function bareGit(harness: GitHubHarness, args: string[]): string {
   return harness.runGit(['--git-dir', harness.bare, ...args])
+}
+
+const WRITE_METHODS: Record<string, true> = {
+  POST: true,
+  PATCH: true,
+  PUT: true,
+  DELETE: true,
+}
+
+/**
+ * Every REST mutation the host has answered so far, in order. GraphQL is excluded
+ * because this client only queries it, so a sync that rewrites nothing has to leave
+ * this list exactly as it found it.
+ */
+async function restMutations(harness: GitHubHarness): Promise<string[]> {
+  const state = await harness.readState()
+  return state.requests
+    .filter(
+      (request) => request.argv[0] !== 'graphql' && WRITE_METHODS[request.argv[1] ?? ''] === true,
+    )
+    .map((request) => `${request.argv[1]} ${request.argv[0]}`)
 }
 
 async function withHarness(
@@ -100,10 +122,8 @@ test('Sync Stack detects squash/rebase merged parent with proven merge head and 
     pr1.mergeOid = newMainTip
     await writeFile(harness.statePath, JSON.stringify(state), 'utf8')
 
-    // Record the proven merge head in Git config
-    git(harness, ['config', '--local', 'branch.parent.mergedHeadPr', '1'])
-    git(harness, ['config', '--local', 'branch.parent.mergedHeadOid', parentTip])
-    git(harness, ['config', '--local', 'branch.parent.mergedCommitOid', newMainTip])
+    // A squash commit names no merged head of its own, so the journal a merge
+    // performed here is the only record of the head this pull request merged at.
     const gitDir = git(harness, ['rev-parse', '--absolute-git-dir'])
     await writeFile(
       join(gitDir, 'git-stacks-merged-heads.json'),
@@ -751,5 +771,297 @@ test('Sync Stack changed origin during paused conflict is rejected before any mu
 
     const result = await runAction(harness.repo, { type: 'stackContinue' })
     assert.match(result.message, /Synced/i)
+  })
+})
+
+test('Sync Stack drops a merge-commit merged parent and reparents its descendant without replaying it twice', async () => {
+  await withHarness(async (harness) => {
+    await runAction(harness.repo, { type: 'createBranch', name: 'parent', parent: 'main' })
+    const parentTip = await commitFile(harness, 'parent.txt', 'parent work\n', 'Parent commit')
+    await runAction(harness.repo, { type: 'createBranch', name: 'child', parent: 'parent' })
+    const childTip = await commitFile(harness, 'child.txt', 'child work\n', 'Child commit')
+    await publishStack(harness, 'child')
+
+    // The parent lands on trunk as a real two-parent merge commit, so the head that
+    // was merged is the merge's own second parent and nothing records it in a journal.
+    git(harness, ['switch', 'main'])
+    git(harness, ['merge', '--no-ff', '-m', 'Merge pull request #1 from acme/parent', 'parent'])
+    const mergeOid = git(harness, ['rev-parse', 'main'])
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+    const [mergedCommit, trunkSide, mergedHead] = git(harness, [
+      'rev-list',
+      '--parents',
+      '-n',
+      '1',
+      mergeOid,
+    ]).split(' ')
+    assert.equal(mergedCommit, mergeOid)
+    assert.equal(mergedHead, parentTip)
+    assert.notEqual(trunkSide, parentTip)
+    git(harness, ['switch', 'child'])
+
+    const state = await harness.readState()
+    const merged = state.prs.find((pr) => pr.number === 1)
+    const survivor = state.prs.find((pr) => pr.number === 2)
+    assert.ok(merged)
+    assert.ok(survivor)
+    merged.state = 'MERGED'
+    merged.mergeOid = mergeOid
+    merged.mergedAt = '2026-02-01T00:00:00Z'
+    // GitHub retargets the surviving layer onto the branch the merged one landed on
+    // and leaves that layer at the bottom of the native stack.
+    survivor.base = 'main'
+    assert.ok((state.stacks ?? []).length > 0, 'the published stack is a native stack')
+    state.stacks = (state.stacks ?? []).map((stack) => ({
+      ...stack,
+      base: { ref: 'main' },
+      pull_requests: stack.pull_requests
+        .filter((member) => member.number !== merged.number)
+        .map((member) => ({ ...member, head: { ref: 'child', sha: childTip } })),
+    }))
+    await harness.writeState(state)
+
+    const gitDir = git(harness, ['rev-parse', '--absolute-git-dir'])
+    assert.equal(existsSync(join(gitDir, 'git-stacks-merged-heads.json')), false)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'sync',
+      'child',
+    )
+    assert.equal(preview.kind, 'sync')
+    assert.deepEqual(preview.blockers, [])
+    assert.ok(preview.sync)
+    assert.deepEqual(preview.sync.layers.map((layer) => layer.branch).sort(), ['child', 'parent'])
+    const parentLayer = preview.sync.layers.find((layer) => layer.branch === 'parent')
+    const childLayer = preview.sync.layers.find((layer) => layer.branch === 'child')
+    assert.ok(parentLayer)
+    assert.ok(childLayer)
+    // The merged parent leaves the cascade exactly as it is; only the descendant moves.
+    assert.equal(parentLayer.state, 'merged')
+    assert.equal(parentLayer.push, 'none')
+    assert.equal(parentLayer.rebase, false)
+    assert.equal(childLayer.state, 'needs-force')
+    assert.equal(childLayer.base, 'main')
+    assert.equal(childLayer.baseOid, mergeOid)
+    assert.equal(childLayer.retargetedFrom, 'parent')
+    assert.equal(childLayer.rebase, true)
+    assert.equal(childLayer.commits, 1)
+    assert.equal(childLayer.remoteOid, childTip)
+    assert.deepEqual(childLayer.blockers, [])
+    assert.deepEqual(preview.sync?.forcePushes, ['child'])
+
+    // Replacing published history is refused until the reviewer approves the lease,
+    // and a refusal leaves both the local branch and the served branch untouched.
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: false,
+        mergeMethod: 'squash',
+      }),
+    )
+    assert.equal(git(harness, ['rev-parse', 'child']), childTip)
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/child']), childTip)
+
+    const approved = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'sync',
+      'child',
+    )
+    assert.deepEqual(approved.sync?.forcePushes, ['child'])
+    const mutationsBefore = await restMutations(harness)
+
+    await runAction(harness.repo, {
+      type: 'executeStack',
+      token: approved.token,
+      allowForce: true,
+      mergeMethod: 'squash',
+    })
+
+    const newChildTip = git(harness, ['rev-parse', 'child'])
+    assert.notEqual(newChildTip, childTip)
+    // The descendant now sits on the merge commit itself. Its single replayed commit
+    // is its own work; the merged parent's commit is reached through the merge instead
+    // of being applied a second time on top of it.
+    assert.equal(git(harness, ['rev-parse', 'child~1']), mergeOid)
+    assert.equal(git(harness, ['rev-list', '--count', `${mergeOid}..child`]), '1')
+    assert.match(git(harness, ['log', '-1', '--format=%s', newChildTip]), /Child commit/)
+    assert.equal(git(harness, ['config', '--get', 'branch.child.parent']), 'main')
+
+    // The merged layer itself is neither replayed nor rewritten, and only the
+    // descendant's own branch moved on the host, under the lease the preview captured.
+    assert.equal(git(harness, ['rev-parse', 'parent']), parentTip)
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/parent']), parentTip)
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/child']), newChildTip)
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/main']), mergeOid)
+
+    // A sync moves branches; it never rewrites a pull request base or stack membership.
+    assert.deepEqual(await restMutations(harness), mutationsBefore)
+    assert.equal(git(harness, ['for-each-ref', '--format=%(refname)', 'refs/git-stacks']), '')
+    assert.equal(existsSync(join(gitDir, 'git-stacks-stack.json')), false)
+    assert.equal(git(harness, ['status', '--porcelain']), '')
+    assert.equal(git(harness, ['branch', '--show-current']), 'child')
+  })
+})
+
+test('Sync Stack refuses a sync whose merge-committed parent is proved differently since the preview', async () => {
+  await withHarness(async (harness) => {
+    await runAction(harness.repo, { type: 'createBranch', name: 'parent', parent: 'main' })
+    const parentTip = await commitFile(harness, 'parent.txt', 'parent work\n', 'Parent commit')
+    await runAction(harness.repo, { type: 'createBranch', name: 'child', parent: 'parent' })
+    const childTip = await commitFile(harness, 'child.txt', 'child work\n', 'Child commit')
+    await publishStack(harness, 'child')
+
+    git(harness, ['switch', 'main'])
+    git(harness, ['merge', '--no-ff', '-m', 'Merge pull request #1 from acme/parent', 'parent'])
+    const mergeOid = git(harness, ['rev-parse', 'main'])
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+
+    const state = await harness.readState()
+    const merged = state.prs.find((pr) => pr.number === 1)
+    assert.ok(merged)
+    merged.state = 'MERGED'
+    merged.mergeOid = mergeOid
+    merged.mergedAt = '2026-02-01T00:00:00Z'
+    const survivor = state.prs.find((pr) => pr.number === 2)
+    assert.ok(survivor)
+    survivor.base = 'main'
+    await harness.writeState(state)
+    git(harness, ['switch', 'child'])
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'sync',
+      'child',
+    )
+    assert.deepEqual(preview.blockers, [])
+    assert.deepEqual(preview.sync?.forcePushes, ['child'])
+
+    // The same pull request is now reported as merged from a different head, so the
+    // merge no longer proves the boundary this preview replayed onto.
+    git(harness, ['branch', 'alternate-head', parentTip])
+    git(harness, ['switch', 'alternate-head'])
+    git(harness, ['commit', '--allow-empty', '-m', 'Alternate merged work'])
+    git(harness, ['switch', 'main'])
+    git(harness, [
+      'merge',
+      '--no-ff',
+      '-m',
+      'Alternate landing of pull request #1',
+      'alternate-head',
+    ])
+    const alternateMergeOid = git(harness, ['rev-parse', 'main'])
+    const alternateParents = git(harness, ['rev-list', '--parents', '-n', '1', alternateMergeOid])
+    assert.notEqual(alternateMergeOid, mergeOid)
+    assert.equal(alternateParents.split(' ')[1], mergeOid)
+    const moved = await harness.readState()
+    const remerged = moved.prs.find((pr) => pr.number === 1)
+    assert.ok(remerged)
+    remerged.mergeOid = alternateMergeOid
+    await harness.writeState(moved)
+    git(harness, ['switch', 'child'])
+
+    const mutationsBefore = await restMutations(harness)
+    const refsBefore = git(harness, ['for-each-ref', '--format=%(refname) %(objectname)'])
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: true,
+        mergeMethod: 'squash',
+      }),
+    )
+    assert.equal(git(harness, ['rev-parse', 'child']), childTip)
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/child']), childTip)
+    assert.equal(git(harness, ['config', '--get', 'branch.child.parent']), 'parent')
+    assert.equal(git(harness, ['for-each-ref', '--format=%(refname) %(objectname)']), refsBefore)
+    assert.deepEqual(await restMutations(harness), mutationsBefore)
+    assert.equal(
+      existsSync(join(git(harness, ['rev-parse', '--absolute-git-dir']), 'git-stacks-stack.json')),
+      false,
+    )
+    assert.equal(git(harness, ['for-each-ref', '--format=%(refname)', 'refs/git-stacks']), '')
+  })
+})
+
+test('Sync Stack reports a published, current stack as up to date and changes nothing', async () => {
+  await withHarness(async (harness) => {
+    await runAction(harness.repo, { type: 'createBranch', name: 'parent', parent: 'main' })
+    const parentTip = await commitFile(harness, 'parent.txt', 'parent work\n', 'Parent commit')
+    await runAction(harness.repo, { type: 'createBranch', name: 'child', parent: 'parent' })
+    const childTip = await commitFile(harness, 'child.txt', 'child work\n', 'Child commit')
+    await publishStack(harness, 'child')
+
+    // Every layer is published and matches the trunk and its predecessor exactly.
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/parent']), parentTip)
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/child']), childTip)
+
+    const preview = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'sync',
+      'child',
+    )
+    assert.equal(preview.kind, 'sync')
+    assert.deepEqual(preview.blockers, [])
+    const sync = preview.sync
+    assert.ok(sync)
+    assert.deepEqual(sync.layers.map((layer) => layer.branch).sort(), ['child', 'parent'])
+    assert.equal(sync.trunk.behind, 0)
+    assert.equal(sync.trunk.ahead, 0)
+    assert.equal(sync.trunk.diverged, false)
+    assert.deepEqual(sync.forcePushes, [])
+    assert.deepEqual(sync.blockers, [])
+    for (const layer of sync.layers) {
+      assert.equal(layer.state, 'up-to-date')
+      assert.equal(layer.push, 'none')
+      assert.equal(layer.rebase, false)
+      assert.equal(layer.retargetedFrom, null)
+      assert.deepEqual(layer.blockers, [])
+    }
+
+    const refsBefore = git(harness, ['for-each-ref', '--format=%(refname) %(objectname)'])
+    const servedBefore = bareGit(harness, [
+      'for-each-ref',
+      '--format=%(refname) %(objectname)',
+      'refs/heads',
+    ])
+    const mutationsBefore = await restMutations(harness)
+    const gitDir = git(harness, ['rev-parse', '--absolute-git-dir'])
+    let pushAttempted = false
+    for (const branch of ['parent', 'child']) {
+      harness.hookGitPush({
+        branch,
+        armed: true,
+        before() {
+          pushAttempted = true
+          throw new Error(`Syncing a current stack must not publish ${branch}`)
+        },
+      })
+    }
+
+    // Nothing needs a lease, so running the sync needs no force approval and moves
+    // neither a ref, a remote branch, nor a pull request.
+    await runAction(harness.repo, {
+      type: 'executeStack',
+      token: preview.token,
+      allowForce: false,
+      mergeMethod: 'squash',
+    })
+    assert.equal(pushAttempted, false)
+    assert.equal(git(harness, ['for-each-ref', '--format=%(refname) %(objectname)']), refsBefore)
+    assert.equal(
+      bareGit(harness, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads']),
+      servedBefore,
+    )
+    assert.deepEqual(await restMutations(harness), mutationsBefore)
+    assert.equal(existsSync(join(gitDir, 'git-stacks-stack.json')), false)
+    assert.equal(git(harness, ['for-each-ref', '--format=%(refname)', 'refs/git-stacks']), '')
+    assert.equal(git(harness, ['status', '--porcelain']), '')
+    assert.equal(git(harness, ['branch', '--show-current']), 'child')
   })
 })
