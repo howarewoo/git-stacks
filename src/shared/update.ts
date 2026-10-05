@@ -130,14 +130,13 @@ export interface UpdateRejectionReport {
   message: string
 }
 
-export class UpdateRefusal extends Error {
-  readonly reason: UpdateRejection
-
-  constructor(reason: UpdateRejection, message: string) {
-    super(message)
-    this.name = 'UpdateRefusal'
-    this.reason = reason
-  }
+/**
+ * The one way a refusal is built. Every rejection reason travels as this pair,
+ * so the manifest reader, the feed reader, and the installer cannot drift into
+ * spelling a refusal differently.
+ */
+export function updateRefusal(reason: UpdateRejection, message: string): UpdateOutcome<never> {
+  return { ok: false, failure: { reason, message } }
 }
 
 export type UpdateOutcome<T> =
@@ -324,88 +323,52 @@ const MANIFEST_KEYS = [
  */
 export function parseUpdateManifest(bytes: Uint8Array): UpdateOutcome<UpdateManifest> {
   if (bytes.byteLength > MAX_UPDATE_MANIFEST_BYTES) {
-    return {
-      ok: false,
-      failure: { reason: 'oversize', message: 'The update manifest is larger than expected.' },
-    }
+    return updateRefusal('oversize', 'The update manifest is larger than expected.')
   }
   let value: unknown
   try {
     value = JSON.parse(Buffer.from(bytes).toString('utf8'))
   } catch {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest is not valid JSON.' },
-    }
+    return updateRefusal('malformed', 'The update manifest is not valid JSON.')
   }
   if (!isRecord(value)) {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest is not an object.' },
-    }
+    return updateRefusal('malformed', 'The update manifest is not an object.')
   }
   if (!closedKeys(value, MANIFEST_KEYS)) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'schema',
-        message: 'The update manifest carries a field this build does not understand.',
-      },
-    }
+    return updateRefusal(
+      'schema',
+      'The update manifest carries a field this build does not understand.',
+    )
   }
   if (value.schema !== UPDATE_MANIFEST_SCHEMA) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'schema',
-        message: 'The update manifest uses a format this build does not understand.',
-      },
-    }
+    return updateRefusal(
+      'schema',
+      'The update manifest uses a format this build does not understand.',
+    )
   }
   if (!UPDATE_CHANNELS.includes(value.channel as UpdateChannel)) {
-    return {
-      ok: false,
-      failure: { reason: 'channel', message: 'The update manifest names an unknown channel.' },
-    }
+    return updateRefusal('channel', 'The update manifest names an unknown channel.')
   }
   if (!parseVersion(value.version)) {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest names no usable version.' },
-    }
+    return updateRefusal('malformed', 'The update manifest names no usable version.')
   }
   if (
     typeof value.sequence !== 'number' ||
     !Number.isSafeInteger(value.sequence) ||
     value.sequence < 1
   ) {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest carries no release sequence.' },
-    }
+    return updateRefusal('malformed', 'The update manifest carries no release sequence.')
   }
   if (typeof value.issuedAt !== 'string' || typeof value.expiresAt !== 'string') {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest carries no usable dates.' },
-    }
+    return updateRefusal('malformed', 'The update manifest carries no usable dates.')
   }
   const issuedAt = Date.parse(value.issuedAt)
   const expiresAt = Date.parse(value.expiresAt)
   if (Number.isNaN(issuedAt) || Number.isNaN(expiresAt)) {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest carries no usable dates.' },
-    }
+    return updateRefusal('malformed', 'The update manifest carries no usable dates.')
   }
   if (expiresAt <= issuedAt) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'malformed',
-        message: 'The update manifest expires before it was issued.',
-      },
-    }
+    return updateRefusal('malformed', 'The update manifest expires before it was issued.')
   }
   // `null` says outright that this release is not a rollback; any other value
   // has to be a version this build can read.
@@ -414,49 +377,28 @@ export function parseUpdateManifest(bytes: Uint8Array): UpdateOutcome<UpdateMani
     value.rollbackOf !== null &&
     !parseVersion(value.rollbackOf)
   ) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'malformed',
-        message: 'The update manifest names no usable rollback version.',
-      },
-    }
+    return updateRefusal('malformed', 'The update manifest names no usable rollback version.')
   }
   if (typeof value.notes !== 'string' || value.notes.length > 4000) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'malformed',
-        message: 'The update manifest carries no usable release notes.',
-      },
-    }
+    return updateRefusal('malformed', 'The update manifest carries no usable release notes.')
   }
   if (
     !Array.isArray(value.artifacts) ||
     value.artifacts.length === 0 ||
     value.artifacts.length > 32
   ) {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update manifest lists no installable builds.' },
-    }
+    return updateRefusal('malformed', 'The update manifest lists no installable builds.')
   }
   const artifacts: UpdateManifestArtifact[] = []
   const seen = new Set<string>()
   for (const entry of value.artifacts) {
     const artifact = parseArtifact(entry)
     if (typeof artifact === 'string') {
-      return { ok: false, failure: { reason: 'malformed', message: artifact } }
+      return updateRefusal('malformed', artifact)
     }
     const identity = `${artifact.platform}-${artifact.arch}`
     if (seen.has(identity)) {
-      return {
-        ok: false,
-        failure: {
-          reason: 'malformed',
-          message: 'The update manifest lists two builds for one platform.',
-        },
-      }
+      return updateRefusal('malformed', 'The update manifest lists two builds for one platform.')
     }
     seen.add(identity)
     artifacts.push(artifact)
@@ -480,19 +422,13 @@ export function parseUpdateManifest(bytes: Uint8Array): UpdateOutcome<UpdateMani
 /** Parses the detached signature envelope. Its own shape is closed too. */
 export function parseSignatureEnvelope(bytes: Uint8Array): UpdateOutcome<UpdateSignatureEnvelope> {
   if (bytes.byteLength > MAX_UPDATE_SIGNATURE_BYTES) {
-    return {
-      ok: false,
-      failure: { reason: 'oversize', message: 'The update signature is larger than expected.' },
-    }
+    return updateRefusal('oversize', 'The update signature is larger than expected.')
   }
   let value: unknown
   try {
     value = JSON.parse(Buffer.from(bytes).toString('utf8'))
   } catch {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update signature is not valid JSON.' },
-    }
+    return updateRefusal('malformed', 'The update signature is not valid JSON.')
   }
   if (
     !isRecord(value) ||
@@ -503,10 +439,7 @@ export function parseSignatureEnvelope(bytes: Uint8Array): UpdateOutcome<UpdateS
     typeof value.signature !== 'string' ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(value.signature)
   ) {
-    return {
-      ok: false,
-      failure: { reason: 'malformed', message: 'The update signature is not a usable envelope.' },
-    }
+    return updateRefusal('malformed', 'The update signature is not a usable envelope.')
   }
   return {
     ok: true,
@@ -551,55 +484,36 @@ export function evaluateUpdateManifest(
   expectations: UpdateExpectations,
 ): UpdateOutcome<UpdateManifestArtifact> {
   if (manifest.channel !== expectations.channel) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'channel',
-        message: `This manifest publishes the ${manifest.channel} channel, not ${expectations.channel}.`,
-      },
-    }
+    return updateRefusal(
+      'channel',
+      `This manifest publishes the ${manifest.channel} channel, not ${expectations.channel}.`,
+    )
   }
   const issuedAt = Date.parse(manifest.issuedAt)
   const expiresAt = Date.parse(manifest.expiresAt)
   if (expiresAt <= expectations.now) {
-    return {
-      ok: false,
-      failure: { reason: 'expired', message: 'This update offer has expired.' },
-    }
+    return updateRefusal('expired', 'This update offer has expired.')
   }
   if (issuedAt - UPDATE_CLOCK_SKEW_MS > expectations.now) {
-    return {
-      ok: false,
-      failure: { reason: 'issued-in-future', message: 'This update offer is dated in the future.' },
-    }
+    return updateRefusal('issued-in-future', 'This update offer is dated in the future.')
   }
   if (expectations.now - issuedAt > UPDATE_MANIFEST_MAX_AGE_MS + UPDATE_CLOCK_SKEW_MS) {
-    return {
-      ok: false,
-      failure: { reason: 'expired', message: 'This update offer is too old to be trusted.' },
-    }
+    return updateRefusal('expired', 'This update offer is too old to be trusted.')
   }
   if (manifest.sequence < expectations.seenSequence) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'replayed',
-        message:
-          'This offer is older than one already considered here. A rollback is a new signed release with a higher sequence.',
-      },
-    }
+    return updateRefusal(
+      'replayed',
+      'This offer is older than one already considered here. A rollback is a new signed release with a higher sequence.',
+    )
   }
   const artifact = manifest.artifacts.find(
     (entry) => entry.platform === expectations.platform && entry.arch === expectations.arch,
   )
   if (!artifact) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'platform',
-        message: `This release has no build for ${expectations.platform} ${expectations.arch}.`,
-      },
-    }
+    return updateRefusal(
+      'platform',
+      `This release has no build for ${expectations.platform} ${expectations.arch}.`,
+    )
   }
   if (compareVersions(manifest.version, expectations.currentVersion) <= 0) {
     // A rollback is allowed to be older, and only when the signed release names
@@ -613,59 +527,38 @@ export function evaluateUpdateManifest(
       compareVersions(replaces, expectations.currentVersion) !== 0 ||
       compareVersions(manifest.version, replaces) >= 0
     ) {
-      return {
-        ok: false,
-        failure: {
-          reason: 'not-newer',
-          message: `Version ${manifest.version} is not newer than the installed ${expectations.currentVersion}, and no signed release authorises rolling back to it.`,
-        },
-      }
+      return updateRefusal(
+        'not-newer',
+        `Version ${manifest.version} is not newer than the installed ${expectations.currentVersion}, and no signed release authorises rolling back to it.`,
+      )
     }
   }
   let url: URL
   try {
     url = new URL(artifact.url)
   } catch {
-    return {
-      ok: false,
-      failure: { reason: 'malformed-url', message: 'An artifact URL could not be read.' },
-    }
+    return updateRefusal('malformed-url', 'An artifact URL could not be read.')
   }
   if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'malformed-url',
-        message: 'An artifact URL is not a plain HTTPS address.',
-      },
-    }
+    return updateRefusal('malformed-url', 'An artifact URL is not a plain HTTPS address.')
   }
   if (url.origin !== expectations.allowedOrigin) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'malformed-url',
-        message: 'An artifact is not published on this project\u2019s release location.',
-      },
-    }
+    return updateRefusal(
+      'malformed-url',
+      'An artifact is not published on this project\u2019s release location.',
+    )
   }
   if (!url.pathname.startsWith(expectations.allowedPathPrefix)) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'malformed-url',
-        message: 'An artifact is not published under this project\u2019s release path.',
-      },
-    }
+    return updateRefusal(
+      'malformed-url',
+      'An artifact is not published under this project\u2019s release path.',
+    )
   }
   if (!url.pathname.endsWith(`/${artifact.fileName}`)) {
-    return {
-      ok: false,
-      failure: {
-        reason: 'malformed-url',
-        message: 'An artifact URL does not name the file the manifest describes.',
-      },
-    }
+    return updateRefusal(
+      'malformed-url',
+      'An artifact URL does not name the file the manifest describes.',
+    )
   }
   return { ok: true, value: artifact }
 }

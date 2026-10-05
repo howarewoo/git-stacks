@@ -129,7 +129,7 @@ export function readLiveRunConfig(env: NodeJS.ProcessEnv = process.env): LiveRun
  * repository name. The digest keeps a runner's own run number out of the name,
  * so two runs of the same workflow number cannot collide on a shared account.
  */
-export function newRunId(): string {
+function newRunId(): string {
   return `r${Date.now().toString(36)}${createHash('sha256')
     .update(randomBytes(8))
     .digest('hex')

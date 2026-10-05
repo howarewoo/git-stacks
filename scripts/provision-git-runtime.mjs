@@ -1,27 +1,26 @@
 #!/usr/bin/env node
 // Build-time only: pin the upstream release archive before extracting any executable.
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import {
+  createWriteStream,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
-  readlinkSync,
   rmSync,
   statSync,
   writeFileSync,
-  lstatSync,
 } from 'node:fs'
 import { get } from 'node:https'
 import { join, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
-import { createWriteStream } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { digest, inventory } from './git-runtime-inventory.cjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const runtimeRoot = join(root, 'resources', 'git')
 const platform = `${process.platform}-${process.arch}`
+const appVersion = JSON.parse(readFileSync(join(root, 'package.json'))).version
 const releases = {
   'darwin-arm64': [
     'macOS-arm64',
@@ -49,10 +48,6 @@ const source = `https://github.com/desktop/dugite-native/releases/download/${tag
 const cache = join(runtimeRoot, '.provision')
 const archive = join(cache, filename)
 
-function digest(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex')
-}
-
 async function download(url, destination, redirects = 0) {
   if (redirects > 5 || !url.startsWith('https://')) throw new Error('Unexpected release redirect')
   await new Promise((done, fail) => {
@@ -73,19 +68,6 @@ async function download(url, destination, redirects = 0) {
   })
 }
 
-function inventory(directory, prefix = '') {
-  const files = {}
-  for (const item of readdirSync(directory, { withFileTypes: true })) {
-    const name = prefix ? `${prefix}/${item.name}` : item.name
-    const path = join(directory, item.name)
-    if (item.isDirectory()) Object.assign(files, inventory(path, name))
-    else if (item.isSymbolicLink()) files[name] = `link:${readlinkSync(path)}`
-    else if (item.isFile()) files[name] = digest(path)
-    else throw new Error(`Unexpected runtime entry: ${name}`)
-  }
-  return files
-}
-
 const executableRelativePath = process.platform === 'win32' ? 'cmd/git.exe' : 'bin/git'
 
 const destination = join(runtimeRoot, platform)
@@ -94,7 +76,7 @@ if (existsSync(destination)) {
   const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath)) : null
   const entry = manifest?.platforms?.[platform]
   if (
-    manifest?.appVersion !== JSON.parse(readFileSync(join(root, 'package.json'))).version ||
+    manifest?.appVersion !== appVersion ||
     entry?.source !== `${source}#sha256=${expectedDigest}` ||
     entry.gitVersion !== '2.53.0' ||
     entry.sha256 !== digest(join(destination, executableRelativePath)) ||
@@ -132,13 +114,10 @@ try {
   const manifest = existsSync(manifestPath)
     ? JSON.parse(readFileSync(manifestPath, 'utf8'))
     : {
-        appVersion: JSON.parse(readFileSync(join(root, 'package.json'))).version,
+        appVersion,
         platforms: {},
       }
-  if (
-    manifest.appVersion !== JSON.parse(readFileSync(join(root, 'package.json'))).version ||
-    manifest.platforms[platform]
-  ) {
+  if (manifest.appVersion !== appVersion || manifest.platforms[platform]) {
     throw new Error('Existing manifest conflicts with this release/platform')
   }
   manifest.platforms[platform] = {

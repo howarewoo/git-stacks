@@ -341,7 +341,7 @@ export function applyPatch(
   const settings: AppSettings = { ...result.settings, version: SETTINGS_VERSION }
   for (const issue of result.issues) {
     if (!touchedBy(issue.key, patch)) continue
-    restore(settings, issue.key, current)
+    restoreKey(settings, current, issue.key)
   }
   return { settings, issues: result.issues }
 }
@@ -390,43 +390,52 @@ function touchedBy(key: string, patch: SettingsPatch): boolean {
   return false
 }
 
-function restore(settings: AppSettings, key: string, current: AppSettings): void {
+/**
+ * Puts one setting back the way it was. Both callers want the same thing: a
+ * patch whose field failed validation keeps the value it already had, and a
+ * reset keeps the value a policy fixed. A key neither of them names is left
+ * alone rather than guessed at.
+ */
+function restoreKey(target: AppSettings, current: AppSettings, key: string): void {
   switch (key) {
     case 'github.host':
-      settings.github.host = current.github.host
+      target.github.host = current.github.host
       return
     case 'notifications.enabled':
-      settings.notifications.enabled = current.notifications.enabled
+      target.notifications.enabled = current.notifications.enabled
       return
     case 'git.useSystemGit':
-      settings.git.useSystemGit = current.git.useSystemGit
+      target.git.useSystemGit = current.git.useSystemGit
       return
     case 'git.editor':
-      settings.git.editor = current.git.editor
+      target.git.editor = current.git.editor
       return
     case 'git.mergeTool':
-      settings.git.mergeTool = current.git.mergeTool
+      target.git.mergeTool = current.git.mergeTool
       return
     case 'git.defaultPullStrategy':
-      settings.git.defaultPullStrategy = current.git.defaultPullStrategy
+      target.git.defaultPullStrategy = current.git.defaultPullStrategy
       return
     case 'git.defaultMergeMethod':
-      settings.git.defaultMergeMethod = current.git.defaultMergeMethod
+      target.git.defaultMergeMethod = current.git.defaultMergeMethod
       return
     case 'git.fetchIntervalSeconds':
-      settings.git.fetchIntervalSeconds = current.git.fetchIntervalSeconds
+      target.git.fetchIntervalSeconds = current.git.fetchIntervalSeconds
       return
     case 'appearance.theme':
-      settings.appearance.theme = current.appearance.theme
+      target.appearance.theme = current.appearance.theme
       return
     case 'appearance.reduceMotion':
-      settings.appearance.reduceMotion = current.appearance.reduceMotion
+      target.appearance.reduceMotion = current.appearance.reduceMotion
       return
     case 'privacy.includeLocalPaths':
-      settings.privacy.includeLocalPaths = current.privacy.includeLocalPaths
+      target.privacy.includeLocalPaths = current.privacy.includeLocalPaths
+      return
+    case 'updates.channel':
+      target.updates.channel = current.updates.channel
       return
     case 'shortcuts':
-      settings.shortcuts = current.shortcuts
+      target.shortcuts = current.shortcuts
       return
     default:
       return
@@ -615,53 +624,6 @@ export async function resetSettings(
  */
 export function resetTarget(current: AppSettings, locks: readonly SettingsLock[]): AppSettings {
   const settings = structuredClone(DEFAULT_SETTINGS)
-  for (const lock of locks) preserveLocked(settings, current, lock.key)
+  for (const lock of locks) restoreKey(settings, current, lock.key)
   return settings
-}
-
-/** Puts back the value a lock fixed, so a reset cannot quietly clear it. */
-function preserveLocked(target: AppSettings, current: AppSettings, key: string): void {
-  switch (key) {
-    case 'github.host':
-      target.github.host = current.github.host
-      return
-    case 'notifications.enabled':
-      target.notifications.enabled = current.notifications.enabled
-      return
-    case 'git.useSystemGit':
-      target.git.useSystemGit = current.git.useSystemGit
-      return
-    case 'git.editor':
-      target.git.editor = current.git.editor
-      return
-    case 'git.mergeTool':
-      target.git.mergeTool = current.git.mergeTool
-      return
-    case 'git.defaultPullStrategy':
-      target.git.defaultPullStrategy = current.git.defaultPullStrategy
-      return
-    case 'git.defaultMergeMethod':
-      target.git.defaultMergeMethod = current.git.defaultMergeMethod
-      return
-    case 'git.fetchIntervalSeconds':
-      target.git.fetchIntervalSeconds = current.git.fetchIntervalSeconds
-      return
-    case 'appearance.theme':
-      target.appearance.theme = current.appearance.theme
-      return
-    case 'appearance.reduceMotion':
-      target.appearance.reduceMotion = current.appearance.reduceMotion
-      return
-    case 'privacy.includeLocalPaths':
-      target.privacy.includeLocalPaths = current.privacy.includeLocalPaths
-      return
-    case 'updates.channel':
-      target.updates.channel = current.updates.channel
-      return
-    case 'shortcuts':
-      target.shortcuts = current.shortcuts
-      return
-    default:
-      return
-  }
 }

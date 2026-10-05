@@ -3,10 +3,10 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { promises as fs } from 'node:fs'
 import { SUPPORTED_EDITORS } from '../shared/settings'
 
+/** The program to launch and the arguments it is given. */
 export interface EditorInvocation {
   command: string
   args: string[]
-  reason: string
 }
 
 /**
@@ -25,11 +25,7 @@ export function resolveEditorInvocation(
   if (configured) {
     if ((SUPPORTED_EDITORS as readonly string[]).includes(configured)) {
       return {
-        invocation: {
-          command: configured,
-          args: [targetPath],
-          reason: 'the editor configured in Settings',
-        },
+        invocation: { command: configured, args: [targetPath] },
         reason: 'the editor configured in Settings',
       }
     }
@@ -37,22 +33,18 @@ export function resolveEditorInvocation(
   }
   if (process.platform === 'darwin') {
     return {
-      invocation: {
-        command: 'open',
-        args: ['-t', targetPath],
-        reason: 'the default text editor on macOS',
-      },
+      invocation: { command: 'open', args: ['-t', targetPath] },
       reason: 'this platform’s default text editor',
     }
   }
   if (process.platform === 'win32') {
     return {
-      invocation: { command: 'notepad', args: [targetPath], reason: 'Notepad' },
+      invocation: { command: 'notepad', args: [targetPath] },
       reason: 'this platform’s default text editor',
     }
   }
   return {
-    invocation: { command: 'gedit', args: [targetPath], reason: 'default text editor' },
+    invocation: { command: 'gedit', args: [targetPath] },
     reason: 'this platform’s default text editor',
   }
 }

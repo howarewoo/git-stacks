@@ -237,10 +237,7 @@ export function backgroundRead<T>(
     readKeys,
     root,
     signal,
-    async (combined) => {
-      const runtime = await resolveGitRuntime()
-      return withGitRuntime(runtime, () => operation(root, combined))
-    },
+    async (combined) => inGitRuntime(() => operation(root, combined)),
     requestId,
     purpose,
   )
@@ -825,6 +822,16 @@ function validateSender(event: IpcMainInvokeEvent) {
   if (origin !== trustedOrigin) throw new UntrustedRequestError('Untrusted application origin.')
 }
 
+/**
+ * Runs an operation against the Git this installation is configured to use.
+ *
+ * Every local Git command resolves the same runtime this way, so work started
+ * here uses the chosen Git rather than whatever happens to be on PATH.
+ */
+async function inGitRuntime<T>(operation: () => Promise<T>): Promise<T> {
+  return withGitRuntime(await resolveGitRuntime(), operation)
+}
+
 function repository() {
   if (!activeRepository) throw new Error('Open a local Git repository first.')
   return activeRepository
@@ -849,8 +856,7 @@ function readRepository<T>(
   return operations
     .read(async () => {
       if (root !== activeRepository) throw superseded()
-      const runtime = await resolveGitRuntime()
-      return withGitRuntime(runtime, () => operation(root, controller.signal))
+      return inGitRuntime(() => operation(root, controller.signal))
     }, controller.signal)
     .finally(() => readKeys.release(root, requestId, controller))
 }
@@ -992,8 +998,7 @@ async function activateRepository(selected: string, signal?: AbortSignal) {
   stopBackgroundSync()
   return operations.switchRepository(path, async () => {
     if (signal?.aborted) throw new CommandCancelled()
-    const runtime = await resolveGitRuntime()
-    return withGitRuntime(runtime, async () => {
+    return inGitRuntime(async () => {
       if (signal?.aborted) throw new CommandCancelled()
       const snapshot = await getSnapshot(path)
       if (signal?.aborted) throw new CommandCancelled()
@@ -1033,10 +1038,6 @@ function onboardingFailure(scope: string, error: unknown): OnboardingFailure {
         : classifyTransportFailure(error)
   if (failure.reason !== 'cancelled') recordFailure(scope, failure.message)
   return failure
-}
-
-function readRequestId(value: unknown): string {
-  return typeof value === 'string' && value ? value : 'onboarding'
 }
 
 function requireString(value: unknown, name: string, limit = 4096): string {
@@ -1353,10 +1354,12 @@ async function currentDiagnostics(settings: AppSettings) {
 }
 
 /**
- * Every handler is registered through this, so a failure main handled leaves
- * the one record a support bundle can carry: the fixed channel and a safe
- * failure category. The thrown value is re-raised unchanged, so the window
- * still decides what to show.
+ * Every handler is registered through this, so two things hold for all of them
+ * rather than for the ones that remembered: a request is refused before it
+ * reaches a handler unless it came from this window's own main frame on the
+ * trusted origin, and a failure main handled leaves the one record a support
+ * bundle can carry — the fixed channel and a safe failure category. The thrown
+ * value is re-raised unchanged, so the window still decides what to show.
  *
  * A request from outside the app is refused rather than failed, and a cancelled
  * operation is the answer the user asked for, so neither is recorded.
@@ -1368,7 +1371,10 @@ const ipcMain = {
   ): void {
     electronIpcMain.handle(channel, (event, ...args: Args) =>
       Promise.resolve()
-        .then(() => listener(event, ...args))
+        .then(() => {
+          validateSender(event)
+          return listener(event, ...args)
+        })
         .catch((error: unknown) => {
           if (!(error instanceof UntrustedRequestError) && !isCommandCancelled(error)) {
             recordFailure(channel, error)
@@ -1387,7 +1393,6 @@ function installHandlers() {
   // The clone destination is chosen with the platform folder picker, so the
   // renderer never composes a filesystem path of its own.
   ipcMain.handle('repositories:choose-destination', async (event, current: unknown) => {
-    validateSender(event)
     const result = await dialog.showOpenDialog(window!, {
       title: 'Choose where to clone',
       buttonLabel: 'Use this folder',
@@ -1397,11 +1402,9 @@ function installHandlers() {
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
   ipcMain.handle('repositories:recent', (event) => {
-    validateSender(event)
     return recents
   })
   ipcMain.handle('repositories:open', async (event, requestedPath: unknown) => {
-    validateSender(event)
     if (requestedPath !== undefined) {
       if (
         typeof requestedPath !== 'string' ||
@@ -1422,13 +1425,11 @@ function installHandlers() {
   // A folder chosen by dialog or dropped on the window is added by its absolute
   // path. It is read exactly as it is found: nothing inside it is written.
   ipcMain.handle('repositories:add', async (event, requestedPath: unknown) => {
-    validateSender(event)
     return activateRepository(requireString(requestedPath, 'folder'))
   })
   ipcMain.handle('git-environment', async (event, requestId: unknown) => {
-    validateSender(event)
     try {
-      const value = await onboardingRequest(readRequestId(requestId), (signal) =>
+      const value = await onboardingRequest(requestIdClaim(requestId, 'onboarding'), (signal) =>
         readGitEnvironment(signal),
       )
       // The capability report measures the HTTPS helper and the SSH client from
@@ -1440,13 +1441,12 @@ function installHandlers() {
     }
   })
   ipcMain.handle('repositories:search', async (event, request: unknown) => {
-    validateSender(event)
     const asked = (request ?? {}) as { query?: unknown; requestId?: unknown }
     const query = typeof asked.query === 'string' ? asked.query : ''
     try {
       const host = configuredHost()
       const value = await forSelectedHost((hostSignal) =>
-        onboardingRequest(readRequestId(asked.requestId), (signal) =>
+        onboardingRequest(requestIdClaim(asked.requestId, 'onboarding'), (signal) =>
           discoverRepositories({
             host,
             query,
@@ -1463,15 +1463,16 @@ function installHandlers() {
   // process claimed before it is registered, so a cancelled or failed clone
   // leaves nothing behind to open.
   ipcMain.handle('repositories:clone', async (event, request: unknown) => {
-    validateSender(event)
     const asked = (request ?? {}) as Record<string, unknown>
     try {
       const clone = validatedClone(asked)
-      const value = await onboardingRequest(readRequestId(asked.requestId), (signal) =>
-        runCloneRequest(clone, signal, {
-          clone: cloneRepository,
-          activate: (path) => activateRepository(path),
-        }),
+      const value = await onboardingRequest(
+        requestIdClaim(asked.requestId, 'onboarding'),
+        (signal) =>
+          runCloneRequest(clone, signal, {
+            clone: cloneRepository,
+            activate: (path) => activateRepository(path),
+          }),
       )
       return { ok: true as const, value }
     } catch (error) {
@@ -1481,7 +1482,6 @@ function installHandlers() {
   // The same commands without running anything, so the clone can be reproduced
   // in a terminal or with `gh repo clone` before a single file is written.
   ipcMain.handle('repositories:clone-preview', async (event, request: unknown) => {
-    validateSender(event)
     try {
       const clone = validatedClone(request)
       return {
@@ -1507,17 +1507,14 @@ function installHandlers() {
     }
   })
   ipcMain.handle('repository:refresh', async (event) => {
-    validateSender(event)
     repository()
     // The person's own refresh always reads GitHub; it never reuses a payload.
     return sync.refreshNow()
   })
   ipcMain.handle('repository:status', (event) => {
-    validateSender(event)
     return sync.freshness()
   })
   ipcMain.handle('repository:activity', (event, activity: unknown) => {
-    validateSender(event)
     if (
       typeof activity !== 'object' ||
       activity === null ||
@@ -1529,12 +1526,10 @@ function installHandlers() {
     sync.reportActivity(activity as SyncActivity)
   })
   ipcMain.handle('repository:dismiss-pending-mutation', (event, id: unknown) => {
-    validateSender(event)
     if (typeof id !== 'string' || !id) throw new Error('A pending mutation id is required.')
     return sync.dismissPendingMutation(id)
   })
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
-    validateSender(event)
     const root = repository()
     try {
       // A mutation claims the repository lane: background reads end first, so a
@@ -1543,13 +1538,16 @@ function installHandlers() {
         // Naming the repository is the admission check: a switch can complete
         // while this action waited for the background reads it ends, and an
         // action must never apply to the repository the window already left.
-        operations.write(async () => {
-          const runtime = await resolveGitRuntime()
-          // The merge tool configured in Settings wins over Git's own
-          // configuration for the one action that consults it.
-          const settings = (await readSettingsFile(settingsFile())).settings
-          return withGitRuntime(runtime, () => runAction(root, action, settings.git.mergeTool))
-        }, root),
+        operations.write(
+          () =>
+            inGitRuntime(async () => {
+              // The merge tool configured in Settings wins over Git's own
+              // configuration for the one action that consults it.
+              const settings = (await readSettingsFile(settingsFile())).settings
+              return runAction(root, action, settings.git.mergeTool)
+            }),
+          root,
+        ),
       )
     } catch (error) {
       // A high-impact remote mutation that lost its answer is listed, never
@@ -1559,30 +1557,24 @@ function installHandlers() {
     }
   })
   ipcMain.handle('repository:file', (event, filePath: string) => {
-    validateSender(event)
     return readRepository((root, signal) => getFileView(root, filePath, signal), `file:${filePath}`)
   })
   ipcMain.handle('repository:conflict', async (event, filePath: string) => {
-    validateSender(event)
     // The conflict view reports the tool it would use, so the configured value
     // the merge action honours is the one the resolver shows.
     const settings = (await readSettingsFile(settingsFile())).settings
     return readRepository((root) => getConflictView(root, filePath, settings.git.mergeTool))
   })
   ipcMain.handle('repository:history', (event, ref: string, skip: number, requestId?: string) => {
-    validateSender(event)
     return readRepository((root, signal) => getHistory(root, ref, skip, signal), requestId)
   })
   ipcMain.handle('repository:commit-diff', (event, oid: string, requestId?: string) => {
-    validateSender(event)
     return readRepository((root, signal) => getCommitDiff(root, oid, signal), requestId)
   })
   ipcMain.handle('repository:push-preview', (event) => {
-    validateSender(event)
     return readRepository((root) => getPushPreview(root))
   })
   ipcMain.handle('repository:stack-preview', (event, kind: StackKind, branch: string) => {
-    validateSender(event)
     return readRepository(
       async (root, signal) => previewStack(root, await getSnapshot(root, signal), kind, branch),
       'stack-preview',
@@ -1590,7 +1582,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:surgery-preview', (event, request: unknown) => {
-    validateSender(event)
     return readRepository(
       async (root, signal) =>
         previewSurgery(root, await getSnapshot(root, signal), validateSurgeryRequest(request)),
@@ -1599,7 +1590,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:reconciliation-preview', (event, stackKey: string) => {
-    validateSender(event)
     return readRepository(
       async (root) => previewReconciliationRepair(root, await getSnapshot(root), stackKey),
       'reconciliation-preview',
@@ -1607,13 +1597,11 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:submit-stack-progress', (event) => {
-    validateSender(event)
     return readRepository((root) => getSubmitStackProgress(root))
   })
   // Read-only: a queue outcome or a still-running request is read from the journal and GitHub,
   // never by asking for another merge.
   ipcMain.handle('repository:merge-status', (event) => {
-    validateSender(event)
     return readRepository((root) => getMergeStatus(root), 'merge-status', 'github')
   })
   // A running submission pushes its own progress. The renderer cannot poll for it: the read
@@ -1629,7 +1617,6 @@ function installHandlers() {
     window?.webContents.send('merge-progress', progress)
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => getPullRequest(root, number, signal),
       `pull-request:${number}`,
@@ -1637,13 +1624,11 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:search-issues', (event, query: unknown, requestId?: unknown) => {
-    validateSender(event)
     const q = typeof query === 'string' ? query : ''
     const reqId = typeof requestId === 'string' ? requestId : 'search-issues'
     return readRepository((root, signal) => searchGitHubIssues(root, q, signal), reqId, 'github')
   })
   ipcMain.handle('repository:pull-request-issue-links', (event, number: unknown) => {
-    validateSender(event)
     if (typeof number !== 'number' || !Number.isInteger(number) || number <= 0) {
       throw new Error('Pull request number must be a positive integer')
     }
@@ -1656,7 +1641,6 @@ function installHandlers() {
   ipcMain.handle(
     'repository:preview-issue-link',
     (event, prNumber: unknown, issueNumber: unknown, relation: unknown, action: unknown) => {
-      validateSender(event)
       if (typeof prNumber !== 'number' || !Number.isInteger(prNumber) || prNumber <= 0) {
         throw new Error('Pull request number must be a positive integer')
       }
@@ -1683,7 +1667,6 @@ function installHandlers() {
   // another pull request cancels the read that is now obsolete instead of
   // letting it answer for a pull request nobody is looking at.
   ipcMain.handle('repository:review-headline', (event, number: unknown, requestId?: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => readReviewHeadline(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-headline'),
@@ -1691,7 +1674,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-files', (event, number: unknown, requestId?: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => readReviewFiles(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-files'),
@@ -1699,7 +1681,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-commits', (event, number: unknown, requestId?: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => readReviewCommits(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-commits'),
@@ -1707,7 +1688,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-viewed', (event, number: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => readViewedRecord(root, requirePullRequestNumber(number), signal),
       'review-viewed',
@@ -1715,7 +1695,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-set-viewed', (event, value: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => writeViewedRecord(root, requireViewedRecord(value), signal),
       'review-set-viewed',
@@ -1723,7 +1702,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-threads', (event, number: unknown, requestId?: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => readReviewThreads(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-threads'),
@@ -1731,7 +1709,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-drafts', (event, number: unknown) => {
-    validateSender(event)
     return readRepository(
       async (root, signal) => {
         const remote = await originRemote(root, signal)
@@ -1757,7 +1734,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-set-drafts', (event, value: unknown) => {
-    validateSender(event)
     return readRepository(
       async (root, signal) => {
         const incoming = requireDraftRecord(value)
@@ -1778,46 +1754,37 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-submit', (event, number: unknown, value: unknown) => {
-    validateSender(event)
-    return operations.write(async () => {
-      const runtime = await resolveGitRuntime()
-      return withGitRuntime(runtime, () =>
+    return operations.write(() =>
+      inGitRuntime(() =>
         submitReview(repository(), requirePullRequestNumber(number), requireSubmission(value)),
-      )
-    })
+      ),
+    )
   })
   ipcMain.handle(
     'repository:review-reply',
     (event, number: unknown, threadId: unknown, body: unknown) => {
-      validateSender(event)
-      return operations.write(async () => {
-        const runtime = await resolveGitRuntime()
-        return withGitRuntime(runtime, () =>
+      return operations.write(() =>
+        inGitRuntime(() =>
           replyToThread(
             repository(),
             requirePullRequestNumber(number),
             requireThreadId(threadId),
             requireCommentBody(body),
           ),
-        )
-      })
+        ),
+      )
     },
   )
   ipcMain.handle(
     'repository:review-resolve',
     (event, number: unknown, threadId: unknown, resolved: unknown) => {
-      validateSender(event)
       if (typeof resolved !== 'boolean') throw new Error('Choose whether to resolve this thread.')
-      return operations.write(async () => {
-        const runtime = await resolveGitRuntime()
-        return withGitRuntime(runtime, () =>
-          setThreadResolved(repository(), requireThreadId(threadId), resolved),
-        )
-      })
+      return operations.write(() =>
+        inGitRuntime(() => setThreadResolved(repository(), requireThreadId(threadId), resolved)),
+      )
     },
   )
   ipcMain.handle('repository:review-resolve-drafts', (event, number: unknown, value: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) =>
         resolveReviewDraftsAt(
@@ -1831,7 +1798,6 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:review-history', (event, number: unknown, requestId?: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => readReviewHistory(root, requirePullRequestNumber(number), signal),
       requestIdClaim(requestId, 'review-history'),
@@ -1841,7 +1807,6 @@ function installHandlers() {
   ipcMain.handle(
     'repository:review-history-diff',
     (event, number: unknown, fromOid: unknown, requestId?: unknown) => {
-      validateSender(event)
       return readRepository(
         (root, signal) =>
           readReviewHistoryDiff(
@@ -1856,7 +1821,6 @@ function installHandlers() {
     },
   )
   ipcMain.handle('repository:review-clear-history', (event, number: unknown) => {
-    validateSender(event)
     return readRepository(
       (root, signal) => clearReviewHistory(root, requirePullRequestNumber(number), signal),
       'review-clear-history',
@@ -1867,7 +1831,6 @@ function installHandlers() {
   ipcMain.handle(
     'repository:pull-request-checks',
     (event, number: number, options?: PullRequestChecksOptions) => {
-      validateSender(event)
       if (!Number.isInteger(number) || number <= 0) {
         throw new Error('Pull request number must be a positive integer.')
       }
@@ -1881,12 +1844,10 @@ function installHandlers() {
   // Rerunning a workflow mutates GitHub, so it is a write: it is refused while any
   // other repository operation is in flight rather than interleaving with one.
   ipcMain.handle('repository:pull-request-check-rerun', (event, number: number, runId: number) => {
-    validateSender(event)
     return operations.write(() => rerunPullRequestCheck(repository(), number, runId))
   })
 
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
-    validateSender(event)
     if (typeof requestId !== 'string' || !requestId) return
     onboardingKeys.cancel(ONBOARDING_ROOT, requestId)
     // The queue runs across repositories, so it is cancelled whether or not one
@@ -1896,7 +1857,6 @@ function installHandlers() {
     readKeys.cancel(activeRepository, requestId)
   })
   ipcMain.handle('external:open', async (event, value: unknown) => {
-    validateSender(event)
     // Trust is decided by the hosts this installation already speaks to, never
     // by the shape of the link. A host that is only spelled like one of them is
     // a different host, and a link to it is refused the same as any other.
@@ -1910,7 +1870,6 @@ function installHandlers() {
   // Its reads claim their own request ids, which makes a refresh cancellable
   // and makes a later refresh end the one still in flight.
   ipcMain.handle('inbox:pull-requests', async (event, requested: unknown) => {
-    validateSender(event)
     const asked = (requested ?? {}) as { requestId?: unknown; mergedWithinDays?: unknown }
     const days = asked.mergedWithinDays
     const mergedWithinDays =
@@ -1936,8 +1895,7 @@ function installHandlers() {
             // Fenced after the targets are resolved, so the hosts this read asks
             // are the hosts whose credentials the identity names.
             const identity = await inboxIdentityNow()
-            const runtime = await resolveGitRuntime()
-            const report = await withGitRuntime(runtime, () =>
+            const report = await inGitRuntime(() =>
               inboxService.refresh(targets, {
                 ...(mergedWithinDays ? { mergedWithinDays } : {}),
                 signal: combined,
@@ -1972,11 +1930,9 @@ function installHandlers() {
     }
   })
   ipcMain.handle('inbox:filters', async (event) => {
-    validateSender(event)
     return inboxFiltersReady.then(() => inboxFilters.list())
   })
   ipcMain.handle('inbox:filters-save', async (event, value: unknown) => {
-    validateSender(event)
     if (!Array.isArray(value)) throw new Error('Saved filters must be a list.')
     // This write replaces the whole list, so it waits for the stored list to
     // have been read: a save taken against an unread store would drop every
@@ -1988,7 +1944,6 @@ function installHandlers() {
   // produced by probing that host, so a host that has never answered reports
   // unknown rather than anything it was not shown to do.
   ipcMain.handle('github:host-status', async (event) => {
-    validateSender(event)
     // The host and its generation are taken before the origin is read, so a host
     // change during that read cannot leave this answering with the retired host.
     const selected = captureSelectedHost()
@@ -2011,11 +1966,9 @@ function installHandlers() {
     )
   })
   ipcMain.handle('git-runtime', async (event) => {
-    validateSender(event)
     return operations.read(() => gitRuntimeStatus(settingsFile()))
   })
   ipcMain.handle('git-runtime:system-git', async (event, requested: unknown) => {
-    validateSender(event)
     if (typeof requested !== 'boolean') throw new Error('Use system Git must be true or false.')
     // This control predates Settings and is still mounted. It goes through the
     // same policy-aware write as the Settings surface so a machine that locked
@@ -2029,20 +1982,17 @@ function installHandlers() {
   // while a repository is mid-operation, and locking the user out of Settings
   // to change an unrelated preference is not a safety property.
   ipcMain.handle('settings', async (event) => {
-    validateSender(event)
     return runSettingsTransaction(async () => {
       return withToolAvailability(await readSettingsSnapshot(settingsFile(), settingsLocks))
     })
   })
   ipcMain.handle('settings:update', async (event, patch: unknown) => {
-    validateSender(event)
     if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
       throw new Error('Settings changes must be an object of setting groups.')
     }
     return withToolAvailability(await changeSettingsPatch(patch as SettingsPatch))
   })
   ipcMain.handle('settings:reset', async (event) => {
-    validateSender(event)
     // Restoring defaults touches this app's own settings and its own update
     // state and nothing else: no repository, ref, or working tree is read or
     // written. A reset carries the update channel with it, so it is decided with
@@ -2084,12 +2034,10 @@ function installHandlers() {
   // The capability report takes no argument, so the window cannot ask main to
   // run a command of its choosing. Main runs its own fixed allowlist.
   ipcMain.handle('diagnostics', async (event) => {
-    validateSender(event)
     const settings = (await readSettingsFile(settingsFile())).settings
     return operations.read(() => currentDiagnostics(settings))
   })
   ipcMain.handle('support-bundle:preview', async (event) => {
-    validateSender(event)
     const settings = await runSettingsTransaction(async () => {
       return (await readSettingsFile(settingsFile())).settings
     })
@@ -2116,7 +2064,6 @@ function installHandlers() {
     })
   })
   ipcMain.handle('support-bundle:export', async (event, requestedPreviewId: unknown) => {
-    validateSender(event)
     if (typeof requestedPreviewId !== 'string' || requestedPreviewId.trim().length === 0) {
       throw new Error('A valid support bundle preview ID is required.')
     }
@@ -2163,7 +2110,6 @@ function installHandlers() {
   // Main resolves the editor from settings and checks the path is inside the
   // repository. The renderer supplies neither a command nor an absolute path.
   ipcMain.handle('editor:open', async (event, relativePath: unknown) => {
-    validateSender(event)
     if (typeof relativePath !== 'string' || relativePath.length === 0) {
       throw new Error('A file path is required.')
     }
@@ -2177,7 +2123,6 @@ function installHandlers() {
   // credential. It never takes the repository gate either, so a stalled GitHub
   // endpoint cannot block local Git work.
   ipcMain.handle('github-cli:status', async (event) => {
-    validateSender(event)
     // A read that started for a host that is no longer selected is discarded: the
     // answer comes from the host that replaced it, so a late read never describes
     // a host this window has left.
@@ -2192,21 +2137,17 @@ function installHandlers() {
   // notifications must not block local Git work, and removing its credential
   // must not disturb the GitHub CLI account the rest of the app reads through.
   ipcMain.handle('notifications:status', async (event) => {
-    validateSender(event)
     return notificationCenter().status()
   })
   ipcMain.handle('notifications:inbox', async (event) => {
-    validateSender(event)
     return notificationCenter().inbox()
   })
   // The refresh takes no arguments at all. The floor it waits for is GitHub's,
   // so nothing the window can send — not a flag, not a count — can outrun it.
   ipcMain.handle('notifications:refresh', async (event) => {
-    validateSender(event)
     return notificationCenter().refresh()
   })
   ipcMain.handle('notifications:cancel', (event) => {
-    validateSender(event)
     notifications?.cancel()
   })
   // The token arrives once, here, and is sealed with a key protected by the
@@ -2215,7 +2156,6 @@ function installHandlers() {
   ipcMain.handle(
     'notifications:save-credential',
     async (event, token: unknown, consent: unknown, host: unknown) => {
-      validateSender(event)
       const currentHost = configuredHost().host
       if (typeof host !== 'string' || host !== currentHost) {
         throw new Error(
@@ -2226,21 +2166,17 @@ function installHandlers() {
     },
   )
   ipcMain.handle('notifications:remove-credential', async (event) => {
-    validateSender(event)
     return notificationCenter().removeCredential()
   })
   ipcMain.handle('notifications:mark-read', async (event, threadId: unknown) => {
-    validateSender(event)
     return notificationCenter().markRead(threadId)
   })
   ipcMain.handle('notifications:done', async (event, threadId: unknown) => {
-    validateSender(event)
     return notificationCenter().markDone(threadId)
   })
   ipcMain.handle(
     'notifications:subscription',
     async (event, threadId: unknown, action: unknown) => {
-      validateSender(event)
       return notificationCenter().setSubscription(threadId, action)
     },
   )
@@ -2250,23 +2186,18 @@ function installHandlers() {
   // state machine. Nothing the window can send chooses a URL, a file, or a
   // command.
   ipcMain.handle('update:status', (event) => {
-    validateSender(event)
     return requireUpdateService().status()
   })
   ipcMain.handle('update:check', async (event) => {
-    validateSender(event)
     return await requireUpdateService().check()
   })
   ipcMain.handle('update:download', async (event) => {
-    validateSender(event)
     return await requireUpdateService().download()
   })
   ipcMain.handle('update:install', async (event) => {
-    validateSender(event)
     return await requireUpdateService().install()
   })
   ipcMain.handle('update:cancel', (event) => {
-    validateSender(event)
     return requireUpdateService().cancel()
   })
 }

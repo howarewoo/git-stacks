@@ -54,9 +54,12 @@ import {
   fail,
   flag,
   HISTORY_KEY_SET_PATH,
+  INJECTED_KEY_SET_PATH,
   parseFlags,
+  publicKeyBytesOf,
   readHistoryKeys,
   readInjectedKeys,
+  requireEd25519SigningKey,
 } from './release-update-common'
 
 /** A fixed string, so this proves a key pair rather than proving some key. */
@@ -90,7 +93,7 @@ function publicKeyFrom(value: string | undefined, name: string, missing: string)
     )
   }
   try {
-    return createPublicKey(secret).export({ format: 'der', type: 'spki' })
+    return publicKeyBytesOf(createPublicKey(secret))
   } catch {
     // Not PEM. It may be the base64 DER the app's key registry stores.
   }
@@ -99,10 +102,7 @@ function publicKeyFrom(value: string | undefined, name: string, missing: string)
     fail(`the ${name} repository secret is neither a PEM public key nor base64 DER.`)
   }
   try {
-    return createPublicKey({ key: der, format: 'der', type: 'spki' }).export({
-      format: 'der',
-      type: 'spki',
-    })
+    return publicKeyBytesOf({ key: der, format: 'der', type: 'spki' })
   } catch {
     return fail(`the ${name} repository secret is not a readable public key.`)
   }
@@ -188,8 +188,9 @@ function instantOf(name: string, fallback: string): string {
   return new Date(Date.parse(value)).toISOString()
 }
 
+const command = process.argv[2]
 const flags = parseFlags(process.argv.slice(3))
-const out = flag(flags, 'out', 'resources/update-trusted-keys.json')
+const out = flag(flags, 'out', INJECTED_KEY_SET_PATH)
 
 /**
  * What a build of this release would actually trust. An empty set is the state
@@ -208,7 +209,7 @@ function requireShippableKeySet(path: string): string {
   return keys
 }
 
-if (process.argv[2] === 'check-injected') {
+if (command === 'check-injected') {
   const shipped = requireShippableKeySet(out)
   const expected = releasePublicKey()
   const named = process.env.UPDATE_SIGNING_KEY_ID?.trim()
@@ -288,20 +289,17 @@ if (process.argv[2] === 'check-injected') {
   process.exit(0)
 }
 
-if (process.argv[2] !== 'inject') {
+if (command !== 'inject') {
   fail(
     'usage: release-trusted-keys.ts inject [--out <path>] | check-injected [--out <path>]. `inject` runs before `npm run dist` so the packaged build carries the key it will verify releases with; `check-injected` refuses a build that would ship without it.',
   )
 }
 
-const privateKey = createPrivateKey(secret('UPDATE_SIGNING_KEY', 'proving the release key pair'))
-if (privateKey.asymmetricKeyType !== 'ed25519') {
-  fail(
-    `the UPDATE_SIGNING_KEY repository secret holds a ${privateKey.asymmetricKeyType} key; update manifests are signed with Ed25519.`,
-  )
-}
+const privateKey = requireEd25519SigningKey(
+  createPrivateKey(secret('UPDATE_SIGNING_KEY', 'proving the release key pair')),
+)
 const declared = releasePublicKey()
-const derived = createPublicKey(privateKey).export({ format: 'der', type: 'spki' })
+const derived = publicKeyBytesOf(privateKey)
 if (!declared.equals(derived)) {
   fail(
     'UPDATE_SIGNING_PUBLIC_KEY is not the public half of UPDATE_SIGNING_KEY, so the build would be packaged with a key it can never verify a manifest with. Nothing is written; check that both secrets come from the same keypair.',

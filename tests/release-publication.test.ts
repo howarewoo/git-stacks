@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { generateKeyPairSync, type KeyObject } from 'node:crypto'
+import { createPublicKey, generateKeyPairSync, type KeyObject } from 'node:crypto'
 import {
   copyFileSync,
   existsSync,
@@ -368,6 +368,112 @@ function installedBuildAccepts(
     ? { ok: true, version: manifest.value.version }
     : { ok: false, reason: offer.failure.reason }
 }
+
+for (const format of ['pem', 'base64'] as const) {
+  test(`release key injection accepts ${format} signing and rotation public keys`, () => {
+    const space = workspace()
+    const signing = ephemeralKey('release-signing')
+    const introduced = ephemeralKey('release-introduced', hoursFromNow(24))
+    declarePublished(space, signing, introduced)
+    const publicKey = (key: EphemeralKey): string =>
+      format === 'pem'
+        ? createPublicKey(key.privateKey).export({ format: 'pem', type: 'spki' }).toString()
+        : key.registry.publicKey
+    const env = {
+      UPDATE_SIGNING_KEY: signing.secret,
+      UPDATE_SIGNING_KEY_ID: signing.keyId,
+      UPDATE_SIGNING_PUBLIC_KEY: publicKey(signing),
+      UPDATE_SIGNING_KEY_VALID_FROM: signing.registry.validFrom,
+      UPDATE_SIGNING_ADDITIONAL_KEY_ID: introduced.keyId,
+      UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: publicKey(introduced),
+      UPDATE_SIGNING_ADDITIONAL_VALID_FROM: introduced.registry.validFrom,
+      UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: introduced.registry.validUntil ?? '',
+    }
+    try {
+      const injected = injectKeys(space, env)
+      assert.equal(injected.code, 0, injected.out)
+      const checked = space.run('release-trusted-keys.ts', ['check-injected'], env)
+      assert.equal(checked.code, 0, checked.out)
+      const registry = readFileSync(
+        join(space.root, 'resources', 'update-trusted-keys.json'),
+        'utf8',
+      )
+      assert.deepEqual(JSON.parse(registry), {
+        schema: 1,
+        keys: [signing.registry, introduced.registry],
+      })
+    } finally {
+      rmSync(space.root, { recursive: true, force: true })
+    }
+  })
+}
+
+test('release verification refuses a manifest that expires while an earlier installer is hashed', () => {
+  const space = workspace()
+  const key = ephemeralKey('release-expiry')
+  declarePublished(space, key)
+  try {
+    const published = release(space, { version: '0.1.0', key })
+    assert.equal(published.code, 0, published.out)
+    const manifestPath = join(space.root, 'channel-feed', MANIFEST)
+    const parsed = parseUpdateManifest(readFileSync(manifestPath))
+    if (!parsed.ok) throw new Error(parsed.failure.message)
+    const now = Date.now()
+    const expiresAt = now + 1000
+    const manifest = {
+      ...parsed.value,
+      issuedAt: new Date(now - 60_000).toISOString(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    }
+    writeFileSync(manifestPath, JSON.stringify(manifest))
+    const env = { UPDATE_SIGNING_KEY: key.secret }
+    const signed = space.run(
+      'release-update-sign.ts',
+      ['--channel', CHANNEL, '--manifest', manifestPath],
+      env,
+    )
+    assert.equal(signed.code, 0, signed.out)
+    const hook = join(space.root, 'clock.cjs')
+    const firstInstaller = join(space.root, 'channel-assets', manifest.artifacts[0].fileName)
+    writeFileSync(
+      hook,
+      `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+let now = ${now}
+Date.now = () => now
+const read = fs.readFileSync
+fs.readFileSync = function(path, ...args) {
+  const bytes = read.call(this, path, ...args)
+  if (path === ${JSON.stringify(firstInstaller)} && process.env.ADVANCE_CLOCK === '1') now = ${expiresAt}
+  return bytes
+}
+syncBuiltinESMExports()
+`,
+    )
+    const args = [
+      '--channel',
+      CHANNEL,
+      '--manifest',
+      manifestPath,
+      '--artifact-dir',
+      join(space.root, 'channel-assets'),
+    ]
+    const baseline = space.run('release-update-verify.ts', args, {
+      ...env,
+      NODE_OPTIONS: `--require ${hook}`,
+    })
+    assert.equal(baseline.code, 0, baseline.out)
+    const expired = space.run('release-update-verify.ts', args, {
+      ...env,
+      NODE_OPTIONS: `--require ${hook}`,
+      ADVANCE_CLOCK: '1',
+    })
+    assert.equal(expired.code, 1, expired.out)
+    assert.match(expired.out, /\(expired\)/u)
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
 
 test(
   'a publication banks its sequence, replaces the live pair, and reads both back',

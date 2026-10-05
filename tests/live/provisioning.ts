@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { LiveCleanupReport, LiveResource, LiveResourceKind, LiveResources } from './contract'
+import type { LiveCleanupReport, LiveResource, LiveResources } from './contract'
 
 /**
  * The record of everything a run created, and the rule that decides what it may
@@ -318,7 +318,7 @@ export class ResourceLedger implements LiveResources {
  * ownership cannot be proven is the whole point of the check, so an unreadable
  * marker and an absent one are answered the same way.
  */
-export function ownsMarker(observed: string | null | undefined, marker: string): boolean {
+function ownsMarker(observed: string | null | undefined, marker: string): boolean {
   if (typeof observed !== 'string' || marker === '') return false
   return observed.split('\n').some((line) => line.trim() === marker)
 }
@@ -371,7 +371,7 @@ export interface OwnedResourceProbe {
 }
 
 /** Reads the marker off whatever the host reports about a resource it created. */
-export function markerOnRepository(probe: OwnedResourceProbe): string | null {
+function markerOnRepository(probe: OwnedResourceProbe): string | null {
   const fromDescription = probe.description ?? ''
   const fromTopics = (probe.topics ?? []).join('\n')
   return `${fromDescription}\n${fromTopics}`
@@ -448,16 +448,6 @@ export async function readLiveReceipt(path: string): Promise<LiveReceipt> {
         typeof (entry as LiveResource).handle === 'string',
     ),
   }
-}
-
-/** The handle a resource is known by in the receipt, one shape per kind. */
-export function resourceHandle(
-  kind: LiveResourceKind,
-  input: { fullName: string; number?: number; id?: number },
-): string {
-  if (input.number !== undefined) return `${input.fullName}#${input.number}`
-  if (input.id !== undefined) return `${input.fullName}/rulesets/${input.id}`
-  return input.fullName
 }
 
 /**

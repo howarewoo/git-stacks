@@ -82,18 +82,6 @@ export class LiveRedactor {
   }
 }
 
-/**
- * The request pairs that led to a failure, with anything credential-shaped
- * removed from the method line. The status is kept because a 409 and a 422 are
- * different bugs; the body is not, because bodies carry repository contents.
- */
-export function sanitizeExchange(
-  redactor: LiveRedactor,
-  exchange: { method: string; path: string; status: number | string },
-): string {
-  return redactor.text(`${exchange.method} ${exchange.path} -> ${exchange.status}`)
-}
-
 export interface LiveFailureInput {
   scenario: string
   error: unknown

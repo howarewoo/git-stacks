@@ -78,13 +78,6 @@ import {
   type PublishedManifest,
 } from './release-update-common'
 
-/** The installer extensions this project builds, and nothing else. */
-const INSTALLER_EXTENSIONS: Record<string, true> = {
-  '.dmg': true,
-  '.exe': true,
-  '.AppImage': true,
-}
-
 /**
  * The builds every published manifest must name. This is the release matrix:
  * an app that is offered a release with no build for its own platform refuses
@@ -120,17 +113,16 @@ interface Descriptor {
   files: DescriptorFile[]
 }
 
-function isInstaller(path: string): boolean {
-  return INSTALLER_EXTENSIONS[extname(path)] === true
-}
-
 function describe(flags: Map<string, string>): void {
   const platform = requirePlatform(flag(flags, 'platform'))
   const arch = requireArchitecture(flag(flags, 'arch'))
   const directory = flag(flags, 'dir')
   const out = flag(flags, 'out')
+  // The installers this project builds are exactly the ones electron-builder
+  // writes for a kind below, so a kind added there is an installer this
+  // records without a second extension list to keep in step.
   const files = readdirSync(directory)
-    .filter(isInstaller)
+    .filter((fileName) => Object.values(KIND_EXTENSIONS).includes(extname(fileName)))
     .sort()
     .map((fileName) => ({ fileName, assetName: assetNameFor(fileName) }))
   if (files.length === 0) fail(`${directory} holds no installer for ${platform} ${arch}.`)

@@ -848,21 +848,30 @@ export class NotificationCenter {
       this.validator.discard()
     }
   }
-  /** Writes the record that names a sealed reference, atomically. */
-  private async writeCredentialFile(value: StoredNotificationCredential): Promise<void> {
-    await mkdir(dirname(this.options.credentialFile), { recursive: true })
-    const temporary = temporaryPathFor(this.options.credentialFile)
+
+  /**
+   * Writes one of this module's own files atomically and owner-only, under a
+   * name no concurrent write can pick, so two callers cannot read each other's
+   * half-written file back.
+   */
+  private async writeJson(file: string, value: unknown): Promise<void> {
+    await mkdir(dirname(file), { recursive: true })
+    const temporary = temporaryPathFor(file)
     try {
-      await writeFile(
-        temporary,
-        `${JSON.stringify({ version: CREDENTIAL_FILE_VERSION, ...value }, null, 2)}\n`,
-        { mode: 0o600 },
-      )
-      await rename(temporary, this.options.credentialFile)
+      await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+      await rename(temporary, file)
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => {})
       throw error
     }
+  }
+
+  /** Writes the record that names a sealed reference. */
+  private async writeCredentialFile(value: StoredNotificationCredential): Promise<void> {
+    await this.writeJson(this.options.credentialFile, {
+      version: CREDENTIAL_FILE_VERSION,
+      ...value,
+    })
   }
 
   /**
@@ -882,22 +891,6 @@ export class NotificationCenter {
       applied = true
     })
     return applied
-  }
-
-  /**
-   * Writes the stored list atomically, with a name no concurrent write can
-   * pick, so two callers cannot read each other's half-written file back.
-   */
-  private async writeCache(record: StoredCache): Promise<void> {
-    await mkdir(dirname(this.options.cacheFile), { recursive: true })
-    const temporary = temporaryPathFor(this.options.cacheFile)
-    try {
-      await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
-      await rename(temporary, this.options.cacheFile)
-    } catch (error) {
-      await rm(temporary, { force: true }).catch(() => {})
-      throw error
-    }
   }
 
   /**
@@ -936,7 +929,7 @@ export class NotificationCenter {
       failureKind,
       pendingRead: this.pendingBulkRead,
     }
-    return this.commit(generation, () => this.writeCache(record))
+    return this.commit(generation, () => this.writeJson(this.options.cacheFile, record))
   }
 
   /**

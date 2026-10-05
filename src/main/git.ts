@@ -40,7 +40,6 @@ import {
 } from '../shared/performance'
 import {
   CommandCancelled,
-  MAX_BUFFER,
   MAX_BRANCH_LENGTH,
   MAX_MESSAGE_LENGTH,
   MAX_PATH_LENGTH,
@@ -50,10 +49,7 @@ import {
   ensureClean,
   ensureNoBusyOperation,
   ensureNotCheckedOutElsewhere,
-  execute,
-  executeCapped,
   getBranchConfigs,
-  execFile,
   getBranchParent,
   getConfigValue,
   getCurrentBranch,
@@ -92,6 +88,7 @@ import {
   requireGitCapability,
   resolveGitRuntime,
   withGitRuntime,
+  type GitRuntimeRecord,
 } from './git-runtime'
 import {
   getHeadGitlinks,
@@ -2064,8 +2061,7 @@ async function runSwitch(repoPath: string, ref: string, carry = false): Promise<
     ])
     return { message: `Switched to ${name}` }
   }
-  const remotes = (await getRemotes(repoPath)).sort((a, b) => b.length - a.length)
-  const remote = remotes.find((name) => ref.startsWith(`refs/remotes/${name}/`))
+  const remote = await remoteForRefPath(repoPath, ref)
   if (!remote) throw new Error('The selected branch has no configured remote.')
   const localName = ref.slice(`refs/remotes/${remote}/`.length)
   if (localName === 'HEAD') throw new Error('Select a branch instead of the remote symbolic HEAD.')
@@ -2240,6 +2236,24 @@ async function runRebaseAbort(repoPath: string): Promise<ActionResult> {
   }
   return { message: 'Aborted the rebase' }
 }
+/**
+ * The configured remote a `refs/remotes/<remote>/…` path belongs to. The
+ * longest matching name wins, so a remote named `origin` never shadows one
+ * named `origin-enterprise`.
+ */
+async function remoteForRefPath(repoPath: string, ref: string): Promise<string | null> {
+  const prefix = 'refs/remotes/'
+  if (!ref.startsWith(prefix)) return null
+  const branchPath = ref.slice(prefix.length)
+  let matched: string | null = null
+  for (const name of await getRemotes(repoPath)) {
+    if (branchPath.startsWith(`${name}/`) && (matched === null || name.length > matched.length)) {
+      matched = name
+    }
+  }
+  return matched
+}
+
 async function baseForGh(
   repoPath: string,
   requestedBase: string,
@@ -2248,9 +2262,7 @@ async function baseForGh(
   if (await refExists(repoPath, `refs/heads/${requestedBase}`)) {
     return requestedBase
   }
-  const remote = (await getRemotes(repoPath))
-    .sort((left, right) => right.length - left.length)
-    .find((name) => resolvedBase.startsWith(`refs/remotes/${name}/`))
+  const remote = await remoteForRefPath(repoPath, resolvedBase)
   if (!remote) throw new Error('The PR base does not resolve to a branch.')
   return resolvedBase.slice(`refs/remotes/${remote}/`.length)
 }
@@ -3597,10 +3609,6 @@ async function conflictIndex(
   return { stages, fingerprint: createHash('sha256').update(output).digest('hex') }
 }
 
-async function conflictStages(root: string, relativePath: string): Promise<ConflictStageEntry[]> {
-  return (await conflictIndex(root, relativePath)).stages
-}
-
 /** Read every byte to classify a stage, but retain only a bounded text preview. */
 async function readConflictBlob(
   root: string,
@@ -3986,6 +3994,7 @@ async function writeConflictChoice(
   choice: ConflictChoice,
   sides: ConflictSides,
   identity: FileIdentity,
+  stages: ConflictStageEntry[],
 ): Promise<void> {
   if (choice === 'delete') {
     await replaceCheckedFile(root, relativePath, identity, null)
@@ -4017,11 +4026,7 @@ async function writeConflictChoice(
     relativePath,
   ]
   if (selected.text !== null && hasConflictMarkers(selected.text)) {
-    const context = await conflictContext(
-      root,
-      relativePath,
-      await conflictStages(root, relativePath),
-    )
+    const context = await conflictContext(root, relativePath, stages)
     const destination = (await conflictMoves(root, relativePath, context)).find(
       (move) => move.to === relativePath,
     )
@@ -4173,7 +4178,14 @@ export async function runResolveConflict(
     ) {
       throw new Error('Keeping both copies requires complete text versions of both sides')
     }
-    await writeConflictChoice(root, relativePath, resolution.choice, sides, identity)
+    await writeConflictChoice(
+      root,
+      relativePath,
+      resolution.choice,
+      sides,
+      identity,
+      captured.stages,
+    )
   }
   await safeRepositoryPath(root, relativePath)
   const stagedIdentity =
@@ -4337,7 +4349,8 @@ export async function runStageHunk(
     path: entry.path,
     originalPath: entry.originalPath ?? null,
   })
-  const hunk = resolved.hunks.find((candidate) => candidate.id === hunkId)
+  const index = resolved.hunks.findIndex((candidate) => candidate.id === hunkId)
+  const hunk = resolved.hunks[index]
   if (!hunk) {
     throw new Error(
       `That hunk is no longer part of the ${side} diff of ${entry.path}; refresh the file and try again`,
@@ -4438,7 +4451,7 @@ export async function runStageHunk(
     }
     await fs.rm(tempIndexPath, { force: true }).catch(() => {})
   }
-  const position = resolved.hunks.indexOf(hunk) + 1
+  const position = index + 1
   const count = selected
     ? selected.length
     : hunk.lines.filter((l) => l.kind === 'add' || l.kind === 'remove').length
@@ -4677,11 +4690,6 @@ let confirmedPayloadGeneration = 0
 export function retireConfirmedGitHubPayloads(): void {
   confirmedPayloadGeneration += 1
   confirmedPayloads.clear()
-}
-
-/** The generation a payload was confirmed in, compared against the current one. */
-export function confirmedGitHubPayloadGeneration(): number {
-  return confirmedPayloadGeneration
 }
 
 /**
@@ -5446,9 +5454,8 @@ async function runDeleteRemoteBranch(
     throw new Error('Only fetched remote branch refs can be deleted')
   }
   await ensureNoBusyOperation(repoPath, 'delete a remote branch')
-  const remotes = (await getRemotes(repoPath)).sort((left, right) => right.length - left.length)
   const remainder = ref.slice(prefix.length)
-  const remote = remotes.find((name) => remainder.startsWith(`${name}/`))
+  const remote = await remoteForRefPath(repoPath, ref)
   if (!remote) throw new Error('The selected remote branch has no configured remote')
   const branch = remainder.slice(remote.length + 1)
   if (!branch || branch === 'HEAD') {
@@ -5491,13 +5498,24 @@ async function runDeleteRemoteBranch(
   return { message: `Deleted remote branch ${remote}/${branch}` }
 }
 
-// Hold the absent branch ref locked while its per-branch config is removed.
-async function withAbsentRefLock(
+/**
+ * Runs one `update-ref --stdin` transaction: the given commands are prepared
+ * first, `body` runs while Git holds the ref lock, and the transaction commits
+ * only when the body resolves. A refused prepare or a failed body aborts the
+ * transaction and waits for Git to exit before anything is reported, so a ref is
+ * never left half written.
+ *
+ * `refusal` says what a refused prepare means for this caller; it answers `null`
+ * when the caller has nothing left to do about it.
+ */
+async function withRefTransaction(
+  runtime: GitRuntimeRecord,
   repoPath: string,
-  ref: string,
-  operation: () => Promise<void>,
+  commands: string,
+  body: () => Promise<void>,
+  refusal: (stderr: string, error: unknown) => Promise<string | null>,
+  unfinished: string,
 ): Promise<void> {
-  const runtime = await resolveGitRuntime()
   const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
     cwd: repoPath,
     env: gitCommandEnvironment(runtime, commandEnvironment()),
@@ -5518,6 +5536,14 @@ async function withAbsentRefLock(
       child.on('close', (code, signal) => resolve({ code, signal }))
     },
   )
+  const abort = async (): Promise<void> => {
+    try {
+      child.stdin.end('abort\n')
+    } catch {
+      // The update-ref process may already have exited.
+    }
+    await completed
+  }
   child.stdout.on('data', (chunk: Buffer) => {
     stdout += chunk.toString()
     pendingOutput += chunk.toString()
@@ -5548,40 +5574,49 @@ async function withAbsentRefLock(
   child.stdin.on('error', (error) => {
     if (!prepared) rejectPrepared(error)
   })
-  child.stdin.write(`start\nverify ${ref}\nprepare\n`)
+  child.stdin.write(`start\n${commands}\nprepare\n`)
 
   try {
     await prepareResult
   } catch (error) {
-    try {
-      child.stdin.end('abort\n')
-    } catch {
-      // The update-ref process may already have exited.
-    }
-    await completed
-    if (await refExists(repoPath, ref)) return
-    throw new Error(
-      stderr.trim() || commandDetail(error) || `Could not lock ${ref} for configuration cleanup`,
-    )
+    await abort()
+    const message = await refusal(stderr.trim(), error)
+    if (message !== null) throw new Error(message)
+    return
   }
-
   try {
-    await operation()
+    await body()
   } catch (error) {
-    try {
-      child.stdin.end('abort\n')
-    } catch {
-      // The update-ref process may already have exited.
-    }
-    await completed
+    await abort()
     throw error
   }
   child.stdin.end('commit\n')
   const result = await completed
   if (result.code !== 0) {
-    throw new Error(stderr.trim() || `Git could not finish cleanup for ${ref}`)
+    throw new Error(stderr.trim() || unfinished)
   }
-  return
+}
+
+// Hold the absent branch ref locked while its per-branch config is removed.
+async function withAbsentRefLock(
+  repoPath: string,
+  ref: string,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const runtime = await resolveGitRuntime()
+  await withRefTransaction(
+    runtime,
+    repoPath,
+    `verify ${ref}`,
+    operation,
+    async (stderr, error) =>
+      // The ref only has to be absent to clean up after it, so a ref somebody
+      // else has since restored leaves nothing for this lock to remove.
+      (await refExists(repoPath, ref))
+        ? null
+        : stderr || commandDetail(error) || `Could not lock ${ref} for configuration cleanup`,
+    `Git could not finish cleanup for ${ref}`,
+  )
 }
 
 async function deleteLocalBranchRef(
@@ -5592,86 +5627,14 @@ async function deleteLocalBranchRef(
   cleanupConfig: () => Promise<void>,
 ): Promise<void> {
   const runtime = await requireGitCapability('referenceTransactions', `delete ${branchName}`)
-  const child = spawn(runtime.executable, ['update-ref', '--stdin'], {
-    cwd: repoPath,
-    env: gitCommandEnvironment(runtime, commandEnvironment()),
-    stdio: ['pipe', 'pipe', 'pipe'],
-  })
-  let pendingOutput = ''
-  let stdout = ''
-  let stderr = ''
-  let prepared = false
-  let resolvePrepared!: () => void
-  let rejectPrepared!: (error: Error) => void
-  const prepareResult = new Promise<void>((resolve, reject) => {
-    resolvePrepared = resolve
-    rejectPrepared = reject
-  })
-  const completed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve) => {
-      child.on('close', (code, signal) => resolve({ code, signal }))
-    },
+  await withRefTransaction(
+    runtime,
+    repoPath,
+    `delete ${ref} ${expectedOid}`,
+    () => ensureNotCheckedOutElsewhere(repoPath, branchName),
+    async () => 'The branch changed since it was selected; refresh before deleting it',
+    `Git could not complete deletion of ${ref}`,
   )
-  child.stdout.on('data', (chunk: Buffer) => {
-    stdout += chunk.toString()
-    pendingOutput += chunk.toString()
-    const lines = pendingOutput.split(/\r?\n/u)
-    pendingOutput = lines.pop() ?? ''
-    for (const line of lines) {
-      if (line === 'prepare: ok') {
-        prepared = true
-        resolvePrepared()
-      } else if (line.startsWith('prepare: ')) {
-        rejectPrepared(new Error(line))
-      }
-    }
-  })
-  child.stderr.on('data', (chunk: Buffer) => {
-    stderr += chunk.toString()
-  })
-  child.on('error', (error) => rejectPrepared(error))
-  child.on('close', (code, signal) => {
-    if (!prepared) {
-      rejectPrepared(
-        new Error(
-          stderr.trim() || stdout.trim() || `Git exited with ${signal ?? code ?? 'unknown'}`,
-        ),
-      )
-    }
-  })
-  child.stdin.on('error', (error) => {
-    if (!prepared) rejectPrepared(error)
-  })
-  child.stdin.write(`start\ndelete ${ref} ${expectedOid}\nprepare\n`)
-
-  try {
-    await prepareResult
-  } catch {
-    try {
-      child.stdin.end('abort\n')
-    } catch {
-      // The update-ref process may already have exited.
-    }
-    await completed
-    throw new Error('The branch changed since it was selected; refresh before deleting it')
-  }
-  try {
-    await ensureNotCheckedOutElsewhere(repoPath, branchName)
-  } catch (error) {
-    try {
-      child.stdin.end('abort\n')
-    } catch {
-      // The update-ref process may already have exited.
-    }
-    await completed
-    throw error
-  }
-
-  child.stdin.end('commit\n')
-  const result = await completed
-  if (result.code !== 0) {
-    throw new Error(stderr.trim() || `Git could not complete deletion of ${ref}`)
-  }
   try {
     await withAbsentRefLock(repoPath, ref, cleanupConfig)
   } catch (error) {

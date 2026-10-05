@@ -32,42 +32,35 @@ export const NO_POLICY: LoadedPolicy = { locks: [], blocked: false, error: null,
 
 export async function loadSettingsPolicy(file: string | undefined): Promise<LoadedPolicy> {
   if (!file) return NO_POLICY
+  // Every way this file can fail to speak produces the same answer: every
+  // managed setting held at its current value, with the one reason that is
+  // stated here and the specific detail the caller adds.
+  const heldClosed = (detail: string): LoadedPolicy => ({
+    locks: allKeysLocked(FAIL_CLOSED_REASON),
+    blocked: true,
+    error: `${FAIL_CLOSED_REASON} ${detail}`,
+    path: file,
+  })
 
   let text: string
   try {
     text = await readFile(file, 'utf8')
   } catch {
-    return {
-      locks: allKeysLocked(FAIL_CLOSED_REASON),
-      blocked: true,
-      error: `${FAIL_CLOSED_REASON} The policy file could not be read.`,
-      path: file,
-    }
+    return heldClosed('The policy file could not be read.')
   }
 
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    return {
-      locks: allKeysLocked(FAIL_CLOSED_REASON),
-      blocked: true,
-      error: `${FAIL_CLOSED_REASON} The policy file is not valid JSON.`,
-      path: file,
-    }
+    return heldClosed('The policy file is not valid JSON.')
   }
 
   const { policy, issues } = validatePolicy(parsed)
   // A policy that names keys this build does not know is partly unusable, so it
   // is held closed rather than applied in part and silently widening the rest.
   if (issues.length > 0) {
-    const detail = issues.map((issue) => `${issue.key} ${issue.message}`).join('; ')
-    return {
-      locks: allKeysLocked(FAIL_CLOSED_REASON),
-      blocked: true,
-      error: `${FAIL_CLOSED_REASON} ${detail}`,
-      path: file,
-    }
+    return heldClosed(issues.map((issue) => `${issue.key} ${issue.message}`).join('; '))
   }
   return {
     locks: Object.entries(policy.locks).map(([key, reason]) => ({ key, reason })),

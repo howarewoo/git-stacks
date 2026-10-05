@@ -689,11 +689,9 @@ if (process.versions.electron && process.argv[1] && resolve(process.argv[1]) ===
     admitOwnedProviderCliRoot,
     installOwnedProviderCliBoundary,
     KEY_FILE,
-    MARKER_FILE,
     createIsolatedSafeStorage,
     createFixtureKey,
     installIsolatedSafeStorage,
-    parseCli,
     readFixtureKey,
   }
 }

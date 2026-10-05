@@ -10,7 +10,7 @@ import {
   type UpdateManifestArtifact,
   type UpdateOffer,
   type UpdateOutcome,
-  type UpdateRejectionReport,
+  updateRefusal,
 } from '../../shared/update'
 import { fetchFeedBytes, resolveUpdateFeed, type UpdateFeed } from './feed'
 import { trustedUpdateKeys } from './keys'
@@ -29,10 +29,6 @@ export interface LoadOptions {
   env?: NodeJS.ProcessEnv
   now?: number
   signal?: AbortSignal
-}
-
-function refusal(reason: UpdateRejectionReport['reason'], message: string): UpdateOutcome<never> {
-  return { ok: false, failure: { reason, message } }
 }
 
 /**
@@ -54,7 +50,7 @@ export async function loadAuthenticatedUpdate(
   if (!feed.ok) return feed
   const keys = trustedUpdateKeys(env, packaged)
   if (keys.keys.length === 0) {
-    return refusal(
+    return updateRefusal(
       'not-configured',
       'This build carries no release signing key, so no update can be trusted and none is fetched.',
     )
@@ -81,7 +77,7 @@ export async function loadAuthenticatedUpdate(
     manifestBytes = manifest.body
     signatureBytes = signature.body
   } catch (error) {
-    return refusal(
+    return updateRefusal(
       'unreachable',
       `The update feed could not be read: ${error instanceof Error ? error.message : String(error)}`,
     )
@@ -91,13 +87,13 @@ export async function loadAuthenticatedUpdate(
   if (!envelope.ok) return envelope
   const key = keys.keys.find((entry) => entry.keyId === envelope.value.keyId)
   if (!key) {
-    return refusal(
+    return updateRefusal(
       'unknown-key',
       `This manifest is signed by ${envelope.value.keyId}, which this build does not trust.`,
     )
   }
   if (!verifyDetachedSignature(key, manifestBytes, envelope.value.signature, now)) {
-    return refusal(
+    return updateRefusal(
       'bad-signature',
       'The update manifest is not signed by a key this build trusts. Nothing was downloaded.',
     )

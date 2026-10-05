@@ -8,7 +8,7 @@ import type {
 } from 'node:child_process'
 
 /** A concurrent Git mutation injected at the moment Git Stacks starts real Git. */
-export interface GitRaceScenario {
+interface GitRaceScenario {
   /** Claims the one Git invocation this race waits for. */
   matches(args: readonly string[]): boolean
   /** Applies the mutation before the claimed invocation runs. */

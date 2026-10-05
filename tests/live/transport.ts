@@ -133,11 +133,6 @@ export class FaultInjectingTransport implements GitHubTransport {
     this.rules.push({ match, remaining: 1, fault: outcome })
   }
 
-  /** Every request the run made, oldest first. Bounded so a long run cannot grow without limit. */
-  exchanges(): readonly LiveExchange[] {
-    return this.seen
-  }
-
   /** The last requests, which is what a failure report shows. */
   recentExchanges(count = 12): LiveExchange[] {
     return this.seen.slice(-count)

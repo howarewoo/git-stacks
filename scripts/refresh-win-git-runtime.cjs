@@ -1,27 +1,10 @@
 // Extra-resource EXEs are signed while electron-builder copies them. Refresh only
 // their digests after that copy, before the unpacked app becomes an installer.
-const { createHash } = require('node:crypto')
-const { readFileSync, readdirSync, readlinkSync, writeFileSync } = require('node:fs')
+const { readFileSync, writeFileSync } = require('node:fs')
 const { join } = require('node:path')
 const { version: appVersion } = require('../package.json')
 const { Arch } = require('builder-util')
-
-function digest(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex')
-}
-
-function inventory(root, prefix = '') {
-  const files = {}
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const name = prefix ? `${prefix}/${entry.name}` : entry.name
-    const path = join(root, entry.name)
-    if (entry.isDirectory()) Object.assign(files, inventory(path, name))
-    else if (entry.isSymbolicLink()) files[name] = `link:${readlinkSync(path)}`
-    else if (entry.isFile()) files[name] = digest(path)
-    else throw new Error(`Unexpected Git runtime entry: ${name}`)
-  }
-  return files
-}
+const { digest, inventory } = require('./git-runtime-inventory.cjs')
 
 module.exports = async ({ appOutDir, arch, electronPlatformName }) => {
   if (electronPlatformName !== 'win32') return

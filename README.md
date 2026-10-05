@@ -93,6 +93,19 @@ do not pin a terminal commit to an exact watcher event count.
 Destination-focus checks activate the named navigation control with Enter and
 verify heading focus and the live announcement, independently of shortcut bindings.
 
+### Shared persistence and IPC boundaries
+
+Main-process handlers register through the local `ipcMain` wrapper in
+`src/main/index.ts`. It validates the sender before invoking a handler and keeps
+untrusted requests out of the failure log. Register new handlers through that
+wrapper, not directly through Electron's `ipcMain`. Verify changes to this
+boundary with the [packaged desktop smoke](#packaged-desktop-smoke).
+
+`src/main/review-journal.ts` owns common-directory journal paths, versioned reads,
+and owner-only, synced atomic writes for review drafts, snapshots, and viewed
+files. Feature modules retain entry validation, retention limits, and locking;
+drafts must not evict unsent words to make room for another record.
+
 ## Agent skills
 
 Repository-owned agent skills live in `.agents/skills/`. They are optional agent

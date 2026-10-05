@@ -56,7 +56,7 @@ import type {
 import { GitEnvironmentPanel, RepositoryDiscoveryDialog } from './components/onboarding'
 import { LIST_PAGE_SIZE } from '../../shared/performance'
 import { ListWindowMore } from './components/list-window'
-import { useListWindow } from './lib/list-window'
+import { useListWindow, useRovingListFocus } from './lib/list-window'
 import { createRequestGate, type RequestClaim } from './lib/request-gate'
 import { cliAuthority, withoutReplacedCredential } from './credential-identity'
 import { Badge } from './components/ui/badge'
@@ -86,18 +86,13 @@ import {
   indexBranchesByParentName,
   sortBranchesByUpdatedAt,
 } from './lib/branches'
-import {
-  claimsRovingKey,
-  clampRovingIndex,
-  rovingAction,
-  rovingTabIndex,
-  rovingTarget,
-} from './lib/tree-navigation'
+import { claimsRovingKey, rovingAction, rovingTabIndex, rovingTarget } from './lib/tree-navigation'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import {
   WORKSPACE_VIEW_HEADING_ID,
   WORKSPACE_VIEW_SHORTCUTS,
   WorkspaceNavigation,
+  type WorkspaceView,
   workspaceNeedsNoRepository,
   workspaceViewLabel,
 } from './components/workspace-navigation'
@@ -148,18 +143,6 @@ import {
   stashRemovalBlockReason,
 } from '../../shared/capabilities'
 
-type WorkspaceView =
-  | 'branches'
-  | 'stacks'
-  | 'history'
-  | 'changes'
-  | 'pullRequests'
-  | 'prInbox'
-  | 'review'
-  | 'stashes'
-  | 'diagnostics'
-  | 'notifications'
-
 import type { NotificationInbox, NotificationThread } from '../../shared/notifications'
 import { canonicalHostName, GITHUB_DEFAULT_HOST } from '../../shared/host'
 import {
@@ -189,7 +172,7 @@ import {
   type ShortcutId,
 } from '../../shared/shortcuts'
 import type { AppSettings, SettingsLock } from '../../shared/settings'
-import { resolveStackNavigation } from './lib/stack-navigation'
+import { resolveStackNavigation, type StackRelation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
 
 type BranchTreeInfo = {
@@ -249,6 +232,37 @@ function cliCheckingStatus(host: string): GitHubCliStatus {
     message: null,
   }
 }
+
+const CLI_LABELS: Record<GitHubCliState, string> = {
+  checking: 'GitHub CLI: checking',
+  'missing-cli': 'GitHub CLI: not installed',
+  'signed-out': 'GitHub CLI: signed out',
+  authenticated: 'GitHub CLI: signed in',
+  rejected: 'GitHub CLI: authentication rejected',
+  'permission-denied': 'GitHub CLI: organization access required',
+  offline: 'GitHub CLI: unreachable',
+  unavailable: 'GitHub CLI: unavailable',
+}
+
+/**
+ * The review workspace's file and layer steps, one binding per published
+ * command. A key pressed while no pull request is open stays a no-op rather
+ * than reaching into the view.
+ */
+const REVIEW_COMMANDS: readonly (readonly [ShortcutId, keyof ReviewCommands])[] = [
+  ['review.nextFile', 'nextFile'],
+  ['review.previousFile', 'previousFile'],
+  ['review.nextLayer', 'nextLayer'],
+  ['review.previousLayer', 'previousLayer'],
+]
+
+/** One keyboard route per stack relation, beside the relation the shell asks for. */
+const STACK_NAVIGATION_SHORTCUTS: readonly (readonly [ShortcutId, StackRelation])[] = [
+  ['stack.selectParent', 'parent'],
+  ['stack.selectChild', 'child'],
+  ['stack.selectTop', 'top'],
+  ['stack.selectBottom', 'bottom'],
+]
 
 function branchTreeInfo(
   branch: Branch,
@@ -996,7 +1010,7 @@ function App() {
       if (!desktop?.openInEditor) return
       try {
         const result = await desktop.openInEditor(relativePath)
-        setNotice(result.opened ? result.reason : result.reason)
+        setNotice(result.reason)
       } catch (value) {
         setError(readableError(value))
       }
@@ -1409,16 +1423,6 @@ function App() {
     })
   }, [desktop, openRepository, snapshot])
 
-  const CLI_LABELS: Record<GitHubCliState, string> = {
-    checking: 'GitHub CLI: checking',
-    'missing-cli': 'GitHub CLI: not installed',
-    'signed-out': 'GitHub CLI: signed out',
-    authenticated: 'GitHub CLI: signed in',
-    rejected: 'GitHub CLI: authentication rejected',
-    'permission-denied': 'GitHub CLI: organization access required',
-    offline: 'GitHub CLI: unreachable',
-    unavailable: 'GitHub CLI: unavailable',
-  }
   const cliLabel = CLI_LABELS[cliStatus?.state ?? 'checking']
   const cliConnected = cliStatus?.state === 'authenticated'
   const runAction = React.useCallback(
@@ -1482,10 +1486,10 @@ function App() {
     return branch ?? null
   }, [branchFilter, selectedBranchRef, snapshot])
 
-  const selectedPullRequest = React.useMemo(() => {
-    if (!snapshot || !selectedBranch) return null
-    return selectedBranch.pr
-  }, [selectedBranch, snapshot])
+  // `selectedBranch` is already derived from the snapshot, so a missing
+  // snapshot can only produce a missing branch: this is the branch's own pull
+  // request, not a second lookup.
+  const selectedPullRequest = selectedBranch?.pr ?? null
   const [selectedPrIssueLinks, setSelectedPrIssueLinks] = React.useState<LinkedIssue[]>([])
   const [selectedPrIssueLinksLoading, setSelectedPrIssueLinksLoading] = React.useState(false)
 
@@ -1645,44 +1649,7 @@ function App() {
   const branchWindow = useListWindow(visibleBranches, LIST_PAGE_SIZE)
   // The branch tree is one composite widget: a single Tab stop whose position
   // follows keyboard focus, so Tab reaches the tree once instead of once per row.
-  // The active row is tracked by its position inside the mounted window, which is
-  // the same coordinate system the DOM lookup and the tabindex comparison use.
-  const [branchTreeActiveIndex, setBranchTreeActiveIndex] = React.useState(0)
-  const branchTreeListRef = React.useRef<HTMLDivElement>(null)
-  const focusBranchRowInWindow = (mountedIndex: number) => {
-    const row =
-      branchTreeListRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]')[mountedIndex]
-    if (!row) return
-    setBranchTreeActiveIndex(mountedIndex)
-    row.focus()
-  }
-  // Only Home and End address the whole filtered list, so the row they name may
-  // not be mounted yet. The window is asked to reveal it and the pending index is
-  // applied once that row exists, which keeps the surface's single Tab stop with
-  // the focus. Arrow keys must never come through here: they are already in
-  // mounted coordinates, and re-basing them by the window start would send them
-  // to the page the reader has already scrolled away from.
-  const pendingBranchFocus = React.useRef<number | null>(null)
-  const focusBranchRowInList = (listIndex: number) => {
-    const mountedIndex = listIndex - branchWindow.start
-    if (mountedIndex >= 0 && mountedIndex < branchWindow.visible.length) {
-      focusBranchRowInWindow(mountedIndex)
-      return
-    }
-    pendingBranchFocus.current = listIndex
-    branchWindow.revealIndex(listIndex)
-  }
-  React.useEffect(() => {
-    setBranchTreeActiveIndex((index) => clampRovingIndex(index, branchWindow.visible.length))
-  }, [branchWindow.start, branchWindow.visible.length])
-  React.useEffect(() => {
-    const pending = pendingBranchFocus.current
-    if (pending === null) return
-    const mountedIndex = pending - branchWindow.start
-    if (mountedIndex < 0 || mountedIndex >= branchWindow.visible.length) return
-    pendingBranchFocus.current = null
-    focusBranchRowInWindow(mountedIndex)
-  }, [branchWindow.start, branchWindow.visible.length])
+  const branchRows = useRovingListFocus(branchWindow, '[role="treeitem"]')
 
   const changeState = React.useMemo(
     () => changeGroups(snapshot?.files ?? [], search),
@@ -1693,7 +1660,6 @@ function App() {
     [search, snapshot],
   )
   const stagedFiles = changeState.staged
-  const conflictedFiles = changeState.conflicted
   const currentBranch = snapshot?.currentBranch ?? null
   const allBranches = snapshot?.branches ?? []
   const branchCount = combinedBranches.length
@@ -2085,7 +2051,6 @@ function App() {
       // A bare printable remap must not steal text from either search field.
       // Modified openers such as Cmd/Ctrl+K still work while editing.
       if (matchesChord(event, shortcutBindings['palette.open'], isMac)) {
-        if (anyModalOpen && !paletteOpen) return
         if (
           isEditableTarget(event.target) &&
           event.key.length === 1 &&
@@ -2097,8 +2062,6 @@ function App() {
         if (!event.repeat) setPaletteOpen((prev) => !prev)
         return
       }
-
-      if (anyModalOpen) return
 
       // Search/filter fields keep their own focused shortcuts and are not conflated with global command search
       if (matchesChord(event, shortcutBindings['search.focus'], isMac)) {
@@ -2136,52 +2099,25 @@ function App() {
       // The review workspace publishes its file and layer steps through a ref.
       // The shell keeps every remappable key, and a key pressed while no pull
       // request is open stays a no-op rather than reaching into the view.
-      const reviewChords: Array<[ShortcutId, () => void]> = [
-        ['review.nextFile', () => reviewCommands.current?.nextFile()],
-        ['review.previousFile', () => reviewCommands.current?.previousFile()],
-        ['review.nextLayer', () => reviewCommands.current?.nextLayer()],
-        ['review.previousLayer', () => reviewCommands.current?.previousLayer()],
-      ]
-      for (const [id, run] of reviewChords) {
-        if (!matchesChord(event, shortcutBindings[id], isMac)) continue
+      for (const [shortcut, command] of REVIEW_COMMANDS) {
+        if (!matchesChord(event, shortcutBindings[shortcut], isMac)) continue
         event.preventDefault()
-        if (workspaceView === 'review') run()
+        if (workspaceView === 'review') reviewCommands.current?.[command]()
         return
       }
 
-      // Stack navigation commands
-      if (matchesChord(event, shortcutBindings['stack.selectParent'], isMac)) {
+      // Stack navigation commands, one binding per relation so a new relation
+      // cannot ship without a keyboard route.
+      for (const [shortcut, relation] of STACK_NAVIGATION_SHORTCUTS) {
+        if (!matchesChord(event, shortcutBindings[shortcut], isMac)) continue
         event.preventDefault()
         if (snapshot) {
-          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'parent')
+          const target = resolveStackNavigation(selectedBranch, snapshot.branches, relation)
           if (target) setSelectedBranchRef(target.ref)
         }
         return
       }
-      if (matchesChord(event, shortcutBindings['stack.selectChild'], isMac)) {
-        event.preventDefault()
-        if (snapshot) {
-          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'child')
-          if (target) setSelectedBranchRef(target.ref)
-        }
-        return
-      }
-      if (matchesChord(event, shortcutBindings['stack.selectTop'], isMac)) {
-        event.preventDefault()
-        if (snapshot) {
-          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'top')
-          if (target) setSelectedBranchRef(target.ref)
-        }
-        return
-      }
-      if (matchesChord(event, shortcutBindings['stack.selectBottom'], isMac)) {
-        event.preventDefault()
-        if (snapshot) {
-          const target = resolveStackNavigation(selectedBranch, snapshot.branches, 'bottom')
-          if (target) setSelectedBranchRef(target.ref)
-        }
-        return
-      }
+
       if (matchesChord(event, shortcutBindings['stack.checkout'], isMac)) {
         event.preventDefault()
         if (selectedBranch && !selectedBranch.current) {
@@ -2229,6 +2165,8 @@ function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [
+    // Every modal flag is listed because each one opens `anyModalOpen`, and the
+    // handler must stop claiming chords the moment a dialog takes the window.
     checkoutGuardTarget,
     deleteTarget,
     desktop,
@@ -2238,10 +2176,8 @@ function App() {
     openPrDialog,
     openWorkflow,
     operationActive,
-    paletteOpen,
     prOpen,
     requestCheckoutBranch,
-    runAction,
     selectedBranch,
     shortcutBindings,
     shortcutSettingsOpen,
@@ -2388,8 +2324,6 @@ function App() {
       </div>
     </aside>
   )
-
-  const shortcutModifier = /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘' : 'Ctrl+'
 
   const renderToolbar = () => (
     <div className="toolbar" role="toolbar" aria-label="Repository actions">
@@ -2653,7 +2587,7 @@ function App() {
         <div
           aria-label="Repository branches"
           className="branch-list"
-          ref={branchTreeListRef}
+          ref={branchRows.containerRef}
           role="tree"
         >
           {branchWindow.visible.map((branch, branchIndex) => {
@@ -2693,7 +2627,7 @@ function App() {
                     }
                     setSelectedBranchRef(branch.ref)
                   }}
-                  onFocus={() => setBranchTreeActiveIndex(branchIndex)}
+                  onFocus={() => branchRows.noteFocus(branchIndex)}
                   onKeyDown={(event) => {
                     // A control inside the row owns its own keys, and a chord is
                     // the global shortcut dispatcher's business; the roving
@@ -2715,8 +2649,8 @@ function App() {
                         : rovingTarget(action, branchIndex, branchWindow.visible.length)
                       if (target === null) return
                       event.preventDefault()
-                      if (wholeList) focusBranchRowInList(target)
-                      else focusBranchRowInWindow(target)
+                      if (wholeList) branchRows.focusListIndex(target)
+                      else branchRows.focusMounted(target)
                       return
                     }
                     if (event.key === 'Enter' || event.key === ' ') {
@@ -2726,7 +2660,7 @@ function App() {
                   }}
                   role="treeitem"
                   style={{ '--branch-depth': tree.depth } as React.CSSProperties}
-                  tabIndex={rovingTabIndex(branchIndex, branchTreeActiveIndex)}
+                  tabIndex={rovingTabIndex(branchIndex, branchRows.activeIndex)}
                 >
                   {tree.trunks.map((trunk, segmentIndex) => (
                     <span

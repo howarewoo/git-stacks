@@ -12,8 +12,9 @@ import type {
   UncertainComment,
 } from '../shared/review-threads'
 import { REVIEW_DRAFTS_MAX } from '../shared/review-threads'
-import { CommandCancelled, runGit, stripTrailingNewline } from './git-core'
+import { CommandCancelled } from './git-core'
 import { isRecord } from '../shared/guards'
+import { readJournal, repositoryJournalPath, writeJournal } from './review-journal'
 
 /**
  * Both journals are read, changed, and written back by every process that has
@@ -253,40 +254,20 @@ async function withJournalLock<T>(
   }
 }
 
-interface DraftJournal {
-  version: 1
-  records: ReviewDraftRecord[]
-}
+const DRAFTS_JOURNAL = 'git-stacks-review-drafts.json'
 
-interface UncertainJournal {
-  version: 1
-  writes: ReviewUncertainWrite[]
-}
+const UNCERTAIN_JOURNAL = 'git-stacks-review-uncertain.json'
 
 /**
  * The pending drafts live beside the repository's own Git directory, like the
  * viewed-file record. A draft is work the reviewer has not sent, it has to
  * follow the repository across workspaces and linked worktrees, and it must
  * never be mistakable for repository content or for something GitHub holds.
- */
-async function draftsPath(repoPath: string, signal?: AbortSignal): Promise<string> {
-  const common = stripTrailingNewline(
-    await runGit(repoPath, ['rev-parse', '--git-common-dir'], undefined, signal),
-  )
-  return path.resolve(repoPath, common, 'git-stacks-review-drafts.json')
-}
-
-/**
+ *
  * The unresolved writes live beside the drafts, and are a separate file because
  * they are not review content: a record of an attempt whose result is unknown,
  * kept until GitHub's own state settles it.
  */
-async function uncertainPath(repoPath: string, signal?: AbortSignal): Promise<string> {
-  const common = stripTrailingNewline(
-    await runGit(repoPath, ['rev-parse', '--git-common-dir'], undefined, signal),
-  )
-  return path.resolve(repoPath, common, 'git-stacks-review-uncertain.json')
-}
 
 function parseUncertain(value: unknown): ReviewUncertainWrite | null {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.number !== 'number') {
@@ -390,36 +371,12 @@ function parseUncertainComments(value: unknown): UncertainComment[] {
   return parsed
 }
 
-async function readUncertain(file: string): Promise<ReviewUncertainWrite[]> {
-  try {
-    const raw = await fs.readFile(file, 'utf8')
-    const parsed: unknown = JSON.parse(raw)
-    if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.writes)) return []
-    return parsed.writes
-      .map(parseUncertain)
-      .filter((entry): entry is ReviewUncertainWrite => entry !== null)
-  } catch {
-    return []
-  }
+function readUncertain(file: string): Promise<ReviewUncertainWrite[]> {
+  return readJournal(file, 'writes', parseUncertain)
 }
 
-async function writeUncertain(
-  file: string,
-  writes: ReviewUncertainWrite[],
-  signal?: AbortSignal,
-): Promise<void> {
-  void signal
-  const journal: UncertainJournal = { version: 1, writes }
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  const temporary = `${file}.${randomUUID()}.tmp`
-  const handle = await fs.open(temporary, 'wx', 0o600)
-  try {
-    await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`, 'utf8')
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  await fs.rename(temporary, file)
+function writeUncertain(file: string, writes: ReviewUncertainWrite[]): Promise<void> {
+  return writeJournal(file, 'writes', writes)
 }
 
 function parseSide(value: unknown): ReviewSide | null {
@@ -513,23 +470,11 @@ function sameOwner(record: ReviewDraftRecord, repo: string, viewer: string): boo
   return record.repo === repo && record.viewer === viewer
 }
 
-async function readJournal(file: string): Promise<ReviewDraftRecord[]> {
-  try {
-    const raw = await fs.readFile(file, 'utf8')
-    const parsed: unknown = JSON.parse(raw)
-    if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.records)) return []
-    return parsed.records
-      .map(parseRecord)
-      .filter((record): record is ReviewDraftRecord => record !== null)
-  } catch {
-    return []
-  }
+function readDrafts(file: string): Promise<ReviewDraftRecord[]> {
+  return readJournal(file, 'records', parseRecord)
 }
 
 /**
- * Publishes the whole journal at once, so a reader sees either every record or
- * none of them and never a half-written one.
- *
  * Records are never evicted to make room. A record is one pull request's unsent
  * words, so dropping one to keep the file small would discard work the
  * reviewer has not sent and still believes is kept; a record leaves the journal
@@ -537,18 +482,8 @@ async function readJournal(file: string): Promise<ReviewDraftRecord[]> {
  * by `REVIEW_DRAFTS_MAX`, so a single pull request cannot grow the file without
  * limit either.
  */
-async function writeJournalFile(file: string, records: ReviewDraftRecord[]): Promise<void> {
-  const journal: DraftJournal = { version: 1, records }
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  const temporary = `${file}.${randomUUID()}.tmp`
-  const handle = await fs.open(temporary, 'wx', 0o600)
-  try {
-    await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`, 'utf8')
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  await fs.rename(temporary, file)
+function writeDrafts(file: string, records: ReviewDraftRecord[]): Promise<void> {
+  return writeJournal(file, 'records', records)
 }
 
 /**
@@ -570,7 +505,7 @@ export async function readReviewDrafts(
   signal?: AbortSignal,
 ): Promise<ReviewDraftRecord | null> {
   return (
-    (await readJournal(await draftsPath(repoPath, signal))).find(
+    (await readDrafts(await repositoryJournalPath(repoPath, DRAFTS_JOURNAL, signal))).find(
       (record) => record.number === number && sameOwner(record, repo, viewer),
     ) ?? null
   )
@@ -595,11 +530,11 @@ export async function writeReviewDrafts(
   record: ReviewDraftRecord,
   signal?: AbortSignal,
 ): Promise<ReviewDraftRecord> {
-  const file = await draftsPath(repoPath, signal)
+  const file = await repositoryJournalPath(repoPath, DRAFTS_JOURNAL, signal)
   return withJournalLock(
     file,
     async () => {
-      const records = await readJournal(file)
+      const records = await readDrafts(file)
       const kept = records.filter(
         (entry) => entry.number !== record.number || !sameOwner(entry, record.repo, record.viewer),
       )
@@ -615,7 +550,7 @@ export async function writeReviewDrafts(
       if (record.drafts.length > 0) {
         kept.unshift({ ...record, drafts: record.drafts.slice(0, REVIEW_DRAFTS_MAX) })
       }
-      await writeJournalFile(file, kept)
+      await writeDrafts(file, kept)
       return record
     },
     signal,
@@ -636,12 +571,12 @@ export async function clearReviewDrafts(
   number: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  const file = await draftsPath(repoPath, signal)
+  const file = await repositoryJournalPath(repoPath, DRAFTS_JOURNAL, signal)
   await withJournalLock(
     file,
     async () => {
-      const records = await readJournal(file)
-      await writeJournalFile(
+      const records = await readDrafts(file)
+      await writeDrafts(
         file,
         records.filter((entry) => entry.number !== number || !sameOwner(entry, repo, viewer)),
       )
@@ -675,7 +610,7 @@ export async function recordUncertainWrite(
   write: ReviewUncertainWrite,
   signal?: AbortSignal,
 ): Promise<void> {
-  const file = await uncertainPath(repoPath, signal)
+  const file = await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal)
   await withJournalLock(
     file,
     async () => {
@@ -691,7 +626,7 @@ export async function recordUncertainWrite(
           entry.repo !== write.repo ||
           entry.viewer !== write.viewer,
       )
-      await writeUncertain(file, [write, ...kept], signal)
+      await writeUncertain(file, [write, ...kept])
     },
     signal,
   )
@@ -705,7 +640,9 @@ export async function readUncertainWrites(
   viewer: string,
   signal?: AbortSignal,
 ): Promise<ReviewUncertainWrite[]> {
-  const entries = await readUncertain(await uncertainPath(repoPath, signal))
+  const entries = await readUncertain(
+    await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal),
+  )
   return entries
     .filter((entry) => entry.number === number && entry.viewer === viewer && entry.repo === repo)
     .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
@@ -726,7 +663,7 @@ export async function clearUncertainWrite(
   id: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const file = await uncertainPath(repoPath, signal)
+  const file = await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal)
   await withJournalLock(
     file,
     async () => {
@@ -742,7 +679,6 @@ export async function clearUncertainWrite(
               entry.repo === repo
             ),
         ),
-        signal,
       )
     },
     signal,
@@ -786,7 +722,7 @@ export async function retireSettledWrites(
   draftIds: readonly string[],
   signal?: AbortSignal,
 ): Promise<void> {
-  const file = await uncertainPath(repoPath, signal)
+  const file = await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal)
   await withJournalLock(
     file,
     async () => {
@@ -804,7 +740,7 @@ export async function retireSettledWrites(
         return entry.draftIds.some((theirs) => draftIds.includes(theirs))
       })
       if (kept.length === existing.length) return
-      await writeUncertain(file, kept, signal)
+      await writeUncertain(file, kept)
     },
     signal,
   )

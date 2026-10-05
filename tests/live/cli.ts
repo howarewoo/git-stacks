@@ -8,6 +8,7 @@ import { startControlledGitHubHost } from '../fixtures/live-github-tls'
 import { describeThrown, LiveRedactor, renderRunSummary } from './diagnostics'
 import { LIVE_ENV, LiveConfigurationError, ownershipMarker, readLiveRunConfig } from './config'
 import { observeSchema, prepareSchemaSubject, renderSchema } from './observed-schema'
+import { SCHEMA_FIXTURE_PATH } from './schema-fixture'
 import { runLiveSuite, type LiveRunReport } from './runner'
 import { findScenario, LIVE_SCENARIOS } from './scenarios'
 import { GitHubAdmin } from './github-admin'
@@ -769,7 +770,7 @@ async function settle(target: LiveTarget, redactor: LiveRedactor): Promise<LiveC
 }
 
 /** Every scenario, its title, and what it needs, so `--only` can be chosen honestly. */
-export function renderCatalogue(): string {
+function renderCatalogue(): string {
   const lines = ['live GitHub scenarios:']
   for (const scenario of LIVE_SCENARIOS) {
     const requires = scenario.requires.length > 0 ? scenario.requires.join(', ') : 'nothing'
@@ -799,16 +800,12 @@ async function writeObservedSchema(
     defaultBranch: target.defaultBranch,
   })
   const observed = await observeSchema(target.transport(), subject, `${target.kind} runtime`)
-  const path = schemaPath ?? committedSchemaPath()
+  const path = schemaPath ?? SCHEMA_FIXTURE_PATH
   await writeFile(path, renderSchema(observed), 'utf8')
   // The probe's branches, pull requests, review, and stack live inside the disposable
   // repository this run owns, so the repository's own deletion takes them with it.
   // Deleting them one at a time would leave the same end state through more calls.
   return `wrote the observed schema to ${path}`
-}
-
-function committedSchemaPath(): string {
-  return new URL('../fixtures/live-github-observed-schema.json', import.meta.url).pathname
 }
 
 async function defaultControlled(): Promise<LiveTarget> {

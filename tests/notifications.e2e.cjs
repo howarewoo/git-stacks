@@ -481,9 +481,13 @@ class Cdp {
   }
 }
 
-/** Reads or sets the real Electron zoom factor of the app window. */
-const MAIN_ZOOM = `(async (factor) => {
-  function resolveElectron() {
+/**
+ * The Electron module, resolved from inside the main process this run talks to
+ * over CDP. It is written once here because every main-process probe below
+ * needs the same answer, and a resolver that differed between them would make
+ * one probe prove something another could not.
+ */
+const RESOLVER = `  function resolveElectron() {
     if (typeof require === 'function') { try { return require('electron') } catch {} }
     if (process.mainModule && typeof process.mainModule.require === 'function') {
       try { return process.mainModule.require('electron') } catch {}
@@ -496,7 +500,11 @@ const MAIN_ZOOM = `(async (factor) => {
       if (Module) return Module.createRequire(process.execPath)('electron')
     }
     throw new Error('Could not resolve the electron module from the main process')
-  }
+  }`
+
+/** Reads or sets the real Electron zoom factor of the app window. */
+const MAIN_ZOOM = `(async (factor) => {
+${RESOLVER}
   const { BrowserWindow } = resolveElectron()
   const window = BrowserWindow.getAllWindows()[0]
   if (!window) throw new Error('The app has no window to zoom')
@@ -512,20 +520,7 @@ const MAIN_ZOOM = `(async (factor) => {
  * person can actually read on the host this run is pinned to.
  */
 const MAIN_EXTERNAL = `(async (action) => {
-  function resolveElectron() {
-    if (typeof require === 'function') { try { return require('electron') } catch {} }
-    if (process.mainModule && typeof process.mainModule.require === 'function') {
-      try { return process.mainModule.require('electron') } catch {}
-    }
-    const getBuiltin = process.getBuiltinModule
-    if (typeof getBuiltin === 'function') {
-      const registered = getBuiltin('electron')
-      if (registered) return registered
-      const Module = getBuiltin('module')
-      if (Module) return Module.createRequire(process.execPath)('electron')
-    }
-    throw new Error('Could not resolve the electron module from the main process')
-  }
+${RESOLVER}
   const { shell } = resolveElectron()
   const active = globalThis.__notificationE2eLinks
   if (action === 'calls') return (active?.calls ?? []).slice()

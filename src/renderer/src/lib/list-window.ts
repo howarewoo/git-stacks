@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { clampRovingIndex } from './tree-navigation'
 import { LIST_PAGE_SIZE } from '../../../shared/performance'
 
 /**
@@ -77,4 +78,54 @@ export function useListWindow<T>(items: readonly T[], pageSize = LIST_PAGE_SIZE)
     retreat,
     revealIndex,
   }
+}
+
+/**
+ * One composite list widget: a single Tab stop whose position follows keyboard
+ * focus, tracked by the row's position inside the mounted window, which is the
+ * same coordinate system the DOM lookup and the tabindex comparison use.
+ *
+ * Only Home and End address the whole filtered list, so the row they name may
+ * not be mounted yet. `focusListIndex` asks the window to reveal it and applies
+ * the pending index once that row exists, which keeps the single Tab stop with
+ * the focus. Arrow keys must never come through it: they are already in mounted
+ * coordinates, and re-basing them by the window start would send them to the
+ * page the reader has already scrolled away from.
+ */
+export function useRovingListFocus<Container extends HTMLElement = HTMLDivElement>(
+  window: ListWindow<unknown>,
+  rowSelector: string,
+) {
+  const [activeIndex, setActiveIndex] = React.useState(0)
+  const containerRef = React.useRef<Container>(null)
+  const focusMounted = (mountedIndex: number) => {
+    const row = containerRef.current?.querySelectorAll<HTMLElement>(rowSelector)[mountedIndex]
+    if (!row) return
+    setActiveIndex(mountedIndex)
+    row.focus()
+  }
+  const pendingFocus = React.useRef<number | null>(null)
+  const focusListIndex = (listIndex: number) => {
+    const mountedIndex = listIndex - window.start
+    if (mountedIndex >= 0 && mountedIndex < window.visible.length) {
+      focusMounted(mountedIndex)
+      return
+    }
+    pendingFocus.current = listIndex
+    window.revealIndex(listIndex)
+  }
+  // The active row is tracked by its position in the mounted window, so a
+  // sliding window has to re-clamp it or the surface loses its single Tab stop.
+  React.useEffect(() => {
+    setActiveIndex((index) => clampRovingIndex(index, window.visible.length))
+  }, [window.start, window.visible.length])
+  React.useEffect(() => {
+    const pending = pendingFocus.current
+    if (pending === null) return
+    const mountedIndex = pending - window.start
+    if (mountedIndex < 0 || mountedIndex >= window.visible.length) return
+    pendingFocus.current = null
+    focusMounted(mountedIndex)
+  }, [window.start, window.visible.length])
+  return { activeIndex, containerRef, focusMounted, focusListIndex, noteFocus: setActiveIndex }
 }

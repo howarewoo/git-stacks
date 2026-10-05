@@ -207,8 +207,6 @@ interface StackPlan {
    * request per layer.
    */
   merge: MergePreview | null
-  /** The native stack this merge belongs to, revalidated at the mutation boundary. */
-  mergeStackNumber: number | null
 }
 
 interface JournalEntry {
@@ -331,6 +329,17 @@ interface CapturedStack {
   members: NativeStack['pullRequests']
 }
 
+/** The native stack membership a plan revalidates against before it mutates. */
+function captureStack(stack: NativeStack): CapturedStack {
+  return {
+    number: stack.number,
+    open: stack.open,
+    base: stack.base,
+    status: stack.status,
+    members: stack.pullRequests.map((member) => ({ ...member })),
+  }
+}
+
 /** The pull request identity a sync plan re-reads before it touches a descendant. */
 interface CapturedPullRequest {
   number: number
@@ -413,16 +422,6 @@ function stackActionError(message: string): never {
 
 function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
   return Object.keys(value).every((key) => keys.includes(key))
-}
-
-function validateTitleMap(value: unknown): Record<string, string> {
-  if (!isRecord(value)) stackActionError('titles must be an object')
-  const result: Record<string, string> = {}
-  for (const [key, title] of Object.entries(value)) {
-    requireRefInput(key, 'title branch')
-    result[key] = requireString(title, `title for ${key}`)
-  }
-  return result
 }
 
 export function validateStackAction(value: unknown): StackAction {
@@ -1742,13 +1741,8 @@ async function captureSyncTrunk(
       `Local ${trunk} has ${ahead} commit${ahead === 1 ? '' : 's'} not on origin/${trunk}; publish or reconcile the trunk before syncing so stack branches retain those commits`,
     )
   }
-  const diverged = Boolean(
-    localOid &&
-    remoteOidValue &&
-    localOid !== remoteOidValue &&
-    !(await isAncestor(repoPath, localOid, remoteOidValue)) &&
-    !(await isAncestor(repoPath, remoteOidValue, localOid)),
-  )
+  const trunkRelation =
+    localOid && remoteOidValue ? await remoteRelation(repoPath, remoteOidValue, localOid) : 'absent'
   return {
     remote: 'origin',
     trunk: {
@@ -1757,7 +1751,7 @@ async function captureSyncTrunk(
       remoteOid: remoteOidValue,
       ahead,
       behind,
-      diverged,
+      diverged: trunkRelation === 'diverged',
       blockers,
     },
     layers,
@@ -2185,7 +2179,6 @@ async function capturePlan(
     }
   }
   let merge: MergePreview | null = null
-  let mergeStackNumber: number | null = null
   let queueConfigured = false
   if (kind === 'merge') {
     const selectedEntry = entries.find((entry) => entry.branch === selectedBranch)
@@ -2225,8 +2218,7 @@ async function capturePlan(
           blockers,
           warnings,
         )
-        mergeStackNumber = merge?.native ? (selectedEntry.pr.stack?.stackNumber ?? null) : null
-        if (merge?.native && mergeStackNumber === null) {
+        if (merge?.native && selectedEntry.pr.stack?.stackNumber == null) {
           blockers.push('The selected pull request reports stack membership without a stack number')
         }
       }
@@ -2294,20 +2286,17 @@ async function capturePlan(
         .map((layer) => entries.find((entry) => entry.pr?.number === layer.pullRequest))
         .filter((entry): entry is PlanEntry => Boolean(entry))
     : entries
-  const steps: StackStep[] = reviewEntries.map((entry) => ({
-    branch: entry.branch,
-    parent: entry.parent,
-    oid: entry.oldTip,
-    commits: 0,
-    title: entry.pr?.title ?? entry.branch,
-    pr: entry.pr,
-    note: merge ? mergeLayerNote(entry, merge) : entry.note,
-  }))
-  for (const [index, entry] of reviewEntries.entries()) {
-    steps[index] = {
-      ...steps[index],
+  const steps: StackStep[] = []
+  for (const entry of reviewEntries) {
+    steps.push({
+      branch: entry.branch,
+      parent: entry.parent,
+      oid: entry.oldTip,
       commits: await commitCount(root, entry.boundary, entry.oldTip),
-    }
+      title: entry.pr?.title ?? entry.branch,
+      pr: entry.pr,
+      note: merge ? mergeLayerNote(entry, merge) : entry.note,
+    })
   }
   if (skippedMerged.size > 0)
     warnings.push(
@@ -2337,19 +2326,12 @@ async function capturePlan(
     capturedPrs: prs,
     nativeStacksAvailable: githubData?.nativeStackPreviewAvailable === true,
     nativeStacksReason: githubData?.nativeStackPreviewReason ?? 'not-applicable',
-    capturedStacks: (snapshot.nativeStacks ?? []).map((stack) => ({
-      number: stack.number,
-      open: stack.open,
-      base: stack.base,
-      status: stack.status,
-      members: stack.pullRequests.map((member) => ({ ...member })),
-    })),
+    capturedStacks: (snapshot.nativeStacks ?? []).map(captureStack),
     warnings,
     blockers,
     mergeMethods,
     sync: syncCapture,
     merge,
-    mergeStackNumber,
   }
   const syncPreview = syncCapture ? buildSyncPreview(syncCapture, selectedBranch) : null
   if (syncPreview)
@@ -2653,11 +2635,6 @@ export function onPublishProgress(listener: PublishProgressListener): () => void
   return () => {
     publishProgressListeners.delete(listener)
   }
-}
-
-export async function readPublishProgress(repoPath: string): Promise<PublishProgress | null> {
-  const operation = await readPublishOperation(await repositoryPath(repoPath))
-  return operation ? publishProgressOf(operation) : null
 }
 
 async function writePublishOperation(repoPath: string, operation: PublishOperation): Promise<void> {
@@ -4120,13 +4097,7 @@ async function captureSurgery(
     ),
     capturedStacks: (githubData?.nativeStacks ?? [])
       .filter((stack) => stack.pullRequests.some((member) => submitted.has(member.number)))
-      .map((stack) => ({
-        number: stack.number,
-        open: stack.open,
-        base: stack.base,
-        status: stack.status,
-        members: stack.pullRequests.map((member) => ({ ...member })),
-      })),
+      .map(captureStack),
     capturedMergedHeads: Object.fromEntries(
       layers.map((layer) => {
         const record = records.get(layer.branch) as BranchRecord
@@ -4149,7 +4120,6 @@ async function captureSurgery(
     // preview to revalidate.
     revalidateRemote: true,
     merge: null,
-    mergeStackNumber: null,
   }
   if (fetchFailure) stackPlan.blockers = [fetchFailure, ...stackPlan.blockers]
   return { plan, stackPlan }

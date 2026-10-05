@@ -3,6 +3,7 @@ import { AlertCircle, Archive, Files } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { Button } from './ui/button'
 import { OperationContext, WorkflowActions, WorkflowFrame } from './workflow-composition'
+import { fileIsStaged } from './data-views'
 import type { RepositorySnapshot } from '../../../shared/types'
 
 export interface DirtyCheckoutGuardProps {
@@ -22,8 +23,7 @@ export function DirtyCheckoutContent({
   onReviewChanges,
   onCarry,
 }: DirtyCheckoutGuardProps) {
-  const stagedCount =
-    snapshot?.files.filter((f) => f.index !== '' && f.index !== ' ' && f.index !== '?').length ?? 0
+  const stagedCount = snapshot?.files.filter(fileIsStaged).length ?? 0
   const totalCount = snapshot?.files.length ?? 0
 
   return (

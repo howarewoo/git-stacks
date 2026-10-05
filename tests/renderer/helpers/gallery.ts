@@ -14,7 +14,7 @@ import type { GitAction, GitHubCliStatus } from '../../../src/shared/types'
  * Fixed instant pinned for all gallery tests so relative timestamps
  * (e.g. "3h ago", "Mar 5") are completely deterministic across runs.
  */
-export const FROZEN_FIXTURE_TIME = new Date('2026-09-25T12:00:00.000Z')
+const FROZEN_FIXTURE_TIME = new Date('2026-09-25T12:00:00.000Z')
 
 export const STANDARD_VIEWPORTS = {
   compact: { width: 1000, height: 700 },

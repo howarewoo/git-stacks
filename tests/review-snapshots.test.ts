@@ -31,6 +31,7 @@ import {
   readReviewSnapshotLog,
   recordObservedHead,
 } from '../src/main/review-snapshots'
+import { readViewedRecord } from '../src/main/review-viewed'
 import {
   GitHubTransportError,
   setGitHubTransport,
@@ -439,6 +440,24 @@ test('reviewSnapshotLabel formats friendly readable label for select dropdowns',
 // -----------------------------------------------------------------------------
 // Storage & journal tests (journal beside git directory)
 // -----------------------------------------------------------------------------
+
+test('review journals read as absent when the repository Git directory disappears', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, comparison(), 1)
+  await rm(join(workspace.repo, '.git'), { recursive: true })
+  const reads = await Promise.allSettled([
+    readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26),
+    readViewedRecord(workspace.repo, 26),
+  ])
+  assert.deepEqual(reads, [
+    { status: 'fulfilled', value: null },
+    { status: 'fulfilled', value: null },
+  ])
+  await assert.rejects(
+    recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, comparison(), 1),
+  )
+})
 
 test('scope isolation: distinct repository or account viewer keeps independent snapshot logs', async (t) => {
   const workspace = await createTestWorkspace()

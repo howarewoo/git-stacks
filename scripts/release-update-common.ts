@@ -15,7 +15,7 @@
  * cannot account for.
  */
 import { execFileSync } from 'node:child_process'
-import { createHash, createPublicKey, verify } from 'node:crypto'
+import { createHash, createPublicKey, verify, KeyObject } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -47,7 +47,7 @@ export const fail: (message: string) => never = (message) => {
   process.exit(1)
 }
 
-export function isChannel(value: string): value is UpdateChannel {
+function isChannel(value: string): value is UpdateChannel {
   return (UPDATE_CHANNELS as readonly string[]).includes(value)
 }
 
@@ -129,7 +129,7 @@ export function readHistoryKeys(path: string = HISTORY_KEY_SET_PATH): TrustedUpd
  * different bytes are refused rather than resolved: a key set nobody can read
  * in one order is a key set nobody can reason about in any.
  */
-export function keysForPublishedHistory(): TrustedUpdateKey[] {
+function keysForPublishedHistory(): TrustedUpdateKey[] {
   const byKeyId = new Map<string, TrustedUpdateKey>()
   for (const key of [...readInjectedKeys(), ...readHistoryKeys()]) {
     const seen = byKeyId.get(key.keyId)
@@ -190,6 +190,32 @@ export function requireInjectedKey(): TrustedUpdateKey[] {
     )
   }
   return keys
+}
+
+/**
+ * The public half of a release key, as the bytes a key set stores it in.
+ *
+ * Every script that answers "is this the key the release signed with?" asks it
+ * the same way, and an answer derived any other way would not be the answer the
+ * key set was compared against.
+ */
+export function publicKeyBytesOf(key: Parameters<typeof createPublicKey>[0]): Buffer {
+  const publicKey = key instanceof KeyObject && key.type === 'public' ? key : createPublicKey(key)
+  return publicKey.export({ format: 'der', type: 'spki' })
+}
+
+/**
+ * The private key a release signs with. Update manifests are signed with
+ * Ed25519, and a secret holding any other kind of key is refused here rather
+ * than producing a signature no build would verify.
+ */
+export function requireEd25519SigningKey(key: KeyObject): KeyObject {
+  if (key.asymmetricKeyType !== 'ed25519') {
+    fail(
+      `the UPDATE_SIGNING_KEY repository secret holds a ${key.asymmetricKeyType} key; update manifests are signed with Ed25519.`,
+    )
+  }
+  return key
 }
 
 /** The app's pinned release location for a channel, asked of the app itself. */
@@ -295,7 +321,7 @@ export function historySignatureFileName(channel: UpdateChannel, sequence: numbe
 }
 
 /** The sequence a banked asset name carries, or null for any other name. */
-export function bankedSequenceOf(channel: UpdateChannel, name: string): number | null {
+function bankedSequenceOf(channel: UpdateChannel, name: string): number | null {
   const match = /^history-([a-z]+)-([0-9]{12})\.json$/u.exec(name)
   if (!match || match[1] !== channel) return null
   const sequence = Number(match[2])
@@ -500,7 +526,7 @@ export function provePublishedAssets(
  * validity window, it signed these exact bytes, and the manifest is one the app
  * parses for this channel.
  */
-export interface ProvenManifest {
+interface ProvenManifest {
   manifest: UpdateManifest
   /** The key that signed it, out of the set the packaged builds carry. */
   key: TrustedUpdateKey

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 
-export const STANDARD_AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']
+const STANDARD_AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']
 
 export interface AxeCheckResult {
   violations: Array<{
@@ -21,7 +21,7 @@ export interface AxeCheckResult {
 /**
  * Runs an axe accessibility audit on the page or a scoped selector.
  */
-export async function runAxeAudit(
+async function runAxeAudit(
   page: Page,
   options: {
     includeSelector?: string

@@ -36,6 +36,14 @@ import {
 } from '../lib/command-palette'
 import { isComposingKeyEvent } from '../../../shared/shortcuts'
 
+/** The keys that move the palette's selection, in either direction or to an end. */
+const MOVES_SELECTION: Record<string, true> = {
+  ArrowDown: true,
+  ArrowUp: true,
+  Home: true,
+  End: true,
+}
+
 export interface CommandPaletteProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -110,9 +118,7 @@ export function CommandPaletteContent({
   const listRef = React.useRef<HTMLDivElement>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
 
-  const filteredItems = React.useMemo(() => {
-    return rankPaletteItems(items, query)
-  }, [items, query])
+  const filteredItems = React.useMemo(() => rankPaletteItems(items, query), [items, query])
 
   // Reset index when query changes
   React.useEffect(() => {
@@ -166,23 +172,21 @@ export function CommandPaletteContent({
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (isComposingKeyEvent(event.nativeEvent)) return
-    if (event.key === 'ArrowDown') {
+    // Every selection key disarms a pending confirmation, because the item the
+    // confirmation was armed for is no longer the one Enter would execute.
+    if (MOVES_SELECTION[event.key]) {
       event.preventDefault()
       setConfirmingId(null)
+    }
+    if (event.key === 'ArrowDown') {
       if (displayedItems.length === 0) return
       setSelectedIndex((prev) => (prev + 1) % displayedItems.length)
     } else if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      setConfirmingId(null)
       if (displayedItems.length === 0) return
       setSelectedIndex((prev) => (prev - 1 + displayedItems.length) % displayedItems.length)
     } else if (event.key === 'Home') {
-      event.preventDefault()
-      setConfirmingId(null)
       setSelectedIndex(0)
     } else if (event.key === 'End') {
-      event.preventDefault()
-      setConfirmingId(null)
       setSelectedIndex(Math.max(0, displayedItems.length - 1))
     } else if (event.key === 'Enter') {
       event.preventDefault()

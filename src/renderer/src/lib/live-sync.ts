@@ -6,7 +6,6 @@ export interface FreshnessDescription {
   /** The full sentence for the badge's accessible description and tooltip. */
   detail: string
   variant: 'secondary' | 'info' | 'warning' | 'danger'
-  tone: 'neutral' | 'info' | 'warning' | 'error'
 }
 
 const VARIANT_BY_STATE: Record<RemoteFreshnessState, FreshnessDescription['variant']> = {
@@ -16,15 +15,6 @@ const VARIANT_BY_STATE: Record<RemoteFreshnessState, FreshnessDescription['varia
   offline: 'warning',
   'rate-limited': 'warning',
   unauthorized: 'danger',
-}
-
-const TONE_BY_STATE: Record<RemoteFreshnessState, FreshnessDescription['tone']> = {
-  fresh: 'neutral',
-  refreshing: 'info',
-  stale: 'warning',
-  offline: 'warning',
-  'rate-limited': 'warning',
-  unauthorized: 'error',
 }
 
 const LABEL_BY_STATE: Record<RemoteFreshnessState, string> = {
@@ -37,7 +27,7 @@ const LABEL_BY_STATE: Record<RemoteFreshnessState, string> = {
 }
 
 /** `12s`, `4m`, `2h`, or `3d`: the age of the last confirmed GitHub data. */
-export function formatFreshnessAge(fetchedAt: string | null, now: number): string | null {
+function formatFreshnessAge(fetchedAt: string | null, now: number): string | null {
   if (!fetchedAt) return null
   const elapsed = now - Date.parse(fetchedAt)
   if (!Number.isFinite(elapsed)) return null
@@ -70,7 +60,6 @@ export function describeFreshness(
       label: 'GitHub unknown',
       detail: 'GitHub data has not been checked yet in this session.',
       variant: 'secondary',
-      tone: 'neutral',
     }
   }
   const age = formatFreshnessAge(freshness.fetchedAt, now)
@@ -103,6 +92,5 @@ export function describeFreshness(
     label: LABEL_BY_STATE[freshness.state],
     detail: parts.join(' '),
     variant: VARIANT_BY_STATE[freshness.state],
-    tone: TONE_BY_STATE[freshness.state],
   }
 }

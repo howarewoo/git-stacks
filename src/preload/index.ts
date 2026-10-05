@@ -31,6 +31,19 @@ function reportDrop(event: DragEvent): void {
 window.addEventListener('dragover', (event) => event.preventDefault())
 window.addEventListener('drop', reportDrop)
 
+/**
+ * Subscribes a renderer listener to a main-process channel and hands back the
+ * unsubscribe. The event argument Electron passes is dropped here, so a payload
+ * never reaches the renderer with the sender attached to it.
+ */
+function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
+  const handler = (_event: unknown, payload: T): void => listener(payload)
+  ipcRenderer.on(channel, handler)
+  return () => {
+    ipcRenderer.removeListener(channel, handler)
+  }
+}
+
 const desktop: DesktopAPI = {
   recentRepositories: () => ipcRenderer.invoke('repositories:recent'),
   openRepository: (path) => ipcRenderer.invoke('repositories:open', path),
@@ -57,20 +70,10 @@ const desktop: DesktopAPI = {
   stackPreview: (kind, branch) => ipcRenderer.invoke('repository:stack-preview', kind, branch),
   surgeryPreview: (request) => ipcRenderer.invoke('repository:surgery-preview', request),
   submitStackProgress: () => ipcRenderer.invoke('repository:submit-stack-progress'),
-  onSubmitStackProgress: (listener: (progress: PublishProgress | null) => void) => {
-    const handler = (_event: unknown, progress: PublishProgress | null): void => listener(progress)
-    ipcRenderer.on('submit-stack-progress', handler)
-    return () => {
-      ipcRenderer.removeListener('submit-stack-progress', handler)
-    }
-  },
-  onMergeProgress: (listener: (progress: MergeProgress | null) => void) => {
-    const handler = (_event: unknown, progress: MergeProgress | null): void => listener(progress)
-    ipcRenderer.on('merge-progress', handler)
-    return () => {
-      ipcRenderer.removeListener('merge-progress', handler)
-    }
-  },
+  onSubmitStackProgress: (listener: (progress: PublishProgress | null) => void) =>
+    subscribe('submit-stack-progress', listener),
+  onMergeProgress: (listener: (progress: MergeProgress | null) => void) =>
+    subscribe('merge-progress', listener),
   mergeStatus: () => ipcRenderer.invoke('repository:merge-status'),
   reconciliationPreview: (stackKey) =>
     ipcRenderer.invoke('repository:reconciliation-preview', stackKey),
@@ -116,40 +119,20 @@ const desktop: DesktopAPI = {
   setSystemGit: (enabled) => ipcRenderer.invoke('git-runtime:system-git', enabled),
   remoteStatus: () => ipcRenderer.invoke('repository:status'),
   reportActivity: (activity) => ipcRenderer.invoke('repository:activity', activity),
-  onBackgroundSnapshot: (listener) => {
-    const handler = (_event: unknown, snapshot: RepositorySnapshot): void => listener(snapshot)
-    ipcRenderer.on('repository:background-snapshot', handler)
-    return () => {
-      ipcRenderer.removeListener('repository:background-snapshot', handler)
-    }
-  },
-  onBackgroundIssues: (listener) => {
-    const handler = (_event: unknown, issues: RepositoryIssue[]): void => listener(issues)
-    ipcRenderer.on('repository:background-issues', handler)
-    return () => {
-      ipcRenderer.removeListener('repository:background-issues', handler)
-    }
-  },
-  onRemoteStatus: (listener) => {
-    const handler = (_event: unknown, freshness: RemoteFreshness): void => listener(freshness)
-    ipcRenderer.on('repository:remote-status', handler)
-    return () => {
-      ipcRenderer.removeListener('repository:remote-status', handler)
-    }
-  },
+  onBackgroundSnapshot: (listener: (snapshot: RepositorySnapshot) => void) =>
+    subscribe('repository:background-snapshot', listener),
+  onBackgroundIssues: (listener: (issues: RepositoryIssue[]) => void) =>
+    subscribe('repository:background-issues', listener),
+  onRemoteStatus: (listener: (freshness: RemoteFreshness) => void) =>
+    subscribe('repository:remote-status', listener),
   dismissPendingMutation: (id) => ipcRenderer.invoke('repository:dismiss-pending-mutation', id),
   // A real read of the installed GitHub CLI and the account it holds. Status
   // only: no credential, no CLI output, and no path to either crosses here, and
   // there is no channel for signing in, switching account, or signing out —
   // those belong to the GitHub CLI itself.
   githubCliStatus: () => ipcRenderer.invoke('github-cli:status'),
-  onGitHubCliStatus: (listener: (status: GitHubCliStatus) => void) => {
-    const handler = (_event: unknown, status: GitHubCliStatus): void => listener(status)
-    ipcRenderer.on('github-cli:status', handler)
-    return () => {
-      ipcRenderer.removeListener('github-cli:status', handler)
-    }
-  },
+  onGitHubCliStatus: (listener: (status: GitHubCliStatus) => void) =>
+    subscribe('github-cli:status', listener),
   notificationsStatus: () => ipcRenderer.invoke('notifications:status'),
   notifications: () => ipcRenderer.invoke('notifications:inbox'),
   refreshNotifications: () => ipcRenderer.invoke('notifications:refresh'),
@@ -166,13 +149,8 @@ const desktop: DesktopAPI = {
   markNotificationDone: (threadId) => ipcRenderer.invoke('notifications:done', threadId),
   setNotificationSubscription: (threadId, action) =>
     ipcRenderer.invoke('notifications:subscription', threadId, action),
-  onNotifications: (listener: (inbox: NotificationInbox) => void) => {
-    const handler = (_event: unknown, inbox: NotificationInbox): void => listener(inbox)
-    ipcRenderer.on('notifications', handler)
-    return () => {
-      ipcRenderer.removeListener('notifications', handler)
-    }
-  },
+  onNotifications: (listener: (inbox: NotificationInbox) => void) =>
+    subscribe('notifications', listener),
   githubHostStatus: () => ipcRenderer.invoke('github:host-status'),
   settings: () => ipcRenderer.invoke('settings'),
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
@@ -187,13 +165,8 @@ const desktop: DesktopAPI = {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
-  onUpdateStatus: (listener: (status: UpdateStatus) => void) => {
-    const handler = (_event: unknown, status: UpdateStatus): void => listener(status)
-    ipcRenderer.on('update:status', handler)
-    return () => {
-      ipcRenderer.removeListener('update:status', handler)
-    }
-  },
+  onUpdateStatus: (listener: (status: UpdateStatus) => void) =>
+    subscribe('update:status', listener),
   pullRequestInbox: (request) => ipcRenderer.invoke('inbox:pull-requests', request),
   pullRequestInboxFilters: () => ipcRenderer.invoke('inbox:filters'),
   savePullRequestInboxFilters: (filters) => ipcRenderer.invoke('inbox:filters-save', filters),
