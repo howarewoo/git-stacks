@@ -800,7 +800,7 @@ test('Sync Stack drops a merge-commit merged parent and reparents its descendant
     assert.notEqual(trunkSide, parentTip)
     git(harness, ['switch', 'child'])
 
-    const state = JSON.parse(await readFile(harness.statePath, 'utf8')) as GitHubFixtureState
+    const state = await harness.readState()
     const merged = state.prs.find((pr) => pr.number === 1)
     const survivor = state.prs.find((pr) => pr.number === 2)
     assert.ok(merged)
@@ -819,7 +819,7 @@ test('Sync Stack drops a merge-commit merged parent and reparents its descendant
         .filter((member) => member.number !== merged.number)
         .map((member) => ({ ...member, head: { ref: 'child', sha: childTip } })),
     }))
-    await writeFile(harness.statePath, JSON.stringify(state), 'utf8')
+    await harness.writeState(state)
 
     const gitDir = git(harness, ['rev-parse', '--absolute-git-dir'])
     assert.equal(existsSync(join(gitDir, 'git-stacks-merged-heads.json')), false)
@@ -832,12 +832,10 @@ test('Sync Stack drops a merge-commit merged parent and reparents its descendant
     )
     assert.equal(preview.kind, 'sync')
     assert.deepEqual(preview.blockers, [])
-    assert.deepEqual([...(preview.sync?.layers ?? [])].map((layer) => layer.branch).sort(), [
-      'child',
-      'parent',
-    ])
-    const parentLayer = preview.sync?.layers.find((layer) => layer.branch === 'parent')
-    const childLayer = preview.sync?.layers.find((layer) => layer.branch === 'child')
+    assert.ok(preview.sync)
+    assert.deepEqual(preview.sync.layers.map((layer) => layer.branch).sort(), ['child', 'parent'])
+    const parentLayer = preview.sync.layers.find((layer) => layer.branch === 'parent')
+    const childLayer = preview.sync.layers.find((layer) => layer.branch === 'child')
     assert.ok(parentLayer)
     assert.ok(childLayer)
     // The merged parent leaves the cascade exactly as it is; only the descendant moves.
@@ -922,7 +920,7 @@ test('Sync Stack refuses a sync whose merge-committed parent is proved different
     const mergeOid = git(harness, ['rev-parse', 'main'])
     git(harness, ['push', harness.bare, 'main:refs/heads/main'])
 
-    const state = JSON.parse(await readFile(harness.statePath, 'utf8')) as GitHubFixtureState
+    const state = await harness.readState()
     const merged = state.prs.find((pr) => pr.number === 1)
     assert.ok(merged)
     merged.state = 'MERGED'
@@ -931,7 +929,7 @@ test('Sync Stack refuses a sync whose merge-committed parent is proved different
     const survivor = state.prs.find((pr) => pr.number === 2)
     assert.ok(survivor)
     survivor.base = 'main'
-    await writeFile(harness.statePath, JSON.stringify(state), 'utf8')
+    await harness.writeState(state)
     git(harness, ['switch', 'child'])
 
     const preview = await previewStack(
@@ -960,11 +958,11 @@ test('Sync Stack refuses a sync whose merge-committed parent is proved different
     const alternateParents = git(harness, ['rev-list', '--parents', '-n', '1', alternateMergeOid])
     assert.notEqual(alternateMergeOid, mergeOid)
     assert.equal(alternateParents.split(' ')[1], mergeOid)
-    const moved = JSON.parse(await readFile(harness.statePath, 'utf8')) as GitHubFixtureState
+    const moved = await harness.readState()
     const remerged = moved.prs.find((pr) => pr.number === 1)
     assert.ok(remerged)
     remerged.mergeOid = alternateMergeOid
-    await writeFile(harness.statePath, JSON.stringify(moved), 'utf8')
+    await harness.writeState(moved)
     git(harness, ['switch', 'child'])
 
     const mutationsBefore = await restMutations(harness)
@@ -1012,7 +1010,7 @@ test('Sync Stack reports a published, current stack as up to date and changes no
     assert.deepEqual(preview.blockers, [])
     const sync = preview.sync
     assert.ok(sync)
-    assert.deepEqual([...sync.layers].map((layer) => layer.branch).sort(), ['child', 'parent'])
+    assert.deepEqual(sync.layers.map((layer) => layer.branch).sort(), ['child', 'parent'])
     assert.equal(sync.trunk.behind, 0)
     assert.equal(sync.trunk.ahead, 0)
     assert.equal(sync.trunk.diverged, false)

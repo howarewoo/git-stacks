@@ -929,29 +929,21 @@ async function commitParents(repoPath: string, oid: string): Promise<string[]> {
   return tokens.slice(1).filter(Boolean)
 }
 
-/**
- * The head a layer's pull request was merged at, resolved in one precedence
- * order: what this repository recorded in branch config or its merge journal,
- * and otherwise what the merge commit itself proves by naming the merged head
- * as its second parent. Preview and the mutation revalidating that preview both
- * resolve it here, so a boundary one of them can prove the other can re-prove —
- * otherwise a merge Git Stacks did not perform is previewed as replannable and
- * then refused for a boundary that never changed.
- */
-async function resolveMergedHead(
+// Preview and revalidation must use the same proof: a recorded head takes
+// precedence; otherwise a merge commit's second parent names the merged head.
+async function resolveMergedHeadOid(
   repoPath: string,
-  recorded: { pr: string | null; oid: string | null; commit: string | null },
-  pullRequestMergeOid: string | null,
-): Promise<{ pr: string | null; oid: string | null; commit: string | null }> {
-  const commit = recorded.commit ?? pullRequestMergeOid
-  if (recorded.oid || !commit) return { ...recorded, commit }
+  recordedOid: string | null,
+  mergeCommitOid: string | null,
+): Promise<string | null> {
+  if (recordedOid || !mergeCommitOid) return recordedOid
   try {
-    const parents = await commitParents(repoPath, commit)
-    if (parents.length >= 2 && isOid(parents[1])) return { ...recorded, oid: parents[1], commit }
+    const parents = await commitParents(repoPath, mergeCommitOid)
+    if (parents.length >= 2 && isOid(parents[1])) return parents[1]
   } catch {
     // A merge commit this repository cannot read proves no boundary.
   }
-  return { ...recorded, commit }
+  return recordedOid
 }
 
 interface MergedPrRecord {
@@ -1557,14 +1549,13 @@ async function branchRecords(
     const pr = canonicalPrs.get(name) ?? localPrForBranch(snapshot, name, originFullName)
     const journalEntry =
       mergedJournal.get(name) ?? (pr ? mergedJournal.get(String(pr.number)) : null)
-    const mergedHead = await resolveMergedHead(
+    const mergedHeadPr = configuredMergedHeadPr ?? (journalEntry ? String(journalEntry.pr) : null)
+    const mergedCommitOid =
+      configuredMergedCommitOid ?? journalEntry?.mergeOid ?? pr?.mergeOid ?? null
+    const mergedHeadOid = await resolveMergedHeadOid(
       repoPath,
-      {
-        pr: configuredMergedHeadPr ?? (journalEntry ? String(journalEntry.pr) : null),
-        oid: configuredMergedHeadOid ?? journalEntry?.headOid ?? null,
-        commit: configuredMergedCommitOid ?? journalEntry?.mergeOid ?? null,
-      },
-      pr?.mergeOid ?? null,
+      configuredMergedHeadOid ?? journalEntry?.headOid ?? null,
+      mergedCommitOid,
     )
     records.set(name, {
       name,
@@ -1574,9 +1565,9 @@ async function branchRecords(
       invalidParentTip,
       parentSource: source,
       pr,
-      mergedHeadPr: mergedHead.pr,
-      mergedHeadOid: mergedHead.oid,
-      mergedCommitOid: mergedHead.commit,
+      mergedHeadPr,
+      mergedHeadOid,
+      mergedCommitOid,
     })
   }
   return records
@@ -2976,14 +2967,8 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
       throw new Error(`Stack preview is stale: branch ${branch} changed`)
   }
   const revalidateMergedJournal = await readMergedPrJournal(repoPath)
-  // One remote read answers both the merge proof below and the pull request
-  // re-read further down, so a boundary this repository never recorded is proved
-  // again from what GitHub reports now rather than from what the preview held.
+  // Reuse the live merge-proof read for the later pull request checks.
   let remoteRead: GitHubResult | undefined
-  const readRemote = async (): Promise<GitHubResult> => {
-    if (!remoteRead) remoteRead = await getGitHubData(repoPath, plan.originUrl)
-    return remoteRead
-  }
   for (const [branch, expected] of Object.entries(plan.capturedMergedHeads)) {
     const [configPr, configOid, configCommit] = await Promise.all([
       getConfigValue(repoPath, `branch.${branch}.gitStacksMergedHeadPr`),
@@ -2993,23 +2978,19 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
     const journalEntry =
       revalidateMergedJournal.get(branch) ??
       (expected.pr ? revalidateMergedJournal.get(expected.pr) : null)
-    const recorded = {
-      pr: configPr ?? (journalEntry ? String(journalEntry.pr) : null),
-      oid: configOid ?? journalEntry?.headOid ?? null,
-      commit: configCommit ?? journalEntry?.mergeOid ?? null,
+    const pr = configPr ?? (journalEntry ? String(journalEntry.pr) : null)
+    const recordedOid = configOid ?? journalEntry?.headOid ?? null
+    let commit = configCommit ?? journalEntry?.mergeOid ?? null
+    if (recordedOid === null && expected.oid !== null) {
+      // Re-prove unrecorded heads from GitHub now, not from the captured preview.
+      remoteRead ??= await getGitHubData(repoPath, plan.originUrl)
+      commit ??=
+        remoteRead.pullRequests.find(
+          (pullRequest) => pullRequest.number === plan.capturedPrs[branch]?.number,
+        )?.mergeOid ?? null
     }
-    // Nothing this repository holds names the head, so the pull request's own
-    // answer is the only source left. It is read now rather than taken from the
-    // preview, so a merge proved differently since then refuses the run; an
-    // unreadable answer proves no boundary and refuses it too.
-    const pullRequestMergeOid =
-      recorded.oid === null && expected.oid !== null
-        ? ((await readRemote()).pullRequests.find(
-            (pullRequest) => pullRequest.number === plan.capturedPrs[branch]?.number,
-          )?.mergeOid ?? null)
-        : null
-    const head = await resolveMergedHead(repoPath, recorded, pullRequestMergeOid)
-    if (head.pr !== expected.pr || head.oid !== expected.oid || head.commit !== expected.commit) {
+    const oid = await resolveMergedHeadOid(repoPath, recordedOid, commit)
+    if (pr !== expected.pr || oid !== expected.oid || commit !== expected.commit) {
       throw new Error(`Stack preview is stale: merged pull request boundary for ${branch} changed`)
     }
   }
@@ -3053,7 +3034,7 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
   const hasCapturedPrs = Object.values(plan.capturedPrs).some(Boolean)
   const hasCapturedStacks = plan.capturedStacks.length > 0
   if (!hasCapturedPrs && !hasCapturedStacks) return
-  const data = await readRemote()
+  const data = remoteRead ?? (await getGitHubData(repoPath, plan.originUrl))
   if (!data.available) {
     throw new Error(`Stack preview is stale: GitHub is no longer reachable (${data.message})`)
   }
