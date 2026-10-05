@@ -864,11 +864,6 @@ export class DirectGitHubTransport implements GitHubTransport {
     return this.options.reportRateLimit !== false
   }
 
-  /** A failure this transport raises. It records nothing; the fences do. */
-  private failure(failure: GitHubTransportFailure): GitHubTransportError {
-    return new GitHubTransportError(failure)
-  }
-
   private get env(): NodeJS.ProcessEnv {
     return this.options.env ?? process.env
   }
@@ -973,7 +968,7 @@ export class DirectGitHubTransport implements GitHubTransport {
   ): Promise<{ headers: Headers; token: string }> {
     const access = this.accessCredential()
     if (!access) {
-      throw this.failure({
+      throw new GitHubTransportError({
         kind: 'unauthorized',
         detail: 'no GitHub credential was supplied to this transport',
       })
@@ -1026,7 +1021,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       const access = await this.headers(payload !== undefined, request.headers)
       requestAuthority = hostCredentialAuthority(this.host ?? GITHUB_HOST, access.token)
       if (controller.signal.aborted) {
-        throw this.failure(
+        throw new GitHubTransportError(
           timedOut
             ? { kind: 'timeout', detail: `request did not complete within ${timeoutMs}ms` }
             : { kind: 'cancelled', detail: 'the request was cancelled' },
@@ -1077,7 +1072,7 @@ export class DirectGitHubTransport implements GitHubTransport {
         // Raising this records nothing; the publication below does, against this
         // host and the order this request left in, so that an answer arriving
         // after a newer one is held back instead of replacing it.
-        const failure = this.failure({
+        const failure = new GitHubTransportError({
           kind: statusKind(response.status, rateLimit, apiMessage(body)),
           status: response.status,
           detail: apiMessage(body) ?? response.statusText ?? 'request failed',
@@ -1109,15 +1104,15 @@ export class DirectGitHubTransport implements GitHubTransport {
     } catch (error) {
       if (error instanceof GitHubTransportError) throw error
       if (timedOut) {
-        throw this.failure({
+        throw new GitHubTransportError({
           kind: 'timeout',
           detail: `request did not complete within ${timeoutMs}ms`,
         })
       }
       if (request.signal?.aborted) {
-        throw this.failure({ kind: 'cancelled', detail: 'the request was cancelled' })
+        throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
       }
-      throw this.failure({
+      throw new GitHubTransportError({
         kind: 'network',
         detail: commandDetail(error),
       })
@@ -1180,7 +1175,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       // The 304 is already recorded against this host by the response that
       // carried it; raising this must not record it again without a host.
       if (!cached)
-        throw this.failure({
+        throw new GitHubTransportError({
           status,
           kind: 'invalid-response',
           detail: 'GitHub answered 304 without a stored response',
@@ -1218,7 +1213,7 @@ export class DirectGitHubTransport implements GitHubTransport {
       // naming no host is process-wide: it would replace what another host, or
       // another account of this one, last reported.
       if (!Array.isArray(body)) {
-        throw this.failure({
+        throw new GitHubTransportError({
           kind: 'invalid-response',
           status,
           detail: 'GitHub returned an unexpected pagination response',
@@ -1237,7 +1232,7 @@ export class DirectGitHubTransport implements GitHubTransport {
     if (currentUrl !== null) {
       // Every page read here was this host's own answer and was recorded against
       // it as it arrived; the refusal to keep paging adds no allowance to record.
-      throw this.failure({
+      throw new GitHubTransportError({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} pages`,
       })
@@ -1250,26 +1245,7 @@ export class DirectGitHubTransport implements GitHubTransport {
     variables: Record<string, unknown> = {},
     options: GitHubGraphqlOptions = {},
   ): Promise<T> {
-    // When this request left, so that an answer carrying a refusal is judged
-    // against the report that was current when it was sent: one that lands after
-    // a newer answer describes a credential that has left.
-    const requestOrder = nextGitHubRequestOrder()
-    const { status, body, rateLimit, authority } = await this.send(
-      this.graphqlUrl,
-      'POST',
-      { query, variables },
-      options,
-    )
-    return graphqlData<T>(
-      body,
-      status,
-      rateLimit,
-      authority,
-      this.reportsRateLimit
-        ? (limit, kind) =>
-            publishRateLimit(limit, kind, this.destinationHost, authority, requestOrder)
-        : undefined,
-    )
+    return (await this.graphqlWithAuthority<T>(query, variables, options)).data
   }
 
   async graphqlWithAuthority<T = Record<string, unknown>>(
@@ -1814,25 +1790,7 @@ export class GhGitHubTransport implements GitHubTransport {
     variables: Record<string, unknown> = {},
     options: GitHubGraphqlOptions = {},
   ): Promise<T> {
-    // When this request left, so that a refusal carried in a 200 is judged against
-    // the report that was current when its child was started.
-    const requestOrder = nextGitHubRequestOrder()
-    const response = await this.request<unknown>({
-      method: 'POST',
-      // A host that serves GraphQL from its own path is given that path; the
-      // default host keeps `/graphql` under its API base.
-      path: this.options.graphqlUrl ?? 'graphql',
-      body: { query, variables },
-      ...options,
-    })
-    return graphqlData<T>(
-      response.data,
-      response.status,
-      response.rateLimit,
-      response.authority,
-      (limit, kind) =>
-        publishRateLimit(limit, kind, this.destinationHost, response.authority, requestOrder),
-    )
+    return (await this.graphqlWithAuthority<T>(query, variables, options)).data
   }
 
   async graphqlWithAuthority<T = Record<string, unknown>>(

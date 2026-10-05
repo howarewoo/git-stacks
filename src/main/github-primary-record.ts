@@ -133,24 +133,17 @@ export async function retirePrimaryGitHubRecord(
   // back where it was found.
   const claim = await claimOwnedFile(record.stateFile)
   if (claim === null) return { retired: false, host: null }
-  if (!(await claim.matches(read.file))) {
-    await claim.restore()
-    return { retired: false, host: null }
-  }
   // Everything from here can refuse or fail, and until the credential is really
-  // gone this record is the only thing naming it. So each way out puts the
-  // record back: a vault that will not parse, one this app cannot prove
-  // anything about, and one that refused the removal all leave the record
-  // exactly where it was found. Only a removal that actually happened discards
-  // it — a cleanup that could not be carried out never reports that it was.
-  let removed = false
-  try {
-    removed = await record.vault.removeOwned(state.reference, state.host)
-  } catch {
-    await claim.restore()
-    return { retired: false, host: null }
-  }
-  if (!removed) {
+  // gone this record is the only thing naming it. So every way out but one puts
+  // the record back: a record that stopped being ours before the claim, a vault
+  // that will not parse, one this app cannot prove anything about, and one that
+  // refused the removal all leave the record exactly where it was found. Only a
+  // removal that actually happened discards it — a cleanup that could not be
+  // carried out never reports that it was.
+  if (
+    !(await claim.matches(read.file)) ||
+    !(await record.vault.removeOwned(state.reference, state.host).catch(() => false))
+  ) {
     await claim.restore()
     return { retired: false, host: null }
   }

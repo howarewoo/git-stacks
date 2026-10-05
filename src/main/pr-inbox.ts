@@ -8,6 +8,7 @@ import {
   pullRequestInboxGroups,
   pullRequestInboxRefreshFailure,
   pullRequestInboxRepositoryStatusLabel,
+  pullRequestInboxWindowEnd,
   sortPullRequestInbox,
   type PullRequestInboxBudget,
   type PullRequestInboxItem,
@@ -119,6 +120,16 @@ const REST_PAGE_SIZE = 100
  */
 const hostAllowances = new Map<string, GitHubRateLimitReport>()
 
+/**
+ * The one key every allowance observation is filed and read under: this host,
+ * this credential, and the resource it was counted against. A count filed
+ * under any other scope is not evidence about this one, so no two of them can
+ * stand in for each other.
+ */
+function allowanceKey(host: string, authority: string, resource?: string | null): string {
+  return `${host.trim().toLowerCase()}\u0000${authority}\u0000${resource ?? ''}`
+}
+
 function rememberHostAllowance(
   host: string,
   rateLimit: GitHubRateLimit,
@@ -127,15 +138,12 @@ function rememberHostAllowance(
   kind: GitHubErrorKind | null = null,
 ): void {
   if (!authority) return
-  hostAllowances.set(
-    `${host.trim().toLowerCase()}\u0000${authority}\u0000${rateLimit.resource ?? ''}`,
-    {
-      rateLimit,
-      kind,
-      at,
-      authority,
-    },
-  )
+  hostAllowances.set(allowanceKey(host, authority, rateLimit.resource), {
+    rateLimit,
+    kind,
+    at,
+    authority,
+  })
 }
 
 /**
@@ -157,22 +165,14 @@ function hostAllowanceFor(
   const live = (report: GitHubRateLimitReport | undefined): GitHubRateLimitReport | null => {
     if (report === undefined || report.at === 0) return null
     if (report.authority !== authority) return null
-    // The moment this account's window ends. A host names a window in two ways
-    // and the longer one is the window: an account told to come back in a minute
-    // by a counter that resets in an hour has an hour, not a minute. A report
-    // that names neither describes no window this build can wait out, and a
-    // window that has already ended says what was true while it lasted rather
-    // than what is true now.
-    const retryAfter = report.rateLimit.retryAfterSeconds
-    const retryUntil =
-      retryAfter === null || retryAfter === undefined ? null : report.at + retryAfter * 1000
-    const resetUntil = report.rateLimit.reset?.getTime() ?? null
-    const until =
-      retryUntil === null
-        ? resetUntil
-        : resetUntil === null
-          ? retryUntil
-          : Math.max(retryUntil, resetUntil)
+    // The moment this account's window ends. A report that names no window this
+    // build can wait out, or one that has already ended, says what was true
+    // while it lasted rather than what is true now.
+    const until = pullRequestInboxWindowEnd({
+      reset: report.rateLimit.reset,
+      retryAfterSeconds: report.rateLimit.retryAfterSeconds,
+      reportedAt: report.at,
+    })
     if (until !== null && until <= at) return null
     // Only a primary refusal spends an account's allowance: that answer says this
     // window is empty for this account, whatever count it carried alongside, so
@@ -190,8 +190,12 @@ function hostAllowanceFor(
   // about this one, and refusing on it would hide a queue GitHub is serving.
   const own = lastGitHubRateLimitFor(host, authority, resource)
   const theirs = own.at === 0 ? null : live(own)
-  const key = `${host.trim().toLowerCase()}\u0000${authority}\u0000`
-  const mine = live(hostAllowances.get(`${key}${resource}`) ?? hostAllowances.get(key))
+  // This refresh's own observation for this resource, or the one it recorded for
+  // this host and credential before it was per-resource.
+  const mine = live(
+    hostAllowances.get(allowanceKey(host, authority, resource)) ??
+      hostAllowances.get(allowanceKey(host, authority)),
+  )
   if (theirs === null) return mine
   if (mine === null) return theirs
   // Between the two of them only this host and authority reported, so the newer report is the
@@ -209,22 +213,29 @@ function hostAllowanceFor(
 }
 
 /**
- * The window one report describes, in the terms admission decides against.
+ * Whether this server admits one more request, and the answer it read to say so.
  *
- * A host names a window in two ways and it lasts as long as the later of them:
- * a counter that resets in ten minutes does not shorten an account that was told
- * to come back in an hour, and a retry named past the reset does not shorten the
- * window the counter opens.
+ * Admission is decided against the allowance this server's own last answer
+ * described, in the window the request lands in: a host reached after a slow
+ * read on another one is admitted against what is open when it is reached, not
+ * against what was open when the refresh began.
  */
-function inboxWindow(
-  report: GitHubRateLimitReport | null,
-  now: number,
-): { reset: Date | null; now: number; retryAfterSeconds: number | null; reportedAt: number } {
+function admitsHost(
+  destination: string,
+  at: number,
+  authority: string | null,
+  budget: PullRequestInboxBudget,
+  resource: string = 'graphql',
+): { allowed: boolean; reason: string; reported: GitHubRateLimitReport | null } {
+  const reported = hostAllowanceFor(destination, at, authority, resource)
   return {
-    reset: report?.rateLimit.reset ?? null,
-    now,
-    retryAfterSeconds: report?.rateLimit.retryAfterSeconds ?? null,
-    reportedAt: report?.at ?? 0,
+    reported,
+    ...pullRequestInboxBudgetAllows(reported?.rateLimit.remaining ?? null, budget, {
+      reset: reported?.rateLimit.reset ?? null,
+      now: at,
+      retryAfterSeconds: reported?.rateLimit.retryAfterSeconds ?? null,
+      reportedAt: reported?.at ?? 0,
+    }),
   }
 }
 
@@ -292,15 +303,12 @@ function chargedTransport(
   }
   const rest = async <T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> => {
     const authority = await transport.credentialAuthority()
-    const reported = hostAllowanceFor(destination, clock(), authority, 'core')
-    const allow = pullRequestInboxBudgetAllows(reported?.rateLimit.remaining ?? null, budget, {
-      ...inboxWindow(reported, clock()),
-    })
-    if (!allow.allowed)
+    const admit = admitsHost(destination, clock(), authority, budget, 'core')
+    if (!admit.allowed)
       throw new GitHubTransportError({
         kind: 'rate-limited',
-        detail: allow.reason,
-        rateLimit: reported?.rateLimit,
+        detail: admit.reason,
+        rateLimit: admit.reported?.rateLimit,
         authority,
         // This queue decided not to ask, from the allowance it already recorded
         // for this host below. GitHub refused nothing, so this is not a host's
@@ -569,8 +577,6 @@ interface RepositoryReadContext {
   signal?: AbortSignal
 }
 
-class BudgetExhausted extends Error {}
-
 /**
  * One pull request's identity across the whole queue: the host it was read from,
  * its repository in GitHub's own case-insensitive spelling, and its number.
@@ -825,17 +831,33 @@ export async function readPullRequestInbox(
   for (const entry of inboxReadTargets(targets)) {
     if (signal?.aborted) throw new CommandCancelled()
     const { target, host, fullName } = entry
-    if (!host) {
+    /**
+     * One repository's line in the refresh report, however this read ended for
+     * it. A repository whose origin named a GitHub host is filed under that
+     * name and that host; one that named no GitHub host keeps the local path it
+     * was registered under, because there is no shared identity to file it by.
+     */
+    const report = (
+      status: PullRequestInboxRepositoryStatus,
+      detail: string,
+      readAs: string | null = null,
+    ): void => {
       repositories.push({
         repository: fullName || target.path,
         path: target.path,
-        host: null,
-        status: 'not-github',
-        viewer: null,
-        detail: `The origin remote is ${
+        host: host?.host ?? null,
+        status,
+        viewer: readAs,
+        detail,
+      })
+    }
+    if (!host) {
+      report(
+        'not-github',
+        `The origin remote is ${
           target.originUrl ? 'not on a GitHub host' : 'not configured'
         }, so this repository has no pull requests here.`,
-      })
+      )
       continue
     }
     // The host that will actually answer, resolved before anything is admitted.
@@ -851,16 +873,11 @@ export async function readPullRequestInbox(
     const destination = serving.destinationHost
     const rejected = rejectedHosts.get(host.host) ?? pausedServers.get(destination)
     if (rejected || exhausted) {
-      repositories.push({
-        repository: fullName,
-        path: target.path,
-        host: host.host,
-        status: 'skipped',
-        viewer: null,
-        detail:
-          rejected ??
+      report(
+        'skipped',
+        rejected ??
           `This refresh reached its ${budget.maxRequests}-request budget, so the remaining repositories were not read.`,
-      })
+      )
       continue
     }
     // Admission is this server's own, and it is decided now rather than at the
@@ -877,14 +894,7 @@ export async function readPullRequestInbox(
     if (until !== null && until > admittedAt) {
       const reason = `${destination} asked to be left alone until ${new Date(until).toISOString()}`
       pausedServers.set(destination, reason)
-      repositories.push({
-        repository: fullName,
-        path: target.path,
-        host: host.host,
-        status: 'rate-limited',
-        detail: reason,
-        viewer: null,
-      })
+      report('rate-limited', reason)
       continue
     }
     if (until !== null) clearGitHubRetryDeadline(destination)
@@ -892,35 +902,16 @@ export async function readPullRequestInbox(
     // to. A count another host reported, or one from a window that has since
     // reset, is not evidence about what this host will answer now.
     const authority = await serving.credentialAuthority().catch(() => null)
-    const principalKey = authority
-      ? `${destination.trim().toLowerCase()}\u0000${authority}\u0000graphql`
-      : null
+    const principalKey = authority ? allowanceKey(destination, authority, 'graphql') : null
     const principalRefused = principalKey ? refusedPrincipals.get(principalKey) : null
     if (principalRefused) {
-      repositories.push({
-        repository: fullName,
-        path: target.path,
-        host: host.host,
-        status: 'rate-limited',
-        detail: principalRefused,
-        viewer: null,
-      })
+      report('rate-limited', principalRefused)
       continue
     }
-    const reported = hostAllowanceFor(destination, admittedAt, authority)
-    const allow = pullRequestInboxBudgetAllows(reported?.rateLimit.remaining ?? null, budget, {
-      ...inboxWindow(reported, admittedAt),
-    })
-    if (!allow.allowed) {
-      if (principalKey) refusedPrincipals.set(principalKey, allow.reason)
-      repositories.push({
-        repository: fullName,
-        path: target.path,
-        host: host.host,
-        status: 'rate-limited',
-        detail: allow.reason,
-        viewer: null,
-      })
+    const admit = admitsHost(destination, admittedAt, authority, budget)
+    if (!admit.allowed) {
+      if (principalKey) refusedPrincipals.set(principalKey, admit.reason)
+      report('rate-limited', admit.reason)
       continue
     }
     // One charged wrapper per origin host rather than per destination. What the
@@ -969,26 +960,12 @@ export async function readPullRequestInbox(
       }
       items.push(...result.items)
       if (result.truncated) truncated.push(fullName)
-      repositories.push({
-        repository: fullName,
-        path: target.path,
-        host: host.host,
-        status: result.status,
-        detail: result.detail,
-        viewer: result.viewer,
-      })
+      report(result.status, result.detail, result.viewer)
     } catch (error) {
       if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
       if (error instanceof GitHubBudgetExhaustedError) {
         exhausted = error.message
-        repositories.push({
-          repository: fullName,
-          path: target.path,
-          host: host.host,
-          status: 'skipped',
-          detail: exhausted,
-          viewer: null,
-        })
+        report('skipped', exhausted)
         continue
       }
       const kind = error instanceof GitHubTransportError ? error.kind : 'unknown'
@@ -1014,19 +991,12 @@ export async function readPullRequestInbox(
           pausedServers.set(destination, message)
         } else if (error instanceof GitHubTransportError && error.authority) {
           refusedPrincipals.set(
-            `${destination.trim().toLowerCase()}\u0000${error.authority}\u0000${error.rateLimit.resource ?? 'graphql'}`,
+            allowanceKey(destination, error.authority, error.rateLimit.resource ?? 'graphql'),
             message,
           )
         }
       }
-      repositories.push({
-        repository: fullName,
-        path: target.path,
-        host: host.host,
-        status,
-        viewer: null,
-        detail: message,
-      })
+      report(status, message)
     }
   }
 

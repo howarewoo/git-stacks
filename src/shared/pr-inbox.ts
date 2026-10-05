@@ -567,39 +567,57 @@ export interface PullRequestInboxRequest {
 }
 
 /**
+ * The window one host answer described, in the terms admission decides against.
+ */
+export interface PullRequestInboxWindow {
+  /** The window the answer's counter runs to, when it named one. */
+  reset?: Date | null
+  now?: number
+  /** How long this answer told this account to come back, when it said. */
+  retryAfterSeconds?: number | null
+  /** When that answer arrived, which is when a wait it names runs from. */
+  reportedAt?: number
+}
+
+/**
+ * The moment the window one answer described ends, or null when it named none.
+ *
+ * A host names a window in two ways and it lasts as long as the later of them: a
+ * counter that resets in ten minutes does not shorten an account that was told
+ * to come back in an hour, and a retry named past the reset does not shorten the
+ * window the counter opens. An answer that names neither — or names one this
+ * build cannot read — describes no window there is anything to wait out.
+ */
+export function pullRequestInboxWindowEnd(window: PullRequestInboxWindow): number | null {
+  const reset = window.reset?.getTime()
+  const retryAfter = window.retryAfterSeconds
+  const retryEnd =
+    retryAfter === null || retryAfter === undefined || !Number.isFinite(retryAfter)
+      ? null
+      : (window.reportedAt ?? 0) + retryAfter * 1000
+  if (retryEnd === null) return reset !== undefined && Number.isFinite(reset) ? reset : null
+  if (reset === undefined || !Number.isFinite(reset)) return retryEnd
+  return Math.max(retryEnd, reset)
+}
+
+/**
  * Whether a refresh may start against the budget GitHub last reported.
  *
- * `reset` is the window the report was for, and a window that has already passed
- * is no longer a limit: GitHub counts each window separately, so a count read
- * before the reset says nothing about the requests available now. Refusing on
- * an expired count would park a window that admits no request capable of
- * updating the count, which is how a queue stays rate-limited until something
- * unrelated calls the API.
+ * A window is over when every moment that answer named has passed, and a window
+ * that has already passed is no longer a limit: GitHub counts each window
+ * separately, so a count read before the reset says nothing about the requests
+ * available now. Refusing on an expired count would park a window that admits no
+ * request capable of updating the count, which is how a queue stays rate-limited
+ * until something unrelated calls the API.
  */
 export function pullRequestInboxBudgetAllows(
   remaining: number | null,
   budget: PullRequestInboxBudget = DEFAULT_PULL_REQUEST_INBOX_BUDGET,
-  window: {
-    reset?: Date | null
-    now?: number
-    /** How long this answer told this account to come back, when it said. */
-    retryAfterSeconds?: number | null
-    /** When that answer arrived, which is when a wait it names runs from. */
-    reportedAt?: number
-  } = {},
+  window: PullRequestInboxWindow = {},
 ): { allowed: boolean; reason: string } {
-  const reset = window.reset ?? null
   const now = window.now ?? Date.now()
-  const retryAfter = window.retryAfterSeconds ?? null
-  const reportedAt = window.reportedAt ?? 0
-  // A window is over when every moment that answer named has passed: a counter
-  // that resets in ten minutes does not end a window the answer also said to come
-  // back to in an hour, and it does not start one on its own either.
-  const moments = [
-    reset !== null && Number.isFinite(reset.getTime()) ? reset.getTime() : null,
-    retryAfter !== null && Number.isFinite(retryAfter) ? reportedAt + retryAfter * 1000 : null,
-  ].filter((moment): moment is number => moment !== null)
-  if (moments.length > 0 && moments.every((moment) => now >= moment)) {
+  const ends = pullRequestInboxWindowEnd(window)
+  if (ends !== null && now >= ends) {
     return { allowed: true, reason: '' }
   }
   if (remaining === null || !Number.isFinite(remaining)) {

@@ -78,8 +78,6 @@ export interface OwnedFileRead {
  * whatever happens to be at the path by the time a check is finished with it.
  */
 export interface OwnedFileClaim {
-  /** Where the claimed file now is; a name only this process knows. */
-  readonly claimed: string
   /**
    * Whether the claimed file is still the one these bytes were read from: the
    * same file, with the same contents. Contents are compared as well as identity
@@ -127,12 +125,6 @@ async function openOwnedFile(file: string): Promise<OwnedFileRead | null | 'fail
   }
 }
 
-/** Whether anything at all holds this path right now. */
-async function pathOccupied(file: string): Promise<boolean> {
-  const read = await openOwnedFile(file)
-  return read === 'failed' || read !== null
-}
-
 /** Reads an owned file, treating anything unreadable as none of this app's own. */
 export async function readOwnedFile(file: string): Promise<OwnedFileRead | null> {
   const read = await openOwnedFile(file)
@@ -155,7 +147,6 @@ export async function claimOwnedFile(file: string): Promise<OwnedFileClaim | nul
     return null
   }
   return {
-    claimed,
     matches: async (validated) => {
       const current = await openOwnedFile(claimed)
       return (
@@ -311,17 +302,17 @@ export class CredentialVault {
     )
     return settled
   }
+
   /** The OS store that will hold secrets, or why none can be used. */
   store(): SecretStore {
     return this.protector.store()
   }
 
-  private requireStore(): string {
+  private requireStore(): void {
     const store = this.protector.store()
     if (store.kind !== 'system') {
       throw new CredentialStoreError('unavailable', store.reason)
     }
-    return store.name
   }
 
   /**
@@ -336,22 +327,6 @@ export class CredentialVault {
     }
     if (read === null) return null
     return { document: parseFile(read.text, this.file), read }
-  }
-
-  /**
-   * The entries in the file that is there now; nothing is remembered between calls.
-   *
-   * Queued on the same line as every change to this file, so a read can never
-   * observe the gap a write opens when it claims the file aside: a change in
-   * progress would otherwise read as no entries at all, and a reader would
-   * decide a stored credential is gone while it is being replaced.
-   */
-  private async read(): Promise<SealedCredential[]> {
-    const loaded = await this.change(async () => {
-      const current = await this.load()
-      return current === null ? null : { document: current.document, read: current.read }
-    })
-    return loaded === null ? [] : loaded.document.entries
   }
 
   /**
@@ -375,13 +350,11 @@ export class CredentialVault {
    */
   private async write(document: VaultDocument, validated: OwnedFileRead | null): Promise<boolean> {
     const claim = validated === null ? null : await claimOwnedFile(this.file)
-    if (validated !== null) {
-      if (claim === null || !(await claim.matches(validated))) {
-        await claim?.restore()
-        // The file changed under this change, and whoever changed it has the
-        // newer store. Overwriting it would destroy their entries.
-        return false
-      }
+    if (validated !== null && (claim === null || !(await claim.matches(validated)))) {
+      await claim?.restore()
+      // The file changed under this change, and whoever changed it has the
+      // newer store. Overwriting it would destroy their entries.
+      return false
     }
     try {
       // A store this build emptied of everything is removed rather than left behind
@@ -417,7 +390,7 @@ export class CredentialVault {
         // Something else owns this path and holds entries this change never saw,
         // or the write could not be made at all. Either way this change did not
         // commit, and the caller is told so.
-        if (await pathOccupied(this.file)) return false
+        if ((await openOwnedFile(this.file)) !== null) return false
         throw new CredentialStoreError('unreadable', 'The stored credentials could not be written.')
       }
       await rm(temporary, { force: true })
@@ -432,9 +405,18 @@ export class CredentialVault {
     }
   }
 
-  /** Stored references with their OS-sealed values; the only place they are held. */
+  /**
+   * Stored references with their OS-sealed values; the only place they are held.
+   * They are the entries in the file that is there now; nothing is remembered
+   * between calls.
+   *
+   * Queued on the same line as every change to this file, so a read can never
+   * observe the gap a write opens when it claims the file aside: a change in
+   * progress would otherwise read as no entries at all, and a reader would
+   * decide a stored credential is gone while it is being replaced.
+   */
   async references(): Promise<SealedCredential[]> {
-    return await this.read()
+    return (await this.change(() => this.load()))?.document.entries ?? []
   }
 
   /**
@@ -460,13 +442,9 @@ export class CredentialVault {
         )
       }
       const raw = { reference, host, sealed: sealed.toString('base64'), createdAt: now }
-      entries.push({
-        raw,
-        reference,
-        host,
-        sealed: raw.sealed,
-        createdAt: now,
-      })
+      // The entry is the record this build writes, read back field for field,
+      // so the two cannot fall out of step with each other.
+      entries.push({ raw, ...raw })
       const committed = await this.write(
         { entries, extras: loaded?.document.extras ?? {} },
         loaded?.read ?? null,
@@ -492,7 +470,7 @@ export class CredentialVault {
    */
   async open(reference: string, expectedHost?: string | null): Promise<string> {
     this.requireStore()
-    const entry = (await this.read()).find((candidate) => candidate.reference === reference)
+    const entry = (await this.references()).find((candidate) => candidate.reference === reference)
     if (!entry) return ''
     if (expectedHost !== undefined && entry.host !== expectedHost) {
       throw new CredentialStoreError(

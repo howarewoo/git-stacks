@@ -289,8 +289,18 @@ environment — and pins that one authority privately to that host's requests. N
 app-level override selects, stores, or logs a token, and a token reaches no
 command line, log, renderer file, or remote URL.
 
+Ordinary GraphQL reads and current-viewer proofs use the same transport request
+and response validation. The proof also receives the opaque authority of the
+credential that request carried; both paths attribute quota and refusal reports
+to that credential and the destination host.
+
 Private clones authenticate as ordinary private Git operations, separately from
 this CLI session.
+
+Legacy primary-record retirement verifies the claimed state file before removing
+its owned vault entry and restores the record when removal is refused or fails.
+Vault reads share the mutation queue; Notifications references and foreign vault
+metadata are preserved.
 
 GitHub CLI can fall back to plaintext token storage when its secure store is
 unavailable; [its login documentation](https://cli.github.com/manual/gh_auth_login)
