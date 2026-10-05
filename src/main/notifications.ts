@@ -707,23 +707,16 @@ export class NotificationCenter {
     return new DirectGitHubTransport({
       apiUrl: this.host.apiBase,
       host: this.host.host,
-      env: {},
+      // This module's own sealed credential, and nothing else. It is authorized
+      // independently of the GitHub CLI, so it never resolves a token from the
+      // environment or asks the CLI who it is.
+      token,
       cache: this.validator,
-      reportFailures: false,
       // This module's budget is its own: an exhausted notification token must
       // not park the pull requests, stacks, and reviews that read through the
-      // application's own credential.
+      // GitHub CLI.
       reportRateLimit: false,
       ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
-      credential: {
-        host: this.host.host,
-        available: () => true,
-        current: async () => ({
-          token,
-          session: this.credential?.reference ?? '',
-          origin: 'account' as const,
-        }),
-      },
     })
   }
 
@@ -841,7 +834,6 @@ export class NotificationCenter {
           record.failureKind === 'offline'
             ? 'The last notification read could not reach GitHub.'
             : 'The last notification read failed.',
-        publish: false,
       })
     }
     this.pendingBulkRead = record.pendingRead ?? null
@@ -1237,7 +1229,6 @@ export class NotificationCenter {
             kind: 'invalid-response',
             status: response.status,
             detail: 'GitHub returned an unexpected notification list',
-            publish: false,
           })
         }
         for (const entry of response.data) {
@@ -1260,7 +1251,6 @@ export class NotificationCenter {
           throw new GitHubTransportError({
             kind: 'invalid-response',
             detail: 'GitHub pointed the notification list at another origin',
-            publish: false,
           })
         }
         const path = resolved.pathname.startsWith(`${base}/`)
@@ -1271,7 +1261,6 @@ export class NotificationCenter {
       throw new GitHubTransportError({
         kind: 'invalid-response',
         detail: `GitHub returned more than ${MAX_PAGES} notification pages`,
-        publish: false,
       })
     } catch (error) {
       // The transport recorded the page it did read. Without the rest of the
@@ -1383,7 +1372,6 @@ export class NotificationCenter {
           : new GitHubTransportError({
               kind: 'unknown',
               detail: 'The notification read did not complete.',
-              publish: false,
             })
       const failedAt = this.now()
       this.memory.checkedAt = new Date(failedAt).toISOString()
@@ -1670,11 +1658,9 @@ export class NotificationCenter {
     const response = await new DirectGitHubTransport({
       apiUrl: this.host.apiBase,
       host: this.host.host,
-      env: {},
-      reportFailures: false,
+      token,
       reportRateLimit: false,
       ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
-      token,
     }).rest<{ login?: unknown }>({ path: 'user', signal })
     const login = text(response.data?.login)
     if (!login) {
@@ -1904,7 +1890,6 @@ export class NotificationCenter {
             : new GitHubTransportError({
                 kind: 'unknown',
                 detail: 'The change did not complete.',
-                publish: false,
               })
         if (!holds()) throw new Error(BOUNDARY_LOST_MESSAGE)
         if (failure.kind === 'unauthorized' || failure.kind === 'forbidden') {

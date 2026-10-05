@@ -27,6 +27,11 @@ export const SCENARIO_NAMES = [
   'shell-connected',
   'shell-long-content',
   'shell-offline',
+  // Required GitHub CLI status
+  'github-cli-missing',
+  'github-cli-signed-out',
+  'github-cli-authenticated',
+  'github-cli-discovery',
   // Ancestry
   'ancestry-linear',
   'ancestry-branching',
@@ -90,7 +95,7 @@ export const SCENARIO_NAMES = [
   // Optional notification center
   'notifications-read-pending',
   'notifications-awaiting-credential',
-  'notifications-account-pending',
+  'notifications-cli-status-pending',
   'notifications-ready',
   'notifications-stale',
   'notifications-rejected',
@@ -162,6 +167,12 @@ export const SCENARIO_GROUPS = {
     'pr-inbox-first-read',
   ],
   stashes: ['stash-stable-oid', 'stash-empty', 'stash-index-shift'],
+  authentication: [
+    'github-cli-missing',
+    'github-cli-signed-out',
+    'github-cli-authenticated',
+    'github-cli-discovery',
+  ],
   workflows: [
     'workflow-preview-ready',
     'workflow-preview-loading',
@@ -176,7 +187,7 @@ export const SCENARIO_GROUPS = {
   notifications: [
     'notifications-awaiting-credential',
     'notifications-read-pending',
-    'notifications-account-pending',
+    'notifications-cli-status-pending',
     'notifications-ready',
     'notifications-stale',
     'notifications-rejected',

@@ -440,6 +440,28 @@ export interface GitHubFixtureState {
     after?: number
     status: number
     message: string
+    /** Headers the refusal carries, such as the wait a rate limit asks for. */
+    headers?: Record<string, string>
+  }>
+  /**
+   * Requests the CLI answers late, which is how a read that was already running
+   * when the credential behind this host was replaced lands after the answer that
+   * replaced it. Each entry is consumed once, by the first matching request.
+   */
+  heldResponses?: Array<{
+    /** A part of the request argv this answer is limited to, such as its verb. */
+    method?: string
+    pathIncludes: string
+    /** Matches only a request carrying this credential, so the ordering is not a race. */
+    credential?: string
+    ms: number
+    /** The refusal this late answer carries, instead of an ordinary one. */
+    refusal?: {
+      status: number
+      message: string
+      retryAfterSeconds?: number
+      remaining?: number
+    }
   }>
   /**
    * Branch refs moved by somebody else while a request is in flight, applied by the double
@@ -958,6 +980,56 @@ async function runGitFixture(
  * and only then awaits the call, so the body reaches the fixture through a
  * deferred promise instead of the stdin it would have been written to.
  */
+/**
+ * Answers one request late, which is how a read that was already running when the
+ * credential behind this host was replaced lands after the answer that replaced
+ * it. The rule names the credential it holds, so the two reads are ordered by
+ * which account is asked rather than by how fast a process happened to start.
+ * The wait is the host's, not the test's: this is the only place in the fixture
+ * that lets one answer overtake another. A rule may answer with a refusal
+ * instead, printed as the envelope a real `gh` prints on an HTTP error and
+ * exited non-zero, so a rate limit this run's own host names is read from the
+ * child rather than from the state that asked for it.
+ */
+async function holdResponse(
+  harness: ActiveHarness,
+  args: readonly string[],
+  options: ExecFileOptions,
+): Promise<{ refusal: string } | null> {
+  const state = JSON.parse(await readFile(harness.statePath, 'utf8')) as GitHubFixtureState
+  const held = (state.heldResponses ?? []).findIndex((rule) => {
+    if (!args.join(' ').includes(rule.pathIncludes)) return false
+    if (rule.method !== undefined && !args.join(' ').includes(rule.method)) return false
+    if (rule.credential === undefined) return true
+    const env = options.env ?? {}
+    const credential = env.GH_TOKEN ?? env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? null
+    return credential === rule.credential
+  })
+  if (held === -1) return null
+  const [rule] = (state.heldResponses ?? []).splice(held, 1)
+  const temporary = `${harness.statePath}.${process.pid}.hold.tmp`
+  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  await rename(temporary, harness.statePath)
+  await new Promise((resolve) => {
+    setTimeout(resolve, rule?.ms ?? 0)
+  })
+  const refusal = rule?.refusal
+  if (!refusal) return null
+  return {
+    refusal: [
+      `HTTP/2 ${refusal.status} ${refusal.status === 429 ? 'Too Many Requests' : 'Error'}`,
+      'x-ratelimit-limit: 5000',
+      `x-ratelimit-remaining: ${refusal.remaining ?? 0}`,
+      `x-ratelimit-reset: ${Math.floor(Date.now() / 1000) + 3600}`,
+      ...(refusal.retryAfterSeconds === undefined
+        ? []
+        : [`retry-after: ${refusal.retryAfterSeconds}`]),
+      '',
+      JSON.stringify({ message: refusal.message }),
+    ].join('\r\n'),
+  }
+}
+
 function runGhFixture(
   harness: ActiveHarness,
   file: string,
@@ -967,29 +1039,42 @@ function runGhFixture(
   let input = ''
   const result = new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     queueMicrotask(() => {
-      try {
-        resolve({
-          stdout: githubCliFixture.runGitHubCli({
-            statePath: harness.statePath,
-            barePath: harness.barePath,
-            realGit: harness.realGit,
-            args: [...args],
-            cwd: typeof options.cwd === 'string' ? options.cwd : process.cwd(),
-            input,
-          }),
-          stderr: '',
-        })
-      } catch (error) {
-        const code = (error as { code?: unknown }).code
-        reject(
-          commandError(
-            file,
-            args,
-            typeof code === 'number' ? code : 2,
-            `${error instanceof Error ? error.message : String(error)}\n`,
-          ),
-        )
+      const answer = async (): Promise<void> => {
+        try {
+          const heldAnswer = await holdResponse(harness, args, options)
+          if (heldAnswer !== null) {
+            // A refusal the host named: the child prints the envelope and exits
+            // as it would on an HTTP error, so the transport reads the wait from
+            // the answer rather than being told about it.
+            const refused = commandError(file, args, 1, '')
+            refused.stdout = heldAnswer.refusal
+            reject(refused)
+            return
+          }
+          resolve({
+            stdout: githubCliFixture.runGitHubCli({
+              statePath: harness.statePath,
+              barePath: harness.barePath,
+              realGit: harness.realGit,
+              args: [...args],
+              cwd: typeof options.cwd === 'string' ? options.cwd : process.cwd(),
+              input,
+            }),
+            stderr: '',
+          })
+        } catch (error) {
+          const code = (error as { code?: unknown }).code
+          reject(
+            commandError(
+              file,
+              args,
+              typeof code === 'number' ? code : 2,
+              `${error instanceof Error ? error.message : String(error)}\n`,
+            ),
+          )
+        }
       }
+      void answer()
     })
   })
   return Object.assign(result, {

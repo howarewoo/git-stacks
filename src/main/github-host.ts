@@ -11,7 +11,7 @@ import {
   githubTransportForHost,
   type GitHubTransport,
 } from './github-transport'
-import { githubAppClientId, githubAppClientIdEnvName } from './github-app'
+import type { GitHubCliStatus } from '../shared/types'
 import {
   CAPABILITY_IDS,
   CAPABILITY_LABELS,
@@ -574,19 +574,13 @@ function unprobedCapability(id: GitHubCapabilityId): GitHubCapability {
 export function hostStatus(
   context: GitHubHostContext,
   env: NodeJS.ProcessEnv = process.env,
+  cli: GitHubCliStatus | null = null,
 ): GitHubHostStatus {
   const entry = records.get(context.host)
   const capabilities: GitHubCapability[] = []
-  for (const id of [
-    'rest',
-    'graphql',
-    'native-stacks',
-    'repository-discovery',
-    'device-sign-in',
-  ] as const) {
-    const known = entry?.capabilities.get(id) ?? unprobedCapability(id)
-    if (id === 'device-sign-in') capabilities.push(deviceSignInCapability(context, env))
-    else capabilities.push(known)
+  for (const id of CAPABILITY_IDS) {
+    if (id === 'cli-authentication') capabilities.push(cliAuthenticationCapability(cli))
+    else capabilities.push(entry?.capabilities.get(id) ?? unprobedCapability(id))
   }
   return {
     host: context.host,
@@ -605,34 +599,51 @@ export function hostStatus(
 }
 
 /**
- * Whether this build can sign a person in to the host, said as it is. Device
- * sign-in is a github.com registration this build carries; no other host is
- * claimed, so an enterprise host reports what it can actually be used with.
+ * Whether this build can authenticate to the host, said as it is.
+ *
+ * The GitHub CLI owns this for every host, so the row reports what the last read
+ * established about the CLI rather than what this build carries: a host nobody
+ * has checked yet is not a host that cannot be used. A host this build has no
+ * installed CLI for is a fact about this computer, not about the host, and says
+ * so.
  */
-function deviceSignInCapability(
-  context: GitHubHostContext,
-  env: NodeJS.ProcessEnv,
-): GitHubCapability {
-  // Whether this build can sign a person in to *this* host, from that host's own
-  // registration. A host with no registered app is not configured, which is not
-  // the same as a host whose server refuses the flow: only a refusal is
-  // unsupported, and this build does not claim one before it is asked.
-  const clientId = githubAppClientId(env, context.host)
-  if (clientId === null) {
-    return {
-      id: 'device-sign-in',
-      label: CAPABILITY_LABELS['device-sign-in'],
-      state: 'not-configured',
-      detail: context.dotcom
-        ? 'No GitHub App client id is configured for this build.'
-        : `No GitHub App client id is registered for ${context.host}. Set ${githubAppClientIdEnvName(context.host)} to sign in to it, or use a credential this build already holds for it.`,
-    }
+function cliAuthenticationCapability(status: GitHubCliStatus | null): GitHubCapability {
+  const capability = (state: GitHubCapabilityState, detail: string): GitHubCapability => ({
+    id: 'cli-authentication',
+    label: CAPABILITY_LABELS['cli-authentication'],
+    state,
+    detail,
+  })
+  if (status === null) {
+    return capability('unknown', 'The GitHub CLI has not been checked for this host yet.')
   }
-  return {
-    id: 'device-sign-in',
-    label: CAPABILITY_LABELS['device-sign-in'],
-    state: 'supported',
-    detail: `${context.host} has a GitHub App registration this build can sign in with.`,
+  switch (status.state) {
+    case 'authenticated':
+      return capability(
+        'supported',
+        `${status.host} is authenticated through the GitHub CLI as ${status.login ?? 'an unnamed account'}.`,
+      )
+    case 'signed-out':
+    case 'rejected':
+      return capability(
+        'unauthenticated',
+        `The GitHub CLI has no usable account for ${status.host}.`,
+      )
+    case 'permission-denied':
+      return capability(
+        'unauthenticated',
+        `The account the GitHub CLI uses is not authorized for ${status.host}.`,
+      )
+    case 'offline':
+      return capability('unreachable', `${status.host} did not answer.`)
+    case 'missing-cli':
+      return capability('not-configured', 'The GitHub CLI is not installed on this computer.')
+    case 'checking':
+    case 'unavailable':
+      return capability(
+        'unknown',
+        `The GitHub CLI's account for ${status.host} has not been established.`,
+      )
   }
 }
 
@@ -644,6 +655,12 @@ export interface HostProbeOptions {
   repository?: { owner: string; name: string } | null
   env?: NodeJS.ProcessEnv
   now?: () => Date
+  /**
+   * What the last CLI status read established for this host. Authentication is
+   * owned by the GitHub CLI and established by its own read, so the matrix
+   * reports that rather than inferring it from a probe.
+   */
+  cli?: GitHubCliStatus | null
 }
 
 /**
@@ -746,18 +763,20 @@ export async function probeGitHubHost(
   }
 
   const status: GitHubHostStatus = {
-    ...hostStatus(context, env),
+    ...hostStatus(context, env, options.cli ?? null),
     state,
     message,
     serverVersion,
     probedAt: (options.now ?? (() => new Date()))().toISOString(),
-    // The matrix is every capability id, always. Sign-in is a fact about this
-    // build's registration for this host, and a probe that could not reach the
-    // network does not make that line vanish.
+    // The matrix is every capability id, always. CLI authentication is a fact
+    // about this computer and its own last read, and a probe that could not
+    // reach the network does not make that line vanish.
     capabilities: CAPABILITY_IDS.map(
       (id) =>
         capabilities.find((capability) => capability.id === id) ??
-        (id === 'device-sign-in' ? deviceSignInCapability(context, env) : unprobedCapability(id)),
+        (id === 'cli-authentication'
+          ? cliAuthenticationCapability(options.cli ?? null)
+          : unprobedCapability(id)),
     ),
   }
   // The last moment before this answer is written down. A host retired while

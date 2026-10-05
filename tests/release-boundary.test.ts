@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import test from 'node:test'
@@ -496,6 +497,7 @@ test(
       ].join('\n'),
       { mode: 0o755 },
     )
+    admitOwnedProviderCliRoot(tools)
     const run = spawnSync(
       process.execPath,
       [

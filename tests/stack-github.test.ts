@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { createGitHubHarness } from './fixtures/github-harness'
 import type { GitHubFixtureState, GitHubHarness, GitPushHook } from './fixtures/github-harness'
 import type { GitHubTransport } from '../src/main/github-transport'
+import { CommandCancelled } from '../src/main/git-core'
 
 // Git Stacks captures Node's spawn API when its own modules load, and the GitHub
 // harness answers `git` and `gh` on that API, so Git Stacks is loaded here.
@@ -16,8 +17,18 @@ import type { GitHubTransport } from '../src/main/github-transport'
 const { getSnapshot, runAction } = await import('../src/main/git')
 const { getGitHubData, getPullRequest } = await import('../src/main/github')
 const { getMergeStatus, previewStack, recoverStaleBranchLocks } = await import('../src/main/stacks')
-const { DirectGitHubTransport, GhGitHubTransport, setGitHubTransport } =
-  await import('../src/main/github-transport')
+const {
+  clearGitHubRetryDeadline,
+  DirectGitHubTransport,
+  GhGitHubTransport,
+  GitHubTransportError,
+  githubRetryDeadlineFor,
+  lastGitHubRateLimitFor,
+  resetGitHubRateLimit,
+  setGitHubObservationClock,
+  setGitHubTransport,
+} = await import('../src/main/github-transport')
+const { retireConfirmedGitHubPayloads } = await import('../src/main/git')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 
 function git(harness: GitHubHarness, args: string[]): string {
@@ -3372,3 +3383,419 @@ test(
     })
   },
 )
+
+test('a live read whose credential is replaced while its reconciliation is still being built is refused, not delivered', async () => {
+  await withHarness(async (harness) => {
+    git(harness, ['checkout', '-b', 'feature', 'main'])
+    fs.writeFileSync(join(harness.repo, 'feature.txt'), 'feature\n')
+    git(harness, ['add', 'feature.txt'])
+    git(harness, [
+      '-c',
+      'user.name=Feature',
+      '-c',
+      'user.email=f@example.invalid',
+      'commit',
+      '-m',
+      'Feature',
+    ])
+    const state = await harness.readState()
+    state.prs = [
+      {
+        number: 7,
+        title: 'Private work',
+        body: 'body',
+        base: 'main',
+        head: 'feature',
+        headRepository: `${state.repository.owner}/${state.repository.name}`,
+        draft: false,
+        state: 'OPEN',
+        checks: 'passing',
+        reviewDecision: 'APPROVED',
+        mergeState: 'CLEAN',
+        url: `https://github.com/${`${state.repository.owner}/${state.repository.name}`}/pull/7`,
+        headOid: git(harness, ['rev-parse', 'feature']),
+        mergeOid: null,
+        mergedAt: null,
+      },
+    ]
+    await harness.writeState(state)
+    const confirmed = await getSnapshot(harness.repo, undefined, undefined, 'live')
+    assert.ok(
+      confirmed.pullRequests.some((pullRequest) => pullRequest.number === 7),
+      'the read confirmed no payload for this one to lose',
+    )
+
+    // This read asks GitHub for a fresh answer, and the account is replaced inside
+    // the last thing the read awaits — the reconciliation it builds from that
+    // answer — so the replacement lands after every answer is in hand and before
+    // the snapshot that would carry them is handed over.
+    // The replacement happens in the middle of the report the read builds from that
+    // answer: after the read has measured its branches and before the snapshot that
+    // would carry them is handed over. The reconciliation's first question about
+    // the repository is the one that follows that measurement, so the account goes
+    // exactly there — the local report is being built, not yet attached.
+    let measured = false
+    let retiredDuringTheReconciliation = false
+    harness.overrideGit({
+      match: (args) => args.includes('--no-walk=unsorted'),
+      run: (args) => {
+        measured = true
+        return harness.runGit(['-C', harness.repo, ...args])
+      },
+    })
+    harness.overrideGit({
+      match: (args) => measured && args.includes('--git-common-dir'),
+      run: (args) => {
+        retiredDuringTheReconciliation = true
+        retireConfirmedGitHubPayloads()
+        return harness.runGit(['-C', harness.repo, ...args])
+      },
+    })
+    await assert.rejects(
+      getSnapshot(harness.repo, undefined, undefined, 'live'),
+      (error: unknown) => error instanceof CommandCancelled,
+    )
+    assert.ok(
+      retiredDuringTheReconciliation,
+      'the reconciliation asked for no ancestry, so the replacement never happened inside the read',
+    )
+
+    // And the account that answered is still not in the next read: the refusal was
+    // of the snapshot, not of the repository, so the person still gets their local
+    // work and simply has to ask again to see GitHub at all.
+    const local = await getSnapshot(harness.repo, undefined, undefined, 'reuse')
+    assert.deepEqual(local.pullRequests, [], 'the replaced account answered the next read')
+    assert.deepEqual(
+      local.branches.map((branch) => branch.name).sort(),
+      ['feature', 'main', 'origin/main'],
+      'the local work did not survive the refusal',
+    )
+  })
+})
+
+test('a local read that loses its account mid-read returns the local work and none of that account', async () => {
+  await withHarness(async (harness) => {
+    // A branch and a pull request for it, so this repository has a payload worth
+    // protecting: private rows, a branch parent read from GitHub, and the
+    // reconciliation built from both.
+    git(harness, ['checkout', '-b', 'feature', 'main'])
+    // A commit of its own, so the branch genuinely diverges and this read really
+    // measures it against its base rather than settling it from the tip it shares.
+    fs.writeFileSync(join(harness.repo, 'feature.txt'), 'feature\n')
+    git(harness, ['add', 'feature.txt'])
+    git(harness, [
+      '-c',
+      'user.name=Feature',
+      '-c',
+      'user.email=f@example.invalid',
+      'commit',
+      '-m',
+      'Feature',
+    ])
+    const head = git(harness, ['rev-parse', 'feature'])
+    const state = await harness.readState()
+    state.prs = [
+      {
+        number: 7,
+        title: 'Private work',
+        body: 'body',
+        base: 'main',
+        head: 'feature',
+        headRepository: `${state.repository.owner}/${state.repository.name}`,
+        draft: false,
+        state: 'OPEN',
+        checks: 'passing',
+        reviewDecision: 'APPROVED',
+        mergeState: 'CLEAN',
+        url: `https://github.com/${`${state.repository.owner}/${state.repository.name}`}/pull/7`,
+        headOid: head,
+        mergeOid: null,
+        mergedAt: null,
+        author: state.currentUser,
+      },
+    ]
+    await harness.writeState(state)
+
+    const confirmed = await getSnapshot(harness.repo, undefined, undefined, 'live')
+    assert.ok(
+      confirmed.pullRequests.some((pullRequest) => pullRequest.number === 7),
+      'this run confirmed no payload to protect',
+    )
+    assert.equal(
+      confirmed.branches.find((branch) => branch.name === 'feature')?.pr?.number,
+      7,
+      'the branch had no pull request to inherit its parent from',
+    )
+
+    // The account is replaced while the next read is already past the point where
+    // it read that payload: this read measures the branch tips against the graph
+    // afterwards, and that is a real Git command it makes.
+    let retired = false
+    harness.overrideGit({
+      match: (args) => args.includes('--no-walk=unsorted'),
+      run: () => {
+        if (retired) return '0'
+        retired = true
+        retireConfirmedGitHubPayloads()
+        return '0'
+      },
+    })
+    assert.equal(retired, false, 'the account was replaced before the read began')
+
+    const local = await getSnapshot(harness.repo, undefined, undefined, 'reuse')
+    assert.equal(retired, true, 'the read finished before its account was replaced')
+
+    // The local work is the whole of what this read returns.
+    assert.deepEqual(
+      local.branches.map((branch) => branch.name).sort(),
+      ['feature', 'main', 'origin/main'],
+      'the local branches were lost with the account',
+    )
+    assert.equal(local.currentBranch !== undefined, true)
+    assert.equal(local.name !== undefined, true)
+
+    // And none of the account that has gone is in it: not its pull requests, its
+    // issues, the branch parents read from them, or the report built from both.
+    assert.deepEqual(local.pullRequests, [], "the replaced account's pull requests were returned")
+    assert.deepEqual(local.issues, [], "the replaced account's issues were returned")
+    assert.equal(local.github.available, false, 'a stale payload was published as a live answer')
+    assert.match(local.github.message, /not been confirmed|unavailable|confirm/iu)
+    assert.deepEqual(local.nativeStacks, [])
+    assert.equal(local.nativeStackPreviewAvailable, false)
+    for (const branch of local.branches) {
+      assert.equal(branch.pr, null, `${branch.name} kept the replaced account's pull request`)
+      // A parent this branch's own history or recorded configuration can name is
+      // local Git and stays; one that could only have come from a pull request is
+      // that account's and goes with it.
+      assert.ok(
+        branch.parentSource !== 'pullRequest' && branch.parentSource !== 'stack',
+        `${branch.name} kept a parent named by the replaced account's pull request`,
+      )
+    }
+    assert.equal(
+      (local.reconciliation?.stacks ?? []).length,
+      0,
+      'the reconciliation still describes the replaced account',
+    )
+
+    // The replacement that retired the first account's answer has itself been
+    // read since, so a second account's payload exists now. The read that follows
+    // is the retry the first one became — one that asked GitHub nothing and can
+    // therefore no longer re-read itself — and this account is replaced again
+    // while that retry is measuring the worktree, after it took the payload.
+    const second = await harness.readState()
+    second.prs = [
+      {
+        ...second.prs[0],
+        number: 9,
+        title: 'Second account work',
+        headOid: git(harness, ['rev-parse', 'feature']),
+        url: `https://github.com/${`${second.repository.owner}/${second.repository.name}`}/pull/9`,
+      },
+    ]
+    await harness.writeState(second)
+    const confirmedSecond = await getSnapshot(harness.repo, undefined, undefined, 'live')
+    assert.ok(
+      confirmedSecond.pullRequests.some((pullRequest) => pullRequest.number === 9),
+      'the second account confirmed no payload for this read to lose',
+    )
+
+    let retiredAgain = false
+    harness.overrideGit({
+      match: (args) => args.includes('--no-walk=unsorted'),
+      run: () => {
+        if (retiredAgain) return '0'
+        retiredAgain = true
+        retireConfirmedGitHubPayloads()
+        return '0'
+      },
+    })
+    const retried = await getSnapshot(harness.repo, undefined, undefined, 'reuse', true)
+    assert.equal(retiredAgain, true, 'the retry finished before its account was replaced')
+
+    // The local work is the whole of what this read returns, assembled from the
+    // local graph itself: the branch stacks on the base its own history names,
+    // and it is measured against that base rather than left with a number that
+    // belonged to a parent the replaced account had named.
+    assert.deepEqual(
+      retried.branches.map((branch) => branch.name).sort(),
+      ['feature', 'main', 'origin/main'],
+      'the local work was lost with the second account',
+    )
+    const feature = retried.branches.find((branch) => branch.name === 'feature')
+    assert.equal(feature?.parent, 'main', 'the branch lost the parent its own history names')
+    assert.equal(feature?.parentSource, 'inferred')
+    assert.equal(feature?.parentBehind, 0, 'the branch was not measured against its local base')
+
+    // And none of the account that has gone is in it.
+    assert.deepEqual(
+      retried.pullRequests,
+      [],
+      "the replaced account's pull requests survived in the read that had already re-read itself",
+    )
+    assert.deepEqual(retried.issues, [], "the replaced account's issues were returned")
+    assert.equal(retried.github.available, false, 'a retired payload was published as an answer')
+    assert.deepEqual(retried.nativeStacks, [])
+    assert.equal(retried.nativeStackPreviewAvailable, false)
+    assert.equal((retried.reconciliation?.stacks ?? []).length, 0)
+    assert.equal(retried.reconciliation?.evidence ?? null, null)
+    for (const branch of retried.branches) {
+      assert.equal(branch.pr, null, `${branch.name} kept the replaced account's pull request`)
+      assert.ok(
+        branch.parentSource !== 'pullRequest' && branch.parentSource !== 'stack',
+        `${branch.name} kept a parent named by the replaced account's pull request`,
+      )
+    }
+  })
+})
+
+test("a replaced account's late rate limit holds the host without becoming the new account's answer", async () => {
+  resetGitHubRateLimit()
+  let observed = 0
+  setGitHubObservationClock(() => {
+    observed += 1
+    return observed
+  })
+  try {
+    await withHarness(async (harness) => {
+      const state = await harness.readState()
+      // The host answers the account being replaced late, and with the refusal it
+      // gives everyone: a secondary limit, with the wait it names. Its own budget
+      // is not spent, which is what makes it the host's wait rather than A's.
+      state.heldResponses = [
+        {
+          pathIncludes: 'graphql',
+          credential: harness.primaryToken,
+          ms: 250,
+          refusal: {
+            status: 429,
+            message: 'You have exceeded a secondary rate limit.',
+            retryAfterSeconds: 120,
+            remaining: 4998,
+          },
+        },
+      ]
+      await harness.writeState(state)
+
+      const env = { PATH: harness.env.PATH }
+      const retired = new GhGitHubTransport({
+        env: { ...env, GH_TOKEN: harness.primaryToken },
+        host: 'github.com',
+      })
+      const current = new GhGitHubTransport({
+        env: { ...env, GH_TOKEN: harness.reviewer.token },
+        host: 'github.com',
+      })
+      const currentAuthority = await current.credentialAuthority()
+
+      const refused = assert.rejects(
+        retired.graphql<{ viewer: { login: string } }>('{ viewer { login } }'),
+        GitHubTransportError,
+      )
+      // The account that is here reads, and answers, while that refusal is still
+      // held: it publishes its own allowance for this host.
+      await current.graphql<{ viewer: { login: string } }>('{ viewer { login } }')
+      const published = lastGitHubRateLimitFor('github.com')
+      await refused
+      assert.deepEqual((await harness.readState()).heldResponses, [])
+
+      // What the host said to everyone is not the replaced account's to answer
+      // with, and it did not become the allowance the new account published.
+      assert.equal(
+        lastGitHubRateLimitFor('github.com').authority,
+        currentAuthority,
+        "the replaced account's late answer became this host's own report",
+      )
+      assert.deepEqual(
+        lastGitHubRateLimitFor('github.com').rateLimit,
+        published.rateLimit,
+        'the account that is here lost the allowance it published',
+      )
+
+      // The wait is the host's and it holds whoever asks next. This is the value
+      // the inbox consults before it spends another request on the host.
+      const deadline = githubRetryDeadlineFor('github.com')
+      assert.ok(
+        deadline !== null && deadline - published.at >= 120_000,
+        `the host's own wait was dropped: ${String(deadline)}`,
+      )
+
+      // And once it has passed, the account that is here is admitted again.
+      clearGitHubRetryDeadline('github.com')
+      await current.graphql<{ viewer: { login: string } }>('{ viewer { login } }')
+      assert.equal(
+        lastGitHubRateLimitFor('github.com').authority,
+        currentAuthority,
+        "the host's wait was still refusing the account that is here",
+      )
+    })
+  } finally {
+    setGitHubObservationClock(null)
+    resetGitHubRateLimit()
+  }
+})
+
+test("a replaced account's late answer is not what this host last said", async () => {
+  resetGitHubRateLimit()
+  // Every observation is stamped with a clock this test advances, so the answer a
+  // scope ends up holding is identified by the moment it was seen rather than by
+  // how far a real second happened to drift.
+  let observed = 0
+  setGitHubObservationClock(() => {
+    observed += 1
+    return observed
+  })
+  try {
+    await withHarness(async (harness) => {
+      const state = await harness.readState()
+      state.heldResponses = [{ pathIncludes: 'graphql', credential: harness.primaryToken, ms: 250 }]
+      await harness.writeState(state)
+
+      const env = { PATH: harness.env.PATH }
+      const retired = new GhGitHubTransport({
+        env: { ...env, GH_TOKEN: harness.primaryToken },
+        host: 'github.com',
+      })
+      const current = new GhGitHubTransport({
+        env: { ...env, GH_TOKEN: harness.reviewer.token },
+        host: 'github.com',
+      })
+      const leavingAuthority = await retired.credentialAuthority()
+      const currentAuthority = await current.credentialAuthority()
+      assert.notEqual(leavingAuthority, currentAuthority, 'both reads shared one credential')
+
+      // The account being replaced is already reading when the one replacing it
+      // reads and answers first.
+      const inFlight = retired.graphql<{ viewer: { login: string } }>('{ viewer { login } }')
+      await current.graphql<{ viewer: { login: string } }>('{ viewer { login } }')
+      await inFlight
+      // The host held the answer the leaving credential was waiting for, so it
+      // really did land after the one that replaced it.
+      assert.deepEqual((await harness.readState()).heldResponses, [])
+
+      for (const [what, report] of [
+        ['the host', lastGitHubRateLimitFor('github.com')],
+        ["the host's core resource", lastGitHubRateLimitFor('github.com', null, 'core')],
+        [
+          'the account that is here',
+          lastGitHubRateLimitFor('github.com', currentAuthority, 'core'),
+        ],
+        ['the last observation anyone took', lastGitHubRateLimitFor('github.com')],
+      ] as const) {
+        assert.equal(
+          report.authority,
+          currentAuthority,
+          `${what} is holding the answer of the credential that has left`,
+        )
+      }
+      assert.equal(
+        lastGitHubRateLimitFor('github.com', leavingAuthority).at,
+        0,
+        'a replaced credential is not recorded as having said anything about this host',
+      )
+    })
+  } finally {
+    setGitHubObservationClock(null)
+    resetGitHubRateLimit()
+  }
+})

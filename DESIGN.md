@@ -758,7 +758,7 @@ A control fixed by this computer's policy is disabled and shows the policy's rea
 Theming is a token-level concern, never per-component styling. `tokens.css` emits a light block, a dark block, and a `system` block that follows the operating system in a media query, so `data-gs-theme` on the document root is the only place a theme is expressed. A theme token that no palette supplies must not be offered as a choice. Reduce motion has the same shape: the operating-system media query and the stored `data-motion` attribute are siblings, so a stored choice holds on a machine that did not ask for reduced motion.
 
 The capability report states what was measured and what was not. Every line carries a status — confirmed, unavailable, or not applicable — and a line the app could not establish is shown as unavailable rather than filled in from what this build usually finds. A capability served by a network call is `not applicable` here, not `confirmed`.
-Diagnostics reports the configured adapter preference without reading credentials to infer the active adapter. CLI version detection uses one fixed, bounded local read, with no account, credential, host, or path query; unrecognized output is reported as unrecognized. A version probe establishes neither authentication nor access. Account surfaces report the host-specific prerequisites and recovery guidance required by [Provider CLI authentication](#provider-cli-authentication), while local Git remains available.
+Diagnostics reports the required CLI's own measured state and nothing inferred from it: there is no adapter preference to report, and no credential is read to infer one. CLI version detection uses one fixed, bounded local read, with no account, credential, host, or path query; unrecognized output is reported as unrecognized. A version probe establishes neither authentication nor access, and authentication with the account actually used is reported separately from it. The status surface reports the host-specific prerequisites and recovery guidance required by [Provider CLI authentication](#provider-cli-authentication), while local Git remains available.
 
 A support bundle is assembled from named fields, never from a log that was filtered afterwards. The bundle preview shows each section, whether it is included, and why. Text that names a location on this machine is withheld until the user opts in, and the opt-in widens that one category only: access tokens, source contents, diffs, branch and pull-request text, and raw GitHub bodies are never collected, so no opt-in can reveal them. The support bundle export binds to the inspected preview and enforces live path consent immediately prior to writing: revoking path inclusion withholds local paths in the exported file even if consent was active when the export dialog opened.
 Telemetry and crash reporting are stated as facts about the build, not as toggles. This build has no endpoint and sends nothing; presenting a checkbox for a setting with no effect would be an inert control. Privacy controls govern what the user chooses to write on this computer.
@@ -826,7 +826,13 @@ Provider commands are fixed, argument-based, host-scoped main-process operations
 
 Identity, host, and credential changes invalidate reads and caches from the previous authority before publishing new data. A late rejection belongs only to the credential that authenticated its request; it cannot invalidate a replacement account. A stale answer never lands under another account or host, and a refused or unanswered request never becomes an empty authenticated result.
 
-The separately authorized Notifications module retains its consent, credential isolation, and operating-system-backed encryption. Removing an obsolete app-owned primary GitHub account during the cutover must not delete Notifications credentials, provider CLI credentials, or unrelated operating-system keys. Notifications never silently expands the permissions of the core CLI account.
+Credential retirement drops submitted reconciliation reports and ancestry learned
+from pull requests or native stacks; recorded and locally inferred parent hints
+remain local facts. A repository open keeps its operation lock until main settles:
+the window adopts the completed local repository identity even when its remote
+answer was retired, so displayed and mutation-target repositories cannot diverge.
+
+The separately authorized Notifications module retains its consent, credential isolation, and operating-system-backed encryption. Nothing this app does to its own authentication state deletes a Notifications credential, a provider CLI credential, or an unrelated operating-system key. Notifications never silently expands the permissions of the core CLI account.
 
 Authentication checks stay outside the repository mutation gate. A missing CLI, a signed-out account, or a stalled GitHub endpoint blocks only the remote action that needs it; local stage, commit, branch, and recovery workflows remain available.
 
@@ -858,16 +864,22 @@ the login its rows were decided as, and the queue-level viewer is stated only
 when every host agrees on it.
 
 The rows on screen belong to one identity: the host this window reads for, the
-account behind it, and the credential that host would authenticate with. Any one
-of them changing retires the read in flight and drops the rows it was for, so a
-refresh that fails afterwards keeps nothing from the credential it replaced. The
-credential part is whatever the transport that will actually make the requests
-would authenticate with — the environment or account credential this app
-resolved, or, where the `gh` CLI speaks for the host, the profile that CLI
-reports — reduced to an opaque per-host fingerprint. It holds no secret, holds no
-credential even in the making, and is never logged or persisted. The host is part
-of that identity on its own, so switching it retires the queue whether or not an
-account status has arrived to say so.
+account behind it, and the authority that host would authenticate with. Any one
+of them changing retires the read in flight and drops what it produced, so a
+refresh that fails afterwards keeps nothing from the credential it replaced.
+That authority is whichever one the CLI itself resolves for the host — the
+stored profile in its configuration or the CLI-native environment variable that
+overrides it — and the app never chooses between them: asking which one is in
+effect is exactly what the CLI's own status answers. It is reduced to an opaque
+per-host nonce minted for that resolution, which holds across equivalent
+re-reads and changes when the host, the account, or the authority behind them is
+replaced. The nonce is a generation counter and nothing else: no credential
+material is read into it, none is held even in the making, and no account or
+authority name reaches the renderer, a log, or a file. Resolving the authority
+and pinning it to that host's own requests happens privately in the main
+process, behind this boundary. The host is part of that identity on its own, so
+switching it retires the queue whether or not an account status has arrived to
+say so.
 
 One host names the requests, the credential asked of the CLI, the environment
 the CLI's process runs with, and the allowance the answers are credited to, so
@@ -875,9 +887,57 @@ none of those four can disagree about which host this is. A host read from the
 wrong place names the wrong credential, so that one host is decided once and the
 four are never resolved apart from each other.
 
+That host is the one the requests reach, which is not always the one that was
+selected. A public host an operator has pointed at a provider of their own is
+served by that provider's account and answered under that provider's name, so the
+four are resolved for the destination and the selection is kept as the identity
+the status belongs to: the window says which host it is reading for while the
+account it names is the one whose requests those reads make. Asking the CLI
+about the selected name instead would report a public session that serves none of
+these requests — signed out, or signed in as somebody else — and would scope the
+child to a credential those requests never carry.
+
+Retirement also covers a read that is overtaken after it has taken its answer. The
+answer cannot be recalled once its account is replaced, so a read that confirmed a
+payload and lost that payload's account while it measured local work is discarded
+and answered from local Git alone, which is everything the app can show without
+the account; being overtaken again cancels the read rather than repeating it.
+
 The registered repositories are part of it too. A repository added or removed
 while a read is resolving its origins retires that read rather than letting it
 answer against the list it started from.
+
+Every response a host serves is recorded once, and that record names the host and
+the credential the request carried, stamped with the moment the request left: a
+response that arrives after a newer one describes an account that has left, and is
+held back from the host's report, that account's record, the process-wide report,
+and the listeners all at once. Nothing is recorded without those names, because a
+record that names no host is process-wide by construction and cannot be held back
+afterwards. That holds for every way this build can refuse an answer a host did
+serve — a refusal carried in a status, a 304 with nothing stored to replay, a page
+that is not a page — and for every way a request can end without an answer at all:
+a child that dies, a deadline that passes, a caller that walks away. None of them is
+evidence about what a host offers, and none of them records anything. A failure
+names no host, has no credential and no moment of departure, so it cannot be
+attributed and cannot be held back; that is why raising one is not a report at all,
+and why the only place a report is written is where the response is read.
+
+Which request an answer belongs to is the order requests left in, counted as each
+one leaves — never a comparison of clocks, because a wall clock cannot order two
+answers that landed inside the same millisecond, and two answers from one account
+are exactly the ordinary case of it. Each host keeps the newest request whose
+answer it has accepted, and that number only ever moves forward. An answer from
+the account that is still current may always say what that account has left, and it
+cannot lower the line: a replayed answer from that same account would otherwise
+re-admit every answer the host has already given after it, including the one from
+the account that replaced it. The one thing a late answer still fixes is a secondary
+limit's wait: that refusal is the host refusing everyone at once, so it binds
+whoever asks next, including the credential that replaced the one it arrived
+under. A primary window is never a host-wide wait: it was measured against one
+authenticated principal, so it is kept against that principal's allowance, and the
+account that replaced it is admitted as it always was — while the account that hit
+it still waits out its own `Retry-After`. An answer this build cannot use is not a
+refusal at all, so it leaves no wait behind.
 
 Each GitHub host meters and refuses on its own, so a host's queue is admitted
 against what that host's own responses last reported. One host's remaining
@@ -889,7 +949,14 @@ When two live reports describe the same instant, the one that admits less is
 honoured. A host that answers "not now" is left alone until the moment it named —
 a `Retry-After`, or the primary window's reset when the answer names no counter
 at all — measured from the answer that carried it rather than from the start of
-the read that met it, and kept even by a refresh that kept no rows. The wait
+the read that met it, and kept even by a refresh that kept no rows. One account's
+window lasts as long as the later of the two moments it named, because the shorter
+one does not shorten the other; and a window with nothing left in it is not
+spendable at all, whatever reserve this queue keeps, since a reserve of zero is an
+absence of headroom rather than unlimited allowance. A secondary refusal is the one
+refusal that spends nothing: it is the shared wait every account on that host
+serves for as long as it names, and the count it carried is still each account's
+own until then. The wait
 belongs to the host, so a refusal an ordinary repository read met delays the
 next refresh exactly as a refusal the queue met does; another host's wait is
 never its own.

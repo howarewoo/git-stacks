@@ -459,8 +459,13 @@ async function closeServer() {
   await new Promise((resolve) => server.close(() => resolve())).catch(() => {})
 }
 
-function slug(value) {
-  return Buffer.from(value, 'utf8').toString('hex').toUpperCase()
+/** The credential class the CLI reads a host's token from. */
+function hostClass(host) {
+  return host.endsWith('.ghe.com') || host === 'github.com' ? 'dotcom' : 'enterprise'
+}
+const TOKEN_ENV = {
+  dotcom: 'GH_TOKEN',
+  enterprise: 'GH_ENTERPRISE_TOKEN',
 }
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -564,8 +569,10 @@ async function launch() {
     ...environment(),
     GIT_STACKS_USER_DATA: userData,
     NODE_EXTRA_CA_CERTS: join(certificate, 'cert.pem'),
-    GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-    [`GIT_STACKS_GITHUB_TOKEN_${slug(host)}`]: TOKEN,
+    // The headless credential the GitHub CLI reads for this host class: this run
+    // authenticates the way a headless install of `gh` does, with no CLI signed
+    // in and no app-owned token anywhere.
+    [TOKEN_ENV[hostClass(host)]]: TOKEN,
   }
   const app = spawn(
     require('electron'),

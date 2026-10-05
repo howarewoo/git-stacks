@@ -23,12 +23,14 @@ const CONDITIONAL_HEADERS = new Set(['if-none-match', 'if-modified-since'])
 const DEFAULT_MAX_ENTRIES = 256
 
 /**
- * Two requests share a cache entry only when the path and every non-conditional
- * header match, so an authorization or API-version difference cannot be
- * answered with another variant's body. Only a GET body can be replayed
- * verbatim from a conditional response.
+ * Two requests share a cache entry only when the path, every non-conditional
+ * header, and the credential the request authenticates with all match. The
+ * authority is part of it because a body read as one account is not another
+ * account's answer, and a validator recorded for one credential must never be
+ * replayed against the credential that replaced it. Only a GET body can be
+ * replayed verbatim from a conditional response.
  */
-export function conditionalCacheKey(request: GitHubRestRequest): string | null {
+export function conditionalCacheKey(request: GitHubRestRequest, authority: string): string | null {
   const method = (request.method ?? 'GET').toUpperCase()
   if (method !== 'GET') return null
   const headers = Object.entries(request.headers ?? {})
@@ -36,7 +38,7 @@ export function conditionalCacheKey(request: GitHubRestRequest): string | null {
     .sort(([left], [right]) => (left < right ? -1 : 1))
     .map(([name, value]) => `${name.toLowerCase()}: ${value}`)
     .join('\n')
-  return `${request.path.replace(/^\/+/u, '')}\n${headers}`
+  return `${request.path.replace(/^\/+/u, '')}\n${headers}\n${authority}`
 }
 
 /** The validator headers a stored response makes meaningful. */

@@ -1,9 +1,23 @@
 import assert from 'node:assert/strict'
 import { githubHostContext } from '../src/main/github-host'
-import { execFileSync } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
+import { CredentialVault, type SecretProtector } from '../src/main/credentials'
+import { retirePrimaryGitHubRecord } from '../src/main/github-primary-record'
 import test from 'node:test'
 import {
   applyPatch,
@@ -30,14 +44,14 @@ import {
 import {
   parseGitBuildOptions,
   parseGitVersion,
-  parseGhVersion,
-  readGitHubAdapterSources,
+  readGitHubCliSources,
   runDiagnostics,
   type DiagnosticSources,
 } from '../src/main/diagnostics'
-import { githubTransportChoice } from '../src/main/github-transport'
+import { parseGhVersion, readGitHubCli } from '../src/main/github-cli'
 import { DEFAULT_SETTINGS } from '../src/shared/settings'
 import type { AppSettings, DiagnosticReport } from '../src/shared/settings'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 
 async function withTempDir<T>(body: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'git-stacks-settings-'))
@@ -761,25 +775,19 @@ test('an exported bundle is owner-only even when it replaces a world-readable fi
   })
 })
 
-test('the capability report names the app permissions and the measured environment', async () => {
+test('the capability report names the CLI authentication and the measured environment', async () => {
   const report = await runDiagnostics({
     runtime: { runtime: null, error: null, minimumVersion: '2.45.0', useSystemGit: false },
-    account: {
-      state: 'signed-in',
-      reference: 'opaque',
-      host: 'github.com',
-      login: 'octocat',
-      permissions: [
-        { permission: 'Contents', access: 'read', feature: 'Pull request commits' },
-        { permission: 'Pull requests', access: 'write', feature: 'Native stacks' },
-      ],
-      expiresAt: null,
-      refreshExpiresAt: null,
-      store: { available: true, name: 'system store', reason: null },
-      externalCredential: false,
-      signingIn: false,
-      challenge: null,
-      message: null,
+    githubCli: {
+      probe: { install: 'present', version: 'gh version 2.62.0' },
+      status: {
+        state: 'authenticated',
+        host: 'github.com',
+        login: 'octocat',
+        version: 'gh version 2.62.0',
+        identity: 'ghcli-1',
+        message: null,
+      },
     },
     environment: {
       identity: { name: 'Ada', email: 'ada@example.com' },
@@ -793,7 +801,13 @@ test('the capability report names the app permissions and the measured environme
     settings: DEFAULT_SETTINGS,
   })
   const measured = Object.fromEntries(report.entries.map((entry) => [entry.label, entry]))
-  assert.equal(measured['App permissions']?.value, 'Contents (read), Pull requests (write)')
+  assert.equal(measured['GitHub CLI authentication']?.value, 'authenticated')
+  assert.equal(measured['GitHub CLI authentication']?.status, 'confirmed')
+  assert.equal(measured['GitHub CLI account']?.value, 'octocat')
+  assert.equal(measured['gh --version']?.value, 'gh version 2.62.0')
+  // The credential behind the CLI is never named: the identity is this build's
+  // own opaque generation, and it does not reach the report.
+  assert.equal(JSON.stringify(report.entries).includes('ghcli-1'), false)
   assert.equal(measured['Git HTTPS helper']?.status, 'confirmed')
   assert.equal(measured['Git HTTPS helper']?.value, 'a helper is configured')
   assert.equal(measured['SSH client']?.status, 'confirmed')
@@ -802,7 +816,6 @@ test('the capability report names the app permissions and the measured environme
   // The same lines with nothing measured stay unavailable rather than filled in.
   const unmeasured = await runDiagnostics({
     runtime: { runtime: null, error: null, minimumVersion: '2.45.0', useSystemGit: false },
-    account: null,
     environment: null,
     host: { platform: 'darwin', release: '23.0', arch: 'arm64', electron: '30.0.0' },
     filesystem: { refFormat: null, error: 'storage unavailable' },
@@ -840,16 +853,18 @@ ${body}
 `,
   )
   await chmod(binary, 0o755)
+  // The boundary answers only for directories a run declared its own, and this
+  // is where this run installed the CLI it just wrote.
+  admitOwnedProviderCliRoot(directory)
   return { path: directory, invoked: marker }
 }
 
-/** The adapter lines, keyed by label, from one report built on these sources. */
-async function adapterLines(
+/** The GitHub CLI lines, keyed by label, from one report built on these sources. */
+async function cliLines(
   sources: Partial<DiagnosticSources>,
 ): Promise<Record<string, { value: string; status: string; detail?: string }>> {
   const report = await runDiagnostics({
     runtime: { runtime: null, error: null, minimumVersion: '2.45.0', useSystemGit: false },
-    account: null,
     environment: null,
     host: { platform: 'darwin', release: '24.3.0', arch: 'arm64', electron: '33.2.1' },
     filesystem: { refFormat: 'files', error: null },
@@ -859,7 +874,7 @@ async function adapterLines(
   })
   return Object.fromEntries(
     report.entries
-      .filter((entry) => entry.label.startsWith('GitHub adapter') || entry.label === 'gh --version')
+      .filter((entry) => entry.label.startsWith('GitHub CLI') || entry.label === 'gh --version')
       .map((entry) => [
         entry.label,
         { value: entry.value, status: entry.status, detail: entry.detail },
@@ -868,7 +883,7 @@ async function adapterLines(
 }
 
 test(
-  'an installed GitHub CLI is reported by version alone, and the direct-API mode never runs it',
+  'an installed GitHub CLI is reported by version alone, and never as authentication',
   {
     skip: process.platform === 'win32' ? 'the controlled CLI uses a POSIX shebang' : false,
   },
@@ -879,34 +894,16 @@ test(
         dir,
       )
 
-      const sources = await readGitHubAdapterSources({ PATH: cli.path })
-      assert.equal(sources.choice, 'auto')
-      assert.equal(sources.probe?.ran, true)
-      const lines = await adapterLines({ githubAdapter: sources })
-      assert.equal(lines['GitHub adapter mode']?.value, 'Automatic')
-      // Automatic mode depends on whether this process holds a credential, which
-      // this report never reads, so it says so rather than claiming an adapter.
-      assert.equal(lines['GitHub adapter in use']?.status, 'not-applicable')
+      const sources = await readGitHubCliSources({ PATH: cli.path })
+      assert.equal(sources.probe?.install, 'present')
+      const lines = await cliLines({ githubCli: sources })
       assert.equal(lines['gh --version']?.value, 'gh version 2.62.0')
       assert.equal(lines['gh --version']?.status, 'confirmed')
       // The build date the CLI prints is not part of the version, and nothing
-      // else it was asked is reported.
+      // else it was asked is reported. No status line appears at all: this probe
+      // established an installed version, never an account.
       assert.equal(JSON.stringify(lines).includes('2024-11-14'), false)
-      assert.deepEqual(await readFile(cli.invoked, 'utf8'), '["--version"]\n')
-
-      // A configuration that resolved to the direct API will not use the CLI, so
-      // this build does not spend this machine's time starting it. The line says
-      // it was not asked, which is a different fact from the CLI being missing.
-      const direct = await readGitHubAdapterSources({
-        PATH: cli.path,
-        GIT_STACKS_GITHUB_TRANSPORT: 'direct',
-      })
-      assert.equal(direct.choice, 'direct')
-      assert.equal(direct.probe, undefined)
-      const directLines = await adapterLines({ githubAdapter: direct })
-      assert.equal(directLines['GitHub adapter in use']?.value, 'Direct GitHub API')
-      assert.equal(directLines['gh --version']?.value, 'not asked')
-      assert.equal(directLines['gh --version']?.status, 'not-applicable')
+      assert.equal(lines['GitHub CLI authentication'], undefined)
       assert.deepEqual(await readFile(cli.invoked, 'utf8'), '["--version"]\n')
     })
   },
@@ -935,7 +932,7 @@ writeFileSync(${JSON.stringify(observed)}, JSON.stringify({
 
       // The machine's own ambient credential is what a version query must never
       // see, so it is handed to the probe and has to come out the other side gone.
-      const sources = await readGitHubAdapterSources({
+      const sources = await readGitHubCliSources({
         PATH: cli.path,
         GH_TOKEN: 'ghp_thismachinecredential000000000000',
         GITHUB_TOKEN: 'another-ambient-token',
@@ -943,7 +940,7 @@ writeFileSync(${JSON.stringify(observed)}, JSON.stringify({
         GH_ENTERPRISE_TOKEN: 'enterprise-ambient-token',
         GIT_STACKS_GITHUB_TOKEN_GITHUB_COM: 'host-scoped-ambient-token',
       })
-      assert.equal(sources.probe?.ran, true)
+      assert.equal(sources.probe?.install, 'present')
       assert.deepEqual(JSON.parse(await readFile(observed, 'utf8')), {
         ghToken: null,
         githubToken: null,
@@ -956,13 +953,12 @@ writeFileSync(${JSON.stringify(observed)}, JSON.stringify({
       // a fact about the machine rather than a fault to fix: nothing in this app,
       // and no sign-in, depends on the CLI being installed.
       await mkdir(join(dir, 'empty'), { recursive: true })
-      const absent = await readGitHubAdapterSources({ PATH: join(dir, 'empty') })
-      assert.equal(absent.probe?.ran, false)
-      const lines = await adapterLines({ githubAdapter: absent })
+      const absent = await readGitHubCliSources({ PATH: join(dir, 'empty') })
+      assert.equal(absent.probe?.install, 'missing')
+      const lines = await cliLines({ githubCli: absent })
       assert.equal(lines['gh --version']?.status, 'unavailable')
-      assert.match(lines['gh --version']?.value ?? '', /not found, or it could not be run/u)
-      assert.match(lines['gh --version']?.detail ?? '', /optional/u)
-      assert.equal(lines['GitHub adapter mode']?.value, 'Automatic')
+      assert.equal(lines['gh --version']?.value, 'not installed')
+      assert.match(lines['gh --version']?.detail ?? '', /required/u)
     })
   },
 )
@@ -983,10 +979,11 @@ process.stderr.write('gh: fatal ${secret}\\n')
 process.exit(1)`,
         dir,
       )
-      const failureSources = await readGitHubAdapterSources({ PATH: failing.path })
-      assert.equal(failureSources.probe?.ran, false)
-      const failureLines = await adapterLines({ githubAdapter: failureSources })
+      const failureSources = await readGitHubCliSources({ PATH: failing.path })
+      assert.equal(failureSources.probe?.install, 'unreadable')
+      const failureLines = await cliLines({ githubCli: failureSources })
       assert.equal(failureLines['gh --version']?.status, 'unavailable')
+      assert.equal(failureLines['gh --version']?.value, 'could not be read')
       assert.equal(JSON.stringify(failureLines).includes(secret), false)
       assert.equal(JSON.stringify(failureLines).includes('/usr/local/bin'), false)
 
@@ -999,11 +996,11 @@ process.exit(1)`,
         `process.stdout.write('gh version nightly.build ${secret} at /Users/someone/tools/gh\\n')`,
         malformedDir,
       )
-      const malformedLines = await adapterLines({
-        githubAdapter: await readGitHubAdapterSources({ PATH: malformed.path }),
+      const malformedLines = await cliLines({
+        githubCli: await readGitHubCliSources({ PATH: malformed.path }),
       })
       assert.equal(malformedLines['gh --version']?.status, 'unavailable')
-      assert.equal(malformedLines['gh --version']?.value, 'unrecognized GitHub CLI version output')
+      assert.equal(malformedLines['gh --version']?.value, 'could not be read')
       assert.equal(JSON.stringify(malformedLines).includes(secret), false)
       assert.equal(JSON.stringify(malformedLines).includes('/Users/someone'), false)
 
@@ -1027,30 +1024,11 @@ process.exit(1)`,
         [],
       )
       const rendered = renderBundle(bundle, false)
-      assert.match(rendered, /github\/gh --version: unrecognized GitHub CLI version output/u)
+      assert.match(rendered, /github\/gh --version: could not be read/u)
       assert.equal(rendered.includes(secret), false)
     })
   },
 )
-
-test('an unrecognised transport preference reports automatic rather than choosing an adapter', async () => {
-  for (const configured of ['direct', 'gh', 'nonsense', '', 'GH']) {
-    const sources = {
-      choice: githubTransportChoice({ GIT_STACKS_GITHUB_TRANSPORT: configured }),
-    }
-    // Unrecognised preferences stay automatic in both the resolver and report.
-    assert.equal(
-      sources.choice,
-      configured === 'direct' || configured === 'gh' ? configured : 'auto',
-    )
-    const lines = await adapterLines({ githubAdapter: sources })
-    assert.equal(
-      lines['GitHub adapter in use']?.status,
-      configured === 'direct' || configured === 'gh' ? 'confirmed' : 'not-applicable',
-      `${JSON.stringify(configured)} resolved to the wrong adapter line`,
-    )
-  }
-})
 
 test('GitHub CLI version parsing and report projection exclude untrusted output on every platform', async () => {
   const secret = 'ghp_thisoutputcredential0000000000000'
@@ -1065,19 +1043,23 @@ test('GitHub CLI version parsing and report projection exclude untrusted output 
     ],
   ] as const) {
     assert.deepEqual(parseGhVersion(output), expected)
-    const lines = await adapterLines({
-      githubAdapter: { choice: 'auto', probe: { ran: true, output } },
+    const lines = await cliLines({
+      githubCli: {
+        probe:
+          expected.status === 'confirmed'
+            ? { install: 'present', version: expected.value }
+            : { install: 'present', version: null },
+      },
     })
-    assert.equal(lines['gh --version']?.value, expected.value)
     assert.equal(lines['gh --version']?.status, expected.status)
     assert.equal(JSON.stringify(lines).includes(secret), false)
     assert.equal(JSON.stringify(lines).includes('/Users/someone'), false)
   }
-  const direct = await readGitHubAdapterSources({ GIT_STACKS_GITHUB_TRANSPORT: 'direct' })
-  assert.equal(direct.probe, undefined)
-  const lines = await adapterLines({ githubAdapter: direct })
-  assert.equal(lines['gh --version']?.status, 'not-applicable')
-  assert.equal(lines['GitHub adapter in use']?.value, 'Direct GitHub API')
+  // Nothing read from this process means no line at all, rather than a line
+  // claiming the CLI was not asked: the CLI is required, and a report with
+  // nothing to say about it says nothing.
+  const lines = await cliLines({})
+  assert.equal(lines['gh --version'], undefined)
 })
 
 test('the GitHub host setting keeps a bare host name and refuses anything aimed elsewhere', async () => {
@@ -1140,5 +1122,1153 @@ test('a settings file written before the host existed keeps answering from githu
     const emptied = await updateSettings(file, { github: { host: '' } }, [])
     assert.equal(emptied.settings.github.host, 'github.com')
     assert.deepEqual(emptied.issues, [])
+  })
+})
+
+/**
+ * A synthetic protector that records every sealed value anything opens, and
+ * answers with the secret that was sealed. A real store returns what it sealed,
+ * so a protector that returned a marker would let a caller pass a test while
+ * being handed the wrong credential. The retirement contract is that cleanup
+ * never needs one: a credential is removed by its opaque reference, and proving
+ * that means proving nothing was opened.
+ */
+function recordingProtector(opened: string[]): SecretProtector {
+  return {
+    store: () => ({ kind: 'system', name: 'synthetic' }),
+    seal: (plain: string) => Buffer.from(`sealed:${plain}`, 'utf8'),
+    open: (sealed: Buffer) => {
+      const text = sealed.toString('utf8')
+      opened.push(text)
+      return text.replace(/^sealed:/u, '')
+    },
+  }
+}
+
+const sealedEntry = (reference: string, host: string, extra: Record<string, unknown> = {}) => ({
+  reference,
+  host,
+  sealed: Buffer.from(`sealed:${reference}`).toString('base64'),
+  createdAt: 1,
+  ...extra,
+})
+
+const primaryRecordFile = (reference: string, host: string, extra: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    reference,
+    host,
+    login: 'octocat',
+    createdAt: 1,
+    expiresAt: null,
+    refreshExpiresAt: null,
+    session: 'session-material',
+    ...extra,
+  })
+
+async function readJson(file: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
+}
+
+test('the retired primary record takes its own credential and nothing else with it', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const stateFile = join(dir, 'github-account.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    // A store with another module's credential in it, a key this build does not
+    // read, and a field on that other entry this build does not write.
+    await writeFile(
+      vaultFile,
+      JSON.stringify({
+        version: 1,
+        lastRotatedAt: 1700000000000,
+        entries: [
+          sealedEntry('primary', 'github.com'),
+          sealedEntry('notifications', 'github.com', { scopes: ['all'] }),
+        ],
+      }),
+    )
+    await writeFile(stateFile, primaryRecordFile('primary', 'github.com'))
+
+    const retired = await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile })
+    assert.deepEqual(retired, { retired: true, host: 'github.com' })
+    assert.deepEqual(opened, [], 'a sealed value was opened while retiring a record')
+
+    const remaining = await readJson(vaultFile)
+    assert.equal(remaining.lastRotatedAt, 1700000000000, 'an unrelated key was dropped')
+    const entries = remaining.entries as Record<string, unknown>[]
+    assert.deepEqual(
+      entries.map((entry) => entry.reference),
+      ['notifications'],
+      "another module's credential was removed with the retired one",
+    )
+    assert.deepEqual(entries[0].scopes, ['all'], 'a field on a kept entry was dropped')
+    await assert.rejects(stat(stateFile), 'the retired record is still on disk')
+    const strays = (await readdir(dir)).filter(
+      (name) => name.endsWith('.tmp') || name.endsWith('.claim'),
+    )
+    assert.deepEqual(strays, [], `the change left its own files behind: ${strays.join(', ')}`)
+  })
+})
+
+test("retiring this build's last credential keeps what another writer put beside it", async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const stateFile = join(dir, 'github-account.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    // One credential this build owns, and beside it two fields another writer keeps in
+    // the same file. This build neither writes those fields nor knows what they mean,
+    // so removing the credential is the only thing it is allowed to do. One of the two
+    // is spelled the way a JSON field can be that a plain object cannot hold as a
+    // field at all, and it is written as JSON on disk rather than as an object here so
+    // that it arrives the way it would arrive from any other writer.
+    const store = JSON.parse(
+      JSON.stringify({
+        version: 1,
+        rotationEpoch: 41,
+        entries: [sealedEntry('primary', 'github.com')],
+      }),
+    ) as Record<string, unknown>
+    Object.defineProperty(store, '__proto__', {
+      value: { writtenBy: 'another-writer' },
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    })
+    await writeFile(vaultFile, JSON.stringify(store))
+    await writeFile(stateFile, primaryRecordFile('primary', 'github.com'))
+
+    const retired = await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile })
+    assert.deepEqual(retired, { retired: true, host: 'github.com' })
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.reference),
+      [],
+      "this build's own credential is still stored",
+    )
+    assert.ok(
+      existsSync(vaultFile),
+      'the file another writer still keeps something in was removed with the credential',
+    )
+    const kept = await readJson(vaultFile)
+    assert.equal(kept.rotationEpoch, 41, "another writer's field was destroyed")
+    assert.deepEqual(kept.entries, [], 'the credential it did own was not removed')
+    assert.ok(
+      Object.hasOwn(kept, '__proto__'),
+      "another writer's field was dropped because a name from the file was assigned",
+    )
+    assert.deepEqual(
+      (kept as Record<string, unknown>)['__proto__'],
+      { writtenBy: 'another-writer' },
+      "another writer's field was not kept as it was written",
+    )
+  })
+})
+
+test('a store replaced, malformed or pointed elsewhere is left exactly as it is', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const stateFile = join(dir, 'github-account.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    const document = (extra: unknown[]) =>
+      JSON.stringify({
+        version: 1,
+        entries: [sealedEntry('primary', 'github.com'), ...extra],
+      })
+
+    // A store this process already read, replaced by a newer one that holds a
+    // second credential: the change acts on what the file holds now, so the newer
+    // credential survives instead of being lost from a remembered snapshot.
+    await writeFile(vaultFile, document([]))
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.reference),
+      ['primary'],
+    )
+    await writeFile(vaultFile, document([sealedEntry('notifications', 'github.com')]))
+    await vault.remove('primary')
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.reference),
+      ['notifications'],
+      'the store that was on disk when the change began was overwritten from an earlier read',
+    )
+
+    // A replacement that is not JSON at all is not repaired, and not removed.
+    await writeFile(vaultFile, document([]))
+    await vault.references()
+    await writeFile(vaultFile, '{ this is not json')
+    await assert.rejects(vault.remove('primary'), /not readable/u)
+    assert.equal(await readFile(vaultFile, 'utf8'), '{ this is not json')
+
+    // A store that has become a link is this app's own nothing: reading through
+    // it would let whatever is behind it be rewritten as if it were this app's
+    // own file.
+    const foreign = join(dir, 'somebody-elses-store.json')
+    await writeFile(
+      foreign,
+      JSON.stringify({ version: 1, entries: [sealedEntry('foreign', 'github.com')] }),
+    )
+    await rm(vaultFile, { force: true })
+    await symlink(foreign, vaultFile)
+    assert.deepEqual(await vault.references(), [])
+    await vault.remove('primary')
+    assert.deepEqual(
+      (await readJson(foreign)).entries,
+      [sealedEntry('foreign', 'github.com')],
+      'a store behind a link was rewritten',
+    )
+
+    // Two entries under one reference leave nothing to say which of them a
+    // reference names, so neither may be acted on.
+    await rm(vaultFile, { force: true })
+    const duplicated = JSON.stringify({
+      version: 1,
+      entries: [sealedEntry('primary', 'github.com'), sealedEntry('primary', 'github.com')],
+    })
+    await writeFile(vaultFile, duplicated)
+    await assert.rejects(vault.references(), /not readable/u)
+    assert.equal(await readFile(vaultFile, 'utf8'), duplicated, 'a refused store was rewritten')
+    assert.deepEqual(opened, [], 'a credential was opened while a store was refused')
+  })
+})
+
+test("a record that cannot be proved to be this build's keeps its credential", async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const stateFile = join(dir, 'github-account.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    const store = (entry: Record<string, unknown>) =>
+      JSON.stringify({ version: 1, entries: [entry] })
+    const refused = async (label: string, record: string) => {
+      await writeFile(vaultFile, store(sealedEntry('primary', 'github.com')))
+      await writeFile(stateFile, record)
+      const retired = await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile })
+      assert.deepEqual(retired, { retired: false, host: null }, label)
+      assert.deepEqual(
+        (await vault.references()).map((entry) => entry.reference),
+        ['primary'],
+        `${label}: the credential was deleted by a call that reported nothing was retired`,
+      )
+      assert.ok(existsSync(stateFile), `${label}: the record was removed`)
+    }
+
+    // A record carrying a field this build does not write is somebody else's.
+    await refused('an unfamiliar field', primaryRecordFile('primary', 'github.com', { scope: 1 }))
+    // A record that is not JSON, and a record that names nothing, are not records.
+    await refused('malformed JSON', '{ not json')
+    await refused('no reference', JSON.stringify({ host: 'github.com' }))
+    // A credential sealed for another host is not the one this record names.
+    await writeFile(vaultFile, store(sealedEntry('primary', 'ghe.example.com')))
+    await writeFile(stateFile, primaryRecordFile('primary', 'github.com'))
+    assert.deepEqual(await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile }), {
+      retired: false,
+      host: null,
+    })
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.host),
+      ['ghe.example.com'],
+    )
+
+    // An entry carrying a field this build does not write may belong to another
+    // build or another tool, so it is preserved rather than removed.
+    await writeFile(
+      vaultFile,
+      store(sealedEntry('primary', 'github.com', { rotatedBy: 'another-build' })),
+    )
+    await writeFile(stateFile, primaryRecordFile('primary', 'github.com'))
+    assert.deepEqual(await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile }), {
+      retired: false,
+      host: null,
+    })
+    assert.equal(
+      ((await readJson(vaultFile)).entries as Record<string, unknown>[])[0].rotatedBy,
+      'another-build',
+      'an entry this build does not recognise was removed',
+    )
+
+    // A record that is a link is something a person pointed somewhere, and what
+    // is behind it is not this build's to delete.
+    const pointed = join(dir, 'pointed-at.json')
+    await writeFile(pointed, primaryRecordFile('primary', 'github.com'))
+    await rm(stateFile, { force: true })
+    await symlink(pointed, stateFile)
+    await writeFile(vaultFile, store(sealedEntry('primary', 'github.com')))
+    assert.deepEqual(await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile }), {
+      retired: false,
+      host: null,
+    })
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.reference),
+      ['primary'],
+      'a link that named the record cost the credential it pointed at',
+    )
+    assert.equal(
+      (await readJson(pointed)).session,
+      'session-material',
+      'the file a link pointed at was rewritten',
+    )
+    assert.deepEqual(opened, [], 'a credential was opened while a record was refused')
+  })
+})
+
+test('a link planted where a change writes is never written through', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    const foreign = join(dir, 'notes.txt')
+    await writeFile(foreign, "somebody else's data\n")
+    // The name a rewrite used to write through, pointed at a file this app does
+    // not own: whatever a change writes, this file is not it.
+    await symlink(foreign, `${vaultFile}.tmp`)
+    await writeFile(
+      vaultFile,
+      JSON.stringify({
+        version: 1,
+        entries: [sealedEntry('primary', 'github.com'), sealedEntry('other', 'github.com')],
+      }),
+    )
+
+    await vault.remove('primary')
+    assert.equal(await readFile(foreign, 'utf8'), "somebody else's data\n")
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.reference),
+      ['other'],
+    )
+
+    // The same for the name a claim used to be taken under.
+    const pointed = join(dir, 'pointed-at-store.json')
+    await writeFile(
+      pointed,
+      JSON.stringify({ version: 1, entries: [sealedEntry('kept', 'github.com')] }),
+    )
+    await rm(vaultFile, { force: true })
+    await symlink(pointed, `${vaultFile}.claim`)
+    await writeFile(
+      vaultFile,
+      JSON.stringify({ version: 1, entries: [sealedEntry('primary', 'github.com')] }),
+    )
+    await vault.clear()
+    assert.deepEqual(
+      JSON.parse(await readFile(pointed, 'utf8')).entries,
+      [sealedEntry('kept', 'github.com')],
+      'a store behind a link was cleared',
+    )
+    assert.deepEqual(await vault.references(), [])
+  })
+})
+
+const nodeRequire = createRequire(import.meta.url)
+const moduleBuiltin = nodeRequire('node:module') as { syncBuiltinESMExports: () => void }
+
+/**
+ * Arms timing hooks on the writable CommonJS `node:fs/promises` for one file of
+ * this test's own, and re-syncs the built-in ESM exports so production code that
+ * already holds the named imports reaches them.
+ *
+ * Only the timing is this test's: every filesystem operation is the real one,
+ * on the real temporary directory, and the hooks are put back — exports included
+ * — whatever happens next. Nothing here reaches the operating system's own
+ * credential store or a real `gh`.
+ */
+function armFileSystemTiming(
+  file: string,
+  afterClaim: () => Promise<void>,
+  beforeRead: () => void,
+): () => void {
+  const fsPromises = nodeRequire('node:fs/promises') as Record<string, unknown>
+  const realOpen = fsPromises.open as (...args: unknown[]) => Promise<unknown>
+  const realRename = fsPromises.rename as (...args: unknown[]) => Promise<unknown>
+  fsPromises.open = (...args: unknown[]) => {
+    if (args[0] === file) beforeRead()
+    return realOpen(...args)
+  }
+  fsPromises.rename = async (...args: unknown[]) => {
+    const renamed = await realRename(...args)
+    if (args[0] === file && String(args[1]).endsWith('.claim')) await afterClaim()
+    return renamed
+  }
+  moduleBuiltin.syncBuiltinESMExports()
+  return () => {
+    fsPromises.open = realOpen
+    fsPromises.rename = realRename
+    moduleBuiltin.syncBuiltinESMExports()
+  }
+}
+
+test('a read never observes the gap a write opens while it holds the store aside', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    // Both credentials exist, and the set-up is finished, before anything is
+    // armed: what is under test is what a reader sees during a later change.
+    const primary = await vault.stage('github.com', 'primary-secret', 1)
+    const notifications = await vault.stage('github.com', 'notifications-secret', 2)
+
+    const claimed = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    // Whether a change is holding the store aside, and whether a read actually
+    // reached the file while it was: the first is the writer's own state, the
+    // second is what a read did. The second only chooses how this test waits.
+    let holding = false
+    let readReachedFile = false
+    const restore = armFileSystemTiming(
+      vaultFile,
+      async () => {
+        holding = true
+        claimed.resolve()
+        await release.promise
+        holding = false
+      },
+      () => {
+        if (holding) readReachedFile = true
+      },
+    )
+    let writer: Promise<void> | null = null
+    try {
+      writer = vault.remove(primary)
+      await claimed.promise
+      assert.equal(
+        existsSync(vaultFile),
+        false,
+        'the change did not hold the store aside, so nothing was proved',
+      )
+      // The read starts here, while the store is held aside and its file is gone.
+      // A read that reached the file at once answers from the gap, so this test
+      // waits for it first and records what it said; a read that waited its turn
+      // behind the change has nothing to answer until the change is done. Either
+      // way the credential the store still holds is the answer that counts.
+      const reader = vault.open(notifications, 'github.com')
+      const earlyAnswer = readReachedFile ? await reader : undefined
+      release.resolve()
+      await writer
+      assert.equal(
+        earlyAnswer ?? (await reader),
+        'notifications-secret',
+        'a read that began while the store was held aside answered with the gap instead of the entry',
+      )
+      assert.deepEqual(
+        opened,
+        ['sealed:notifications-secret'],
+        'the read opened a credential other than the one the store still held',
+      )
+      assert.deepEqual(
+        (await vault.references()).map((entry) => entry.reference),
+        [notifications],
+      )
+    } finally {
+      release.resolve()
+      await writer?.catch(() => undefined)
+      restore()
+    }
+  })
+})
+
+test('a store another writer took over is never overwritten, and no removal is claimed', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const stateFile = join(dir, 'github-account.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    const primary = await vault.stage('github.com', 'primary-secret', 1)
+    // A second credential, so removing one is a change that has something left
+    // to write rather than a store this app empties.
+    const notifications = await vault.stage('github.com', 'notifications-secret', 2)
+    await writeFile(stateFile, primaryRecordFile(primary, 'github.com'))
+    // What this app's own store holds, entry for entry, before any of this runs.
+    const ownStore = (await vault.references()).map((entry) => ({
+      reference: entry.reference,
+      host: entry.host,
+      sealed: entry.sealed,
+      createdAt: entry.createdAt,
+    }))
+
+    // The other writer's store, created while this app's change holds its own
+    // file aside: entries this change never saw, at a path it does not own.
+    const theirs = JSON.stringify({
+      version: 1,
+      entries: [sealedEntry('another-writer', 'github.com')],
+    })
+    const claimed = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const restore = armFileSystemTiming(
+      vaultFile,
+      async () => {
+        await writeFile(vaultFile, theirs)
+        claimed.resolve()
+        await release.promise
+      },
+      () => undefined,
+    )
+    let writer: Promise<boolean> | null = null
+    try {
+      writer = vault.removeOwned(primary, 'github.com')
+      await claimed.promise
+      release.resolve()
+      assert.equal(await writer, false, 'a removal that never happened was reported as one')
+    } finally {
+      release.resolve()
+      await writer?.catch(() => undefined)
+      restore()
+    }
+    assert.equal(
+      await readFile(vaultFile, 'utf8'),
+      theirs,
+      "another writer's store was overwritten by a change that had already read it",
+    )
+    const retained = (await readdir(dir)).filter((name) => name.endsWith('.claim'))
+    assert.equal(
+      retained.length,
+      1,
+      `the file this app had sealed credentials in was discarded rather than kept: ${retained.join(', ')}`,
+    )
+    assert.deepEqual((await readJson(join(dir, retained[0]!))).entries, ownStore)
+
+    // The same refusal through the retirement path: the record that named the
+    // credential is put back exactly where it was found, because the credential
+    // it names is still stored.
+    const retired = await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile })
+    assert.deepEqual(retired, { retired: false, host: null })
+    assert.equal(
+      await readFile(stateFile, 'utf8'),
+      primaryRecordFile(primary, 'github.com'),
+      'the record was discarded by a call that reported nothing was retired',
+    )
+  })
+})
+
+test('a credential a Notifications center currently holds is never retired', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const stateFile = join(dir, 'github-account.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    await writeFile(
+      vaultFile,
+      JSON.stringify({
+        version: 1,
+        entries: [sealedEntry('notifications', 'github.com')],
+      }),
+    )
+    // The record names the very reference the Notifications center holds: the
+    // entry has this build's shape and this host, so only the caller's own
+    // knowledge of what it holds can tell the two apart.
+    await writeFile(stateFile, primaryRecordFile('notifications', 'github.com'))
+
+    assert.deepEqual(
+      await retirePrimaryGitHubRecord({
+        vault,
+        vaultFile,
+        stateFile,
+        protectedReferences: ['notifications'],
+      }),
+      { retired: false, host: null },
+    )
+    assert.ok(existsSync(stateFile), 'a protected credential took the record with it')
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.reference),
+      ['notifications'],
+      'a credential the Notifications center holds was removed',
+    )
+  })
+})
+
+test('a claim that fails leaves the record it took, and says nothing was retired', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const stateFile = join(dir, 'github-account.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    // A store that cannot be parsed: the record names a real reference and the
+    // file holding it is a regular file, so everything is checked before the
+    // store turns out to be unreadable.
+    await writeFile(vaultFile, '{ not json')
+    const record = primaryRecordFile('primary', 'github.com')
+    await writeFile(stateFile, record)
+
+    assert.deepEqual(await retirePrimaryGitHubRecord({ vault, vaultFile, stateFile }), {
+      retired: false,
+      host: null,
+    })
+    assert.equal(
+      await readFile(stateFile, 'utf8'),
+      record,
+      'a credential that could not be removed left no record of where it is',
+    )
+    assert.equal(
+      await readFile(vaultFile, 'utf8'),
+      '{ not json',
+      'a store that could not be read was rewritten',
+    )
+    const strays = (await readdir(dir)).filter((name) => name.endsWith('.claim'))
+    assert.deepEqual(strays, [], `a refused change left its own files behind: ${strays.join(', ')}`)
+    assert.deepEqual(opened, [], 'a credential was opened while a record was refused')
+  })
+})
+
+test('a removal reports only a removal this build can prove is its own', async () => {
+  await withTempDir(async (dir) => {
+    const vaultFile = join(dir, 'credentials.vault.json')
+    const opened: string[] = []
+    const vault = new CredentialVault(vaultFile, recordingProtector(opened))
+    const store = async (entries: Record<string, unknown>[]) =>
+      writeFile(vaultFile, JSON.stringify({ version: 1, entries }))
+    const refused = async (label: string) =>
+      assert.equal(
+        await vault.removeOwned('primary', 'github.com'),
+        false,
+        `${label} was reported as a removal this build made`,
+      )
+
+    await refused('a store this build does not write')
+    await store([sealedEntry('primary', 'github.com', { rotatedBy: 'another-build' })])
+    await refused('an entry another build wrote')
+    await store([sealedEntry('primary', 'ghe.example.com')])
+    await refused('a credential sealed for another host')
+    await store([sealedEntry('primary', 'github.com'), sealedEntry('primary', 'github.com')])
+    await refused('a reference two entries answer to')
+    await store([sealedEntry('primary', 'github.com')])
+    assert.equal(
+      await vault.removeOwned('primary', 'github.com'),
+      true,
+      "this build's own entry was not removed",
+    )
+    assert.deepEqual(await vault.references(), [])
+
+    // A saved credential comes back as a reference the store actually holds, so
+    // a caller that acts on one is acting on something that exists.
+    const reference = await vault.stage('github.com', 'staged-secret', 3)
+    assert.deepEqual(
+      (await vault.references()).map((entry) => entry.reference),
+      [reference],
+    )
+    assert.equal(await vault.open(reference, 'github.com'), 'staged-secret')
+    assert.deepEqual(
+      opened,
+      ['sealed:staged-secret'],
+      'anything other than the caller opening its own staged credential was opened',
+    )
+  })
+})
+
+/**
+ * The child the boundary runs inside. It imports the spawn functions before the
+ * fixture installs anything, which is the harder case: a named import already
+ * handed out has to see the guarded function, or production keeps the original.
+ */
+const BOUNDARY_CHILD = `
+import { exec, execFile, execFileSync, execSync, spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { promisify } from 'node:util'
+
+const [helper, root, owned, second, sentinel, alias, deep, linked] = process.argv.slice(2)
+const fixture = createRequire(import.meta.url)(helper)
+// The run's own directory comes from the environment; the second controlled CLI
+// is admitted through the exported call, which is how a test that installs a CLI
+// of its own declares it.
+fixture.installOwnedProviderCliBoundary(root)
+fixture.admitOwnedProviderCliRoot(second)
+const run = promisify(execFile)
+const report = {}
+const withPath = (path) => ({ ...process.env, PATH: path })
+const attempt = async (label, start) => {
+  try {
+    const value = await start()
+    report[label] = {
+      ran: true,
+      value: typeof value === 'string' ? value : (value?.stdout ?? null),
+    }
+  } catch (error) {
+    report[label] = { ran: false, code: error.code ?? null, value: error.stdout ?? null }
+  }
+}
+const shell = (command) => () => new Promise((resolve, reject) => {
+  const child = exec(command, { env: withPath(owned + ':' + sentinel) }, (error, stdout) => {
+    if (error) reject(error)
+    else resolve(stdout)
+  })
+  child.stdin?.end()
+})
+const spawned = (file, options) => () => new Promise((resolve, reject) => {
+  const child = spawn(file, options)
+  child.on('error', reject)
+  child.on('close', (code) => resolve(String(code)))
+})
+
+const options = { env: withPath(owned + ':' + sentinel), encoding: 'utf8' }
+
+await attempt('owned-bare', () => run('gh', ['--version'], options))
+await attempt('owned-absolute', () => run(owned + '/gh', ['--version'], options))
+await attempt('sentinel-absolute', () => run(sentinel + '/gh', ['--version'], options))
+await attempt('unowned-first-path', () => run('gh', ['--version'], {
+  ...options,
+  env: withPath(sentinel + ':' + owned),
+}))
+await attempt('other-spelling', () => run('gh.exe', ['--version'], options))
+await attempt('alias-path', () => run('gh', ['--version'], {
+  ...options,
+  env: withPath(alias + ':' + sentinel),
+}))
+await attempt('relative-path-entry', () => run('gh', ['--version'], {
+  ...options,
+  cwd: root,
+  env: withPath('./owned:' + sentinel),
+}))
+// Two controlled CLIs installed at once, each judged on the file its own PATH
+// resolves to: neither is compared with the other, and neither is refused
+// because another owned directory was searched first.
+await attempt('second-owned-alone', () => run('gh', ['--version'], {
+  ...options,
+  env: withPath(second + ':' + sentinel),
+}))
+await attempt('second-owned-behind-first', () => run('gh', ['--version'], {
+  ...options,
+  env: withPath(owned + ':' + second + ':' + sentinel),
+}))
+// A CLI installed deep under an owned root is this run's own at that depth.
+await attempt('deep-descendant', () => run('gh', ['--version'], {
+  ...options,
+  env: withPath(deep + ':' + sentinel),
+}))
+// An empty PATH entry is the child's own working directory, as it is for the
+// operating system — owned or not, judged from there.
+await attempt('empty-path-owned-cwd', () => run('gh', ['--version'], {
+  ...options,
+  cwd: owned,
+  env: withPath(''),
+}))
+await attempt('empty-path-unowned-cwd', () => run('gh', ['--version'], {
+  ...options,
+  cwd: sentinel,
+  env: withPath(''),
+}))
+// A file that is a link, even one pointing at another of this run's own files,
+// is something a person pointed there rather than an install.
+await attempt('linked-file', () => run(linked + '/gh', ['--version'], options))
+await attempt('request-body', async () => {
+  const child = run('gh', ['--input', '-'], options)
+  child.child.stdin?.end('request-body-receipt')
+  return (await child).stdout
+})
+await attempt('nonzero-json', () => run('gh', ['fail-json'], options))
+await attempt('shell-command', shell(owned + '/gh --version'))
+await attempt('shell-argv-absolute', () => execFileSync('gh', ['--version'], { shell: true }))
+await attempt('shell-argv-command-string', spawned('gh --version', { shell: true, stdio: 'ignore' }))
+await attempt('shell-argv-sentinel', spawned(sentinel + '/gh', { shell: false, stdio: 'ignore' }))
+report['non-provider'] = {
+  ran: true,
+  value: execFileSync('git', ['--version'], { env: withPath(process.env.PATH ?? '') })
+    .toString()
+    .trim(),
+}
+process.stdout.write(JSON.stringify(report))
+`
+
+test('the fixture fences the GitHub CLI to the executables the run installed', async () => {
+  await withTempDir(async (dir) => {
+    const root = join(dir, 'root')
+    const owned = join(root, 'owned')
+    const second = join(root, 'second')
+    const sentinel = join(root, 'sentinel')
+    const alias = join(root, 'owned-alias')
+    // A CLI installed deep under an owned root, and a directory holding nothing
+    // but a link out of one.
+    const deep = join(owned, 'nested', 'bin')
+    const linked = join(owned, 'linked')
+    for (const directory of [root, owned, second, sentinel, deep, linked]) {
+      await mkdir(directory, { recursive: true })
+    }
+    await symlink(owned, alias)
+    await symlink(join(sentinel, 'gh'), join(linked, 'gh'))
+    // The controlled CLIs, and a CLI the run does not own whose only behaviour
+    // is to leave a mark. None of them is the machine's own gh, which is never
+    // invoked here.
+    const cli = (banner: string) =>
+      [
+        '#!/bin/sh',
+        'case "$1" in',
+        `  --input) read -r body; printf '%s' "$body" > ${JSON.stringify(join(root, 'body-receipt'))} ;;`,
+        '  fail-json) printf \'{"hosts":{}}\\n\'; exit 1 ;;',
+        `  *) printf '${banner} gh %s\\n' "$*" ;;`,
+        'esac',
+        '',
+      ].join('\n')
+    await writeFile(join(owned, 'gh'), cli('owned'), { mode: 0o755 })
+    await writeFile(join(second, 'gh'), cli('second'), { mode: 0o755 })
+    await writeFile(join(deep, 'gh'), cli('deep'), { mode: 0o755 })
+    await writeFile(
+      join(sentinel, 'gh'),
+      [
+        '#!/bin/sh',
+        `printf 'sentinel %s\\n' "$*" >> ${JSON.stringify(join(dir, 'sentinel.log'))}`,
+        "printf 'gh version 9.9.9-sentinel\\n'",
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    )
+    const child = join(root, 'boundary-child.mjs')
+    await writeFile(child, BOUNDARY_CHILD)
+
+    const run = () =>
+      JSON.parse(
+        execFileSync(
+          process.execPath,
+          [
+            child,
+            join(process.cwd(), 'tests', 'fixtures', 'isolated-desktop.cjs'),
+            root,
+            owned,
+            second,
+            sentinel,
+            alias,
+            deep,
+            linked,
+          ],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, GIT_STACKS_OWNED_GH_DIR: alias },
+            timeout: 60_000,
+          },
+        ),
+      ) as Record<
+        string,
+        { ran: boolean; code?: string | null; value?: string; stdout?: string | null }
+      >
+
+    let report = run()
+    const ran = (label: string) => String(report[label].value)
+    assert.match(ran('owned-bare'), /^owned gh --version/u, 'the owned CLI did not run')
+    assert.match(ran('owned-absolute'), /^owned gh --version/u)
+    assert.match(
+      ran('alias-path'),
+      /^owned gh --version/u,
+      'an owned path through a link was refused',
+    )
+    assert.match(
+      ran('relative-path-entry'),
+      /^owned gh --version/u,
+      'a relative PATH entry was refused',
+    )
+    // Both controlled CLIs run, whichever one the PATH actually resolves to,
+    // and the deep one is judged from where it is installed rather than from a
+    // search of everything beneath the root.
+    assert.match(
+      ran('second-owned-alone'),
+      /^second gh --version/u,
+      'the second owned CLI was refused',
+    )
+    assert.match(
+      ran('second-owned-behind-first'),
+      /^owned gh --version/u,
+      'the first PATH entry was not the one that ran',
+    )
+    assert.match(
+      ran('deep-descendant'),
+      /^deep gh --version/u,
+      'a CLI installed beneath an owned root was refused',
+    )
+    assert.match(
+      ran('empty-path-owned-cwd'),
+      /^owned gh --version/u,
+      'an empty PATH entry did not resolve against the child working directory',
+    )
+    assert.equal(
+      await readFile(join(root, 'body-receipt'), 'utf8').catch(() => null),
+      'request-body-receipt',
+      'the promisified execFile handed back no child for a request body to be written to',
+    )
+    assert.equal(
+      report['nonzero-json'].value,
+      '{"hosts":{}}\n',
+      'a nonzero exit did not carry the JSON the auth-status parser reads',
+    )
+    assert.match(String(report['non-provider'].value), /^git version /u, 'real Git was fenced too')
+    for (const label of [
+      'sentinel-absolute',
+      'unowned-first-path',
+      'other-spelling',
+      'empty-path-unowned-cwd',
+      'linked-file',
+      'shell-command',
+      'shell-argv-absolute',
+      'shell-argv-command-string',
+      'shell-argv-sentinel',
+    ]) {
+      assert.equal(report[label].ran, false, `${label} started a CLI the run does not own`)
+      assert.equal(report[label].code, 'ENOENT', `${label} was not answered as an absent CLI`)
+    }
+    assert.ok(!existsSync(join(dir, 'sentinel.log')), 'a CLI outside the owned directory ran')
+    const refusals = await readFile(join(root, 'unowned-gh-launches.log'), 'utf8')
+    assert.equal(
+      refusals.trim().split('\n').length,
+      9,
+      `the run refused ${refusals.trim().split('\n').length} requests rather than the 9 it should have`,
+    )
+
+    // With the owned executable gone, the same PATH answers as a machine with no
+    // CLI on it, and the sentinel behind it is still never reached.
+    await rm(join(owned, 'gh'))
+    await rm(join(root, 'unowned-gh-launches.log'))
+    report = run()
+    assert.equal(report['owned-bare'].code, 'ENOENT')
+    assert.equal(report['sentinel-absolute'].code, 'ENOENT')
+    assert.ok(!existsSync(join(dir, 'sentinel.log')), 'a CLI outside the owned directory ran')
+  })
+})
+
+/**
+ * A `gh` that is a real executable answering through the shared loopback
+ * fixture: the request argv the shipped transport writes arrives as arguments,
+ * a request body arrives on stdin, and the fixture's own answer is what the
+ * process prints. Nothing about the answer is written for this test — it is the
+ * same fixture the rest of the suite reads through.
+ */
+const LOOPBACK_CLI = `
+const { readFileSync } = require('node:fs')
+const { runGitHubCli } = require(__fixture__)
+const args = process.argv.slice(2)
+if (args.includes('--version')) {
+  process.stdout.write('gh version 2.62.0 (2024-11-14)\\n')
+  process.exit(0)
+}
+const input = args.includes('--input') ? readFileSync(0, 'utf8') : undefined
+try {
+  process.stdout.write(
+    runGitHubCli({ statePath: __state__, barePath: __bare__, realGit: __git__, args, cwd: process.cwd(), input }),
+  )
+} catch (error) {
+  process.stderr.write(String(error && error.message) + '\\n')
+  process.exit(typeof error?.code === 'number' ? error.code : 2)
+}
+`
+
+test('a real CLI child proves the account the loopback fixture serves', async () => {
+  await withTempDir(async (dir) => {
+    const bin = join(dir, 'bin')
+    const barePath = join(dir, 'origin.git')
+    await mkdir(bin, { recursive: true })
+    // A real bare repository and the real Git, so the fixture is not told about
+    // work it cannot actually do.
+    spawnSync('git', ['init', '--bare', '--quiet', barePath], { encoding: 'utf8' })
+    const realGit = execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim()
+    const statePath = join(dir, 'fixture-state.json')
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        repository: { owner: 'octocat', name: 'stacks' },
+        currentUser: 'fixture-user',
+        prs: [],
+        requests: [],
+      }),
+    )
+    await writeFile(
+      join(bin, 'gh'),
+      [
+        `#!${process.execPath}`,
+        LOOPBACK_CLI.replaceAll('__fixture__', () =>
+          JSON.stringify(join(process.cwd(), 'tests', 'fixtures', 'github-cli.cjs')),
+        )
+          .replaceAll('__state__', () => JSON.stringify(statePath))
+          .replaceAll('__bare__', () => JSON.stringify(barePath))
+          .replaceAll('__git__', () => JSON.stringify(realGit)),
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    )
+    admitOwnedProviderCliRoot(bin)
+
+    const answer = await readGitHubCli(githubHostContext('github.com'), { env: { PATH: bin } })
+    assert.equal(
+      answer.state,
+      'authenticated',
+      'the loopback CLI did not authenticate through the account the build pins',
+    )
+    assert.equal(
+      answer.login,
+      'fixture-user',
+      'the account was not the one the proof request itself reported',
+    )
+    assert.ok(answer.authority, 'a proven account has a credential identity to fence on')
+
+    // An inactive failed check establishes no active account and no rejection.
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        repository: { owner: 'octocat', name: 'stacks' },
+        currentUser: 'fixture-user',
+        cliAccounts: { 'github.com': [{ state: 'error', active: false, login: 'stale' }] },
+        prs: [],
+        requests: [],
+      }),
+    )
+    const refused = await readGitHubCli(githubHostContext('github.com'), { env: { PATH: bin } })
+    assert.equal(
+      refused.state,
+      'unavailable',
+      'a failed inactive check cannot establish that a credential was rejected',
+    )
+
+    // A host this run's CLI does not serve is refused rather than answered, and a
+    // refusal that printed nothing is not read as a signed-out host either.
+    const unserved = await readGitHubCli(githubHostContext('ghe.example.com'), {
+      env: { PATH: bin },
+    })
+    assert.equal(
+      unserved.state,
+      'unavailable',
+      'a host this run does not serve is a question this build cannot answer, not a signed-out host',
+    )
+  })
+})
+
+test('a destination provider this run is signed into authenticates a public host it never asked about', async () => {
+  await withTempDir(async (dir) => {
+    const destination = '127.0.0.1:65530'
+    const bin = join(dir, 'bin')
+    await mkdir(bin, { recursive: true })
+    // The CLI of a provider this run is pointed at: signed in there, signed out
+    // of the public host, and serving one account under the name that provider
+    // answers on. It accepts a proof request only at its own address, so a read
+    // that put the question to the public host could not be satisfied by this
+    // CLI at all, and its own session for the public host is signed out.
+    const cli = await installControlledGh(
+      `const args = process.argv.slice(2)
+const host = args.includes('--hostname') ? args[args.indexOf('--hostname') + 1] : 'github.com'
+if (args.includes('--version')) {
+  process.stdout.write('gh version 2.62.0 (2024-11-14)\\n')
+  process.exit(0)
+}
+if (args[0] === 'auth' && args[1] === 'status') {
+  process.stdout.write(
+    JSON.stringify({
+      hosts:
+        host === '${destination}'
+          ? {
+              '${destination}': [
+                {
+                  state: 'success',
+                  active: true,
+                  host: '${destination}',
+                  login: 'ada',
+                },
+              ],
+            }
+          : {},
+    }) + '\\n',
+  )
+  process.exit(0)
+}
+if (args[0] === 'auth' && args[1] === 'token') {
+  if (host !== '${destination}') process.exit(1)
+  process.stdout.write('destination-credential\\n')
+  process.exit(0)
+}
+const endpoint = args.find((arg) => arg.includes('/graphql'))
+if (!endpoint || !endpoint.startsWith('http://${destination}/')) {
+  process.stderr.write('the proof was not made against this provider: ' + endpoint + '\\n')
+  process.exit(3)
+}
+// The envelope a real 'gh api --include' prints: the status line and the rate
+// limit headers ahead of the body, which is what the transport parses.
+process.stdout.write(
+  'HTTP/2 200 OK\\r\\n' +
+    'x-ratelimit-limit: 5000\\r\\n' +
+    'x-ratelimit-remaining: 4998\\r\\n' +
+    'x-ratelimit-reset: 1800000000\\r\\n' +
+    'x-ratelimit-resource: core\\r\\n\\r\\n' +
+    JSON.stringify({ data: { viewer: { login: 'ada' } } }) + '\\n',
+)
+process.exit(0)`,
+      bin,
+    )
+    const read = await readGitHubCli(githubHostContext('github.com'), {
+      env: { PATH: bin, GIT_STACKS_GITHUB_API_URL: `http://${destination}/api/v3` },
+    })
+    assert.equal(
+      read.state,
+      'authenticated',
+      `gh was asked: ${await readFile(cli.invoked, 'utf8')}`,
+    )
+    assert.equal(read.login, 'ada', 'the account serving this run was not the one the read named')
+  })
+})
+
+test('the CLI status proves the destination the app is pointed at, not the public API', async () => {
+  await withTempDir(async (dir) => {
+    const bin = join(dir, 'bin')
+    const barePath = join(dir, 'origin.git')
+    await mkdir(bin, { recursive: true })
+    spawnSync('git', ['init', '--bare', '--quiet', barePath], { encoding: 'utf8' })
+    const realGit = execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim()
+    const statePath = join(dir, 'fixture-state.json')
+    const writeState = async () =>
+      writeFile(
+        statePath,
+        JSON.stringify({
+          repository: { owner: 'octocat', name: 'stacks' },
+          currentUser: 'override-account',
+          // The session this run's CLI holds for the provider it was pointed at.
+          // Requests for the public host are made against that destination, so
+          // the account there is the one that answers them.
+          cliAccounts: {
+            '127.0.0.1:65530': [{ state: 'success', active: true, login: 'override-account' }],
+          },
+          prs: [],
+          requests: [],
+        }),
+      )
+    await writeState()
+    await writeFile(
+      join(bin, 'gh'),
+      [
+        `#!${process.execPath}`,
+        LOOPBACK_CLI.replaceAll('__fixture__', () =>
+          JSON.stringify(join(process.cwd(), 'tests', 'fixtures', 'github-cli.cjs')),
+        )
+          .replaceAll('__state__', () => JSON.stringify(statePath))
+          .replaceAll('__bare__', () => JSON.stringify(barePath))
+          .replaceAll('__git__', () => JSON.stringify(realGit)),
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    )
+    admitOwnedProviderCliRoot(bin)
+
+    // The public host pointed at a destination of its own. Every request this app
+    // makes for that host goes there and carries that destination's credential,
+    // so the account it reports has to be the one proven there.
+    const override = 'http://127.0.0.1:65530/api/v3'
+    const answer = await readGitHubCli(githubHostContext('github.com'), {
+      env: {
+        PATH: bin,
+        GIT_STACKS_GITHUB_API_URL: override,
+        // A credential for the public host and one for the pointed-at
+        // destination. Proving the account has to be pinned to the credential
+        // that destination's requests carry, not the public host's.
+        GH_TOKEN: 'public-host-credential',
+        GH_ENTERPRISE_TOKEN: 'override-destination-credential',
+      },
+    })
+    assert.equal(answer.state, 'authenticated', 'the pointed-at destination was not used')
+    assert.equal(
+      answer.login,
+      'override-account',
+      'the account was not the one the configured destination serves',
+    )
+    const requests = JSON.parse(await readFile(statePath, 'utf8')) as {
+      requests: Array<{ argv: string[] }>
+    }
+    const proof = requests.requests
+      .flatMap((entry) => entry.argv)
+      .filter((arg) => arg.startsWith('http'))
+    assert.ok(proof.length > 0, 'no request was made to prove the account')
+    for (const url of proof) {
+      assert.ok(
+        url.startsWith(override),
+        `the proof was made against ${url} rather than the configured destination`,
+      )
+    }
   })
 })

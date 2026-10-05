@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { CommandCancelled } from '../src/main/git-core'
-import { getSnapshot } from '../src/main/git'
+import { getSnapshot, retireConfirmedGitHubPayloads } from '../src/main/git'
 import { getGitHubIssues, getGitHubData } from '../src/main/github'
 import { githubHostContext } from '../src/main/github-host'
 import {
@@ -13,6 +13,8 @@ import {
   GhGitHubTransport,
   GitHubTransportError,
   githubResponseCache,
+  nextGitHubRequestOrder,
+  publishRateLimit,
   resetGitHubRateLimit,
   setGitHubTransport,
   type GitHubTransport,
@@ -28,7 +30,11 @@ import {
   RemoteMutationLedger,
   unknownRemoteOutcome,
 } from '../src/main/remote-mutations'
-import { RequestRegistry, performBackgroundRead } from '../src/main/request-registry'
+import {
+  RequestRegistry,
+  performBackgroundRead,
+  snapshotReadPurpose,
+} from '../src/main/request-registry'
 import {
   classifyRemoteFailure,
   DEFAULT_INTERVALS,
@@ -38,6 +44,7 @@ import {
   type SyncTimer,
 } from '../src/main/sync-coordinator'
 import { describeFreshness } from '../src/renderer/src/lib/live-sync'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 import type {
   GitAction,
   PullRequest,
@@ -130,6 +137,11 @@ async function drainTurns(count = 8): Promise<void> {
  * a re-resolution, and awaiting it unguarded would hang the whole suite
  * instead of naming the step that never came.
  */
+/** Whether a refusal is about this host's own rate limit, rather than about a request. */
+function refusedTheRateLimit(kind: GitHubTransportError['kind']): boolean {
+  return kind === 'rate-limited' || kind === 'secondary-rate-limit'
+}
+
 function within(promise: Promise<void>, what: string, ms = 10_000): Promise<void> {
   return Promise.race([
     promise,
@@ -244,6 +256,10 @@ interface Harness {
 }
 
 function harness(snapshotFor?: (attempt: number) => RepositorySnapshot): Harness {
+  // A coordinator is installed over a host that has said nothing yet: whatever
+  // another case in this file recorded is a world of its own, and its quota
+  // state does not reach into this one.
+  resetGitHubRateLimit()
   const clock = new ManualClock()
   const reads: string[] = []
   const pushed: Harness['pushed'] = {}
@@ -287,6 +303,17 @@ function harness(snapshotFor?: (attempt: number) => RepositorySnapshot): Harness
     issueReads: () => state.issueReads,
     failWith: (error: unknown) => {
       state.failure = error
+      // A transport records what a host answered as it reads it, against that
+      // host and the credential the request carried, so the coordinator sees the
+      // same refusal a real host would produce. This double answers the same way.
+      if (error instanceof GitHubTransportError && refusedTheRateLimit(error.kind))
+        publishRateLimit(
+          error.rateLimit,
+          error.kind,
+          'github.com',
+          error.authority ?? 'live-sync-test-credential',
+          nextGitHubRequestOrder(),
+        )
     },
   }
 }
@@ -1462,31 +1489,190 @@ test('the freshness badge renders every state in words, not colour alone', async
 test('a live snapshot read that cannot reach GitHub never reuses the confirmed payload', async () => {
   const { repo, cleanup } = await disposableRepository()
   const previous = { ...process.env }
-  // A host that resolves to nothing, with that host's own credential present, so
-  // the read fails in the transport rather than in a double. The credential is
-  // scoped to the unreachable host because a credential is bound to the host
-  // that issued it and is never sent to an origin that host does not own.
-  process.env.GIT_STACKS_GITHUB_TRANSPORT = 'direct'
-  process.env[
-    `GIT_STACKS_GITHUB_TOKEN_${Buffer.from('github.invalid', 'utf8').toString('hex').toUpperCase()}`
-  ] = 'test-token'
+  // github.invalid is neither github.com nor under ghe.com, so the CLI reads its
+  // credential from the enterprise variable, and a credential is never sent to an
+  // origin the host that issued it does not own.
+  process.env.GH_ENTERPRISE_TOKEN = 'test-token'
   delete process.env.GIT_STACKS_GITHUB_API_URL
   git(repo, 'remote', 'add', 'origin', 'git@github.invalid:acme/widgets.git')
+
+  // The read first succeeds, so there is a confirmed payload with real content for
+  // the failure below to be tempted into passing off as a live answer.
+  const confirmedPullRequests = {
+    nodes: [
+      {
+        number: 7,
+        title: 'Confirmed earlier answer',
+        url: 'https://github.invalid/acme/widgets/pull/7',
+        state: 'OPEN',
+        isDraft: false,
+        headRefName: 'feature/step-1',
+        baseRefName: 'main',
+        mergeable: 'MERGEABLE',
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    ],
+    pageInfo: { hasNextPage: false, endCursor: null },
+  }
+  let reachable = true
+  class SwitchingTransport implements GitHubTransport {
+    readonly kind = 'direct' as const
+    readonly destinationHost = 'github.invalid'
+    async credentialAuthority(): Promise<string> {
+      return 'switching-test-credential'
+    }
+    async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
+      if (!reachable) throw new GitHubTransportError({ kind: 'network', detail: 'unreachable' })
+      return {
+        status: 200,
+        data: {} as T,
+        rateLimit: {
+          limit: 5000,
+          remaining: 4999,
+          reset: null,
+          resource: 'core',
+          retryAfterSeconds: null,
+        },
+      }
+    }
+    async paginate<T = unknown>(): Promise<T[]> {
+      if (!reachable) throw new GitHubTransportError({ kind: 'network', detail: 'unreachable' })
+      return []
+    }
+    async graphql<T = Record<string, unknown>>(query: string): Promise<T> {
+      if (!reachable) throw new GitHubTransportError({ kind: 'network', detail: 'unreachable' })
+      return {
+        repository: {
+          pullRequests: query.includes('pullRequests(')
+            ? confirmedPullRequests
+            : { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
+      } as T
+    }
+  }
+  setGitHubTransport(new SwitchingTransport())
   try {
+    const confirmed = await getSnapshot(repo, undefined, undefined, 'live')
+    assert.equal(confirmed.github.available, true, 'the first read answers')
+    assert.deepEqual(
+      confirmed.pullRequests.map((pullRequest) => pullRequest.number),
+      [7],
+      'there is a confirmed payload for the failure to reuse',
+    )
+
+    // GitHub stops answering for that host, and nothing about the CLI or the
+    // network is consulted: the read fails where GitHub is asked, which is the
+    // event under test, rather than wherever a boundary happens to refuse first.
+    reachable = false
     const live = await getSnapshot(repo, undefined, undefined, 'live')
     assert.equal(live.github.available, false, 'a live read that failed is not available')
     assert.deepEqual(live.pullRequests, [], 'no older payload is passed off as a live answer')
     assert.equal(live.githubStale?.reason, live.github.message)
     // The failure is typed and reported, so backoff has something to act on.
     assert.ok(live.githubFailure, 'the snapshot carries why the read failed')
-    assert.match(live.githubFailure?.detail ?? '', /fetch failed|ECONNREFUSED|network/iu)
+    assert.equal(live.githubFailure?.kind, 'network', 'the read failed as a network failure')
 
-    // A background refresh of the same repository may fall back, and says so.
+    // A background refresh of the same repository may fall back to the confirmed
+    // answer it already has. That fallback is the point: the older payload is still
+    // there for a read that asked for a fallback, and the failure that sent it there
+    // is still reported rather than swallowed.
     const background = await getSnapshot(repo, undefined, undefined, 'on-failure')
-    assert.equal(background.github.available, false)
-    assert.ok(background.githubFailure)
+    assert.deepEqual(
+      background.pullRequests.map((pullRequest) => pullRequest.number),
+      [7],
+      'a read that fell back keeps the answer it confirmed earlier',
+    )
+    assert.ok(background.githubFailure, 'the fallback still reports why GitHub was asked')
   } finally {
+    setGitHubTransport(null)
     Object.assign(process.env, previous)
+    await cleanup()
+  }
+})
+
+test('a snapshot whose credential was replaced while it was being read is never published', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+  // The GitHub read answers, and then holds: the credential is replaced in exactly
+  // the window between the answer and the snapshot that would carry it.
+  const answered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  class HoldingTransport implements GitHubTransport {
+    readonly kind = 'direct' as const
+    readonly destinationHost = 'github.com'
+    async credentialAuthority(): Promise<string> {
+      return 'holding-test-credential'
+    }
+    async rest<T = unknown>(): Promise<GitHubRestResponse<T>> {
+      return {
+        status: 404,
+        data: {} as T,
+        rateLimit: {
+          limit: 5000,
+          remaining: 4999,
+          reset: null,
+          resource: 'core',
+          retryAfterSeconds: null,
+        },
+      }
+    }
+    async paginate<T = unknown>(): Promise<T[]> {
+      return []
+    }
+    async graphql<T = Record<string, unknown>>(query: string): Promise<T> {
+      const answer = {
+        repository: {
+          pullRequests: query.includes('pullRequests(')
+            ? {
+                nodes: [
+                  {
+                    number: 3,
+                    title: 'Read under the previous credential',
+                    url: 'https://github.com/acme/widgets/pull/3',
+                    state: 'OPEN',
+                    isDraft: false,
+                    headRefName: 'feature/step-1',
+                    baseRefName: 'main',
+                    mergeable: 'MERGEABLE',
+                    updatedAt: '2026-01-01T00:00:00Z',
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              }
+            : { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
+      } as T
+      answered.resolve()
+      await release.promise
+      return answer
+    }
+  }
+  setGitHubTransport(new HoldingTransport())
+  try {
+    const stale = getSnapshot(repo, undefined, undefined, 'live')
+    await answered.promise
+    retireConfirmedGitHubPayloads()
+    release.resolve()
+    await assert.rejects(
+      stale,
+      (error: unknown) => error instanceof CommandCancelled,
+      'a snapshot read under a replaced credential was still published',
+    )
+
+    // The same repository still reads: a read that asks GitHub now confirms the
+    // current credential, and a local read after it is unaffected by any account
+    // change at all.
+    release.resolve()
+    const current = await getSnapshot(repo, undefined, undefined, 'live')
+    assert.equal(current.github.available, true, 'the current credential could not read GitHub')
+    const local = await getSnapshot(repo, undefined, undefined, 'reuse')
+    assert.equal(
+      local.pullRequests.length,
+      1,
+      'a local read stopped carrying the payload the current read confirmed',
+    )
+  } finally {
+    setGitHubTransport(null)
     await cleanup()
   }
 })
@@ -1788,6 +1974,9 @@ test('the gh path resolves a 304 that arrived with a nonzero exit', async () => 
   // it prints the block gh prints and exits nonzero exactly as gh does.
   await writeFile(fake, GH_STUB, 'utf8')
   await chmod(fake, 0o755)
+  // Admitted by name, so the boundary answers for this stand-in and refuses the
+  // machine's own CLI.
+  admitOwnedProviderCliRoot(root)
   const previous = process.env.PATH
   const cache = new GitHubResponseCacheStore()
   process.env.PATH = `${root}:${previous ?? ''}`
@@ -1982,6 +2171,16 @@ test('real repository watcher fires coordinator during rate limit and delivers l
     const initial = await getSnapshot(repo, undefined, undefined, 'reuse')
     coordinator.attach(repo, initial)
 
+    // Recorded the way a transport records it: a host that answered with a
+    // refusal names itself and the credential that asked, and that is what the
+    // coordinator budgets on.
+    publishRateLimit(
+      { limit: 5000, remaining: 0, reset: resetTime, resource: 'core', retryAfterSeconds: 3600 },
+      'rate-limited',
+      'github.com',
+      'live-sync-test-credential',
+      nextGitHubRequestOrder(),
+    )
     // Simulate rate-limited state
     coordinator['recordFailure'](
       new GitHubTransportError({
@@ -2161,6 +2360,112 @@ test('actual production performBackgroundRead forwards scheduler cancellation to
   const wasCancelled = await readCancelled.promise
   assert.equal(wasCancelled, true, 'background read signal was aborted when mutation claimed lane')
   await assert.rejects(backgroundTask, /cancelled/iu)
+})
+
+test('a replaced credential ends the GitHub read and leaves local Git reading', async () => {
+  const registry = new RequestRegistry()
+  const root = '/tmp/repo-credential-retirement-test'
+  const githubStarted = Promise.withResolvers<void>()
+  const localStarted = Promise.withResolvers<void>()
+  const githubAborted = Promise.withResolvers<boolean>()
+  const hold = Promise.withResolvers<void>()
+
+  // A read pinned to a credential, and a local read of the same repository's Git
+  // and file state. Neither answers until this test says so.
+  const untilReleased = (
+    started: PromiseWithResolvers<void>,
+    aborted?: PromiseWithResolvers<boolean>,
+    signal?: AbortSignal,
+  ) =>
+    new Promise<string>((resolve) => {
+      started.resolve()
+      signal?.addEventListener('abort', () => aborted?.resolve(true), { once: true })
+      hold.promise.then(() => resolve('read'))
+    })
+
+  const githubRead = performBackgroundRead(
+    registry,
+    root,
+    undefined,
+    (signal) => untilReleased(githubStarted, githubAborted, signal),
+    'sync-refresh',
+    'github',
+  )
+  const localRead = performBackgroundRead(
+    registry,
+    root,
+    undefined,
+    (signal) => untilReleased(localStarted, undefined, signal),
+    'file:README.md',
+    'local',
+  )
+  await Promise.all([githubStarted.promise, localStarted.promise])
+
+  // The credential behind the GitHub read was replaced.
+  registry.cancelGitHub()
+  hold.resolve()
+
+  assert.equal(await githubAborted.promise, true, 'the read pinned to the old credential survived')
+  assert.equal(await localRead, 'read', 'local Git reading was cancelled by a credential change')
+  await githubRead
+})
+
+test('a replaced credential leaves a reuse-only snapshot reading and ends a live one', async () => {
+  const { repo, cleanup } = await disposableRepository()
+  try {
+    git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
+    const registry = new RequestRegistry()
+    const hold = Promise.withResolvers<void>()
+    const localStarted = Promise.withResolvers<void>()
+    const liveStarted = Promise.withResolvers<void>()
+    const liveAborted = Promise.withResolvers<boolean>()
+
+    // The refresh the filesystem event asked for, held where this test can see
+    // it, and a live refresh asked for at the same time.
+    const localRead = performBackgroundRead(
+      registry,
+      repo,
+      undefined,
+      async (signal) => {
+        localStarted.resolve()
+        await hold.promise
+        // The external edit behind that event, made while the read was in flight.
+        git(repo, 'checkout', '-b', 'external/edit')
+        return getSnapshot(repo, signal, undefined, 'reuse')
+      },
+      'sync-local',
+      snapshotReadPurpose({ remote: 'reuse' }),
+    )
+    const liveRead = performBackgroundRead(
+      registry,
+      repo,
+      undefined,
+      (signal) =>
+        new Promise<string>((resolve) => {
+          liveStarted.resolve()
+          signal.addEventListener('abort', () => liveAborted.resolve(true), { once: true })
+          hold.promise.then(() => resolve('live read'))
+        }),
+      'sync-refresh',
+      snapshotReadPurpose({ remote: 'live' }),
+    )
+    await Promise.all([localStarted.promise, liveStarted.promise])
+
+    // The account behind the signed-in credential was replaced.
+    registry.cancelGitHub()
+    hold.resolve()
+
+    assert.equal(await liveAborted.promise, true, 'the live read pinned to the old credential ran')
+    await liveRead
+    const snapshot = await localRead
+    assert.deepEqual(
+      snapshot.branches.map((branch) => branch.name).sort(),
+      ['external/edit', 'main'],
+      'the local refresh was ended with the credential, and the external edit with it',
+    )
+  } finally {
+    await cleanup()
+  }
 })
 
 test('overlapping local read defers and reschedules remote polling without losing it', async () => {

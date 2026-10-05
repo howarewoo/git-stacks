@@ -1141,56 +1141,40 @@ export interface GitEnvironmentStatus {
   ssh: { available: boolean; version: string | null }
 }
 /**
- * Where the GitHub account stands. Every field is a status: an opaque reference
- * to the sealed credential, never the credential itself, so nothing here can be
- * replayed against the API.
+ * Where the provider CLI stands for the selected host. Every state is a fact a
+ * bounded read established: an installed `gh` and an account signed in to it are
+ * reported separately, because a version on disk proves nothing about who can
+ * make a request.
  */
-export type GitHubAccountState =
-  | 'not-configured'
+export type GitHubCliState =
+  | 'checking'
+  | 'missing-cli'
   | 'signed-out'
-  | 'signing-in'
-  | 'signed-in'
-  | 'expired'
-  | 'revoked'
+  | 'authenticated'
+  | 'rejected'
   | 'permission-denied'
   | 'offline'
-  | 'storage-unavailable'
+  | 'unavailable'
 
-export interface GitHubAppPermission {
-  permission: string
-  access: 'read' | 'write'
-  /** The enabled feature that needs this permission, or null when several share it. */
-  feature: string | null
-}
-
-export interface GitHubSignInChallenge {
-  userCode: string
-  verificationUri: string
-  expiresAt: number
-}
-
-export interface GitHubAccountStatus {
-  state: GitHubAccountState
-  /** Opaque handle for the sealed credential held by the operating system. */
-  reference: string | null
+export interface GitHubCliStatus {
+  state: GitHubCliState
+  /** The host this status describes; a status for another host is never shown. */
   host: string
+  /** The account the CLI would authenticate as, when it named one. */
   login: string | null
-  /** The fine-grained permissions the registered app requests; never a runtime scope. */
-  permissions: GitHubAppPermission[]
-  expiresAt: number | null
-  refreshExpiresAt: number | null
-  store: { available: boolean; name: string | null; reason: string | null }
+  /** The installed CLI's own version, from the separate installed-version probe. */
+  version: string | null
   /**
-   * A device sign-in is in progress. This is reported separately from `state`
-   * because the flow belongs to no credential: it survives a renewal of the
-   * account that is still signed in, so the code and its cancel control stay on
-   * screen until the flow itself ends.
+   * Opaque in-memory identity for the credential behind this status.
+   *
+   * It is a generation counter, never credential material or a stored
+   * reference: it changes when the host, the account, or the credential behind
+   * them is actually replaced, and is unchanged by a refresh that found the
+   * same account. Rows read under one identity are not this account's rows.
    */
-  signingIn: boolean
-  challenge: GitHubSignInChallenge | null
+  identity: string | null
+  /** Fixed, host-scoped guidance in this build's own words; never CLI output. */
   message: string | null
-  /** A credential supplied by the environment is in use instead of the app's own. */
-  externalCredential: boolean
 }
 
 export interface DesktopAPI {
@@ -1338,19 +1322,19 @@ export interface DesktopAPI {
   cancel(requestId: string): Promise<void>
   gitRuntimeStatus(): Promise<GitRuntimeStatus>
   setSystemGit(enabled: boolean): Promise<GitRuntimeStatus>
-  /** Status only: the account's state, permissions, and an opaque credential reference. */
-  githubAccountStatus?(): Promise<GitHubAccountStatus>
-  /** Starts GitHub App device sign-in and returns the one-time code to enter in a browser. */
-  startGitHubSignIn?(): Promise<GitHubAccountStatus>
-  /** Ends a pending sign-in without affecting an already stored credential. */
-  cancelGitHubSignIn?(): Promise<GitHubAccountStatus>
-  /** Removes the credential this application owns. Local repositories are untouched. */
-  signOutOfGitHub?(): Promise<GitHubAccountStatus>
   /**
-   * Subscribes to account changes pushed by a running sign-in, and returns the
-   * unsubscribe. The renderer reads status rather than polling a long sign-in.
+   * Reads the GitHub CLI's status for the selected host. Every call is a real
+   * bounded read: the CLI's own account answer and, when an account exists, one
+   * authenticated request that proves it. It never installs a tool, starts a
+   * login, switches an account, or logs one out.
    */
-  onGitHubAccount?: (listener: (status: GitHubAccountStatus) => void) => () => void
+  githubCliStatus?(): Promise<GitHubCliStatus>
+  /**
+   * Subscribes to status changes main established on its own — a host change, a
+   * request that proved the credential had been replaced — and returns the
+   * unsubscribe.
+   */
+  onGitHubCliStatus?: (listener: (status: GitHubCliStatus) => void) => () => void
   /**
    * Whether the optional GitHub Notifications module can run, and on what. It
    * carries no token and no thread: only the state, the host it is pinned to,

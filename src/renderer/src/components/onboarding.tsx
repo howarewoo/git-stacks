@@ -9,11 +9,12 @@ import { Input } from './ui/input'
 import { SegmentedControl } from './ui/segmented-control'
 import { EmptyState, InlineAlert, LoadingState } from './ui/surface'
 import { OperationFacts, WorkflowSection, type ContextFact } from './workflow-composition'
+import { createRequestGate } from '../lib/request-gate'
 import type {
   CloneCommandPreview,
   CloneProtocol,
   GitEnvironmentStatus,
-  GitHubAccountStatus,
+  GitHubCliStatus,
   GitHubRepositorySummary,
   OnboardingFailure,
   RepositoryCloneResult,
@@ -82,8 +83,12 @@ function repositoryBadges(repository: GitHubRepositorySummary) {
   return badges
 }
 
-/** A command the person can copy, with the copy confirmed in place. */
-function CommandRow({ label, command }: { label: string; command: string }) {
+/**
+ * A command the person can copy, with the copy confirmed in place. Every command
+ * this app shows is presented rather than run: the renderer never composes one
+ * from renderer input and never spawns a process for it.
+ */
+export function CopyableCommand({ label, command }: { label: string; command: string }) {
   const [copied, setCopied] = React.useState(false)
   return (
     <div className="onboarding-command">
@@ -111,29 +116,48 @@ function CommandRow({ label, command }: { label: string; command: string }) {
         )}
         {copied ? 'Copied' : 'Copy'}
       </Button>
+      <span aria-live="polite" className="sr-only">
+        {copied ? `${label} command copied` : ''}
+      </span>
     </div>
   )
 }
 
 /**
- * Find a repository the signed-in account can reach and clone it with ordinary
- * Git. The dialog names every refusal — an organization that needs single
- * sign-on, a destination that already holds files, a cancelled clone — and shows
+ * Find a repository the authenticated CLI account can reach and clone it with
+ * ordinary Git. The dialog names every refusal — a missing CLI, an account that
+ * is not signed in, an organization that needs single sign-on, an unreachable
+ * host, a destination that already holds files, a cancelled clone — and shows
  * the exact `git clone` and `gh repo clone` commands before anything is written.
+ * Discovery needs the CLI; adding an existing local repository does not, so
+ * that path stays available whatever this dialog reports.
  */
 export function RepositoryDiscoveryDialog({
-  account,
+  authority,
   busy,
+  cliStatus,
   onCloned,
-  onOpenAccount,
   onOpenChange,
+  onOpenCliStatus,
   open,
 }: {
-  account: GitHubAccountStatus | null
+  /**
+   * The CLI authority the account behind this window's GitHub belongs to: the
+   * host, the state, the account, and the opaque credential generation.
+   *
+   * Everything this dialog finds is that account's to see, so a replacement
+   * ends the search in flight and drops what it had already found — the rows,
+   * the selection, and the clone commands composed for that selection — rather
+   * than letting the next account be offered somebody else's private
+   * repositories. The clone a person has already started is local Git writing
+   * to their disk, so it is left to finish.
+   */
+  authority: string
   busy: boolean
+  cliStatus: GitHubCliStatus | null
   onCloned: (result: RepositoryCloneResult) => void
-  onOpenAccount: () => void
   onOpenChange: (open: boolean) => void
+  onOpenCliStatus: () => void
   open: boolean
 }) {
   const desktop = window.desktop
@@ -157,12 +181,19 @@ export function RepositoryDiscoveryDialog({
   const [cloning, setCloning] = React.useState(false)
   const [cloneFailure, setCloneFailure] = React.useState<OnboardingFailure | null>(null)
 
+  // One discovery search at a time, and only the newest one may answer. A
+  // search is a read of the account in effect when it was asked for, so a
+  // replacement ends this claim: the answer that eventually arrives describes
+  // what the previous account could reach and must not repopulate this list.
+  const searchGate = React.useRef(createRequestGate()).current
   const search = React.useCallback(
     async (next: string) => {
       if (!desktop?.searchRepositories) return
+      const claim = searchGate.claim()
       setSearching(true)
       setDiscoveryFailure(null)
       const outcome = await desktop.searchRepositories({ query: next, requestId: SEARCH_REQUEST })
+      if (!searchGate.current(claim)) return
       setSearching(false)
       if (outcome.ok) {
         setResults(outcome.value.repositories)
@@ -179,14 +210,44 @@ export function RepositoryDiscoveryDialog({
         setSearched(true)
       }
     },
-    [desktop],
+    [desktop, searchGate],
   )
 
-  // Listing what the account can reach is the first thing this dialog shows.
+  // A replaced authority takes the account's findings with it, whether or not
+  // the dialog is on screen: what this account can reach is what the CLI
+  // answered, so the rows, the selection, and the clone commands composed for
+  // that selection are dropped rather than offered to the next account.
+  //
+  // What the person typed stays, because none of it came from the account: a
+  // search term, a destination directory, a directory name, and the transport
+  // and depth they chose are ordinary local Git, and a clone from an ordinary
+  // Git URL keeps working with or without any CLI session. The same is true of
+  // a clone already running: it is Git writing to the person's own disk, so it
+  // is left to finish.
+  React.useEffect(() => {
+    searchGate.reset()
+    void desktop?.cancel?.(SEARCH_REQUEST)
+    // The search in flight belongs to the retired account and will never
+    // publish, so its flag ends with it rather than leaving the field spinning
+    // for an answer this window has already refused.
+    setSearching(false)
+    setResults([])
+    setSelected(null)
+    setCommands(null)
+    setCommandFailure(null)
+    setDiscoveryMeta(null)
+    setDiscoveryFailure(null)
+    setSearched(false)
+  }, [authority, desktop, searchGate])
+
+  // Listing what the account can reach is the first thing this dialog shows,
+  // and it is asked again whenever the account behind it changes: what this
+  // window can offer to clone is the new account's to offer, not the previous
+  // one's, and the re-read is what proves the window knows the difference.
   React.useEffect(() => {
     if (!open || !desktop?.searchRepositories) return
     void search('')
-  }, [desktop, open, search])
+  }, [authority, desktop, open, search])
 
   // The commands are recomputed by the main process, which owns the only code
   // that can build them, so the copy is exactly what a clone would run.
@@ -242,7 +303,10 @@ export function RepositoryDiscoveryDialog({
     setCloneFailure(outcome.failure)
   }
 
-  const signedIn = account?.state === 'signed-in'
+  // Discovery reads GitHub as the authenticated CLI account; which of the
+  // distinct states that is decides whether an empty result is a fact about the
+  // account or a fact about this computer, and each reads as its own thing.
+  const authenticated = cliStatus?.state === 'authenticated'
   const destinationReady = Boolean(parentDirectory && directoryName && commands)
 
   return (
@@ -262,8 +326,9 @@ export function RepositoryDiscoveryDialog({
         <DialogHeader>
           <DialogTitle>Clone from GitHub</DialogTitle>
           <DialogDescription>
-            Git Stacks clones with ordinary Git. The repository stays standard Git and keeps working
-            in your terminal, your editor, and GitHub Desktop.
+            Git Stacks clones with ordinary Git, using the GitHub CLI account for this host to find
+            the repository. The clone itself is standard Git and keeps working in your terminal,
+            your editor, and GitHub Desktop.
           </DialogDescription>
         </DialogHeader>
 
@@ -306,9 +371,15 @@ export function RepositoryDiscoveryDialog({
           {discoveryFailure ? (
             <InlineAlert tone={discoveryFailure.reason === 'sso-denied' ? 'warning' : 'error'}>
               {discoveryFailure.message}
-              {discoveryFailure.reason === 'signed-out' ? (
-                <Button className="mt-2" onClick={onOpenAccount} size="sm" variant="secondary">
-                  Open GitHub account
+              {/* Search is the one onboarding path that needs GitHub, so an
+                  authentication refusal is the one that opens the CLI status.
+                  Adding an existing local repository is offered outside this
+                  dialog and is never gated on it. */}
+              {discoveryFailure.reason === 'signed-out' ||
+              discoveryFailure.reason === 'authentication' ||
+              discoveryFailure.reason === 'unavailable' ? (
+                <Button className="mt-2" onClick={onOpenCliStatus} size="sm" variant="secondary">
+                  Open GitHub CLI status
                 </Button>
               ) : null}
             </InlineAlert>
@@ -320,9 +391,13 @@ export function RepositoryDiscoveryDialog({
             <EmptyState>
               <strong>No repositories to show</strong>
               <span>
-                {signedIn
-                  ? 'Sign in with an account that can reach a repository, or search by another name.'
-                  : 'Sign in to GitHub to search the repositories you can reach.'}
+                {authenticated
+                  ? 'This GitHub CLI account reached nothing by that name. Search for another name, or check which account is signed in.'
+                  : cliStatus?.state === 'missing-cli'
+                    ? 'Searching GitHub needs the GitHub CLI. Install it and sign in for this host, then search again — or add a local repository instead.'
+                    : cliStatus
+                      ? 'Sign in with the GitHub CLI for this host to search the repositories you can reach.'
+                      : 'This window has not read the GitHub CLI status yet, so it cannot say whose repositories this is. Check the GitHub CLI status, then search again.'}
               </span>
             </EmptyState>
           ) : null}
@@ -441,8 +516,8 @@ export function RepositoryDiscoveryDialog({
               ) : null}
               {commands ? (
                 <div className="onboarding-commands">
-                  <CommandRow command={commands.gitCommand} label="git clone" />
-                  <CommandRow command={commands.ghCommand} label="gh repo clone" />
+                  <CopyableCommand command={commands.gitCommand} label="git clone" />
+                  <CopyableCommand command={commands.ghCommand} label="gh repo clone" />
                 </div>
               ) : null}
             </WorkflowSection>

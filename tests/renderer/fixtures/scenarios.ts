@@ -1300,6 +1300,66 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: null,
     recentRepositories,
   },
+  'github-cli-missing': {
+    name: 'github-cli-missing',
+    summary:
+      'No GitHub CLI on this computer: GitHub work is unavailable and onboarding still offers local repositories.',
+    snapshot: null,
+    recentRepositories,
+    githubCliStatus: {
+      state: 'missing-cli',
+      host: 'github.com',
+      login: null,
+      version: null,
+      identity: null,
+      message: 'No gh executable was found on PATH.',
+    },
+  },
+  'github-cli-signed-out': {
+    name: 'github-cli-signed-out',
+    summary:
+      'The GitHub CLI is installed but holds no account for this host, so discovery has nothing to read as.',
+    snapshot: null,
+    recentRepositories,
+    githubCliStatus: {
+      state: 'signed-out',
+      host: 'github.com',
+      login: null,
+      version: '2.62.0',
+      identity: null,
+      message: 'No GitHub account is signed in for github.com.',
+    },
+  },
+  'github-cli-authenticated': {
+    name: 'github-cli-authenticated',
+    summary:
+      'An authenticated GitHub CLI account for github.com, with the version reported apart from the authentication.',
+    snapshot: connected,
+    recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:github.com:octo:1',
+      message: null,
+    },
+  },
+  'github-cli-discovery': {
+    name: 'github-cli-discovery',
+    summary:
+      'No repository open and an authenticated GitHub CLI account, which is what discovery needs before it can read GitHub.',
+    snapshot: null,
+    recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:github.com:octo:1',
+      message: null,
+    },
+  },
   'shell-loading': {
     name: 'shell-loading',
     summary: 'Boot reads never settle, so the shell keeps its loading state.',
@@ -1842,30 +1902,24 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
   'pr-inbox-host-switch': {
     name: 'pr-inbox-host-switch',
     summary:
-      'A queue confirmed for one host, whose account status has not answered yet, when the person names a different host.',
+      'A queue confirmed for one host, whose GitHub CLI status has not answered yet, when the person names a different host.',
     snapshot: inboxPrimarySnapshot,
     recentRepositories,
     snapshotsByPath: inboxSnapshots,
     inbox: inboxQueue,
-    // The account read is still outstanding, so the window opens holding a
-    // confirmed queue for github.com and nothing at all that says who behind it
-    // is. It answers with github.com's account, and it answers late.
-    pending: ['githubAccountStatus'],
+    // The CLI status read is still outstanding, so the window opens holding a
+    // confirmed queue for github.com and nothing at all that says which account
+    // behind it is. It answers with github.com's account, and it answers late.
+    pending: ['githubCliStatus'],
     identity: {
       settings: { ...DEFAULT_SETTINGS },
-      account: {
-        state: 'signed-in',
-        reference: 'keychain://git-stacks/pr-inbox-host-switch',
+      cli: {
+        state: 'authenticated',
         host: 'github.com',
         login: 'ada',
-        permissions: [{ permission: 'pull_requests', access: 'read', feature: 'inbox' }],
-        expiresAt: null,
-        refreshExpiresAt: null,
-        store: { available: true, name: null, reason: null },
-        signingIn: false,
-        challenge: null,
+        version: '2.62.0',
+        identity: 'cli:github.com:ada:1',
         message: null,
-        externalCredential: false,
       },
     },
   },
@@ -1888,20 +1942,27 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     pending: ['notifications'],
     notifications: awaitingCredential(),
   },
-  'notifications-account-pending': {
-    name: 'notifications-account-pending',
+  'notifications-cli-status-pending': {
+    name: 'notifications-cli-status-pending',
     summary:
-      "This installation's own GitHub account read is still outstanding, so the window has no account for any host while the Notification Center is otherwise ready to be pointed at another one.",
+      "This installation's own GitHub CLI status read is still outstanding, so the window has no account for any host while the Notification Center is otherwise ready to be pointed at another one.",
     snapshot: connected,
     recentRepositories,
-    // The account read the App makes on mount is admitted and then held: the
+    // The CLI status read the App makes on mount is admitted and then held: the
     // window is holding no account at all, which is a different thing from a
     // notification credential being missing. It is also the only reason this
-    // scenario answers the optional account bridge at all: a window whose
-    // build has no such bridge holds no account either, and every other
-    // scenario already renders that way.
-    exposesGithubAccount: true,
-    pending: ['githubAccountStatus'],
+    // scenario answers the optional CLI status bridge at all: a window whose
+    // build has no such bridge holds no status either, and every other scenario
+    // already renders that way.
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:github.com:octo:1',
+      message: null,
+    },
+    pending: ['githubCliStatus'],
     notifications: awaitingCredential(),
   },
   'notifications-other-host-awaiting-credential': {

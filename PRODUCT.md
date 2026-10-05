@@ -11,7 +11,7 @@ Git tools. Local changes, history, and stashes support the pull-request workflow
 
 This document describes approved product scope, not verified platform or host
 capabilities. [README.md](README.md#current-runtime) documents the runtime that
-precedes the required-`gh` authentication cutover.
+reads GitHub through the required GitHub CLI.
 
 ## Core workflows
 
@@ -32,8 +32,9 @@ precedes the required-`gh` authentication cutover.
   merge the reviewed downstack scope. Report confirmed outcomes separately from
   pending or unconfirmed remote state.
 - **Configure the desktop:** choose Git runtime and GitHub host, inspect the
-  host's `gh` authentication, adjust appearance and shortcuts, inspect
-  diagnostics, preview support bundles, and use signed updates where supported.
+  host's `gh` authentication as a read-only report, adjust appearance and
+  shortcuts, inspect diagnostics, preview support bundles, and use signed updates
+  where supported.
 
 Detailed behavior and limitations remain in the [README](README.md), including
 [onboarding](README.md#onboarding), [stack synchronization](README.md#stack-synchronization-and-recovery),
@@ -44,12 +45,22 @@ Detailed behavior and limitations remain in the [README](README.md), including
 - Repositories remain ordinary Git repositories, interoperable with terminals,
   editors, and other Git clients. Opening one is not a conversion step, and the
   app does not configure the user's Git identity or credential helper.
-- GitHub collaboration requires an installed `gh`, authenticated for the
-  repository's host. It owns sign-in, credential storage, refresh, account
-  switching, and logout; the app needs no primary GitHub App registration or
-  provider credential store. Missing or rejected CLI authentication leaves
-  local Git available. The desktop owns stack workflows without an additional
-  stack-management CLI or Graphite dependency.
+- GitHub collaboration requires an installed `gh` that can report
+  `gh auth status --json hosts`, authenticated for the repository's host. It owns
+  sign-in, credential storage, refresh, account switching, and logout; there is
+  no app-owned GitHub App registration, device flow, primary credential vault,
+  transport preference, or app-resolved token. The app reports the CLI's
+  sanitized status for that host and shows the fixed host-scoped commands a
+  person runs in their own terminal; it never runs a session-changing command
+  — not `gh auth login`, `gh auth switch`, `gh auth logout`, or a credential
+  helper write — because the CLI owns that session. It does run bounded
+  read-only probes of the installed CLI: its version, its status for the host,
+  and the API reads its own GitHub work needs, each under the same timeout and
+  cancellation rules as any other read. Where a host is served by a provider the
+  app was pointed at, that status is the provider's account rather than the
+  selected host's public session, because that is the account its requests carry. Missing or rejected CLI authentication
+  leaves local Git available. The desktop owns stack workflows without an
+  additional stack-management CLI or Graphite dependency.
 - GitHub features address the repository's host with host-specific credentials
   and observed capabilities. Unavailable remote features must not imply that
   local Git is unavailable. See [GitHub hosts](README.md#github-hosts).

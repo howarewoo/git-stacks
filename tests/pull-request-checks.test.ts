@@ -15,8 +15,15 @@ const { execFileSync } = await import('node:child_process')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 const { DirectGitHubTransport, GitHubTransportError, setGitHubTransport } =
   await import('../src/main/github-transport')
-const { clearPullRequestChecksCache, getPullRequestChecks, rerunPullRequestCheck } =
-  await import('../src/main/pull-request-checks')
+// The dynamic import is this file's convention, and the reason is written above:
+// the harness must patch Node's spawn API before Git Stacks captures it.
+const {
+  clearCredentialCheckBackoffs,
+  clearPullRequestChecksCache,
+  getPullRequestChecks,
+  rerunPullRequestCheck,
+  retirePullRequestChecks,
+} = await import('../src/main/pull-request-checks')
 const { classifyCheckRun, classifyCommitStatus, safeGitHubUrl, summariseCheckRollupState } =
   await import('../src/shared/pull-request-checks')
 
@@ -1573,6 +1580,74 @@ test('a rate-limited identity read serves the last report stale and asks nothing
     assert.equal(again.freshness, 'stale')
     assert.equal(again.nextAttemptAt, refused.nextAttemptAt)
     assert.equal((await harness.readState()).requests.length, requestsBefore)
+  })
+})
+
+test("a host's secondary limit still holds for the account that replaced the one that met it", async () => {
+  await withHarness(async (harness) => {
+    const head = await setup(harness, (headSha) => ({
+      checkRuns: [{ id: 1, headSha, name: 'build', status: 'completed', conclusion: 'success' }],
+    }))
+    const first = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+    })
+    assert.equal(first.freshness, 'live')
+
+    // A report this credential read, and then a host that refuses everyone.
+    const state = await harness.readState()
+    state.lostResponses = [
+      {
+        method: 'GET',
+        pathIncludes: `/pulls/${PR_NUMBER}`,
+        status: 429,
+        message: 'You have exceeded a secondary rate limit.',
+        // The wait this host asks for, so the test can watch the new credential
+        // take over once it is over rather than only inside it.
+        headers: { 'retry-after': '2' },
+      },
+    ]
+    await harness.writeState(state)
+    const refused = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(refused.freshness, 'stale')
+    const deadline = Date.parse(refused.nextAttemptAt ?? '')
+    assert.ok(deadline > Date.now(), 'the host was not asked to wait')
+
+    // The credential behind that report is replaced. The report is one account's
+    // and is dropped with it; the host's refusal is not.
+    retirePullRequestChecks()
+    clearCredentialCheckBackoffs()
+
+    const requestsBefore = (await harness.readState()).requests.length
+    const duringWait = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(duringWait.available, false, 'the host was asked again inside its own wait')
+    assert.equal(
+      (await harness.readState()).requests.length,
+      requestsBefore,
+      'a request was made before the wait the host asked for was over',
+    )
+
+    // Once the wait is over the new credential reads for real.
+    await new Promise((resolve) => setTimeout(resolve, 2_500))
+    const later = await getPullRequestChecks(harness.repo, PR_NUMBER, {
+      headSha: head,
+      base: 'main',
+      force: true,
+    })
+    assert.equal(
+      later.freshness,
+      'live',
+      'the new credential was still held by a wait that had ended',
+    )
+    assert.equal(later.available, true)
   })
 })
 

@@ -49,21 +49,16 @@ const entries: DiagnosticReport['entries'] = [
   },
   {
     source: 'credentials',
-    label: 'GitHub account',
-    value: 'signed in as octo',
+    label: 'GitHub CLI authentication',
+    value: 'authenticated as octo for github.com',
     status: 'confirmed',
   },
   {
     source: 'credentials',
-    label: 'Stored credential',
-    value: 'present in the system credential store',
+    label: 'GitHub CLI version',
+    value: '2.62.0',
     status: 'confirmed',
-  },
-  {
-    source: 'credentials',
-    label: 'Credential store',
-    value: 'system store',
-    status: 'confirmed',
+    detail: 'The version was read on its own; it establishes no account.',
   },
   {
     source: 'credentials',
@@ -75,18 +70,10 @@ const entries: DiagnosticReport['entries'] = [
   { source: 'credentials', label: 'SSH client', value: 'available', status: 'confirmed' },
   {
     source: 'github',
-    label: 'GitHub adapter mode',
-    value: 'Automatic',
+    label: 'GitHub CLI',
+    value: 'required',
     status: 'confirmed',
-    detail: 'Set with GIT_STACKS_GITHUB_TRANSPORT; unset or unrecognised means automatic.',
-  },
-  {
-    source: 'github',
-    label: 'GitHub adapter in use',
-    value: 'not established',
-    status: 'not-applicable',
-    detail:
-      'Automatic mode uses the direct API when this app holds a GitHub credential and the CLI otherwise; this report does not read one.',
+    detail: 'GitHub collaboration reads and writes run through this CLI on this computer.',
   },
   {
     source: 'github',

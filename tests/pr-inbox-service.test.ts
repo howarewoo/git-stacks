@@ -22,11 +22,11 @@ import {
   type GitHubGraphqlOptions,
   type GitHubRestRequest,
   type GitHubTransport,
-  environmentTokenName,
+  credentialEnvNames,
   GhGitHubTransport,
+  githubRetryDeadlineFor,
   lastGitHubRateLimitFor,
   resetGitHubRateLimit,
-  setGitHubCredentialSource,
   setGitHubHostTransport,
   setGitHubObservationClock,
 } from '../src/main/github-transport'
@@ -36,6 +36,7 @@ import {
   resetInboxHostAllowances,
   type PullRequestInboxTarget,
 } from '../src/main/pr-inbox'
+import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 
 const NOW = Date.parse('2026-03-01T12:00:00.000Z')
 const VIEWER = 'ada'
@@ -75,6 +76,11 @@ interface Synthetic {
   behaviour: Record<string, SyntheticHost>
   /** The transport an ordinary read for one host would use. */
   transport: (host: string) => GitHubTransport
+  /**
+   * The credential this host's requests carry being replaced, as a caller whose
+   * own credential changed hands over the next transport for that host.
+   */
+  replaceCredential: (host: string, token: string) => GitHubTransport
   restore(): void
 }
 
@@ -124,19 +130,13 @@ function answered(node: unknown, viewer: string | null = VIEWER): Answer {
 /**
  * A GitHub host served by transports this test owns.
  *
- * @param ambientCredential when true the request transports carry the host's
- *   scoped environment token rather than a token handed to them at
- *   construction, so replacing that token replaces the credential the requests
- *   really send — on the same transport, with nothing rebuilt.
  */
-function installSynthetic(
-  hosts: Record<string, SyntheticHost>,
-  options: { ambientCredential?: boolean } = {},
-): Synthetic {
+function installSynthetic(hosts: Record<string, SyntheticHost>): Synthetic {
   const calls: string[] = []
   const graphqlCalls: Record<string, number> = {}
   const installed: string[] = []
   const installedTransports: Record<string, GitHubTransport> = {}
+  const transportFor: Record<string, (token: string) => GitHubTransport> = {}
   for (const [host, behaviour] of Object.entries(hosts)) {
     installed.push(host)
     const api = `https://${host}/api/v3`
@@ -186,10 +186,10 @@ function installSynthetic(
     }) as typeof globalThis.fetch
 
     // One transport per host, registered and handed back as the same object, so
-    // a case can read the identity the requests themselves are fenced on. A
-    // token handed over here would shadow the host's own environment token, and
-    // replacing that token would then change nothing about the requests.
-    const forHost = () =>
+    // a case can read the identity the requests themselves are fenced on. The
+    // credential belongs to the caller that owns it, so a credential replaced
+    // outside this app arrives as the next transport authenticating as another.
+    const forHost = (token: string) =>
       new DirectGitHubTransport({
         host,
         fetch: fetch$,
@@ -199,29 +199,40 @@ function installSynthetic(
         // case into a credential case.
         ...(host === 'github.com' ? {} : { apiUrl: api }),
         graphqlUrl: `${api}/graphql`,
-        ...(options.ambientCredential ? {} : { token: 'synthetic-token' }),
+        // Every transport authenticates as the one credential its caller owns,
+        // which is the only credential it has: there is no ambient fallback for a
+        // request to find, so replacing the credential means handing the next
+        // transport a different one.
+        token,
       })
-    const transport = forHost()
+    transportFor[host] = forHost
+    const transport = forHost('synthetic-token')
     setGitHubHostTransport(host, transport)
     installedTransports[host] = transport
   }
   resetGitHubRateLimit()
   resetInboxHostAllowances()
-  // A second host is authorized the way an operator authorizes one, so a case
-  // that needs two serving hosts is not secretly a credential case.
-  for (const host of installed) {
-    process.env[environmentTokenName(host)] = 'synthetic-token'
-  }
   return {
     calls,
     graphqlCalls,
     behaviour: hosts,
     /** The transport a caller would use for one host, as any ordinary read is. */
     transport: (host: string) => installedTransports[host],
+    /**
+     * The credential this host's requests carry being replaced: the next
+     * transport for that host authenticates as another one, which is what a
+     * credential replaced outside this app looks like to every reader.
+     */
+    replaceCredential: (host: string, token: string) => {
+      const replacement = transportFor[host](token)
+      setGitHubHostTransport(host, replacement)
+      installedTransports[host] = replacement
+      return replacement
+    },
     restore() {
       for (const host of installed) {
         setGitHubHostTransport(host, null)
-        delete process.env[environmentTokenName(host)]
+        delete process.env[credentialEnvNames(host)[0]]
       }
       resetGitHubRateLimit()
       resetInboxHostAllowances()
@@ -529,7 +540,215 @@ test('two origins on one API server retain their own transports and primary quot
   }
 })
 
-test('a refused credential is one origin’s, while the server’s own quota is both', async () => {
+test('a secondary refusal holds every account to its own wait, and spends none of their allowance', async () => {
+  // A secondary limit is the host refusing everyone at once, and it names a wait
+  // that is much shorter than the window the headers describe.
+  let refusals = 0
+  const api = installSynthetic({
+    'github.com': {
+      remaining: '4998',
+      reset: Math.floor((NOW + 3_600_000) / 1000),
+      // The host refuses once. Whether this account is asked again is what the
+      // wait it named decides, so the answer after it has to be an answer.
+      graphql: (variables) =>
+        variables.name === 'hidden' && refusals++ === 0
+          ? {
+              status: 200,
+              body: { errors: [{ message: 'You have exceeded a secondary rate limit' }] },
+              headers: { 'retry-after': '60' },
+            }
+          : answered(pullRequest({ number: 51, title: 'Served inside an hour window' })),
+    },
+    'ghe.example.com': {
+      remaining: '4998',
+      graphql: () => answered(pullRequest({ number: 52, title: 'Another account entirely' })),
+    },
+  })
+  try {
+    let moment = NOW
+    const clock = (): number => moment
+    await withOneClock(clock, async () => {
+      const targets = [
+        target('acme/hidden'),
+        target('acme/other', '/repos/acme-other', 'ghe.example.com'),
+      ]
+      const first = await readPullRequestInbox(targets, { now: moment, clock })
+      const seen = new Map(first.refresh.repositories.map((e) => [e.repository, e.status]))
+      assert.equal(seen.get('acme/hidden'), 'rate-limited')
+      assert.equal(seen.get('acme/other'), 'ok')
+
+      // Inside the minute it named, this account is not asked — and neither is
+      // anyone else on that host.
+      moment = NOW + 59_999
+      const inside = await readPullRequestInbox(targets, { now: moment, clock })
+      const blocked = new Map(inside.refresh.repositories.map((e) => [e.repository, e.status]))
+      assert.equal(blocked.get('acme/hidden'), 'rate-limited')
+      assert.equal(
+        blocked.get('acme/other'),
+        'ok',
+        'a wait one host named was charged to another host as well',
+      )
+
+      // After it passes, and long before the window it arrived with resets, this
+      // account is served again: it spent nothing, and an hour is the window, not
+      // the wait.
+      moment = NOW + 60_001
+      const served = await readPullRequestInbox([target('acme/hidden')], { now: moment, clock })
+      assert.equal(
+        served.refresh.repositories[0]?.status,
+        'ok',
+        'a refusal that spent nothing was held until the window it arrived with reset',
+      )
+      assert.deepEqual(
+        served.items.map((item) => item.title),
+        ['Served inside an hour window'],
+      )
+    })
+  } finally {
+    api.restore()
+  }
+})
+
+test('an exhausted window is honoured with no reserve kept at all', async () => {
+  let spentRefusals = 0
+  const api = installSynthetic({
+    'github.com': {
+      graphql: (variables) =>
+        variables.name === 'spent' && spentRefusals++ === 0
+          ? {
+              status: 200,
+              body: { errors: [{ message: 'API rate limit exceeded' }] },
+              headers: {
+                'x-ratelimit-remaining': '0',
+                'x-ratelimit-reset': null,
+                'retry-after': '600',
+              },
+            }
+          : answered(pullRequest({ number: 53, title: 'Kept aside by the refusal' })),
+    },
+  })
+  try {
+    let moment = NOW
+    const clock = (): number => moment
+    await withOneClock(clock, async () => {
+      // No reserve at all: the queue protects no headroom, which is not a licence
+      // to spend a window that is already empty.
+      const options = { now: moment, clock, budget: { reserve: 0 } }
+      const targets = [target('acme/spent'), target('acme/kept')]
+      const first = await readPullRequestInbox(targets, options)
+      const seen = new Map(first.refresh.repositories.map((e) => [e.repository, e.status]))
+      assert.equal(seen.get('acme/spent'), 'rate-limited')
+      const before = api.calls.length
+      moment = NOW + 599_999
+      const inside = await readPullRequestInbox(targets, {
+        now: moment,
+        clock,
+        budget: { reserve: 0 },
+      })
+      const blocked = new Map(inside.refresh.repositories.map((e) => [e.repository, e.status]))
+      assert.equal(blocked.get('acme/spent'), 'rate-limited')
+      assert.notEqual(
+        blocked.get('acme/kept'),
+        'ok',
+        'a repository sharing an empty window was reported as read',
+      )
+      assert.equal(
+        api.calls.length,
+        before,
+        'an account inside its own wait was asked again with nothing left to spend',
+      )
+      moment = NOW + 600_001
+      const after = await readPullRequestInbox(targets, {
+        now: moment,
+        clock,
+        budget: { reserve: 0 },
+      })
+      const statuses = new Map(after.refresh.repositories.map((e) => [e.repository, e.status]))
+      assert.equal(
+        statuses.get('acme/spent'),
+        'ok',
+        'the account was held past the wait it was given',
+      )
+      assert.deepEqual(
+        after.items.map((item) => item.repository).sort(),
+        ['acme/kept', 'acme/spent'],
+        'the account was not served again once its own window had passed',
+      )
+      assert.ok(api.calls.length > before, 'the account was not asked once its own wait passed')
+    })
+  } finally {
+    api.restore()
+  }
+})
+
+test('a primary window lasts as long as the later of the two moments it named', async () => {
+  for (const shape of [
+    // A counter that resets sooner than the retry the host named, and the other
+    // way round. The window is whichever of the two is later.
+    { reset: 600, retryAfter: 3_600 },
+    { reset: 3_600, retryAfter: 600 },
+  ]) {
+    // A window with nothing left in it answers nothing at all: while this account
+    // is refused, every request on this host is refused, which is what an empty
+    // window means.
+    let refusals = 0
+    const api = installSynthetic({
+      'github.com': {
+        graphql: () => {
+          if (refusals++ === 0)
+            return {
+              status: 200,
+              body: { errors: [{ message: 'API rate limit exceeded' }] },
+              headers: {
+                'x-ratelimit-remaining': '0',
+                'x-ratelimit-reset': String(Math.floor(NOW / 1000) + shape.reset),
+                'retry-after': String(shape.retryAfter),
+              },
+            }
+          return answered(pullRequest({ number: 54, title: 'Served after the window' }))
+        },
+      },
+    })
+    try {
+      let moment = NOW
+      const clock = (): number => moment
+      await withOneClock(clock, async () => {
+        const targets = [target('acme/window')]
+        const first = await readPullRequestInbox(targets, { now: moment, clock })
+        assert.equal(first.refresh.repositories[0]?.status, 'rate-limited')
+        const asked = api.calls.length
+
+        // A moment before the longer of the two moments it named, nothing is asked
+        // of this host: the shorter of the two is not the window.
+        moment = NOW + 3_600_000 - 2
+        const inside = await readPullRequestInbox(targets, { now: moment, clock })
+        assert.equal(
+          inside.refresh.repositories[0]?.status,
+          'rate-limited',
+          `a window that resets in ${shape.reset}s and retries in ${shape.retryAfter}s was released early`,
+        )
+        assert.equal(api.calls.length, asked, 'the host was asked inside its own window')
+
+        // And once the later moment has passed it is served, with no wait left.
+        moment = NOW + 3_600_001
+        const after = await readPullRequestInbox(targets, { now: moment, clock })
+        assert.equal(
+          after.refresh.repositories[0]?.status,
+          'ok',
+          'the account was still held once its own window had passed',
+        )
+        assert.deepEqual(
+          after.items.map((item) => item.title),
+          ['Served after the window'],
+        )
+      })
+    } finally {
+      api.restore()
+    }
+  }
+})
+
+test('a refused credential is one origin’s, and so is the window it spent', async () => {
   const credential = installSharedServer({
     'github.com': { graphql: () => ({ status: 401, body: { message: 'Bad credentials' } }) },
     'ghe.example.com': {},
@@ -565,19 +784,32 @@ test('a refused credential is one origin’s, while the server’s own quota is 
     const report = await readPullRequestInbox(origins, { now: NOW })
     const byName = new Map(report.refresh.repositories.map((entry) => [entry.repository, entry]))
     assert.equal(byName.get('acme/app')?.status, 'rate-limited')
-    // A quota is the server's, not one origin's, so the same refusal keeps the
-    // other origin away too. This one was never asked: the queue distinguishes
-    // a repository it declined to attempt from one a server turned down, and
-    // reports the difference, so the refused origin is skipped rather than
-    // claimed to have been rate limited in a request nobody made.
-    assert.equal(byName.get('acme/tools')?.status, 'skipped')
-    assert.equal(report.items.length, 0)
-    assert.equal(
-      // The counter only exists once something has been asked, and the point
-      // here is that nothing was.
-      quota.graphqlCalls['ghe.example.com'] ?? 0,
-      0,
-      'the server was not asked again for a repository it had already refused',
+    // The window was measured against the one account GitHub counted, and the
+    // other origin is a different account behind a different credential: it is
+    // asked, and what it says is its own answer, not an echo of the refusal
+    // beside it.
+    assert.equal(byName.get('acme/tools')?.status, 'ok')
+    assert.deepEqual(
+      report.items.map((item) => item.repository),
+      ['acme/tools'],
+      "the other account's rows were lost to the refusal it never met",
+    )
+    const askedOnce = quota.graphqlCalls['ghe.example.com'] ?? 0
+    assert.ok(askedOnce > 0, 'the other account was never asked anything')
+
+    // The refused account is the one that waits: it is asked for nothing while
+    // its own window is open, and the account beside it is asked again rather
+    // than left idle behind a wait it is not inside.
+    const asked = { ...quota.graphqlCalls }
+    const again = await readPullRequestInbox(origins, { now: NOW + 60_000 })
+    const byNameAgain = new Map(
+      again.refresh.repositories.map((entry) => [entry.repository, entry]),
+    )
+    assert.equal(byNameAgain.get('acme/app')?.status, 'rate-limited')
+    assert.equal(quota.graphqlCalls['github.com'], asked['github.com'])
+    assert.ok(
+      (quota.graphqlCalls['ghe.example.com'] ?? 0) > (asked['ghe.example.com'] ?? 0),
+      'the account with allowance left was not asked again',
     )
   } finally {
     quota.restore()
@@ -983,24 +1215,16 @@ test('a failed read after a credential was replaced keeps no rows from the old o
   // The replacement credential really cannot read the repository: the host
   // answers from the authorization the request carried, so this is the second
   // credential's own refusal rather than a scripted one.
-  const api = installSynthetic(
-    {
-      'github.com': {
-        graphql: (_variables, _call, authorization) =>
-          authorization.includes('first-sign-in')
-            ? answered(pullRequest())
-            : { status: 401, body: { message: 'Bad credentials' } },
-      },
+  const api = installSynthetic({
+    'github.com': {
+      graphql: (_variables, _call, authorization) =>
+        authorization.includes('first-sign-in')
+          ? answered(pullRequest())
+          : { status: 401, body: { message: 'Bad credentials' } },
     },
-    // The requests carry this host's own environment token, which is the one
-    // replaced below. A token handed to the transport at construction would be
-    // used instead of it, and replacing the environment would change nothing
-    // about the credential the host sees.
-    { ambientCredential: true },
-  )
+  })
   try {
-    const name = environmentTokenName('github.com')
-    process.env[name] = 'first-sign-in'
+    api.replaceCredential('github.com', 'first-sign-in')
     // The identity the queue is fenced on is the credential authority of the
     // very transport these rows are read through, so it can only move when the
     // credential those requests carry moves.
@@ -1017,15 +1241,11 @@ test('a failed read after a credential was replaced keeps no rows from the old o
     // read the repository. The rows the old credential confirmed are not the
     // new one's last-known-good, so the queue is empty and says why. The
     // same-credential test above is what keeps rows.
-    process.env[name] = 'second-sign-in'
-    try {
-      const afterReplacement = await service.refresh(targets, { now: NOW })
-      assert.equal(afterReplacement.refresh.state, 'auth-required')
-      assert.deepEqual(afterReplacement.items, [])
-      assert.equal(afterReplacement.refresh.confirmedAt, null)
-    } finally {
-      delete process.env[name]
-    }
+    api.replaceCredential('github.com', 'second-sign-in')
+    const afterReplacement = await service.refresh(targets, { now: NOW })
+    assert.equal(afterReplacement.refresh.state, 'auth-required')
+    assert.deepEqual(afterReplacement.items, [])
+    assert.equal(afterReplacement.refresh.confirmedAt, null)
   } finally {
     api.restore()
   }
@@ -1205,6 +1425,9 @@ send(200, profile.body)
 `,
     )
     await chmod(binary, 0o755)
+    // Admitted by name, so the boundary answers for the file the real transport
+    // starts and refuses the machine's own CLI.
+    admitOwnedProviderCliRoot(directory)
     await write({})
     // One transport, constructed the way the app constructs one — with the host
     // named — and installed once. The credential belongs to the CLI, and the
@@ -1263,7 +1486,7 @@ test('rows are fenced to the credential the gh CLI holds, not only to this proce
     // that, the identity below would be resolved from the environment and the
     // profile would never be asked, and every assertion after this one would
     // compare an answer with itself.
-    assert.equal(process.env[environmentTokenName('github.com')], undefined)
+    assert.equal(process.env[credentialEnvNames('github.com')[0]], undefined)
     assert.equal(process.env.GH_TOKEN, undefined)
     assert.equal(process.env.GITHUB_TOKEN, undefined)
     assert.equal(process.env.GIT_STACKS_GITHUB_TOKEN, undefined)
@@ -1358,31 +1581,43 @@ test('rows are fenced to the credential the gh CLI holds, not only to this proce
   }
 })
 
-test('a host-scoped credential this process carries outranks one handed to the child directly', async () => {
+test('the credential the child carries is the one its transport was given', async () => {
   const cli = await installSyntheticCli({
     host: 'github.com',
     material: 'scoped-b-material',
     body: answered(pullRequest()).body,
   })
   // Established after the scrub, and known on both sides: nothing either value
-  // came from this machine. Both names reach the child — one because this
-  // process carries it, one because it was handed over as an option — and they
-  // disagree, so what the child authenticates with says which one wins.
-  process.env[environmentTokenName('github.com')] = 'scoped-b-material'
+  // came from this machine. What this process carries for that host and what
+  // the CLI's own store holds disagree, so what the child authenticated with
+  // says which of the two this build signed its requests with.
+  process.env[credentialEnvNames('github.com')[0]] = 'scoped-b-material'
   try {
-    const transport = new GhGitHubTransport({
-      env: { PATH: cli.path, GH_TOKEN: 'options-a-material' },
-      host: 'github.com',
-    })
-    const answer = await transport.graphql<{ viewer: { login: string } }>('{ viewer { login } }')
-    // The scoped credential is the one this build signs that host's requests
-    // with, so it is the one the request was made with — the profile holds it
-    // and nothing else, so a request made with the other one could not have
-    // answered at all.
-    assert.equal(cli.presented().at(-1), 'scoped-b-material')
-    assert.equal(answer.viewer.login, VIEWER)
+    const ambient = new GhGitHubTransport({ env: { PATH: cli.path }, host: 'github.com' })
+    assert.equal(
+      (await ambient.graphql<{ viewer: { login: string } }>('{ viewer { login } }')).viewer.login,
+      VIEWER,
+    )
+    assert.equal(
+      cli.presented().at(-1),
+      'scoped-b-material',
+      "the child authenticated with this host's own credential, not the CLI's stored one",
+    )
+    // With nothing in this environment for that host, the child is handed the
+    // CLI's own stored credential instead — the same transport, the same host,
+    // and the request still answers.
+    delete process.env[credentialEnvNames('github.com')[0]]
+    assert.equal(
+      (await ambient.graphql<{ viewer: { login: string } }>('{ viewer { login } }')).viewer.login,
+      VIEWER,
+    )
+    assert.equal(
+      cli.presented().at(-1),
+      'scoped-b-material',
+      "with no ambient credential of this host's, the CLI's own stored one is what it uses",
+    )
   } finally {
-    delete process.env[environmentTokenName('github.com')]
+    delete process.env[credentialEnvNames('github.com')[0]]
     await cli.remove()
   }
 })
@@ -1594,36 +1829,32 @@ test('a normal repository read lowers this host’s allowance for the next queue
 for (const primaryRefusal of [false, true]) {
   test(`a replacement credential admits its own Inbox without inheriting another account’s primary quota (${primaryRefusal ? 'primary refusal' : 'low successful response'})`, async () => {
     const reset = Math.floor((NOW + 3_600_000) / 1000)
-    const api = installSynthetic(
-      {
-        'github.com': {
-          remaining: '3',
-          reset,
-          rest: () =>
-            primaryRefusal
-              ? {
-                  status: 403,
-                  body: { message: 'API rate limit exceeded' },
-                  headers: { 'x-ratelimit-remaining': '0' },
-                }
-              : { body: { full_name: 'acme/app' } },
-          graphql: (_variables, _call, authorization) =>
-            answered(
-              pullRequest({
-                number: 42,
-                title: authorization.includes('second-sign-in')
-                  ? 'Replacement account work'
-                  : 'Previous account work',
-              }),
-            ),
-        },
-        'ghe.example.com': { remaining: '3', reset },
+    const api = installSynthetic({
+      'github.com': {
+        remaining: '3',
+        reset,
+        rest: () =>
+          primaryRefusal
+            ? {
+                status: 403,
+                body: { message: 'API rate limit exceeded' },
+                headers: { 'x-ratelimit-remaining': '0' },
+              }
+            : { body: { full_name: 'acme/app' } },
+        graphql: (_variables, _call, authorization) =>
+          answered(
+            pullRequest({
+              number: 42,
+              title: authorization.includes('second-sign-in')
+                ? 'Replacement account work'
+                : 'Previous account work',
+            }),
+          ),
       },
-      { ambientCredential: true },
-    )
+      'ghe.example.com': { remaining: '3', reset },
+    })
     try {
-      const name = environmentTokenName('github.com')
-      process.env[name] = 'first-sign-in'
+      api.replaceCredential('github.com', 'first-sign-in')
       const service = new PullRequestInboxService(async () =>
         ['github.com|active|ada', await api.transport('github.com').credentialAuthority()].join(
           '\u0000',
@@ -1653,7 +1884,7 @@ for (const primaryRefusal of [false, true]) {
           assert.deepEqual(refused.items, [])
           assert.equal(api.calls.length, before, 'unchanged credentials keep their primary reserve')
 
-          process.env[name] = 'second-sign-in'
+          api.replaceCredential('github.com', 'second-sign-in')
           api.behaviour['github.com'].remaining = '4998'
           delete api.behaviour['github.com'].rest
           const replacement = await service.refresh(targets, { now: NOW, clock: () => NOW })
@@ -1691,36 +1922,32 @@ for (const primaryRefusal of [false, true]) {
       started = resolve
     })
     let holdFirstRequest = true
-    const api = installSynthetic(
-      {
-        'github.com': {
-          rest: async (path) => {
-            if (!holdFirstRequest) {
-              return path.includes('/stacks') ? { body: [] } : { body: { full_name: 'acme/app' } }
-            }
-            holdFirstRequest = false
-            started()
-            await gate
-            return {
-              status: primaryRefusal ? 403 : 200,
-              body: primaryRefusal
-                ? { message: 'API rate limit exceeded' }
-                : { full_name: 'acme/app' },
-              headers: {
-                'x-ratelimit-remaining': primaryRefusal ? '0' : '3',
-                'x-ratelimit-reset': String(Math.floor((NOW + 3_600_000) / 1000)),
-              },
-            }
-          },
-          graphql: () => answered(pullRequest({ number: 43, title: 'Current account work' })),
+    const api = installSynthetic({
+      'github.com': {
+        rest: async (path) => {
+          if (!holdFirstRequest) {
+            return path.includes('/stacks') ? { body: [] } : { body: { full_name: 'acme/app' } }
+          }
+          holdFirstRequest = false
+          started()
+          await gate
+          return {
+            status: primaryRefusal ? 403 : 200,
+            body: primaryRefusal
+              ? { message: 'API rate limit exceeded' }
+              : { full_name: 'acme/app' },
+            headers: {
+              'x-ratelimit-remaining': primaryRefusal ? '0' : '3',
+              'x-ratelimit-reset': String(Math.floor((NOW + 3_600_000) / 1000)),
+            },
+          }
         },
+        graphql: () => answered(pullRequest({ number: 43, title: 'Current account work' })),
       },
-      { ambientCredential: true },
-    )
+    })
     let abandoned: Promise<unknown> | undefined
     try {
-      const name = environmentTokenName('github.com')
-      process.env[name] = 'first-sign-in'
+      api.replaceCredential('github.com', 'first-sign-in')
       const service = new PullRequestInboxService(async () =>
         ['github.com|active|ada', await api.transport('github.com').credentialAuthority()].join(
           '\u0000',
@@ -1738,7 +1965,7 @@ for (const primaryRefusal of [false, true]) {
               )
             : ordinary
           await entered
-          process.env[name] = 'second-sign-in'
+          api.replaceCredential('github.com', 'second-sign-in')
           const targets = [target('acme/app')]
           const confirmed = await service.refresh(targets, { now: NOW, clock: () => NOW })
           assert.equal(confirmed.refresh.state, 'fresh')
@@ -1765,63 +1992,6 @@ for (const primaryRefusal of [false, true]) {
     }
   })
 }
-
-test('an unrelated account source cutover retains an unchanged environment credential’s primary reserve', async () => {
-  const api = installSynthetic(
-    { 'github.com': { remaining: '249', reset: Math.floor((NOW + 3_600_000) / 1000) } },
-    { ambientCredential: true },
-  )
-  let queried = 0
-  try {
-    process.env[environmentTokenName('github.com')] = 'environment-account-b'
-    await withOneClock(
-      () => NOW,
-      async () => {
-        await api.transport('github.com').rest({ path: 'repos/acme/app' })
-        const before = api.calls.length
-        const source = {
-          host: 'github.com',
-          available: () => true,
-          current: async () => {
-            queried += 1
-            return {
-              origin: 'account' as const,
-              token: 'stored-account-a',
-              session: 'stored-session-a',
-            }
-          },
-        }
-        setGitHubCredentialSource(source)
-        const installed = await readPullRequestInbox([target('acme/app')], {
-          now: NOW,
-          clock: () => NOW,
-        })
-        assert.equal(installed.refresh.state, 'rate-limited')
-        assert.deepEqual(installed.items, [])
-        setGitHubCredentialSource(null)
-        const cleared = await readPullRequestInbox([target('acme/app')], {
-          now: NOW,
-          clock: () => NOW,
-        })
-        assert.equal(cleared.refresh.state, 'rate-limited')
-        assert.deepEqual(cleared.items, [])
-        assert.equal(
-          api.calls.length,
-          before,
-          'the unchanged environment account stays below reserve',
-        )
-        assert.equal(
-          queried,
-          0,
-          'the overriding environment credential never queries the stored account',
-        )
-      },
-    )
-  } finally {
-    setGitHubCredentialSource(null)
-    api.restore()
-  }
-})
 
 test('native REST core allowance does not replace an explicit low GraphQL allowance', async () => {
   const reset = String(Math.floor((NOW + 3_600_000) / 1000))
@@ -1958,6 +2128,182 @@ test('a secondary GraphQL refusal without wait headers blocks refresh for exactl
       assert.deepEqual(
         released.items.map((item) => item.number),
         [1],
+      )
+    })
+  } finally {
+    api.restore()
+  }
+})
+
+test("one account refusing late, after the account that replaced it answered, is that account's answer alone", async () => {
+  for (const refusal of ['primary', 'secondary'] as const) {
+    const late = Promise.withResolvers<void>()
+    const api = installSynthetic({
+      'github.com': {
+        graphql: async (_variables, call) => {
+          // The first read of the refresh is the account that is about to be
+          // replaced; it is refused, and refused after the replacement has
+          // already been answered.
+          if (call !== 0) return answered(pullRequest())
+          await late.promise
+          return refusal === 'primary'
+            ? {
+                status: 403,
+                body: { message: 'API rate limit exceeded' },
+                headers: {
+                  'x-ratelimit-remaining': '0',
+                  'x-ratelimit-reset': null,
+                  'retry-after': '600',
+                },
+              }
+            : {
+                status: 200,
+                body: { errors: [{ message: 'You have exceeded a secondary rate limit' }] },
+                headers: {
+                  'x-ratelimit-remaining': '4998',
+                  'x-ratelimit-reset': null,
+                  'retry-after': null,
+                },
+              }
+        },
+      },
+    })
+    try {
+      let moment = NOW
+      const clock = (): number => moment
+      await withOneClock(clock, async () => {
+        const targets = [target('acme/app')]
+        const held = readPullRequestInbox(targets, { now: moment, clock })
+        await new Promise((resolve) => setImmediate(resolve))
+        // The account behind this host is replaced while the first read is still
+        // in flight, and the replacement answers first.
+        api.replaceCredential('github.com', 'replacement-token')
+        const answering = readPullRequestInbox(targets, { now: moment, clock })
+        await answering
+        moment += 1_000
+        late.resolve()
+        await held
+
+        if (refusal === 'primary') {
+          // A primary window belongs to the account GitHub counted, so this host
+          // is asked again: the replacement never spent it.
+          assert.equal(
+            githubRetryDeadlineFor('github.com'),
+            null,
+            "one account's exhausted window was made the whole host's wait",
+          )
+          const before = api.graphqlCalls['github.com'] ?? 0
+          const again = await readPullRequestInbox(targets, { now: moment, clock })
+          assert.notEqual(
+            again.refresh.repositories[0]?.status,
+            'rate-limited',
+            'the host was reported as refusing an account that was not refused',
+          )
+          assert.equal(
+            api.graphqlCalls['github.com'],
+            before + 1,
+            'the account that replaced the refused one was not admitted',
+          )
+          assert.deepEqual(
+            again.items.map((item) => item.repository),
+            ['acme/app'],
+            'the answering account lost its rows to the refusal behind it',
+          )
+        } else {
+          // A secondary limit is this host refusing everyone at once, so it binds
+          // whoever asks next, including the account that replaced the one that
+          // met it.
+          const until = githubRetryDeadlineFor('github.com')
+          assert.ok(until !== null && until > moment, 'a secondary refusal left this host no wait')
+          const before = api.graphqlCalls['github.com'] ?? 0
+          const again = await readPullRequestInbox(targets, { now: moment, clock })
+          assert.equal(again.refresh.repositories[0]?.status, 'rate-limited')
+          assert.equal(
+            api.graphqlCalls['github.com'],
+            before,
+            'the host was asked again inside a wait it named',
+          )
+        }
+      })
+    } finally {
+      api.restore()
+    }
+  }
+})
+
+test("a host refusing late, after another host answered, keeps that host's rows and its own wait", async () => {
+  // The slow host is the one that refuses, and it refuses with the secondary limit
+  // that names no moment: a fixed wait the app decides, not one the host reported.
+  const late = Promise.withResolvers<void>()
+  const api = installSynthetic({
+    'github.com': { graphql: () => answered(pullRequest()) },
+    'ghe.example': {
+      graphql: async () => {
+        // The other host has answered by now, so this refusal lands after that
+        // host's rows are already in the refresh being built.
+        await late.promise
+        return {
+          status: 200,
+          body: { errors: [{ message: 'You have exceeded a secondary rate limit' }] },
+          headers: {
+            'x-ratelimit-remaining': '4999',
+            'x-ratelimit-reset': null,
+            'retry-after': null,
+          },
+        }
+      },
+    },
+  })
+  try {
+    let moment = NOW
+    const clock = (): number => moment
+    await withOneClock(clock, async () => {
+      const targets = [target('acme/app'), target('acme/tools', '/repos/acme-tools', 'ghe.example')]
+      const refreshing = readPullRequestInbox(targets, { now: moment, clock })
+      // The refusing host is released only once the answering host has served its
+      // rows, which is the ordering this case is about.
+      await new Promise((resolve) => setImmediate(resolve))
+      late.resolve()
+      const report = await refreshing
+
+      // The host that answered still holds the rows it answered with: a refusal on
+      // one host is that host's, and does not retract the other's current report.
+      assert.deepEqual(
+        report.items.map((item) => item.repository),
+        ['acme/app'],
+        "the answering host's rows were lost with the other host's refusal",
+      )
+      const refused = report.refresh.repositories.find((entry) => entry.host === 'ghe.example')
+      assert.equal(refused?.status, 'rate-limited', 'the refusing host is not reported as refusing')
+      assert.equal(refused?.viewer, null, 'a refused host names no account')
+
+      // And the wait belongs to the host that asked for it: the next refresh is
+      // still refused for that host, while the answering host is read again.
+      const before = api.graphqlCalls['github.com'] ?? 0
+      const asking = api.graphqlCalls['ghe.example'] ?? 0
+      const again = await readPullRequestInbox(targets, { now: moment, clock })
+      // One host is paused and one answered, which is a partial refresh naming
+      // which is which rather than an empty one.
+      assert.equal(again.refresh.state, 'partial')
+      assert.equal(
+        again.refresh.repositories.find((entry) => entry.host === 'ghe.example')?.status,
+        'rate-limited',
+        'the waiting host was read again inside its own wait',
+      )
+      assert.equal(
+        api.graphqlCalls['ghe.example'] ?? 0,
+        asking,
+        'the cached deadline for that host did not refuse the request',
+      )
+      assert.equal(
+        api.graphqlCalls['github.com'],
+        before + 1,
+        'the waiting host kept the other host from being read',
+      )
+      assert.deepEqual(
+        again.items.map((item) => item.repository),
+        ['acme/app'],
+        "the answering host lost its rows to the other host's wait",
       )
     })
   } finally {
@@ -2511,27 +2857,23 @@ test('a wait named inside a successful response runs from that answer', async ()
   }
 })
 
-test('a replacement account waits only for explicit Retry-After, not the previous account’s later primary reset', async () => {
-  const api = installSynthetic(
-    {
-      'github.com': {
-        rest: () => ({
-          status: 403,
-          body: { message: 'API rate limit exceeded' },
-          headers: {
-            'x-ratelimit-remaining': '0',
-            'x-ratelimit-reset': String(Math.floor((NOW + 3_600_000) / 1000)),
-            'retry-after': '60',
-          },
-        }),
-        graphql: () => answered(pullRequest({ number: 45, title: 'Replacement after short wait' })),
-      },
+test('a window belongs to the account that spent it: a replacement is admitted, and it is still waiting when it returns', async () => {
+  const api = installSynthetic({
+    'github.com': {
+      rest: () => ({
+        status: 403,
+        body: { message: 'API rate limit exceeded' },
+        headers: {
+          'x-ratelimit-remaining': '0',
+          'x-ratelimit-reset': String(Math.floor((NOW + 3_600_000) / 1000)),
+          'retry-after': '60',
+        },
+      }),
+      graphql: () => answered(pullRequest({ number: 45, title: 'Replacement after short wait' })),
     },
-    { ambientCredential: true },
-  )
+  })
   try {
-    const name = environmentTokenName('github.com')
-    process.env[name] = 'first-sign-in'
+    api.replaceCredential('github.com', 'first-sign-in')
     let moment = NOW
     const clock = () => moment
     await withOneClock(clock, async () => {
@@ -2539,21 +2881,37 @@ test('a replacement account waits only for explicit Retry-After, not the previou
         api.transport('github.com').rest({ path: 'repos/acme/app' }),
         GitHubTransportError,
       )
-      process.env[name] = 'second-sign-in'
+      // The account behind this host is replaced, and the replacement is asked
+      // inside the window the previous one spent: a window is measured against
+      // one account, and this one never spent anything.
+      api.replaceCredential('github.com', 'second-sign-in')
       delete api.behaviour['github.com'].rest
+      const admitted = await readPullRequestInbox([target('acme/app')], { now: moment, clock })
+      assert.equal(admitted.refresh.state, 'fresh')
+      assert.deepEqual(
+        admitted.items.map((item) => [item.number, item.title]),
+        [[45, 'Replacement after short wait']],
+      )
+
+      // The account that did spend it is still inside its own window if it comes
+      // back, and is asked for nothing until the window GitHub named has passed:
+      // a window with nothing left in it lasts until it resets, and the sixty
+      // seconds are the floor of that, not its length.
+      api.replaceCredential('github.com', 'first-sign-in')
       const before = api.calls.length
-      moment = NOW + 59_999
+      moment = NOW + 3_599_999
       const inside = await readPullRequestInbox([target('acme/app')], { now: moment, clock })
       assert.equal(inside.refresh.state, 'rate-limited')
       assert.deepEqual(inside.items, [])
-      assert.equal(api.calls.length, before, 'the replacement honours the host-wide short wait')
-      moment = NOW + 60_000
+      assert.equal(api.calls.length, before, 'the account still inside its own window was asked')
+      moment = NOW + 3_600_001
       const released = await readPullRequestInbox([target('acme/app')], { now: moment, clock })
-      assert.equal(released.refresh.state, 'fresh')
-      assert.deepEqual(
-        released.items.map((item) => [item.number, item.title]),
-        [[45, 'Replacement after short wait']],
+      assert.notEqual(
+        released.refresh.repositories[0]?.status,
+        'rate-limited',
+        'the window outlived the reset that ends it',
       )
+      assert.ok(api.calls.length > before, 'the account was not asked once its own window passed')
     })
   } finally {
     api.restore()
@@ -2561,24 +2919,21 @@ test('a replacement account waits only for explicit Retry-After, not the previou
 })
 
 test('a headerless GraphQL primary refusal stops only its own principal for the current refresh', async () => {
-  const api = installSynthetic(
-    {
-      'github.com': {
-        graphql: () => ({
-          status: 200,
-          body: { errors: [{ message: 'API rate limit exceeded' }] },
-          headers: { 'x-ratelimit-remaining': null, 'x-ratelimit-reset': null },
-        }),
-      },
-      'ghe.example.com': {
-        graphql: () => answered(pullRequest({ number: 46, title: 'Other principal work' })),
-      },
+  const api = installSynthetic({
+    'github.com': {
+      graphql: () => ({
+        status: 200,
+        body: { errors: [{ message: 'API rate limit exceeded' }] },
+        headers: { 'x-ratelimit-remaining': null, 'x-ratelimit-reset': null },
+      }),
     },
-    { ambientCredential: true },
-  )
+    'ghe.example.com': {
+      graphql: () => answered(pullRequest({ number: 46, title: 'Other principal work' })),
+    },
+  })
   try {
-    process.env[environmentTokenName('github.com')] = 'principal-a'
-    process.env[environmentTokenName('ghe.example.com')] = 'principal-b'
+    process.env[credentialEnvNames('github.com')[0]] = 'principal-a'
+    process.env[credentialEnvNames('ghe.example.com')[0]] = 'principal-b'
     setGitHubHostTransport(
       'ghe.example.com',
       servedBy(api.transport('ghe.example.com'), 'github.com'),

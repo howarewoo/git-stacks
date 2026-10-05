@@ -241,55 +241,82 @@ only part of the read that talks to anything.
 
 ## GitHub sign-in
 
-GitHub collaboration requires the GitHub CLI (`gh`) under the approved product
-scope; the [current runtime](#current-runtime) still has legacy authentication.
-Install `gh` from [cli.github.com](https://cli.github.com/) and authenticate for
-the host you intend to use:
+GitHub collaboration requires the GitHub CLI (`gh`). Install it from
+[cli.github.com](https://cli.github.com/) and authenticate for the host you
+intend to use:
 
 ```sh
 gh --version
+gh auth status --json hosts
 gh auth login --hostname github.com --web
-gh auth status --hostname github.com
 ```
 
-Check status before logging in if you already authenticated. `gh` owns credential
-storage, refresh, account selection, and logout. The approved model needs no
-app-owned GitHub App registration, Client ID, client secret, or primary credential
-vault. Local Git remains available when the CLI is missing, signed out, or offline.
+Check status before logging in if you already authenticated. `gh` owns sign-in,
+credential storage, refresh, account switching, and sign-out; Git Stacks reports
+what it found and changes nothing about that session. Local Git remains available
+when the CLI is missing, signed out, rejected, or offline.
+
+Any current `gh` release that reports `gh auth status --json hosts` works. The
+version shown in this repository's fixtures is a fixture version, not a minimum:
+a version probe establishes no account, no host, and no permission.
+
+### Which account is asked about
+
+A host this app is pointed at another provider answers under that provider's
+name, not the name that was selected: requests for the public host are made
+against the configured destination, so the account serving this app is the one
+signed in there. The status is asked for the host those requests actually reach,
+and the child it starts is scoped to that host's credential alone. The status
+still belongs to the host that was selected — the account it names is the one
+that will serve it. A run signed into its destination while signed out of the
+public host is therefore authenticated here, which is what it is; a run signed
+into neither reports the public host as signed out.
 
 ### Current runtime
 
-[#11](https://github.com/howarewoo/git-stacks/issues/11) tracks required-CLI
-detection and account guidance, removal of App/device-flow authentication, and
-retirement of alternate primary authentication paths. The runtime still supports
-`auto`, `direct`, and `gh` transports and the legacy App account panel. Its
-`not-configured` status says nothing about your CLI session.
+The GitHub CLI is the only primary authentication path. There is no transport
+preference to choose, no alternate direct-API credential, and no environment
+variable that selects or supplies one; the app asks the CLI for the host it is
+pointed at and reports the sanitized answer.
 
-Selecting CLI transport does not remove the legacy account service or isolate
-the OS credential store. Use isolated fixtures for credential-bearing automated
-checks and a designated test profile for manual native-store checks.
+GitHub's own documented environment variables remain what they are, and they are
+the provider CLI's business: `GH_TOKEN` and `GITHUB_TOKEN` serve github.com and
+`*.ghe.com`, while `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` serve
+GitHub Enterprise Server. The app configures no authentication mode of its own,
+logs nobody in, and persists no credential: the main process resolves whichever
+authority the CLI itself reports for the host — its stored profile or the native
+environment — and pins that one authority privately to that host's requests. No
+app-level override selects, stores, or logs a token, and a token reaches no
+command line, log, renderer file, or remote URL.
 
-Use the existing CLI-backed mode now:
+Ordinary GraphQL reads and current-viewer proofs use the same transport request
+and response validation. The proof also receives the opaque authority of the
+credential that request carried; both paths attribute quota and refusal reports
+to that credential and the destination host.
 
-```sh
-GIT_STACKS_GITHUB_TRANSPORT=gh npm run dev
-```
+App installation-token accounts use GitHub's actual `name[bot]` login form.
+An active CLI account reported as `error` is not assumed rejected: the bounded
+viewer proof distinguishes a refused credential, insufficient permissions, and
+an unreachable host. An inactive failed check establishes no active credential
+and is reported as unavailable; raw CLI diagnostics are never published.
 
-Leave `GIT_STACKS_GITHUB_TOKEN`, `GIT_STACKS_GITHUB_TOKEN_<HOST>`, `GITHUB_TOKEN`,
-and `GH_TOKEN` unset to use your CLI session; explicit environment tokens take
-precedence. Unscoped tokens belong to github.com. Another host receives only
-its `GIT_STACKS_GITHUB_TOKEN_<HOST>`, with the canonical host encoded as
-upper-case hexadecimal (`github.com` is `6769746875622E636F6D`). The CLI child
-receives only that host's token under `GH_TOKEN` or `GH_ENTERPRISE_TOKEN`.
-Credentials are resolved privately in main and pinned to their host and request;
-never redirect them to another host or copy `gh auth token` output into the app
-or a shell command.
+Private clones authenticate as ordinary private Git operations, separately from
+this CLI session.
+
+Legacy primary-record retirement verifies the claimed state file before removing
+its owned vault entry and restores the record when removal is refused or fails.
+Vault reads share the mutation queue; Notifications references and foreign vault
+metadata are preserved.
+If any Notifications credential-state file is malformed or unreadable, or its
+directory cannot be enumerated, retirement is skipped without aborting startup.
+An unknown protected reference is never treated as an empty protection list.
 
 GitHub CLI can fall back to plaintext token storage when its secure store is
 unavailable; [its login documentation](https://cli.github.com/manual/gh_auth_login)
-describes that behavior. Use a working secure credential store, do not select
-`--insecure-storage`, and never include credentials or credential paths in a
-support bundle. Requiring `gh` does not establish secure storage by itself.
+describes that behavior. Plaintext storage is not secure storage. Use a working
+secure credential store, do not select `--insecure-storage`, and never include
+credentials or credential paths in a support bundle. Requiring `gh` does not
+establish secure storage by itself.
 
 [GitLab through `glab`](PRODUCT.md#future-provider-direction) is future direction
 and is outside this cutover.
@@ -375,6 +402,45 @@ belongs to one host and one account: a host change, an account change, or a
 replacement credential ends any read, write, or authorization still in flight, so
 no list is ever published or written under another host's or account's name.
 
+Every GitHub response is metered against the host that served it and the
+credential it carried, and against the order its request left in — never against a
+clock, because two answers from one account are the ordinary case of it and a
+millisecond cannot order them. An answer whose request left before a newer one
+describes an account that has since been replaced, and it is not allowed to become
+that host's current rate-limit state, the process-wide report, or anything a
+listener is told. Each host's line only moves forward: an account's late answer may
+still say what that account has left, and it cannot lower the line the account that
+replaced it stands behind. A secondary rate limit is the exception:
+it is the host refusing everyone at once, so its wait still applies to whoever asks
+next. A primary rate limit is the other way round: its window belongs to the one
+account it was measured against, so it is kept against that account's allowance and
+never becomes a wait the whole host serves — an account replaced by one with plenty
+left is admitted, and the account that spent the window waits out its own
+`Retry-After`.
+
+A read can also be overtaken while it is still being built rather than before it
+starts, and the window between those two is covered the same way. The answer a
+read already took cannot be recalled once its account is replaced, so a read that
+asked GitHub is refused rather than handed over. A read that asked nothing — a
+local refresh after a commit, or a refresh after the network — is answered again by
+asking nothing at all: it consults no confirmed payload, and reads the local Git
+work once, so the branches, the parent each one names in its own history, how far it
+is behind that parent and whether it needs a restack are all measured locally and
+none of the replaced account's pull requests, issues, branches or reconciliation
+come along with them. A read's rate limit or last answer does not become the
+replaced account's answer either — those describe requests the replaced account
+made. And an answer this build cannot use — a conditional response with nothing
+stored to replay, a page that is not a page — or a request that never got an answer
+at all is not this host's current state either: it changes nothing another host or
+another account last reported, and leaves no wait behind for whoever asks next.
+
+Filesystem-triggered reuse-only snapshots remain local reads during credential
+retirement; their existing generation checks rebuild from local Git when needed.
+In the renderer, retirement also clears submitted reconciliation, its repair
+preview, and ancestry learned from pull requests or native stacks. A repository
+open remains locked until main settles, then adopts the completed repository's
+local identity even if the remote part of its answer was retired.
+
 This module seals its token in its own store. Removing it leaves the CLI account
 intact. Retiring app-owned primary account records must preserve Notifications
 credentials, CLI credentials, and unrelated operating-system keys. A replacement
@@ -449,10 +515,13 @@ The count of what the host has been asked is taken before the write that changed
 its list, which is well before the wait, because a read the app sends by itself
 is exactly the one a baseline measured from too late would miss.
 
-**The isolated smoke observes the legacy App account panel.** It strips App
-registration values and asserts `not-configured`, no credential reference, and
-no login. It does not prove CLI authentication; the
-[account cutover](#current-runtime) must update this fixture.
+**The isolated smoke observes the required GitHub CLI's reported status.** It
+strips App registration and app-owned credential values, then reads the CLI
+status surface: which host it is pointed at, whether that host is authenticated,
+as which account, and which CLI version was detected. Those four are reported
+separately, so a version on screen is never read as an account. It does not
+establish a working CLI login, a secure credential store, or native-store
+behavior; those need the manual procedures a person runs.
 
 The renderer surface is also exercised in the [gallery](#renderer-verification):
 `notifications-awaiting-credential`, `notifications-ready`,
@@ -527,9 +596,8 @@ a separate code path; it is the same path with a different name.
 
 ### Links opened outside the app
 
-Every **open in browser** control, including the legacy device page, and every
-pull request, issue, stack, and check link cross the same main-process host
-boundary. A link is opened
+Every **open in browser** control and every pull request, issue, stack, and check
+link cross the same main-process host boundary. A link is opened
 only when it is HTTPS, carries no credentials, and names `github.com`, the
 configured host, or the host owning an open repository's origin. Public GitHub
 links remain available when an enterprise host is selected. The host is compared whole, so its port is
@@ -553,9 +621,7 @@ the repository's host explicitly for CLI authentication and API operations,
 and must never retry a failed enterprise request against github.com.
 GitHub Enterprise still needs its own capability probes; a successful CLI
 login is not proof of native-stack or merge-queue support.
-
-See [Current runtime](#current-runtime) for the remaining App authentication
-and environment overrides.
+See [GitHub sign-in](#github-sign-in) for the CLI the app reads through.
 
 ### Capability matrix
 
@@ -568,11 +634,13 @@ that host actually answered:
 | GraphQL API                  | Whether the host serves GraphQL queries                                |
 | Native stacked pull requests | Whether the host serves the resource that groups stacked pull requests |
 | Repository discovery         | Whether the host can be asked which repositories are reachable         |
-| GitHub App sign-in (legacy)  | Whether the current, pre-cutover build has a device-flow registration  |
+| GitHub CLI authentication    | Whether the required CLI is installed and authenticated for this host  |
 
-[#38](https://github.com/howarewoo/git-stacks/issues/38) tracks replacing the
-legacy App row with CLI availability and authentication status under the
-[account cutover](#current-runtime).
+That row is the single `cli-authentication` capability, and its availability label
+follows the state the CLI reported for this host: unauthenticated when the CLI
+holds no account, not configured when the CLI itself could not be run. Host-side
+capabilities such as native stacks and merge queues are never inferred from a
+successful login; each is probed on its own.
 
 Every host has its own endpoints: a GitHub Enterprise Server host serves REST
 from `/api/v3` and GraphQL from `/api/graphql` on its own name, while
@@ -585,7 +653,7 @@ and a request is never retried against a different path or a different host.
 | `unsupported`     | The host answered and does not offer the capability.                                               |
 | `unauthenticated` | The host answered, but no credential for that host is available.                                   |
 | `unreachable`     | The host did not answer.                                                                           |
-| `not-configured`  | A prerequisite is missing, such as the legacy App probe's device-flow registration.                |
+| `not-configured`  | A prerequisite is missing, such as the required GitHub CLI not being installed.                    |
 | `unknown`         | The capability has not been established, or the host answered something this build could not read. |
 
 Repository discovery is reported from an actual discovery run, not from the
@@ -739,23 +807,22 @@ they pass through the same secret and path redaction as every other field.
 
 ### GitHub CLI diagnostics
 
-**Settings → Diagnostics** reports the configured
-[transport preference](#current-runtime). Under `auto`, the active adapter
-depends on a usable App or environment credential, which diagnostics does not
-read; the active adapter is reported as _not established_. An unset or
-unrecognized preference resolves to `auto`.
+**Settings → Diagnostics** reports what was measured about the required GitHub
+CLI and never infers it. There is no adapter preference to choose and no
+alternate path in use.
 
 Detection runs `gh --version` through the Git-probe allowlist with a byte cap,
 deadline, and credential-free environment. It makes no account or host query
 and reports no credential or executable path. Recognized output is reduced to
 the semantic version; unrecognized output is labelled as such. A missing CLI,
-timeout, or non-zero exit reports _unavailable_; direct mode reports _not asked_.
-This probe does not establish authentication.
+timeout, or non-zero exit reports _unavailable_. This probe does not establish
+authentication: the detected version is a property of the program, while
+authentication and the account actually used are read separately from the CLI's
+own authentication status for that host.
 
-[#30](https://github.com/howarewoo/git-stacks/issues/30) tracks host-authentication
-status, packaged executable discovery, and recovery guidance for the
-[required-`gh` cutover](#current-runtime). Missing CLI or authentication blocks
-GitHub work only.
+[#30](https://github.com/howarewoo/git-stacks/issues/30) covers host-authentication
+status and packaged executable discovery; a missing CLI or missing authentication
+blocks GitHub work only, never local Git.
 
 ## Signed updates
 
@@ -1477,7 +1544,12 @@ These are the extreme cases the app states rather than hanging or crashing on.
   pull requests incrementally; the main process collects the origin's open pull
   requests through paginated GraphQL reads on the host's typed transport, then
   reads any locally tracked pull requests missing from that listing individually.
-  Use the [current-runtime instructions](#current-runtime) for CLI transport.
+  Follow the [GitHub sign-in](#github-sign-in) instructions, and configure the run
+  to authorize the CLI for the targets and provider state it is configured to use
+  and for nothing else; a controlled suite brings its own profile, and an automated
+  check is never pointed at a personal or default session. The live end-to-end
+  suite stays a deferred development gate whose evidence is the owner's manual run;
+  it is not an authentication-policy waiver.
 
 ## Renderer verification
 
@@ -1646,9 +1718,9 @@ Automated axe and contrast checks supplement, not replace, human keyboard and as
 
 **Two platforms, two records.** The target readers are VoiceOver on macOS and Narrator or NVDA on Windows; the `Accessibility checks` workflow runs headless Chromium on Linux and is evidence for no reader. One record per platform, each naming the reviewer, the date, the OS version and build, the app revision under test (`git rev-parse HEAD`), the reader with its version and settings, display scaling, the keyboard input modes in force (Sticky, Filter, and Slow Keys on Windows; keyboard menu navigation on macOS), and whether the chords are the shipped defaults or the ones set in Settings → Keyboard shortcuts. A macOS record does not answer the Windows one, an unrun platform is recorded as not run, and the evidence belongs in the pull request.
 
-**What to launch.** `npm ci`, then `npm run package`, then the unpacked application from `release/`: macOS `release/mac-arm64/Git Stacks.app/Contents/MacOS/Git Stacks` (or `release/mac/Git Stacks.app/Contents/MacOS/Git Stacks`), Linux `release/linux-unpacked/git-stacks`, Windows `release/win-unpacked/Git Stacks.exe`. `npm run test:desktop` is the automated packaged smoke: it supports macOS and Linux and refuses Windows ("Packaged desktop smoke supports macOS and Linux only; Windows process-tree cleanup is not implemented"), so the Windows pass is manual, and on the platforms it supports `--keep` retains its disposable workspace and prints the path.
+**What to launch.** `npm ci`, then `npm run package`, then the unpacked application from `release/`: macOS `release/mac-arm64/Git Stacks.app/Contents/MacOS/Git Stacks` (or `release/mac/Git Stacks.app/Contents/MacOS/Git Stacks`), Linux `release/linux-unpacked/git-stacks`, Windows `release/win-unpacked/Git Stacks.exe`. `npm run test:desktop` is the automated packaged smoke: it supports macOS and Linux and refuses Windows ("Packaged desktop smoke supports macOS and Linux only; Windows process-tree cleanup is not implemented"), so the Windows pass is manual, and on the platforms it supports `--keep` retains its disposable workspace and prints the path. That smoke runs an unsigned, locally built artifact against fixtures: it is not evidence of a signed release, of the operating system's native credential store, or of any manual acceptance pass.
 
-**An owned, credential-free run.** Everything the pass touches lives in one directory this pass creates, and the app is launched from a shell that carries none of the machine's Git, GitHub, or credential state. A fresh `--user-data-dir` is part of that, not all of it: it holds `settings.json`, `repositories.json`, the stored GitHub account, and the notification state, but the app also reads `GIT_STACKS_GITHUB_TOKEN`, `GITHUB_TOKEN`, and `GH_TOKEN` from the environment and can fall back to the machine's `gh` login, so `--user-data-dir` alone does not make the run credential-free. On macOS leave `HOME` as it is: the app brings its sandboxed helpers up only against the home the password database reports.
+**An owned, credential-free run.** Everything the pass touches lives in one directory this pass creates, and the app is launched from a shell that carries none of the machine's Git, GitHub, or credential state. A fresh `--user-data-dir` is part of that, not all of it: it holds `settings.json`, `repositories.json`, and the notification state, while the CLI session comes from the CLI itself. `GH_CONFIG_DIR` is the one GitHub variable this run points somewhere: it names a directory, so it points at the empty one this run created, which is how the CLI finds no stored session to authenticate with. The four token variables are not directories and are not pointed anywhere — `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` must be **unset**, because the CLI reads any one of them as a credential in preference to its own configuration, and the run would then authenticate as whoever owns that token. With them gone the CLI reports itself signed out and the run reaches no real account. On macOS leave `HOME` as it is: the app brings its sandboxed helpers up only against the home the password database reports.
 
 ```sh
 # macOS: an empty environment plus this run's own variables
@@ -2030,10 +2102,14 @@ or desktop acceptance; those require separately authorized verification.
 
 Automated live GitHub E2E is deferred as a development gate; howarewoo owns
 manual live acceptance recorded against a tested revision
-([#34](https://github.com/howarewoo/git-stacks/issues/34),
-[#39](https://github.com/howarewoo/git-stacks/issues/39)). Automated live runs
-still require explicit dedicated credentials, never an ambient personal CLI
-session. Signing and human accessibility acceptance are unchanged.
+([#34](https://github.com/howarewoo/git-stacks/issues/34), [#39](https://github.com/howarewoo/git-stacks/issues/39)).
+A live run is authorized per target rather than by default: it may only be
+pointed at a disposable target the person authorizing it named in advance,
+using a CLI profile this suite owns for that run, created for the run and
+removed with it. It never borrows an ambient personal CLI session, never falls
+back to the account that happens to be signed in on this machine, and never
+uses a personal default repository. Signing and human accessibility acceptance
+are unchanged.
 
 Recovery is a narrower claim than that, and it is stated as the mechanism rather
 than as a result. The command opens its own connection: a private agent, no
@@ -2587,9 +2663,9 @@ Empty, filtered-empty, stale/offline, auth-required, and partial-permission are 
 
 The refresh is budgeted twice, and both halves count what actually happened. It refuses to start while GitHub's remaining budget is below the 250-request reserve the repository sync already keeps, and it stops mid-refresh once the 24-request per-refresh cap is spent, naming the repositories it did not attempt. Every round trip is charged before it is made — a refused field and the narrower query that follows it, each page of the pull-request listings, the native-stack capability probe, and each page of the stack collection — so a repository that fails part-way cannot spend the allowance while contributing nothing to it. Admission reads the allowance the host itself reported, in the window that report belongs to: a count from a window that has already closed is set aside however recently it arrived and however much more it allows, and where another report for that host and credential still describes an open window, that one is what admission reads. GitHub counts each window separately, so a spent window never refuses a later one. A refusal is believed on GitHub's terms rather than the read's: whatever wait it names — a `Retry-After`, or the moment the primary window resets when it names no counter at all — runs from the answer that carried it. That wait is shared by ordinary repository reads and Inbox reads, rather than belonging only to the read that met it, with credential-scoped primary limits and host-wide secondary waits distinguished below.
 
-Primary allowance observations also belong to the credential that made the request, not just the host. Ordinary repository reads and Inbox reads share that credential's allowance; replacing the credential on the same host does not carry the previous account's spent primary window into the replacement account's queue. A primary-limit refusal that names only its reset stays with that credential; a secondary-limit refusal or an explicit `Retry-After` still establishes a host-wide wait. A late answer from the previous credential cannot lower the replacement's primary allowance. Replacing one host's credential leaves other hosts' observations intact, and installing or clearing a stored account does not discard a primary reserve for an unchanged environment credential that overrides it.
+Primary allowance observations also belong to the credential that made the request, not just the host. Ordinary repository reads and Inbox reads share that credential's allowance; replacing the credential on the same host does not carry the previous account's spent primary window into the replacement account's queue. A primary-limit refusal stays with that credential: it names that account's window, not the host's, so no primary refusal establishes a wait the whole host serves. A secondary-limit refusal does, and its wait applies to whoever asks next. A late answer from the previous credential cannot lower the replacement's primary allowance, nor the line the replacement stands behind. A late answer from the previous credential cannot lower the replacement's primary allowance. Replacing one host's credential leaves other hosts' observations intact, and installing or clearing a stored account does not discard a primary reserve for an unchanged environment credential that overrides it.
 
-When a primary refusal supplies both a reset and `Retry-After`, the explicit retry duration sets the host-wide wait; the later primary reset still applies only to the credential that exhausted that window. A replacement credential can therefore read after the explicit wait ends without waiting for the previous account's primary reset. A primary refusal that names neither a reset nor a retry duration stops that principal's remaining repositories in the current refresh, but does not invent a deadline for the next refresh or stop another principal.
+A primary window lasts as long as the later of the two moments that refusal named: a counter that resets in ten minutes does not shorten an account that was told to come back in an hour, and a retry named past the reset does not shorten the window the counter opens. It is that one account's window either way. A window with nothing left in it is not spendable at any reserve — a reserve of zero says there is no headroom to protect, not that an empty window can be asked. A secondary refusal spends nothing and invents no window of its own: it is the shared wait every account on that host is held to for as long as it names, and the positive count it carried is still true of each account until then. A replacement credential is admitted inside it, and is admitted because it has spent nothing; an account that signs in again after being replaced waits out its own window until that window has passed, with nothing asked of the host meanwhile. A primary refusal that names neither a reset nor a retry duration stops that principal's remaining repositories in the current refresh, but does not invent a deadline for the next refresh or stop another principal.
 
 Rows belong to one identity. The account, its credential, and the selected host decide whose queue is on screen: signing out, switching accounts, or changing host ends the read still running for the previous identity, refuses its late answer, and drops its rows rather than showing them until a refresh can answer for the new one. Which host that is comes from one decision, in one order, because a host read from the wrong place names the wrong credential. The host serving a configured non-public API base decides first, and decides even when a host was named as well, because the CLI is sent to that URL and authenticates as whoever serves it; then the host that was named; then `GH_HOST` from the merged environment, canonicalised; and only then the public host. A base equal to the public default is the public host by fallback rather than by anyone's decision, so it resolves nothing a host name does not and cannot outvote a host that was named. The same host names the requests, the credential asked of the CLI, the environment the CLI's process runs with, and the allowance the answers are credited to, so all four can never disagree. Registered clones and worktrees of one remote are one GitHub repository, so they are read once, counted once, and opened through one deterministic local path.
 

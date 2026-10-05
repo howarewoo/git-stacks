@@ -4,13 +4,10 @@ import { promisify } from 'node:util'
 import type { AppSettings } from '../shared/settings'
 import type { GitHubHostStatus } from '../shared/host'
 import type { DiagnosticEntry, DiagnosticReport } from '../shared/settings'
-import type { GitEnvironmentStatus, GitRuntimeStatus, GitHubAccountStatus } from '../shared/types'
+import type { GitEnvironmentStatus, GitHubCliStatus, GitRuntimeStatus } from '../shared/types'
 import { NOTIFICATION_STATE_LABELS, type NotificationModuleStatus } from '../shared/notifications'
-import {
-  githubTransportChoice,
-  hostScopedEnvironment,
-  type GitHubTransportChoice,
-} from './github-transport'
+import { GH_VERSION_ARGS, probeGitHubCliVersion, type GitHubCliVersionProbe } from './github-cli'
+import { hostScopedEnvironment } from './github-transport'
 
 const exec = promisify(execFile)
 
@@ -31,116 +28,24 @@ const MAX_PROBE_BYTES = 8 * 1024
 const MAX_PROBE_SECONDS = 5
 
 /**
- * The only GitHub CLI command this app will run to describe itself, and the
- * only adapter this app will ever run outside Git itself. It is a local version
- * query: no subcommand of it reaches a host, reads a keychain, or asks the CLI
- * who it is signed in as. `gh auth status` and `gh auth token` are not on this
- * list and cannot be added by a caller, because a caller names no command —
- * this entry is the whole allowlist.
+ * The GitHub CLI this build requires, reported as the fixed command it runs to
+ * describe itself. The command list is a constant: no caller names a command,
+ * so this entry is the whole allowlist, and it is a local version query that
+ * reaches no host and asks the CLI who it is signed in as. Authentication is
+ * established elsewhere, from the CLI's own account answer.
  */
-export const GH_DIAGNOSTIC_COMMAND = { label: 'gh --version', args: ['--version'] } as const
+export const GH_DIAGNOSTIC_COMMAND = { label: 'gh --version', args: GH_VERSION_ARGS } as const
 
 /**
- * Safe projection of GitHub CLI version output. Strictly the semantic version
- * the CLI named, so a build date, a commit, an install path, or anything else
- * the binary chose to print cannot reach a diagnostic report or a support
- * bundle. Output this does not recognise is reported as unrecognised rather
- * than partially believed.
+ * What this computer's GitHub CLI is, kept separate from what it can
+ * authenticate: an installed version is a fact about the machine, and the
+ * account behind it is a separate read whose answer this report is given.
  */
-export function parseGhVersion(output: string): {
-  value: string
-  status: 'confirmed' | 'unavailable'
-} {
-  const match = /(?:^|\s)gh version (\d{1,4}\.\d{1,4}\.\d{1,4})(?=$|\s)/u.exec(output)
-  if (match) {
-    return { value: `gh version ${match[1]}`, status: 'confirmed' }
-  }
-  return { value: 'unrecognized GitHub CLI version output', status: 'unavailable' }
-}
-
-/** What one optional adapter was observed to be, and how it was observed. */
-export interface GitHubAdapterProbe {
-  /**
-   * Whether `gh --version` ran and answered. `false` covers both an absent CLI
-   * and one that could not be started, because this report cannot tell those
-   * apart without reading an error this module deliberately never inspects.
-   */
-  ran: boolean
-  /** The raw version output, projected by {@link parseGhVersion} before use. */
-  output: string
-}
-
-/**
- * One bounded `gh --version`, run the way every other child of this process is:
- * no shell, a byte cap, a deadline, and an environment carrying no GitHub
- * credential at all. A version query cannot use one, and handing the CLI an
- * ambient token would put this machine's credential behind a command that only
- * needed to print a number.
- */
-async function probeGhAdapter(env: NodeJS.ProcessEnv): Promise<GitHubAdapterProbe> {
-  try {
-    const { stdout } = await exec('gh', [...GH_DIAGNOSTIC_COMMAND.args], {
-      env: hostScopedEnvironment(env, null),
-      timeout: MAX_PROBE_SECONDS * 1000,
-      maxBuffer: MAX_PROBE_BYTES,
-      windowsHide: true,
-    })
-    return { ran: true, output: stdout.trim() }
-  } catch {
-    // The reason is the CLI's to word and a path to its binary is this
-    // machine's, so neither is read: the report says the query did not answer
-    // and nothing about why.
-    return { ran: false, output: '' }
-  }
-}
-
-/**
- * Which adapter this process was configured to prefer, and what the optional
- * CLI answered when it was asked.
- *
- * The preference is reported as the configuration reads it, never as a claim
- * about which adapter a request will actually use: under `auto` that depends on
- * a credential this report does not read, so an unanswered question stays
- * unanswered instead of being resolved by assumption.
- */
-export interface GitHubAdapterSources {
-  choice: GitHubTransportChoice
-  /** Omitted when this process never asked the CLI, and the report says so. */
-  probe?: GitHubAdapterProbe
-}
-
-const ADAPTER_MODE_LABELS: Record<GitHubTransportChoice, string> = {
-  auto: 'Automatic',
-  direct: 'Direct GitHub API',
-  gh: 'GitHub CLI (gh)',
-}
-
-/**
- * What each mode means for the adapter a request goes through. `auto` is not
- * resolved here: it depends on whether this process holds a usable GitHub
- * credential, and reading one to answer a settings question would be the wrong
- * reason to touch a credential.
- */
-const ADAPTER_IN_USE: Record<
-  GitHubTransportChoice,
-  { value: string; status: DiagnosticEntry['status']; detail: string }
-> = {
-  auto: {
-    value: 'not established',
-    status: 'not-applicable',
-    detail:
-      'Automatic mode uses the direct API when this app holds a GitHub credential and the CLI otherwise; this report does not read one.',
-  },
-  direct: {
-    value: 'Direct GitHub API',
-    status: 'confirmed',
-    detail: 'This configuration sends GitHub requests to the API itself.',
-  },
-  gh: {
-    value: 'GitHub CLI (gh)',
-    status: 'confirmed',
-    detail: 'This configuration sends GitHub requests through the CLI.',
-  },
+export interface GitHubCliSources {
+  /** Omitted when nothing has read the CLI on this machine yet. */
+  probe?: GitHubCliVersionProbe
+  /** Omitted until a status read established what the CLI can authenticate to. */
+  status?: GitHubCliStatus | null
 }
 
 async function probe(
@@ -206,7 +111,6 @@ export function parseGitBuildOptions(output: string): {
 }
 export interface DiagnosticSources {
   runtime: GitRuntimeStatus
-  account: GitHubAccountStatus | null
   environment: GitEnvironmentStatus | null
   host: { platform: string; release: string; arch: string; electron: string }
   filesystem: { refFormat: string | null; error: string | null }
@@ -224,13 +128,11 @@ export interface DiagnosticSources {
    * and every thread title stay out of every report and bundle.
    */
   notifications?: NotificationModuleStatus | null
-
   /**
-   * The adapter this process is configured to prefer, and what the optional
-   * GitHub CLI answered when it was asked. Omitted when this process has no
-   * adapter preference to report.
+   * What this computer's GitHub CLI is, and what it can authenticate. Omitted
+   * when nothing has read the CLI on this machine yet.
    */
-  githubAdapter?: GitHubAdapterSources
+  githubCli?: GitHubCliSources
 }
 
 function runtimeEntries(runtime: GitRuntimeStatus): DiagnosticEntry[] {
@@ -282,68 +184,45 @@ function runtimeEntries(runtime: GitRuntimeStatus): DiagnosticEntry[] {
   return entries
 }
 
-function accountEntries(account: GitHubAccountStatus | null): DiagnosticEntry[] {
-  if (!account) {
-    return [
-      {
-        source: 'credentials',
-        label: 'GitHub account',
-        value: 'status not available',
-        status: 'unavailable',
-        detail: 'the account status could not be read',
-      },
-    ]
-  }
-  const entries: DiagnosticEntry[] = [
-    {
-      source: 'credentials',
-      label: 'GitHub account',
-      value:
-        account.state === 'signed-in'
-          ? `signed in as ${account.login ?? 'unknown account'}`
-          : account.state,
-      status: 'confirmed',
-    },
-    {
+/**
+ * What the required GitHub CLI is on this machine and what it is authenticated
+ * to. Only states, the account's own login, and this build's own guidance:
+ * never CLI output, a token, a credential file, or a path to one.
+ */
+function cliEntries(sources: GitHubCliSources | undefined): DiagnosticEntry[] {
+  if (!sources) return []
+  const entries: DiagnosticEntry[] = []
+  if (sources.probe) {
+    entries.push({
       source: 'github',
-      label: 'GitHub host',
-      value: account.host,
-      status: 'confirmed',
-    },
-    // Only whether a sealed credential exists. The reference itself and the
-    // token behind it never reach this report.
-    {
-      source: 'credentials',
-      label: 'Stored credential',
-      value: account.reference ? 'present in the system credential store' : 'none stored',
-      status: 'confirmed',
-    },
-    {
-      source: 'credentials',
-      label: 'Credential store',
-      value: account.store.available
-        ? (account.store.name ?? 'available')
-        : (account.store.reason ?? 'unavailable'),
-      status: account.store.available ? 'confirmed' : 'unavailable',
-    },
-    {
-      source: 'credentials',
-      label: 'App permissions',
-      // Each entry is a { permission, access, feature } object, so it is
-      // rendered the way the Account section names it rather than joined.
+      label: GH_DIAGNOSTIC_COMMAND.label,
       value:
-        account.permissions.length > 0
-          ? account.permissions.map((entry) => `${entry.permission} (${entry.access})`).join(', ')
-          : 'none reported',
-      status: 'confirmed',
-    },
-  ]
-  if (account.externalCredential) {
+        sources.probe.version ??
+        (sources.probe.install === 'missing' ? 'not installed' : 'could not be read'),
+      status: sources.probe.version ? 'confirmed' : 'unavailable',
+      detail:
+        sources.probe.install === 'present'
+          ? 'The CLI was asked for its version and nothing else.'
+          : sources.probe.install === 'missing'
+            ? 'The GitHub CLI is required for GitHub collaboration and is not installed here.'
+            : 'The GitHub CLI is installed but did not answer a local version query.',
+    })
+  }
+  const status = sources.status
+  if (status) {
     entries.push({
       source: 'credentials',
-      label: 'Credential source',
-      value: 'supplied by the environment, not by Git Stacks',
-      status: 'confirmed',
+      label: 'GitHub CLI authentication',
+      value: status.state,
+      status: status.state === 'authenticated' ? 'confirmed' : 'unavailable',
+      detail: status.message ?? undefined,
+    })
+    entries.push({
+      source: 'github',
+      label: 'GitHub CLI account',
+      value: status.login ?? 'none reported',
+      status: status.login ? 'confirmed' : 'not-applicable',
+      detail: 'Accounts, sessions, and sign-out belong to the GitHub CLI.',
     })
   }
   return entries
@@ -443,68 +322,6 @@ function githubHostEntries(status: GitHubHostStatus | null): DiagnosticEntry[] {
   return entries
 }
 
-/**
- * Three lines about an adapter this build never requires: the configured mode,
- * whether the CLI is installed here, and — only when it answered — the version
- * it printed.
- *
- * A missing CLI is reported as a fact about this computer and never as a fault
- * in the installation: nothing in this app, and no sign-in, depends on it being
- * present, so there is nothing here for a person to go and fix. The report never
- * names the CLI's own account, host, or credential, and never asks it for one.
- */
-function githubAdapterEntries(adapter: GitHubAdapterSources): DiagnosticEntry[] {
-  const entries: DiagnosticEntry[] = [
-    {
-      source: 'github',
-      label: 'GitHub adapter mode',
-      value: ADAPTER_MODE_LABELS[adapter.choice],
-      status: 'confirmed',
-      detail: 'Set with GIT_STACKS_GITHUB_TRANSPORT; unset or unrecognised means automatic.',
-    },
-    {
-      source: 'github',
-      label: 'GitHub adapter in use',
-      value: ADAPTER_IN_USE[adapter.choice].value,
-      status: ADAPTER_IN_USE[adapter.choice].status,
-      detail: ADAPTER_IN_USE[adapter.choice].detail,
-    },
-  ]
-
-  if (adapter.probe === undefined) {
-    entries.push({
-      source: 'github',
-      label: GH_DIAGNOSTIC_COMMAND.label,
-      value: 'not asked',
-      status: 'not-applicable',
-      detail: 'This configuration does not use the GitHub CLI, so this build did not run it.',
-    })
-    return entries
-  }
-  if (!adapter.probe.ran) {
-    entries.push({
-      source: 'github',
-      label: GH_DIAGNOSTIC_COMMAND.label,
-      value: 'not found, or it could not be run',
-      status: 'unavailable',
-      detail: 'The GitHub CLI is optional; nothing in this app needs it installed.',
-    })
-    return entries
-  }
-  const version = parseGhVersion(adapter.probe.output)
-  entries.push({
-    source: 'github',
-    label: GH_DIAGNOSTIC_COMMAND.label,
-    value: version.value,
-    status: version.status,
-    detail:
-      version.status === 'confirmed'
-        ? 'The CLI reported a version; it was asked for nothing else.'
-        : 'The CLI answered with something this build does not read, so no version is claimed.',
-  })
-  return entries
-}
-
 function stackEntries(environment: GitEnvironmentStatus | null): DiagnosticEntry[] {
   const credentials = environment?.httpsCredentials
   return [
@@ -578,10 +395,9 @@ export async function runDiagnostics(sources: DiagnosticSources): Promise<Diagno
   const entries: DiagnosticEntry[] = [
     ...hostEntries(sources),
     ...runtimeEntries(sources.runtime),
-    ...accountEntries(sources.account),
+    ...cliEntries(sources.githubCli),
     ...stackEntries(sources.environment),
     ...notificationEntries(sources.notifications ?? null),
-    ...(sources.githubAdapter ? githubAdapterEntries(sources.githubAdapter) : []),
     ...githubHostEntries(sources.githubHost ?? null),
     ...filesystemEntries(sources.filesystem),
   ]
@@ -621,20 +437,17 @@ export async function runDiagnostics(sources: DiagnosticSources): Promise<Diagno
 }
 
 /**
- * The adapter preference this process runs with, and whether the optional
- * GitHub CLI was asked anything.
+ * What this computer's GitHub CLI is, from one bounded local query.
  *
- * A configuration that resolved to the direct API never runs the CLI: probing a
- * program this build will not use spends this machine's time to learn nothing,
- * and leaves `probe` omitted so the report says the CLI was not asked rather
- * than implying it was missing. Every other configuration asks exactly one
- * fixed, local question of it.
+ * The CLI is required for GitHub collaboration, so this asks it exactly once and
+ * reports what it answered; a machine without it is reported as missing rather
+ * than as a fault in anything else. It is the version only: which account the
+ * CLI holds is established by the status read, which never runs from here.
  */
-export async function readGitHubAdapterSources(
+export async function readGitHubCliSources(
   env: NodeJS.ProcessEnv = process.env,
-): Promise<GitHubAdapterSources> {
-  const choice = githubTransportChoice(env)
-  return choice === 'direct' ? { choice } : { choice, probe: await probeGhAdapter(env) }
+): Promise<GitHubCliSources> {
+  return { probe: await probeGitHubCliVersion(env) }
 }
 
 /**

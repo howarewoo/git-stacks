@@ -103,8 +103,8 @@ export interface GitHubSettings {
   /**
    * The GitHub host this installation works against. It is a host name, not a
    * URL, and it defaults to github.com; an enterprise host is named here and
-   * everything — sign-in, discovery, clone URLs, API requests, and the
-   * capability matrix — follows it.
+   * everything — CLI authentication status, discovery, clone URLs, API
+   * requests, and the capability matrix — follows it.
    */
   host: string
 }
@@ -136,8 +136,9 @@ export interface NotificationSettings {
   /**
    * Whether this computer has agreed to let Git Stacks read a GitHub
    * Notifications inbox. Off by default: the endpoints are served to a classic
-   * personal access token rather than to the GitHub App credential, so the
-   * consent is separate from sign-in and says so before it is given.
+   * personal access token rather than to the credential the GitHub CLI holds,
+   * so the consent is separate from CLI authentication and says so before it
+   * is given.
    */
   enabled: boolean
 }

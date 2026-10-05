@@ -688,7 +688,6 @@ function sanitizedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   delete clean.GIT_STACKS_GITHUB_API_URL
   delete clean.GH_TOKEN
   delete clean.GITHUB_TOKEN
-  delete clean.GIT_STACKS_GITHUB_TOKEN
   // Still removed here, and still for a different reason than the one above: the
   // transport hands this environment to the children it spawns, and a child that
   // inherited an extra authority would trust it.

@@ -58,7 +58,7 @@ const ACTIONS_APP_ID = 15368
  * toward a server this window is talking to, so a second clone of the same
  * repository is not made to sit out someone else's refusal.
  */
-const backoffs = new Map<string, { nextAttemptAt: number; reason: string }>()
+const backoffs = new Map<string, { nextAttemptAt: number; reason: string; hostWide: boolean }>()
 
 interface CachedReport {
   /** One validator per resource page, so a later page is asked about its own change. */
@@ -82,9 +82,45 @@ interface CachedReport {
 
 const cache = new Map<string, CachedReport>()
 
-/** Test seam: drops every remembered report so one case cannot read another's. */
+/**
+ * Drops every remembered report. A report holds one credential's answers and
+ * the validators they were recorded under, so it is dropped when a test needs
+ * a clean slate and when the credential behind this host is actually replaced:
+ * a validator recorded for one credential is never replayed against the
+ * credential that replaced it.
+ */
 export function clearPullRequestChecksCache(): void {
   cache.clear()
+}
+
+/**
+ * Which credential the cached reports belong to. A read that was already running
+ * when a credential was replaced finishes afterwards, and its answer describes
+ * the account that has left; it is dropped rather than kept for whoever asks
+ * next.
+ */
+let checksGeneration = 0
+
+/** Retires the cached reports and refuses any read already in flight. */
+export function retirePullRequestChecks(): void {
+  checksGeneration += 1
+  cache.clear()
+}
+
+/** Whether every read that started before the last retirement is finished. */
+function isCurrentGeneration(generation: number): boolean {
+  return generation === checksGeneration
+}
+
+/**
+ * Drops the deadlines one credential's own refusals left behind, and keeps the
+ * ones that belong to the host rather than to whoever asked. A wait for a host
+ * that is rate-limiting everyone is still true for the next account; a wait left
+ * by a credential that has been replaced is not, and would otherwise answer for
+ * it without a request ever being made.
+ */
+export function clearCredentialCheckBackoffs(): void {
+  for (const [key, entry] of backoffs) if (!entry.hostWide) backoffs.delete(key)
 }
 
 /**
@@ -883,6 +919,9 @@ export async function getPullRequestChecks(
   const remembered = cache.get(cacheKey) ?? null
   const now = Date.now()
   const backoffKey = `${repoPath}\u0000${cacheKey}`
+  // The credential this read starts in. Nothing it discovers after a credential
+  // was replaced may be kept for the next read.
+  const startedIn = checksGeneration
   const paused = backoffs.get(backoffKey) ?? null
   if (!remembered && paused && now < paused.nextAttemptAt) {
     // A repository whose first read failed has no report to serve, so the wait is
@@ -933,7 +972,15 @@ export async function getPullRequestChecks(
       // stops here rather than going on to ask for check runs it has already said no to.
       // The refusal is recorded the same way a payload refusal is, deadline included.
       if (!remembered?.headSha) {
-        return recordFailure(error, { number, headSha, base, remembered, cacheKey, backoffKey })
+        return recordFailure(error, {
+          number,
+          headSha,
+          base,
+          remembered,
+          cacheKey,
+          backoffKey,
+          generation: startedIn,
+        })
       }
       // An unproved head cannot authorise a write, so the last good report is shown with
       // the rerun held back and said to be unproved.
@@ -948,6 +995,7 @@ export async function getPullRequestChecks(
           remembered: { ...remembered, permissions: withoutRerun(remembered.permissions, reason) },
           cacheKey,
           backoffKey,
+          generation: startedIn,
         },
         reason,
       )
@@ -1044,7 +1092,7 @@ export async function getPullRequestChecks(
         nextAttemptAt: 0,
         lastReason: null,
       }
-      cache.set(cacheKey, confirmed)
+      if (isCurrentGeneration(startedIn)) cache.set(cacheKey, confirmed)
       return reportFrom(confirmed, number, base, 'not-modified', null)
     }
 
@@ -1086,12 +1134,20 @@ export async function getPullRequestChecks(
       nextAttemptAt: 0,
       lastReason: null,
     }
-    cache.set(cacheKey, entry)
+    if (isCurrentGeneration(startedIn)) cache.set(cacheKey, entry)
     backoffs.delete(backoffKey)
     return reportFrom(entry, number, base, 'live', null)
   } catch (error) {
     if (error instanceof GitHubTransportError && error.kind === 'cancelled') throw error
-    return recordFailure(error, { number, headSha, base, remembered, cacheKey, backoffKey })
+    return recordFailure(error, {
+      number,
+      headSha,
+      base,
+      remembered,
+      cacheKey,
+      backoffKey,
+      generation: startedIn,
+    })
   }
 }
 
@@ -1111,6 +1167,7 @@ function recordFailure(
     remembered: CachedReport | null
     cacheKey: string
     backoffKey: string
+    generation: number
   },
   reason: string = describeFailure(error),
 ): PullRequestChecksReport {
@@ -1119,7 +1176,26 @@ function recordFailure(
     // A first read that failed still has to leave a deadline behind, or the next refresh
     // - and every watch tick after it - asks a server that just said no.
     const deadline = Math.max(now + backoffDelay(1), serverRetryDeadline(error, now))
-    backoffs.set(context.backoffKey, { nextAttemptAt: deadline, reason })
+    if (!isCurrentGeneration(context.generation)) {
+      // A failure the replaced credential met says nothing about the current one,
+      // and its wait would answer for it without asking.
+      return failureReport(
+        context.number,
+        context.headSha,
+        context.base,
+        context.remembered,
+        null,
+        0,
+        null,
+      )
+    }
+    backoffs.set(context.backoffKey, {
+      nextAttemptAt: deadline,
+      reason,
+      // A secondary limit is the host refusing everyone at once, so it outlives
+      // the credential that met it. Every other refusal is about this credential.
+      hostWide: error instanceof GitHubTransportError && error.kind === 'secondary-rate-limit',
+    })
     return failureReport(
       context.number,
       context.headSha,
@@ -1139,7 +1215,22 @@ function recordFailure(
     ),
     lastReason: reason,
   }
-  cache.set(context.cacheKey, failed)
+  // A secondary limit is the host refusing everyone at once, so it is recorded
+  // as the host's wait rather than as this report's alone. A report belongs to
+  // the credential that read it and is dropped when that credential is replaced,
+  // and a deadline kept only there would go with it: the next account would ask a
+  // host that had already said to wait, before the wait it was told to keep was
+  // over. Every other refusal is about this credential and is not recorded here.
+  if (isCurrentGeneration(context.generation)) {
+    cache.set(context.cacheKey, failed)
+    if (error instanceof GitHubTransportError && error.kind === 'secondary-rate-limit') {
+      backoffs.set(context.backoffKey, {
+        nextAttemptAt: failed.nextAttemptAt,
+        reason,
+        hostWide: true,
+      })
+    }
+  }
   return failureReport(
     context.number,
     context.remembered.headSha,

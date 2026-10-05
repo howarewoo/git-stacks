@@ -24,10 +24,11 @@ import {
   type ThemePreference,
 } from '../../../shared/settings'
 import type { ShortcutId } from '../../../shared/shortcuts'
-import type { GitHubAccountStatus } from '../../../shared/types'
+import type { GitHubCliStatus } from '../../../shared/types'
 import { UPDATE_CHANNELS, type UpdateChannel, type UpdateStatus } from '../../../shared/update'
-import { UpdateFacts, UpdateNotice } from './update-summary'
 import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
+import { GitHubCliStatusSection } from './github-cli-status'
+import { UpdateFacts, UpdateNotice } from './update-summary'
 import {
   NOTIFICATION_CONSENT_POINTS,
   NOTIFICATION_CREDENTIAL_KIND,
@@ -72,8 +73,6 @@ export interface SettingsDialogProps {
     supportBundlePreview?: () => Promise<SupportBundlePreview>
     exportSupportBundle?: (previewId: string) => Promise<{ path: string; bytes: number }>
     githubHostStatus?: () => Promise<GitHubHostStatus>
-    githubAccountStatus?: () => Promise<GitHubAccountStatus>
-    signOutOfGitHub?: () => Promise<GitHubAccountStatus>
     updateStatus?: () => Promise<UpdateStatus>
     checkForUpdates?: () => Promise<UpdateStatus>
     downloadUpdate?: () => Promise<UpdateStatus>
@@ -81,8 +80,13 @@ export interface SettingsDialogProps {
     cancelUpdate?: () => Promise<UpdateStatus>
     onUpdateStatus?: (listener: (status: UpdateStatus) => void) => () => void
   } | null
-  account: GitHubAccountStatus | null
-  onAccountChange: (status: GitHubAccountStatus) => void
+  cliStatus: GitHubCliStatus | null
+  /**
+   * The one fenced read every surface asks for. Settings does not read the CLI
+   * for itself: a second read would be a second answer, taken at a different
+   * moment and able to disagree with what the rest of the window is showing.
+   */
+  onReadCliStatus: () => void
   /** Every change is written through the main process, which owns the file. */
   onSettingsChange: (settings: SettingsSnapshot['settings']) => void
   shortcutBindings: Record<ShortcutId, string>
@@ -91,7 +95,7 @@ export interface SettingsDialogProps {
 }
 
 type Section =
-  | 'account'
+  | 'cli'
   | 'github'
   | 'notifications'
   | 'git'
@@ -102,7 +106,7 @@ type Section =
   | 'diagnostics'
 
 const SECTIONS: { id: Section; label: string }[] = [
-  { id: 'account', label: 'Account' },
+  { id: 'cli', label: 'GitHub CLI' },
   { id: 'github', label: 'GitHub' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'git', label: 'Git' },
@@ -117,14 +121,14 @@ export function SettingsDialog({
   open,
   onOpenChange,
   desktop,
-  account,
-  onAccountChange,
+  cliStatus,
+  onReadCliStatus,
   onSettingsChange,
   shortcutBindings,
   onShortcutBindingsChange,
   onError,
 }: SettingsDialogProps) {
-  const [section, setSection] = React.useState<Section>('account')
+  const [section, setSection] = React.useState<Section>('cli')
   const [snapshot, setSnapshot] = React.useState<SettingsSnapshot | null>(null)
   const [busy, setBusy] = React.useState(false)
   const [report, setReport] = React.useState<DiagnosticReport | null>(null)
@@ -293,45 +297,16 @@ export function SettingsDialog({
     }
   }, [desktop, bundle?.id, onError])
 
-  const signOut = React.useCallback(async () => {
-    if (!desktop?.signOutOfGitHub) return
-    setBusy(true)
-    try {
-      onAccountChange(await desktop.signOutOfGitHub())
-      setMessage('Signed out. Your local repositories are untouched.')
-    } catch (value) {
-      onError(value instanceof Error ? value.message : String(value))
-    } finally {
-      setBusy(false)
-    }
-  }, [desktop, onAccountChange, onError])
+  // Reading the CLI status again is a real read of sanitized facts, and it is the
+  // same read the rest of the window makes. Settings inspects that session; it
+  // never changes it, so there is no sign-in, switch, or sign-out control here
+  // and no control that could be mistaken for one.
+  const refreshCliStatus = React.useCallback(() => {
+    onReadCliStatus()
+  }, [onReadCliStatus])
 
   const settings = snapshot?.settings
   const locked = (key: string) => lockFor(key) !== null
-
-  const accountFacts: ContextFact[] = account
-    ? [
-        { label: 'Account', value: account.login ?? 'Signed in' },
-        { label: 'Host', value: account.host, code: true },
-        {
-          label: 'Permissions',
-          // A permission is a name and a level, so it is labelled as one rather
-          // than joined as a bare string.
-          value:
-            account.permissions.length > 0
-              ? account.permissions
-                  .map((entry) => `${entry.permission} (${entry.access})`)
-                  .join(', ')
-              : 'None reported',
-        },
-        {
-          label: 'Credential store',
-          value: account.store.available
-            ? (account.store.name ?? 'Available')
-            : (account.store.reason ?? 'Unavailable'),
-        },
-      ]
-    : [{ label: 'Account', value: 'Not signed in' }]
 
   const reportFacts: ContextFact[] = (report?.entries ?? []).map((entry) => ({
     label: `${entry.source} · ${entry.label}`,
@@ -378,17 +353,12 @@ export function SettingsDialog({
               </InlineAlert>
             ) : null}
 
-            {section === 'account' && settings ? (
-              <WorkflowSection label="Account">
-                <OperationFacts facts={accountFacts} />
-                <p className="text-[length:var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]">
-                  Signing out removes the credential this app stores. It does not touch any local
-                  repository, and signing back in restores access.
-                </p>
-                <Button variant="secondary" disabled={busy || !account} onClick={signOut}>
-                  Sign out
-                </Button>
-              </WorkflowSection>
+            {section === 'cli' && settings ? (
+              <GitHubCliStatusSection
+                onRefresh={() => void refreshCliStatus()}
+                refreshing={busy}
+                status={cliStatus}
+              />
             ) : null}
 
             {section === 'github' && settings ? (
@@ -396,7 +366,7 @@ export function SettingsDialog({
                 <Field
                   id="settings-github-host"
                   label="Host"
-                  description="The GitHub host this app works against. Leave it as github.com, or name your GitHub Enterprise Server host. Every request, clone URL, and sign-in follows it."
+                  description="The GitHub host this app works against. Leave it as github.com, or name your GitHub Enterprise Server host. CLI authentication status, every request, and every clone URL follow it."
                   error={problemFor('github.host')}
                 >
                   <input
@@ -462,14 +432,14 @@ export function SettingsDialog({
               <WorkflowSection label="GitHub Notifications">
                 <p className="text-[length:var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]">
                   The GitHub Notifications inbox is a different thing from the pull request inbox in
-                  this app, and it is not read with the credential this app signs in with. It is off
-                  by default; turning it on here says what it adds before you turn it on, and only
-                  then can a token be authorized from the Notification Center.
+                  this app, and it is not read with the GitHub CLI session. It is off by default;
+                  turning it on here says what it adds before you turn it on, and only then can a
+                  token be authorized from the Notification Center.
                 </p>
                 <Field
                   id="settings-notifications"
                   label={<span className="sr-only">Read a GitHub Notifications inbox</span>}
-                  description={`Optional and separate from sign-in. Reading this inbox needs a ${NOTIFICATION_CREDENTIAL_KIND} with the ${NOTIFICATION_CREDENTIAL_SCOPE} scope. It is entered here, crosses the bridge to the main process once, and is kept sealed by the operating system's own protection in a vault file this module owns; ordinary application state holds only an opaque reference to it, and the stored credential is never sent back to this window. Turning it off stops the polling and hides the list; it does not remove that token, and it changes nothing about pull requests, stacks, or reviews.`}
+                  description={`Optional and separate from CLI authentication. Reading this inbox needs a ${NOTIFICATION_CREDENTIAL_KIND} with the ${NOTIFICATION_CREDENTIAL_SCOPE} scope. It is entered here, crosses the bridge to the main process once, and is kept sealed by the operating system's own protection in a vault file this module owns; ordinary application state holds only an opaque reference to it, and the stored credential is never sent back to this window. Turning it off stops the polling and hides the list; it does not remove that token, it asks nothing of the GitHub CLI session, and it changes nothing about pull requests, stacks, or reviews.`}
                   error={problemFor('notifications.enabled')}
                 >
                   <Checkbox
@@ -853,8 +823,9 @@ export function SettingsDialog({
                   Every line below was measured on this computer by a fixed set of commands run in
                   the app process. A line marked unavailable is something this build could not
                   establish, not an assumption, and a line marked not applicable is one this build
-                  never asked about — including the optional GitHub CLI, which no part of this app
-                  requires.
+                  never asked about. GitHub collaboration requires the GitHub CLI, so its detection
+                  and authentication status are asked about rather than assumed, and a CLI version
+                  on its own never establishes an account.
                 </p>
                 <Button variant="secondary" disabled={busy} onClick={openDiagnostics}>
                   Run report

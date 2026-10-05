@@ -997,7 +997,6 @@ export class ControlledLiveTarget extends DisposableTarget {
     // this very path, a certificate check the run had already turned off for Git.
     Object.assign(process.env, harness.ownedEnvironment, {
       GIT_STACKS_GITHUB_API_URL: server.url,
-      GIT_STACKS_GITHUB_TRANSPORT: 'direct',
     })
     // Installing replaces rather than stacks, so whatever was here is taken and kept for
     // teardown to put back. Reading the installed transport afterwards would not do it:
@@ -1166,7 +1165,6 @@ export class ControlledLiveTarget extends DisposableTarget {
     // and the fork's pull request is opened over that same double.
     Object.assign(process.env, this.harnessInstance.ownedEnvironment, {
       GIT_STACKS_GITHUB_API_URL: this.server.url,
-      GIT_STACKS_GITHUB_TRANSPORT: 'direct',
     })
     await createForeignRepository({
       path: foreignPath,
@@ -1404,7 +1402,6 @@ export class GitHubLiveTarget extends DisposableTarget {
       delete pinnedEnv.GIT_STACKS_GITHUB_API_URL
       delete pinnedEnv.GH_TOKEN
       delete pinnedEnv.GITHUB_TOKEN
-      delete pinnedEnv.GIT_STACKS_GITHUB_TOKEN
       const pin = (token: string): DirectGitHubTransport =>
         new DirectGitHubTransport({
           token,

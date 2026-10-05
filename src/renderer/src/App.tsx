@@ -42,8 +42,8 @@ import type {
   GitAction,
   GitEnvironmentStatus,
   GitRuntimeStatus,
-  GitHubAccountState,
-  GitHubAccountStatus,
+  GitHubCliState,
+  GitHubCliStatus,
   LinkedIssue,
   OnboardingFailure,
   PullRequest,
@@ -57,7 +57,8 @@ import { GitEnvironmentPanel, RepositoryDiscoveryDialog } from './components/onb
 import { LIST_PAGE_SIZE } from '../../shared/performance'
 import { ListWindowMore } from './components/list-window'
 import { useListWindow } from './lib/list-window'
-import { createRequestGate } from './lib/request-gate'
+import { createRequestGate, type RequestClaim } from './lib/request-gate'
+import { cliAuthority, withoutReplacedCredential } from './credential-identity'
 import { Badge } from './components/ui/badge'
 import { Button, IconButton } from './components/ui/button'
 import { Checkbox } from './components/ui/checkbox'
@@ -105,7 +106,7 @@ import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner, StackView } from './components/repository-views'
 import { GitRuntimeDialog } from './components/git-runtime-dialog'
 import { SettingsDialog } from './components/settings-dialog'
-import { GitHubAccountDialog } from './components/github-account-dialog'
+import { GitHubCliStatusDialog } from './components/github-cli-status'
 import {
   ChangesView,
   DiagnosticsView,
@@ -227,6 +228,26 @@ function unknownOutcomeError(message: string): string {
  */
 function inboxForHost(inbox: NotificationInbox, host: string | null): boolean {
   return host === null || canonicalHostName(inbox.host) === host
+}
+
+/**
+ * The status a host is reported as while its own read is outstanding.
+ *
+ * Naming the host matters more than filling the fields: this is what every
+ * surface shows between a host change and the answer, and it must say which
+ * host is being read rather than leave the previous host's facts standing as
+ * this one's. It names no account, no version, and no credential, because
+ * nothing has established any of those for this host yet.
+ */
+function cliCheckingStatus(host: string): GitHubCliStatus {
+  return {
+    state: 'checking',
+    host,
+    login: null,
+    version: null,
+    identity: null,
+    message: null,
+  }
 }
 
 function branchTreeInfo(
@@ -451,14 +472,19 @@ function App() {
   const [gitRuntimeOpen, setGitRuntimeOpen] = React.useState(false)
   const [gitRuntimeStatus, setGitRuntimeStatus] = React.useState<GitRuntimeStatus | null>(null)
   const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
-  const [accountOpen, setAccountOpen] = React.useState(false)
-  const [account, setAccount] = React.useState<GitHubAccountStatus | null>(null)
-  const [accountBusy, setAccountBusy] = React.useState(false)
+  const [cliStatusOpen, setCliStatusOpen] = React.useState(false)
+  const [cliStatus, setCliStatus] = React.useState<GitHubCliStatus | null>(null)
+  const [cliRefreshing, setCliRefreshing] = React.useState(false)
   const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
   const [gitEnvironment, setGitEnvironment] = React.useState<GitEnvironmentStatus | null>(null)
   const [gitEnvironmentFailure, setGitEnvironmentFailure] =
     React.useState<OnboardingFailure | null>(null)
-  const accountRequest = React.useRef(0)
+  // Counts every CLI status read this window has asked for. A refresh that
+  // answers after a later one, or after a host or account change retired the
+  // identity, must not paint the state it was asked about over the current one.
+  const cliStatusRequest = React.useRef(0)
+  /** The host the CLI status on screen was established for. */
+  const cliStatusHost = React.useRef<string | null>(null)
   /**
    * The legacy import is offered once. Main decides at write time whether it
    * still applies, and a declined import leaves the stored bindings alone, so
@@ -521,7 +547,12 @@ function App() {
   const isMac = React.useMemo(() => isMacPlatform(), [])
   const [showDetails, setShowDetails] = React.useState(true)
   const busyRef = React.useRef<string | null>(null)
-  const openingRef = React.useRef(false)
+  /**
+   * The local repository open this window is waiting for. Credential changes
+   * retire its remote data, not the switch itself: main may already have
+   * persisted the selection, so its completed local identity must be adopted.
+   */
+  const openingRef = React.useRef<RequestClaim | null>(null)
   const searchRef = React.useRef<HTMLInputElement>(null)
   /** The queue's own filter field, which the search chord focuses while it is on screen. */
   const inboxSearchRef = React.useRef<HTMLInputElement>(null)
@@ -754,11 +785,11 @@ function App() {
       landing?: { reviewNumber: number },
     ) => {
       if (!desktop || openingRef.current || busyRef.current) return
-      openingRef.current = true
       // Resetting the gate before awaiting retires every in-flight refresh, so
       // a snapshot taken from the previous repository cannot land here.
       repositoryGate.reset()
       const claim = repositoryGate.claim()
+      openingRef.current = claim
       setOpening(true)
       setError(null)
       setActionError(null)
@@ -768,8 +799,10 @@ function App() {
           mode === 'add'
             ? await desktop.addRepository?.(path ?? '')
             : await desktop.openRepository(path)
-        if (next && repositoryGate.current(claim)) {
-          setSnapshotAndSelection(next)
+        if (next && openingRef.current === claim) {
+          setSnapshotAndSelection(
+            repositoryGate.current(claim) ? next : withoutReplacedCredential(next),
+          )
           setDeleteTarget(null)
           setWorkflow(null)
           setInspectedPath(null)
@@ -784,10 +817,14 @@ function App() {
         const repositories = await desktop.recentRepositories().catch(() => null)
         if (repositories) setRecentRepositories(repositories)
       } catch (value) {
-        if (repositoryGate.current(claim)) setError(readableError(value))
+        if (openingRef.current === claim) setError(readableError(value))
       } finally {
-        if (repositoryGate.current(claim)) setOpening(false)
-        openingRef.current = false
+        // The switch keeps its lock until main settles and the window adopts
+        // the completed repository, including across credential retirement.
+        if (openingRef.current === claim) {
+          openingRef.current = null
+          setOpening(false)
+        }
       }
     },
     [desktop, repositoryGate, setSnapshotAndSelection],
@@ -803,6 +840,10 @@ function App() {
       if (!desktop) return
       inboxGate.reset()
       const claim = inboxGate.claim()
+      // The host this read is for, taken as it stands when the read is asked
+      // for: the rows it produces belong to that host, and a later change of host
+      // has to retire them for that host and no other.
+      const inboxRowsHost = notificationHostRef.current
       setInboxLoading(true)
       setInboxRefreshing(true)
       setInboxError(null)
@@ -810,6 +851,7 @@ function App() {
         const report = await desktop.pullRequestInbox?.(request)
         if (!report) return
         if (!inboxGate.current(claim)) return
+        inboxRowsHostRef.current = inboxRowsHost
         setInboxReport(report)
       } catch (value) {
         if (!inboxGate.current(claim)) return
@@ -962,109 +1004,190 @@ function App() {
     [desktop],
   )
 
-  const openAccount = React.useCallback(() => {
-    if (!desktop || isBusy || operationActive) return
-    setAccountOpen(true)
-    desktop
-      .githubAccountStatus?.()
-      .then((value) => value && setAccount(value))
-      .catch((value) => setError(readableError(value)))
-  }, [desktop, isBusy, operationActive])
-
   // The identity the rows on screen belong to: the host this window reads for
-  // AND the account behind it. The host is part of it because switching from
-  // github.com to an enterprise host changes whose pull requests these are
-  // even when the account status is byte-for-byte unchanged.
+  // AND the CLI account behind it. The host is part of it because switching from
+  // github.com to an enterprise host changes whose pull requests these are even
+  // when the CLI status is byte-for-byte unchanged.
   const inboxHostRef = React.useRef<string | null>(null)
+  /**
+   * The host the rows on screen were read for, which is not the same thing as
+   * the host this window has seen a status for: a queue can be read and on
+   * screen while this host's own CLI status is still outstanding, and naming the
+   * host from a read rather than from a status is what lets a host change retire
+   * those rows even when no status has answered for either host yet.
+   */
+  const inboxRowsHostRef = React.useRef<string | null>(null)
+  /**
+   * Everything this window holds that GitHub answered belongs to the authority
+   * that asked, so one retirement covers all of it and runs for whichever
+   * change replaced that authority — a new account, a new credential, or a new
+   * host.
+   *
+   * The reads still running for the retired authority are ended with their
+   * gates, and the flags those reads own go with them: a result this window
+   * has already refused must not leave local work disabled while it waits.
+   * What they had produced is dropped rather than repainted under a new
+   * account — the queue, and in the repository the pull request each branch
+   * carries with its checks and its links, which are read per branch rather
+   * than on the list. Local Git is untouched: the repository, its branches,
+   * the working tree, and everything already checked out all stay, and the
+   * next refresh fills the rest in as the account in effect.
+   */
+  const retireGitHubAuthority = React.useCallback(() => {
+    leaveInbox()
+    setInboxReport(null)
+    setInboxError(null)
+    repositoryGate.reset()
+    // Keep an outstanding local switch locked until its completion is adopted.
+    // Its gate is stale, so only the returned local Git facts can land.
+    setRefreshing(false)
+    setSnapshot((current) => (current === null ? current : withoutReplacedCredential(current)))
+    setReviewNumber(null)
+  }, [leaveInbox, repositoryGate])
+
   const retireInboxIdentity = React.useCallback(
-    (status: GitHubAccountStatus | null, host: string) => {
-      // The host is the first half of the identity, so it retires the queue on
-      // its own and before any account field is folded in. Rows read for the
-      // previous host cannot stay on screen under new settings while the
-      // account status is still pending, has failed, or is byte-for-byte the
-      // same; and with no account status yet, leaving the previous rows keyed to
-      // the old host would let a later first adoption pass them through.
-      if (inboxHostRef.current !== host) {
-        leaveInbox()
-        setInboxReport(null)
-        setInboxError(null)
+    (status: GitHubCliStatus | null, host: string) => {
+      // The host is the first half of the identity, so it retires on its own and
+      // before any account field is folded in. Rows read for the previous host
+      // cannot stay on screen under new settings while the CLI status is still
+      // pending, has failed, or is byte-for-byte the same; and with no status
+      // yet, leaving the previous rows keyed to the old host would let a later
+      // first adoption pass them through.
+      //
+      // What decides the change is the host the rows on screen were read for,
+      // not the host a status has been seen for. A window can hold one host's
+      // queue while that host's own status is still outstanding, so a host
+      // change during that window retires those rows on the host change alone —
+      // waiting for a status would leave the previous host's pull requests on
+      // screen under the new host's name for as long as the read takes.
+      const rowsHost = inboxRowsHostRef.current
+      const hostChanged =
+        rowsHost !== null && canonicalHostName(rowsHost) !== canonicalHostName(host)
+      if (hostChanged || (inboxHostRef.current !== null && inboxHostRef.current !== host)) {
+        retireGitHubAuthority()
+        inboxRowsHostRef.current = null
         inboxIdentityRef.current = null
+        // The status on screen answered for the host just left. It is replaced
+        // by the host now selected, still reading, so nothing on screen — not
+        // the queue, not the checks, not the commands Settings offers — can be
+        // read as this host's answer before its own read lands.
+        setCliStatus(cliCheckingStatus(host))
       }
       inboxHostRef.current = host
       if (!status) return
-      const identity = [
-        host,
-        status.host,
-        status.state,
-        status.login ?? '',
-        status.reference ?? '',
-      ].join('|')
+      // `identity` is the opaque generation the main process stamped on the
+      // host, account, and credential this status belongs to. It changes when
+      // one of those is actually replaced and holds across equivalent
+      // refreshes, which is what makes it the right half of this fence: a
+      // swapped or revoked session retires the rows, and a re-read of the same
+      // session does not.
+      const identity = cliAuthority(host, status)
       if (inboxIdentityRef.current !== null && inboxIdentityRef.current !== identity) {
-        leaveInbox()
-        setInboxReport(null)
-        setInboxError(null)
+        retireGitHubAuthority()
       }
       inboxIdentityRef.current = identity
     },
-    [leaveInbox],
+    [retireGitHubAuthority],
   )
 
-  const applyAccount = React.useCallback(
-    (status: GitHubAccountStatus) => {
-      retireInboxIdentity(status, inboxHostRef.current ?? status.host)
-      setAccount(status)
+  /**
+   * A status is applied only when it is about the host this window is reading
+   * for. A push that arrives after the host changed describes the host that was
+   * left, and its answer would be the previous host's rows under this one's
+   * name.
+   */
+  const applyCliStatus = React.useCallback(
+    (status: GitHubCliStatus) => {
+      const host = inboxHostRef.current ?? status.host
+      if (canonicalHostName(status.host) !== canonicalHostName(host)) return
+      retireInboxIdentity(status, host)
+      setCliStatus(status)
     },
     [retireInboxIdentity],
   )
 
-  // A host this window reads for is part of that identity, so changing it
-  // retires the read still running for the previous host even when no account
-  // event arrives to report the switch.
+  // A real read of what the CLI is doing. The main process runs the bounded,
+  // host-scoped probes and answers with sanitized facts; nothing here installs a
+  // tool, starts a login, switches an account, or signs out.
+  //
+  // The counter is retired by anything that makes the answer it is waiting for
+  // obsolete — a pushed status that supersedes it, or a host change — so a slow
+  // read of the previous account, host, or credential can never land over the
+  // one now in effect.
+  const readCliStatus = React.useCallback(async () => {
+    if (!desktop?.githubCliStatus) return
+    const request = ++cliStatusRequest.current
+    setCliRefreshing(true)
+    try {
+      const status = await desktop.githubCliStatus()
+      // Only the newest read paints, and only for the host being read now.
+      if (request === cliStatusRequest.current) applyCliStatus(status)
+    } catch (value) {
+      if (request === cliStatusRequest.current) setError(readableError(value))
+    } finally {
+      if (request === cliStatusRequest.current) setCliRefreshing(false)
+    }
+  }, [applyCliStatus, desktop])
+
+  const openCliStatus = React.useCallback(() => {
+    if (!desktop || isBusy || operationActive) return
+    setCliStatusOpen(true)
+    void readCliStatus()
+  }, [desktop, isBusy, operationActive, readCliStatus])
+
+  // The host this window reads for is part of the identity, so a change to it
+  // retires what the previous host answered — its queue, its repository's
+  // GitHub fields, the review and checks read under its credential — even when
+  // no status event arrives to report the switch, and the new host is then read
+  // for itself. What is on screen is never the previous host's answer under the
+  // new name.
   React.useEffect(() => {
     const host = settings?.github.host ?? null
     if (host === null) return
-    retireInboxIdentity(account, host)
-  }, [account, retireInboxIdentity, settings?.github.host])
+    const established = canonicalHostName(host)
+    const previous = cliStatusHost.current
+    // The same host arriving again, with the settings object that named it
+    // replaced, established nothing and retires nothing.
+    if (previous === established) return
+    cliStatusHost.current = established
+    // The first host this window learns of is the one the mount read is already
+    // asking about. Retiring that read would leave the window reading nothing
+    // at all until a push or an explicit refresh, which is worse than letting
+    // the answer it asked for land.
+    if (previous === null) return
+    cliStatusRequest.current += 1
+    setCliRefreshing(false)
+    retireInboxIdentity(null, host)
+    void readCliStatus()
+  }, [readCliStatus, retireInboxIdentity, settings?.github.host])
 
-  // A running sign-in pushes its own state, so the panel is never left waiting on a read.
+  // The CLI session changes outside this window — a sign-in, a switch, a logout,
+  // a revocation — so the status is pushed rather than polled, and the first
+  // read is asked once on mount. A push is newer than any read still running,
+  // so it retires them rather than racing them.
   React.useEffect(() => {
     if (!desktop) return
-    const stop = desktop.onGitHubAccount?.(applyAccount)
-    desktop
-      .githubAccountStatus?.()
-      .then((value) => value && applyAccount(value))
-      .catch(() => undefined)
+    const stop = desktop.onGitHubCliStatus?.((status) => {
+      cliStatusRequest.current += 1
+      setCliRefreshing(false)
+      applyCliStatus(status)
+    })
+    void readCliStatus()
     return stop
-  }, [applyAccount, desktop])
+  }, [applyCliStatus, desktop, readCliStatus])
 
-  const runAccountAction = React.useCallback(
-    async (action: () => Promise<GitHubAccountStatus>, interruptible = false) => {
-      // Cancelling and signing out must stay reachable while a sign-in is in
-      // progress; only starting one is prevented from being doubled up.
-      if (!desktop || (accountBusy && !interruptible)) return
-      const request = ++accountRequest.current
-      setAccountBusy(true)
-      try {
-        const next = await action()
-        // A slow sign-in must not overwrite the state a later cancel already
-        // reached; only the newest action's result is applied. It still passes
-        // the identity boundary, because signing out is exactly the change that
-        // must not leave the previous account's queue on screen.
-        if (request === accountRequest.current) applyAccount(next)
-      } catch (value) {
-        if (request === accountRequest.current) setError(readableError(value))
-      } finally {
-        if (request === accountRequest.current) setAccountBusy(false)
-      }
-    },
-    [accountBusy, applyAccount, desktop],
+  /**
+   * The one authority value every GitHub-fed surface is fenced by: the host
+   * this window reads for, with the state, account, and opaque credential
+   * generation behind the status on screen. A replacement retires this window's
+   * own rows and, with the same value, the review workspace, the checks panel,
+   * and anything discovery found — so those surfaces cannot keep showing one
+   * session while the rest of the window shows another.
+   */
+  const authority = React.useMemo(
+    () => cliAuthority(settings?.github.host ?? null, cliStatus),
+    [cliStatus, settings?.github.host],
   )
-
-  const openDevicePage = React.useCallback(() => {
-    const uri = account?.challenge?.verificationUri
-    if (!desktop || !uri) return
-    desktop.openExternal(uri).catch((value) => setError(readableError(value)))
-  }, [account, desktop])
 
   // The optional Notification Center. Its own state, its own request counter,
   // and two separate errors: a failed read must not report itself as a failed
@@ -1286,19 +1409,18 @@ function App() {
     })
   }, [desktop, openRepository, snapshot])
 
-  const ACCOUNT_LABELS: Record<GitHubAccountState, string> = {
-    'not-configured': 'GitHub: not configured',
-    'signed-out': 'GitHub: signed out',
-    'signing-in': 'GitHub: waiting for sign-in',
-    'signed-in': 'GitHub: signed in',
-    expired: 'GitHub: sign-in expired',
-    revoked: 'GitHub: authorization revoked',
-    'permission-denied': 'GitHub: organization access required',
-    offline: 'GitHub: unreachable',
-    'storage-unavailable': 'GitHub: no secure store',
+  const CLI_LABELS: Record<GitHubCliState, string> = {
+    checking: 'GitHub CLI: checking',
+    'missing-cli': 'GitHub CLI: not installed',
+    'signed-out': 'GitHub CLI: signed out',
+    authenticated: 'GitHub CLI: signed in',
+    rejected: 'GitHub CLI: authentication rejected',
+    'permission-denied': 'GitHub CLI: organization access required',
+    offline: 'GitHub CLI: unreachable',
+    unavailable: 'GitHub CLI: unavailable',
   }
-  const accountLabel = ACCOUNT_LABELS[account?.state ?? 'signed-out']
-  const accountConnected = account?.state === 'signed-in' || account?.state === 'signing-in'
+  const cliLabel = CLI_LABELS[cliStatus?.state ?? 'checking']
+  const cliConnected = cliStatus?.state === 'authenticated'
   const runAction = React.useCallback(
     async (action: GitAction, label: string): Promise<boolean> => {
       if (!desktop || !snapshot || busyRef.current) return false
@@ -1431,12 +1553,15 @@ function App() {
   )
 
   // Changing what is selected retires the previous report: a checks drill-down for
-  // one pull request must never be read as the state of another.
+  // one pull request must never be read as the state of another. A replaced
+  // authority retires it explicitly rather than waiting for the selected pull
+  // request number to change, because the same number can describe a different
+  // account's pull request entirely.
   React.useEffect(() => {
     checksGate.reset()
     setChecksReport(null)
     setChecksWatching(false)
-  }, [checksGate, checksNumber, checksRepository])
+  }, [authority, checksGate, checksNumber, checksRepository])
 
   React.useEffect(() => {
     if (checksNumber === null) return
@@ -2235,17 +2360,17 @@ function App() {
           <span
             className={cn(
               'connection-dot',
-              accountConnected ? 'connection-dot-live' : 'connection-dot-offline',
+              cliConnected ? 'connection-dot-live' : 'connection-dot-offline',
             )}
           />
           <button
             className="version-label version-label-action"
             disabled={!desktop || isBusy || operationActive}
-            onClick={openAccount}
-            title="GitHub account"
+            onClick={openCliStatus}
+            title="GitHub CLI status"
             type="button"
           >
-            {accountLabel}
+            {cliLabel}
           </button>
         </div>
         <div className="sidebar-footer-actions">
@@ -2855,6 +2980,7 @@ function App() {
     if (workspaceView === 'review')
       return (
         <ReviewView
+          authority={authority}
           commands={reviewCommands}
           desktop={desktop ?? undefined}
           number={reviewNumber ?? selectedPullRequest?.number ?? null}
@@ -3646,9 +3772,9 @@ function App() {
         />
       ) : null}
       <SettingsDialog
-        account={account}
+        cliStatus={cliStatus}
         desktop={desktop}
-        onAccountChange={setAccount}
+        onReadCliStatus={() => void readCliStatus()}
         onError={setError}
         onSettingsChange={setSettings}
         onShortcutBindingsChange={setShortcutBindings}
@@ -3663,15 +3789,12 @@ function App() {
         open={gitRuntimeOpen}
         status={gitRuntimeStatus}
       />
-      <GitHubAccountDialog
-        busy={accountBusy || isBusy || operationActive}
-        onCancelSignIn={() => runAccountAction(() => desktop!.cancelGitHubSignIn!(), true)}
-        onOpenChange={setAccountOpen}
-        onOpenVerification={openDevicePage}
-        onSignIn={() => runAccountAction(() => desktop!.startGitHubSignIn!())}
-        onSignOut={() => runAccountAction(() => desktop!.signOutOfGitHub!(), true)}
-        open={accountOpen}
-        status={account}
+      <GitHubCliStatusDialog
+        onOpenChange={setCliStatusOpen}
+        onRefresh={() => void readCliStatus()}
+        open={cliStatusOpen}
+        refreshing={cliRefreshing}
+        status={cliStatus}
       />
       <NotificationCredentialDialog
         busy={notificationBusy}
@@ -3687,11 +3810,12 @@ function App() {
         open={notificationDialogOpen}
       />
       <RepositoryDiscoveryDialog
-        account={account}
+        authority={authority}
         busy={isBusy || operationActive}
+        cliStatus={cliStatus}
         onCloned={(result) => void adoptClonedRepository(result)}
-        onOpenAccount={openAccount}
         onOpenChange={setDiscoveryOpen}
+        onOpenCliStatus={openCliStatus}
         open={discoveryOpen}
       />
       {conflictPath && snapshot ? (

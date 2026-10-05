@@ -391,6 +391,17 @@ export function ReconciliationPanel({
     },
     [],
   )
+  React.useEffect(() => {
+    if (report) return
+    // A retired credential takes the preview as well as the report. Invalidate
+    // its outstanding read before a new account can repopulate reconciliation.
+    request.current++
+    setOpenKey(null)
+    setPreview(null)
+    setPreviewError(null)
+    setFallbackError(null)
+    setLoading(false)
+  }, [report])
 
   const load = React.useCallback(
     async (stackKey: string) => {

@@ -11,7 +11,7 @@
     "start": "npm run build:promotion-helper && electron-vite preview",
     "build": "npm run typecheck && npm run build:promotion-helper && electron-vite build",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build:promotion-helper && npm run provision:git-runtime && tsx --test tests/*.test.ts",
+    "test": "npm run build:promotion-helper && npm run provision:git-runtime && tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/*.test.ts",
     "test:live": "tsx tests/live/cli.ts --controlled",
     "bench:performance": "tsx scripts/perf/run-benchmarks.ts",
     "gallery": "vite --config tests/renderer/vite.config.ts",
