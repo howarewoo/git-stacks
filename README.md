@@ -2168,6 +2168,13 @@ it and the original tips stay recoverable.
   that has work above it is not deleted with its work: the layer above is replayed onto
   the removed layer's parent first. A merged pull request is never removed, because its
   pull request cannot leave the stack; Sync Stack drops merged layers instead.
+- **A merged layer stays where GitHub merged it.** It is not moved, and no surgery may
+  reparent it: GitHub will not retarget a pull request that already merged, so inserting
+  a layer below one, or reordering the layers around one so its parent changes, is
+  refused in the preview before a single ref moves. Inserting above a merged layer is
+  allowed, because nothing GitHub merged is retargeted; the merged pull requests keep
+  their branches, their bases, and their place in the native stack GitHub does not
+  unstack them from.
 - **Native stack membership** is GitHub's to own. Reordering submitted layers unstack
   the native stack and registers the pull requests again in the new order; layers that
   are not part of a native stack, and a repository that cannot use native stacks, plan a

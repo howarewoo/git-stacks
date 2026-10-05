@@ -4,12 +4,13 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createGitHubHarness } from './fixtures/github-harness'
 import type { GitHubFixtureState, GitHubHarness } from './fixtures/github-harness'
-import type { SurgeryRequest } from '../src/shared/types'
+import type { SurgeryPreview, SurgeryRequest } from '../src/shared/types'
 
 // Git Stacks captures Node's spawn API when its own modules load, so the modules
 // under test are imported after the harness is installed rather than statically.
 const { getSnapshot, runAction } = await import('../src/main/git')
-const { getStackProgress, previewSurgery, runSurgery } = await import('../src/main/stacks')
+const { getStackProgress, previewStack, previewSurgery, runSurgery } =
+  await import('../src/main/stacks')
 const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 
@@ -1053,5 +1054,298 @@ test('a registration whose read-back 404s keeps its intent instead of posting ag
     )
     assert.deepEqual(openStacks(after), [], 'no stack is registered behind the refusal')
     assert.ok((await getStackProgress(harness.repo)) !== null, 'the journal is retained')
+  })
+})
+
+function prByNumber(state: GitHubFixtureState, number: number) {
+  const pr = state.prs.find((entry) => entry.number === number)
+  assert.ok(pr, `the fixture has no pull request #${number}`)
+  return pr
+}
+
+/**
+ * The published four-layer stack after GitHub landed its bottom pull requests
+ * the way this app lands a stacked pull request: one merge request for the top
+ * of the contiguous downstack, the merged-head metadata Git Stacks records for
+ * every layer that landed, and the pull requests and native stack membership
+ * the host reports afterwards. Every merged fact a surgery below has to refuse
+ * is a fact this run produced.
+ */
+async function publishedStackWithMergedDownstack(
+  harness: GitHubHarness,
+  mergedThrough: Layer,
+): Promise<Record<Layer, { tip: string; number: number }>> {
+  const layers = await publishedFourLayerStack(harness)
+  const state = await harness.readState()
+  for (const pr of state.prs) {
+    if (pr.state !== 'OPEN') continue
+    pr.checks = 'passing'
+    pr.reviewDecision = 'APPROVED'
+    pr.mergeState = 'CLEAN'
+  }
+  await harness.writeState(state)
+  git(harness, ['switch', mergedThrough])
+
+  const plan = await previewStack(
+    harness.repo,
+    await getSnapshot(harness.repo),
+    'merge',
+    mergedThrough,
+  )
+  assert.deepEqual(plan.blockers, [], 'the contiguous downstack is offered as one merge')
+  assert.deepEqual(
+    plan.merge?.layers.map((layer) => layer.branch),
+    LAYERS.slice(0, LAYERS.indexOf(mergedThrough) + 1),
+    'the merge lands the layers below the one this run selected',
+  )
+  await runAction(harness.repo, {
+    type: 'executeStack',
+    token: plan.token,
+    allowForce: false,
+    mergeMethod: 'squash',
+    mergeAction: 'direct_merge',
+  })
+
+  const merged = await harness.readState()
+  const stack = (merged.stacks ?? []).find((entry) => entry.number === 1)
+  assert.ok(stack, 'the native stack the merge landed into is still reported')
+  for (const member of stack.pull_requests) {
+    const pr = prByNumber(merged, member.number)
+    if (pr.state !== 'MERGED') continue
+    // GitHub keeps a merged pull request in the stack that held it, and reports
+    // it as a closed member carrying the time it merged.
+    member.state = 'closed'
+    member.merged_at = pr.mergedAt
+  }
+  await harness.writeState(merged)
+  for (const layer of LAYERS.slice(0, LAYERS.indexOf(mergedThrough) + 1)) {
+    assert.equal(prFor(merged, layer).state, 'MERGED', `${layer} merged in this run`)
+  }
+  assert.equal(
+    config(harness, `branch.${mergedThrough}.gitStacksMergedHeadPr`),
+    String(layers[mergedThrough].number),
+    'the merged head is recorded, which is the fact a surgery reads as merged',
+  )
+  return layers
+}
+
+/**
+ * Everything a refused surgery has to leave alone: the local branches and the
+ * metadata that places them, the remote its leases are read from, what the host
+ * reports for each pull request and for native stack membership, how many
+ * requests were written rather than read, and the recovery journal the run
+ * would otherwise have written.
+ */
+async function untouchedFacts(harness: GitHubHarness) {
+  const state = await harness.readState()
+  return {
+    branches: git(harness, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads/']),
+    remoteBranches: bareGit(harness, [
+      'for-each-ref',
+      '--format=%(refname) %(objectname)',
+      'refs/heads/',
+    ]),
+    recoveryRefs: git(harness, ['for-each-ref', 'refs/git-stacks/']),
+    branchMetadata: git(harness, ['config', '--local', '--list'])
+      .split('\n')
+      .filter((line) => line.startsWith('branch.'))
+      .sort(),
+    checkout: [
+      git(harness, ['symbolic-ref', '--short', 'HEAD']).trim(),
+      git(harness, ['rev-parse', 'HEAD']).trim(),
+    ],
+    pullRequests: state.prs.map((pr) => [pr.number, pr.base, pr.state, pr.headOid]),
+    stacks: (state.stacks ?? []).map((stack) => [
+      stack.number,
+      stack.open,
+      stack.pull_requests.map((member) => [member.number, member.state, member.merged_at]),
+    ]),
+    // GraphQL reads are POSTs, so only the REST writes a surgery would make count.
+    writes: state.requests.filter(
+      (entry) => entry.argv[1] !== 'GET' && !entry.argv[0].endsWith('graphql'),
+    ).length,
+  }
+}
+
+/**
+ * The facts about layers whose pull request already merged: where each points
+ * locally and on the remote, the branch metadata that places it, and what its
+ * pull request reports. An operation that does not retarget a merged pull
+ * request has to leave every one of them as it found it.
+ */
+async function mergedLayerFacts(harness: GitHubHarness, merged: readonly Layer[]) {
+  const state = await harness.readState()
+  const metadata = git(harness, ['config', '--local', '--list']).split('\n')
+  return {
+    branches: Object.fromEntries(
+      merged.map((layer) => [
+        layer,
+        git(harness, ['for-each-ref', '--format=%(objectname)', `refs/heads/${layer}`]).trim(),
+      ]),
+    ),
+    remoteBranches: Object.fromEntries(
+      merged.map((layer) => [
+        layer,
+        bareGit(harness, ['for-each-ref', '--format=%(objectname)', `refs/heads/${layer}`]).trim(),
+      ]),
+    ),
+    metadata: merged.map((layer) => [
+      layer,
+      metadata.filter((line) => line.startsWith(`branch.${layer}.`)).sort(),
+    ]),
+    pullRequests: merged.map((layer) => {
+      const pr = prFor(state, layer)
+      return [layer, pr.number, pr.base, pr.state, pr.headOid]
+    }),
+  }
+}
+
+/**
+ * A refusal has to be about the pull request GitHub already merged. The reason
+ * is checked by identity rather than by the sentence that states it, and by
+ * what the refused run leaves behind: no ref, no branch metadata, no remote
+ * branch, no pull request base, no stack membership, no write to the host and
+ * no journal for a recovery that was never started.
+ */
+async function refusedSurgery(
+  harness: GitHubHarness,
+  layers: Record<Layer, { number: number }>,
+  request: SurgeryRequest,
+  merged: readonly Layer[],
+): Promise<SurgeryPreview> {
+  const before = await untouchedFacts(harness)
+  const plan = await preview(harness, request)
+  assert.ok(plan.blockers.length > 0, 'the surgery is refused instead of offered for review')
+  for (const layer of merged) {
+    const number = layers[layer].number
+    assert.ok(
+      plan.blockers.some((blocker) => blocker.includes(`#${number}`)),
+      `the refusal is about merged pull request #${number}: ${JSON.stringify(plan.blockers)}`,
+    )
+  }
+  await assert.rejects(runSurgery(harness.repo, plan.token, true, false))
+  assert.deepEqual(
+    await untouchedFacts(harness),
+    before,
+    'the refused surgery changed nothing it would have had to be reviewed for',
+  )
+  assert.equal(
+    await getStackProgress(harness.repo),
+    null,
+    'no recovery journal is left behind by a run that never started',
+  )
+  return plan
+}
+
+test('a published layer whose pull request merged is not moved', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedStackWithMergedDownstack(harness, 'two')
+
+    const plan = await refusedSurgery(
+      harness,
+      layers,
+      { kind: 'move', branch: 'two', target: 'one' },
+      ['two'],
+    )
+    assert.deepEqual(plan.layers, [], 'no branch is offered for rewriting behind the refusal')
+    assert.deepEqual(plan.retargets, [], 'no pull request is offered for retargeting')
+  })
+})
+
+test('a published layer whose pull request merged is not removed', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedStackWithMergedDownstack(harness, 'two')
+
+    const plan = await refusedSurgery(harness, layers, { kind: 'remove', branch: 'two' }, ['two'])
+    assert.deepEqual(plan.layers, [], 'the layer is not offered for deletion either')
+    assert.deepEqual(
+      plan.closes,
+      [],
+      'a merged pull request is not offered for closing as part of a removal',
+    )
+  })
+})
+
+test('inserting a layer under a merged pull request is refused', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedStackWithMergedDownstack(harness, 'two')
+
+    const plan = await refusedSurgery(
+      harness,
+      layers,
+      { kind: 'insert', branch: 'one', name: 'pilot' },
+      ['two'],
+    )
+    const refused = plan.layers
+      .filter((layer) => layer.blockers.length > 0)
+      .map((layer) => layer.branch)
+    assert.ok(
+      refused.includes('two'),
+      `the merged layer is the one GitHub will not retarget: ${JSON.stringify(refused)}`,
+    )
+  })
+})
+
+test('reordering a stack across a merged pull request is refused', async () => {
+  await withPublishedStack(async (harness) => {
+    const layers = await publishedStackWithMergedDownstack(harness, 'two')
+
+    const plan = await refusedSurgery(
+      harness,
+      layers,
+      { kind: 'move', branch: 'four', target: 'one' },
+      ['two'],
+    )
+    const refused = plan.layers
+      .filter((layer) => layer.blockers.length > 0)
+      .map((layer) => layer.branch)
+    assert.ok(
+      refused.includes('two'),
+      `moving four below the merged layer would retarget it: ${JSON.stringify(refused)}`,
+    )
+    assert.ok(
+      plan.layers.some((layer) => layer.branch === 'four'),
+      'the layer that was actually moved is still reviewed, so the refusal is the merged one',
+    )
+  })
+})
+
+test('inserting above a merged pull request moves the open layers and leaves the merged ones alone', async () => {
+  await withPublishedStack(async (harness) => {
+    const merged = ['one', 'two'] as const
+    const layers = await publishedStackWithMergedDownstack(harness, 'two')
+    const before = await mergedLayerFacts(harness, merged)
+
+    // The new layer lands between the merged layer and the first open one, so
+    // nothing GitHub already merged is retargeted.
+    const plan = await preview(harness, { kind: 'insert', branch: 'two', name: 'pilot' })
+    assert.deepEqual(plan.blockers, [])
+    await runSurgery(harness.repo, plan.token, true, false)
+
+    const state = await harness.readState()
+    assert.deepEqual(
+      await mergedLayerFacts(harness, merged),
+      before,
+      'the merged layers keep their tips, their metadata and their pull requests',
+    )
+    const stack = (state.stacks ?? []).find((entry) => entry.number === 1)
+    assert.deepEqual(
+      stack?.pull_requests.map((member) => member.number),
+      merged.map((layer) => layers[layer].number),
+      'the merged pull requests stay in the stack GitHub does not unstack them from',
+    )
+    assert.equal(prFor(state, 'three').base, 'pilot', 'the open layer above the insert moved')
+    assert.equal(config(harness, 'branch.three.parent'), 'pilot')
+    assert.equal(
+      bareGit(harness, ['rev-parse', 'refs/heads/pilot']),
+      layers.two.tip,
+      'the inserted branch is published at the tip it was created from',
+    )
+    assert.equal(
+      git(harness, ['merge-base', '--is-ancestor', 'pilot', 'three']),
+      '',
+      'the replayed open layer descends from the branch published for it',
+    )
+    assert.equal(await getStackProgress(harness.repo), null)
   })
 })
