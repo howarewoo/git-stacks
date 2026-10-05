@@ -26,7 +26,7 @@
  *   npx tsx scripts/release-update-verify.ts --channel stable \
  *     --manifest channel-feed/update-stable.json --artifact-dir channel-assets
  */
-import { createPrivateKey, createPublicKey } from 'node:crypto'
+import { createPrivateKey } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { evaluateUpdateManifest } from '../src/shared/update'
@@ -36,8 +36,9 @@ import {
   manifestFileName,
   parseFlags,
   proveManifestBytes,
-  releaseLocation,
+  publicKeyBytesOf,
   requireChannel,
+  releaseLocation,
   sha256Of,
   signatureFileName,
   sizeOf,
@@ -80,13 +81,13 @@ const secret = process.env.UPDATE_SIGNING_KEY?.trim()
 if (secret) {
   let publicKey
   try {
-    publicKey = createPublicKey(createPrivateKey(secret))
+    publicKey = publicKeyBytesOf(createPrivateKey(secret))
   } catch {
     fail(
       'UPDATE_SIGNING_KEY is present but is not a readable private key, so this release cannot be checked against the key that was meant to sign it.',
     )
   }
-  const derived = publicKey.export({ format: 'der', type: 'spki' }).toString('base64')
+  const derived = publicKey.toString('base64')
   if (derived !== key.publicKey) {
     fail(
       `the committed key ${key.keyId} is not the key in UPDATE_SIGNING_KEY, so the signature was made with a key this release does not hold. Nothing is published.`,

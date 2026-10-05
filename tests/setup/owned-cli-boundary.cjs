@@ -42,11 +42,3 @@ const fixture = require('../fixtures/isolated-desktop.cjs')
 // empty registry.
 fixture.admitOwnedProviderCliRoot(realpathSync(owned))
 fixture.installOwnedProviderCliBoundary(owned)
-
-// The built-in ESM exports are re-synced from the patched CommonJS object, which
-// is the only way to reach a binding that was handed out before the boundary was
-// installed. The function lives on the `node:module` builtin; `process` has no
-// such export, so a call through it would throw on every run and the re-sync
-// these tests depend on would never happen.
-const moduleBuiltin = require('node:module')
-if (typeof moduleBuiltin.syncBuiltinESMExports === 'function') moduleBuiltin.syncBuiltinESMExports()

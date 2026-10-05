@@ -71,7 +71,8 @@ export function hostBarePath(): string {
   return value
 }
 
-function realGit(): string {
+/** The real `git` this fixture serves repositories from. */
+export function realGit(): string {
   return process.env.GIT_STACKS_REAL_GIT || '/usr/bin/git'
 }
 

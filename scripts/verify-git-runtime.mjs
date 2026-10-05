@@ -3,10 +3,10 @@
 // distribution and records every shipped file in the release manifest; this check
 // rejects incomplete or modified payloads before packaging.
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, statSync, lstatSync, readlinkSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { digest, inventory } from './git-runtime-inventory.cjs'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const runtimeRoot = process.argv[2]
@@ -21,18 +21,13 @@ function fail(message) {
   process.exit(1)
 }
 
-function inventory(directory, prefix = '') {
-  const files = {}
-  for (const item of readdirSync(directory, { withFileTypes: true })) {
-    const name = prefix ? `${prefix}/${item.name}` : item.name
-    const path = join(directory, item.name)
-    if (item.isDirectory()) Object.assign(files, inventory(path, name))
-    else if (item.isSymbolicLink()) files[name] = `link:${readlinkSync(path)}`
-    else if (item.isFile())
-      files[name] = createHash('sha256').update(readFileSync(path)).digest('hex')
-    else fail(`unexpected runtime entry ${name}`)
+/** The inventory as this script reports it: a prefixed line, then the stop. */
+function inventoryOrFail(root) {
+  try {
+    return inventory(root)
+  } catch (error) {
+    fail(error.message)
   }
-  return files
 }
 
 if (!existsSync(manifestPath)) {
@@ -64,7 +59,7 @@ for (const [name, entry] of Object.entries(manifest.platforms ?? {})) {
   if (!existsSync(executable)) {
     fail(`the manifest records ${name} but ${executable} is missing.`)
   }
-  const sha256 = createHash('sha256').update(readFileSync(executable)).digest('hex')
+  const sha256 = digest(executable)
   if (sha256 !== entry.sha256) {
     fail(`${executable} does not match the digest recorded for ${name}.`)
   }
@@ -73,7 +68,7 @@ for (const [name, entry] of Object.entries(manifest.platforms ?? {})) {
   }
   if (
     !entry.files ||
-    JSON.stringify(inventory(join(runtimeRoot, name))) !== JSON.stringify(entry.files)
+    JSON.stringify(inventoryOrFail(join(runtimeRoot, name))) !== JSON.stringify(entry.files)
   ) {
     fail(`${name} runtime files do not match the release inventory.`)
   }

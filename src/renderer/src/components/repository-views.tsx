@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import type { Branch, Commit, FileView, RepositorySnapshot } from '../../../shared/types'
 import { DIFF_PAGE_SIZE, LIST_PAGE_SIZE } from '../../../shared/performance'
-import { useListWindow } from '../lib/list-window'
+import { useListWindow, useRovingListFocus } from '../lib/list-window'
 import { createRequestGate } from '../lib/request-gate'
 import { ListWindowMore } from './list-window'
 import { actionBlockReason, submodulePathReason } from '../../../shared/capabilities'
@@ -937,43 +937,7 @@ export function StackView({
   const blocked = busy || !!snapshot.operation || !!snapshot.stackOperation
   // The stack rail is one composite widget, matching the branch tree and the
   // commit history list: one Tab stop, arrow keys between members.
-  const [activeMemberIndex, setActiveMemberIndex] = React.useState(0)
-  const memberListRef = React.useRef<HTMLDivElement>(null)
-  const focusStackMemberInWindow = (mountedIndex: number) => {
-    const row =
-      memberListRef.current?.querySelectorAll<HTMLButtonElement>('.stack-member-name')[mountedIndex]
-    if (!row) return
-    setActiveMemberIndex(mountedIndex)
-    row.focus()
-  }
-  // Only Home and End address the whole filtered rail, so a target outside the
-  // mounted window is revealed first and focused once it exists, keeping the
-  // rail's single Tab stop with the focus. Arrow keys must never come through
-  // here: they are already in mounted coordinates, and re-basing them by the
-  // window start would send them to the page the reader has already left.
-  const pendingMemberFocus = React.useRef<number | null>(null)
-  const focusStackMemberInList = (listIndex: number) => {
-    const mountedIndex = listIndex - memberWindow.start
-    if (mountedIndex >= 0 && mountedIndex < memberWindow.visible.length) {
-      focusStackMemberInWindow(mountedIndex)
-      return
-    }
-    pendingMemberFocus.current = listIndex
-    memberWindow.revealIndex(listIndex)
-  }
-  // The active member is tracked by its position in the mounted window, so a
-  // sliding window has to re-clamp it or the tree loses its single Tab stop.
-  React.useEffect(() => {
-    setActiveMemberIndex((index) => clampRovingIndex(index, memberWindow.visible.length))
-  }, [memberWindow.start, memberWindow.visible.length])
-  React.useEffect(() => {
-    const pending = pendingMemberFocus.current
-    if (pending === null) return
-    const mountedIndex = pending - memberWindow.start
-    if (mountedIndex < 0 || mountedIndex >= memberWindow.visible.length) return
-    pendingMemberFocus.current = null
-    focusStackMemberInWindow(mountedIndex)
-  }, [memberWindow.start, memberWindow.visible.length])
+  const memberRows = useRovingListFocus(memberWindow, '.stack-member-name')
   return (
     <div className="stacks-view">
       <div className="list-toolbar">
@@ -1114,7 +1078,7 @@ export function StackView({
           <div
             aria-label="Stack branches, children above parents"
             className="stack-members"
-            ref={memberListRef}
+            ref={memberRows.containerRef}
             role="list"
           >
             {memberWindow.visible.map((branch, memberIndex) => (
@@ -1137,7 +1101,7 @@ export function StackView({
                       })}
                       className="stack-member-name"
                       onClick={() => onSelect(branch)}
-                      onFocus={() => setActiveMemberIndex(memberIndex)}
+                      onFocus={() => memberRows.noteFocus(memberIndex)}
                       onKeyDown={(event) => {
                         // Only unmodified keys are claimed; a chord belongs to the
                         // global shortcut dispatcher.
@@ -1157,10 +1121,10 @@ export function StackView({
                           : rovingTarget(action, memberIndex, memberWindow.visible.length)
                         if (target === null) return
                         event.preventDefault()
-                        if (wholeList) focusStackMemberInList(target)
-                        else focusStackMemberInWindow(target)
+                        if (wholeList) memberRows.focusListIndex(target)
+                        else memberRows.focusMounted(target)
                       }}
-                      tabIndex={rovingTabIndex(memberIndex, activeMemberIndex)}
+                      tabIndex={rovingTabIndex(memberIndex, memberRows.activeIndex)}
                     >
                       <GitBranch className="size-4" />
                       <strong>{branch.name}</strong>

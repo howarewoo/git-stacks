@@ -7,7 +7,7 @@ import {
   RELEASE_LOCATION_PATH_PREFIX,
   type UpdateChannel,
   type UpdateOutcome,
-  type UpdateRejectionReport,
+  updateRefusal,
 } from '../../shared/update'
 
 /** A release moving tag per channel, so the feed URL never has to be rebuilt. */
@@ -36,10 +36,6 @@ export interface UpdateFeed {
   trust: 'release' | 'development'
 }
 
-function refusal(reason: UpdateRejectionReport['reason'], message: string): UpdateOutcome<never> {
-  return { ok: false, failure: { reason, message } }
-}
-
 /**
  * Resolves the feed for one channel. A build with no pinned key does not fail
  * here: it reports that updates are not configured, and never opens a socket.
@@ -55,7 +51,7 @@ export function resolveUpdateFeed(
     try {
       url = new URL(base)
     } catch {
-      return refusal('malformed-url', 'The configured update feed address is not a URL.')
+      return updateRefusal('malformed-url', 'The configured update feed address is not a URL.')
     }
     const caFile = env.GIT_STACKS_UPDATE_CA_FILE
     let ca: string[] = []
@@ -63,7 +59,7 @@ export function resolveUpdateFeed(
       try {
         ca = [readFileSync(caFile, 'utf8')]
       } catch {
-        return refusal('unreachable', 'The configured update feed certificate is unreadable.')
+        return updateRefusal('unreachable', 'The configured update feed certificate is unreadable.')
       }
     }
     const prefix = url.pathname.endsWith('/') ? url.pathname : `${url.pathname}/`

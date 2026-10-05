@@ -20,17 +20,20 @@
  *   UPDATE_SIGNING_KEY="$(cat key.pem)" npx tsx scripts/release-update-sign.ts \
  *     --channel stable --manifest channel-feed/update-stable.json
  */
-import { createPrivateKey, createPublicKey, sign, type KeyObject } from 'node:crypto'
+import { createPrivateKey, sign, type KeyObject } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { keyIsCurrent, type TrustedUpdateKey } from '../src/main/update/keys'
+import { verifyDetachedSignature } from '../src/main/update/signature'
 import { MAX_UPDATE_SIGNATURE_BYTES, UPDATE_SIGNATURE_SCHEMA } from '../src/shared/update'
 import {
   fail,
   flag,
   manifestFileName,
   parseFlags,
+  publicKeyBytesOf,
   requireChannel,
+  requireEd25519SigningKey,
   requireInjectedKey,
   signatureFileName,
 } from './release-update-common'
@@ -41,7 +44,6 @@ import {
  * signing with a key the app does not carry would publish an update nobody can
  * install.
  */
-import { verifyDetachedSignature } from '../src/main/update/signature'
 function releaseKeyFromSecret(): { key: TrustedUpdateKey; privateKey: KeyObject } {
   const secret = process.env.UPDATE_SIGNING_KEY?.trim()
   if (!secret) {
@@ -57,14 +59,7 @@ function releaseKeyFromSecret(): { key: TrustedUpdateKey; privateKey: KeyObject 
       'the UPDATE_SIGNING_KEY repository secret is not a readable private key (expected a PEM PKCS#8 Ed25519 key).',
     )
   }
-  if (privateKey.asymmetricKeyType !== 'ed25519') {
-    fail(
-      `the UPDATE_SIGNING_KEY repository secret holds a ${privateKey.asymmetricKeyType} key; update manifests are signed with Ed25519.`,
-    )
-  }
-  const publicKey = createPublicKey(privateKey)
-    .export({ format: 'der', type: 'spki' })
-    .toString('base64')
+  const publicKey = publicKeyBytesOf(requireEd25519SigningKey(privateKey)).toString('base64')
   const keys = requireInjectedKey()
   const key = keys.find((entry) => entry.publicKey === publicKey)
   if (!key) {

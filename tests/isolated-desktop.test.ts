@@ -14,7 +14,6 @@ interface IsolatedSafeStorage {
 
 interface IsolatedDesktopModule {
   KEY_FILE: string
-  MARKER_FILE: string
   createFixtureKey(keyFile: string, fixtureRoot: string): Buffer
   createIsolatedSafeStorage(options: {
     keyFile: string

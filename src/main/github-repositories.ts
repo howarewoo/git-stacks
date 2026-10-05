@@ -16,13 +16,7 @@ import type {
 
 /** GitHub's largest page for a repository collection. */
 export const REPOSITORY_PAGE_SIZE = 100
-/**
- * A bounded sweep over accessible repositories. This stops rather than walking
- * an unbounded collection, and reports only what it actually read.
- */
-export const MAX_REPOSITORY_PAGES = 30
 
-const PAGE_CAP = MAX_REPOSITORY_PAGES
 /** GitHub's search API imposes a hard limit of 1,000 results per query. */
 const GITHUB_SEARCH_RESULT_CAP = 1000
 const SEARCH_PAGE_CAP = Math.floor(GITHUB_SEARCH_RESULT_CAP / REPOSITORY_PAGE_SIZE)
@@ -312,7 +306,9 @@ function discoveryFailure(error: unknown): { state: GitHubCapabilityState; detai
 /**
  * `GET /user/repos`, already limited to repositories the caller owns,
  * collaborates on, or reaches through organization membership. The transport
- * follows every `Link` page and owns the credential and cancellation.
+ * follows every `Link` page within its own page bound and owns the credential
+ * and cancellation, so a bounded sweep stops rather than walking an unbounded
+ * collection.
  */
 async function listAccessible(
   transport: GitHubTransport,

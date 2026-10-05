@@ -189,7 +189,6 @@ export function unavailableGitHubResult(message: string, failure?: GitHubFailure
     nativeStackMessage: message,
   }
 }
-const unavailable = unavailableGitHubResult
 
 /** Read open issues separately from PR workflows; paging one connection never truncates the other. */
 export async function getGitHubIssues(
@@ -302,9 +301,10 @@ export async function getGitHubData(
 ): Promise<GitHubResult> {
   const remote = parseRemote(originUrl)
   const host = remoteHostContext(remote)
-  if (!originUrl) return unavailable('GitHub metadata unavailable: no origin remote is configured')
+  if (!originUrl)
+    return unavailableGitHubResult('GitHub metadata unavailable: no origin remote is configured')
   if (!remote || !host) {
-    return unavailable(
+    return unavailableGitHubResult(
       `PR integration requires a GitHub origin remote; this repository's origin is on ${remote ? remote.host : 'no host'}. Local Git actions remain available.`,
     )
   }
@@ -401,7 +401,7 @@ export async function getGitHubData(
   } catch (error) {
     if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
     observeGraphqlFailure(host, error)
-    return unavailable(githubErrorMessage(error), typedFailure(error))
+    return unavailableGitHubResult(githubErrorMessage(error), typedFailure(error))
   }
 }
 

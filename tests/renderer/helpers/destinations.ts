@@ -41,7 +41,7 @@ export function destinationScenario(id: DestinationId): ScenarioName {
 /**
  * Returns the navigation button Locator for the given workspace destination.
  */
-export function getDestinationNavItem(page: Page, id: DestinationId): Locator {
+function getDestinationNavItem(page: Page, id: DestinationId): Locator {
   const dest = DESTINATIONS.find((d) => d.id === id)
   if (!dest) {
     throw new Error(`Unknown destination id: ${id}`)

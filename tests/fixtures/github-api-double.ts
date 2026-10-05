@@ -19,6 +19,7 @@ import {
   hostRefSha,
   paginate,
   queryStringOf,
+  realGit,
   standingReviewDecisions,
   validateRuleSetCreation,
   withHostRepository,
@@ -72,8 +73,6 @@ function saveState(state: GitHubFixtureState): void {
   writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
   renameSync(temporary, statePath())
 }
-
-const realGit = () => process.env.GIT_STACKS_REAL_GIT || '/usr/bin/git'
 
 const primaryFullName = (state: GitHubFixtureState) =>
   `${state.repository.owner}/${state.repository.name}`

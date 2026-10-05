@@ -52,7 +52,7 @@ export async function openDeleteLocalBranchDialog(
 /**
  * Opens the toolbar 'More Git actions' dropdown menu.
  */
-export async function openMoreGitActionsMenu(page: Page): Promise<Locator> {
+async function openMoreGitActionsMenu(page: Page): Promise<Locator> {
   const menuTrigger = page.getByRole('button', { name: 'More Git actions', exact: true })
   await menuTrigger.click()
   const menu = page.getByRole('menu')

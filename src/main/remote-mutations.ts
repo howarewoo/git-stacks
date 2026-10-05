@@ -7,11 +7,11 @@ import { GitHubTransportError, type GitHubErrorKind } from './github-transport'
  * been applied, or may never have reached it. Everything else either changed
  * only local Git or failed in a way GitHub itself reported.
  */
-const UNKNOWN_OUTCOME_KINDS: Record<string, GitHubErrorKind> = {
-  network: 'network',
-  timeout: 'timeout',
-  'rate-limited': 'rate-limited',
-  'secondary-rate-limit': 'secondary-rate-limit',
+const UNKNOWN_OUTCOME_KINDS: Partial<Record<GitHubErrorKind, true>> = {
+  network: true,
+  timeout: true,
+  'rate-limited': true,
+  'secondary-rate-limit': true,
 }
 
 const CONNECTIVITY =

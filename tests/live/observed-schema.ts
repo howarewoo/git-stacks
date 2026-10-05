@@ -372,7 +372,7 @@ const MAX_OBSERVED_ROWS = 25
  * longer in the diff and a number for one that is), and a contract built from the
  * first row alone would pin the wrong one of the two.
  */
-export function shapeOf(value: unknown, prefix = '', depth = 0): ObservedField[] {
+function shapeOf(value: unknown, prefix = '', depth = 0): ObservedField[] {
   return mergeObservedFields(collectShape(value, prefix, depth))
 }
 

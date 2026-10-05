@@ -1,34 +1,43 @@
-import { randomUUID } from 'node:crypto'
-import * as fs from 'node:fs/promises'
-import path from 'node:path'
-
-import type { ReviewComparison } from '../shared/review'
-import type {
-  ReviewFirstObservation,
-  ReviewSnapshot,
-  ReviewSnapshotLog,
+import {
+  observeReviewHead,
+  withReviewedSnapshot,
+  type ReviewFirstObservation,
+  type ReviewSnapshot,
+  type ReviewSnapshotLog,
 } from '../shared/review-snapshots'
-import { observeReviewHead, withReviewedSnapshot } from '../shared/review-snapshots'
-import { runGit, stripTrailingNewline } from './git-core'
+import type { ReviewComparison } from '../shared/review'
 import { isRecord } from '../shared/guards'
+import { readJournal, repositoryJournalPath, writeJournal } from './review-journal'
 
-interface SnapshotJournal {
-  version: 1
-  records: ReviewSnapshotLog[]
-}
+const SNAPSHOT_JOURNAL = 'git-stacks-review-snapshots.json'
 
 const JOURNAL_MAX_LOGS = 100
 
-/**
- * The update snapshots live beside the repository's own Git directory, in the
- * common directory every linked worktree shares: they describe heads a person
- * observed across this repository, whatever worktree they were in.
- */
-async function snapshotPath(repoPath: string, signal?: AbortSignal): Promise<string> {
-  const common = stripTrailingNewline(
-    await runGit(repoPath, ['rev-parse', '--git-common-dir'], undefined, signal),
+async function readSnapshotJournal(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<ReviewSnapshotLog[]> {
+  try {
+    return await readJournal(
+      await repositoryJournalPath(repoPath, SNAPSHOT_JOURNAL, signal),
+      'records',
+      parseLog,
+    )
+  } catch {
+    return []
+  }
+}
+
+async function writeSnapshotJournal(
+  repoPath: string,
+  records: ReviewSnapshotLog[],
+  signal?: AbortSignal,
+): Promise<void> {
+  await writeJournal(
+    await repositoryJournalPath(repoPath, SNAPSHOT_JOURNAL, signal),
+    'records',
+    records.slice(0, JOURNAL_MAX_LOGS),
   )
-  return path.resolve(repoPath, common, 'git-stacks-review-snapshots.json')
 }
 
 function parseSnapshot(value: unknown): ReviewSnapshot | null {
@@ -88,39 +97,6 @@ function parseLog(value: unknown): ReviewSnapshotLog | null {
   }
 }
 
-async function readJournal(repoPath: string, signal?: AbortSignal): Promise<ReviewSnapshotLog[]> {
-  try {
-    const raw = await fs.readFile(await snapshotPath(repoPath, signal), 'utf8')
-    const parsed: unknown = JSON.parse(raw)
-    if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.records)) return []
-    return parsed.records.map(parseLog).filter((log): log is ReviewSnapshotLog => log !== null)
-  } catch {
-    return []
-  }
-}
-
-async function writeJournal(
-  repoPath: string,
-  records: ReviewSnapshotLog[],
-  signal?: AbortSignal,
-): Promise<void> {
-  const file = await snapshotPath(repoPath, signal)
-  const journal: SnapshotJournal = {
-    version: 1,
-    records: records.slice(0, JOURNAL_MAX_LOGS),
-  }
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  const temporary = `${file}.${randomUUID()}.tmp`
-  const handle = await fs.open(temporary, 'wx', 0o600)
-  try {
-    await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`, 'utf8')
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  await fs.rename(temporary, file)
-}
-
 function matches(log: ReviewSnapshotLog, repo: string, viewer: string, number: number): boolean {
   return log.repo === repo && log.viewer === viewer && log.number === number
 }
@@ -133,7 +109,7 @@ export async function readReviewSnapshotLog(
   number: number,
   signal?: AbortSignal,
 ): Promise<ReviewSnapshotLog | null> {
-  const records = await readJournal(repoPath, signal)
+  const records = await readSnapshotJournal(repoPath, signal)
   return records.find((log) => matches(log, repo, viewer, number)) ?? null
 }
 
@@ -155,13 +131,13 @@ export async function recordObservedHead(
   now: string = new Date().toISOString(),
   signal?: AbortSignal,
 ): Promise<ReviewSnapshotLog> {
-  const records = await readJournal(repoPath, signal)
+  const records = await readSnapshotJournal(repoPath, signal)
   const existingIndex = records.findIndex((log) => matches(log, repo, viewer, number))
   const current = existingIndex >= 0 ? records[existingIndex] : null
   const updated = observeReviewHead(current, { number, repo, viewer, comparison, commits, now })
   const kept = records.filter((_, index) => index !== existingIndex)
   kept.unshift(updated)
-  await writeJournal(repoPath, kept, signal)
+  await writeSnapshotJournal(repoPath, kept, signal)
   return updated
 }
 
@@ -182,7 +158,7 @@ export async function markReviewSnapshotReviewed(
   signal?: AbortSignal,
 ): Promise<void> {
   if (!comparison.headOid) return
-  const records = await readJournal(repoPath, signal)
+  const records = await readSnapshotJournal(repoPath, signal)
   const target = records.find((log) => matches(log, repo, viewer, number)) ?? null
   const observed = target?.snapshots.some((entry) => entry.headOid === comparison.headOid)
     ? target
@@ -190,7 +166,7 @@ export async function markReviewSnapshotReviewed(
   const updated = withReviewedSnapshot(observed, comparison.headOid, reviewId, now)
   const kept = records.filter((log) => !matches(log, repo, viewer, number))
   kept.unshift(updated)
-  await writeJournal(repoPath, kept, signal)
+  await writeSnapshotJournal(repoPath, kept, signal)
 }
 
 /**
@@ -206,7 +182,7 @@ export async function clearReviewSnapshots(
   number: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  const records = await readJournal(repoPath, signal)
+  const records = await readSnapshotJournal(repoPath, signal)
   const kept = records.filter((log) => !matches(log, repo, viewer, number))
-  await writeJournal(repoPath, kept, signal)
+  await writeSnapshotJournal(repoPath, kept, signal)
 }

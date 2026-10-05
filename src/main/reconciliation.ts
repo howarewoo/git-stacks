@@ -63,10 +63,6 @@ const stateLabels: Record<ReconciliationState, string> = {
   ambiguous: 'Ambiguous',
 }
 
-export function reconciliationStateLabel(state: ReconciliationState): string {
-  return stateLabels[state]
-}
-
 function shortOid(value: string | null): string {
   return value ? value.slice(0, 12) : 'unknown'
 }

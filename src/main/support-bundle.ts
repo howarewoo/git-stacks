@@ -91,6 +91,22 @@ function settingsFields(settings: AppSettings): SafeField[] {
 }
 
 /**
+ * The one rule every value on its way into a bundle passes through: withheld
+ * when it names a location and local paths are not included, redacted
+ * otherwise. Both the fields kept in the preview and the text rendered from
+ * them go through it, so the two can never disagree about what is safe.
+ */
+function safeValue(value: string, locational: boolean, includeLocalPaths: boolean): string {
+  const readable =
+    locational && !includeLocalPaths
+      ? '[withheld: include local paths in Settings to include this]'
+      : includeLocalPaths
+        ? value
+        : sanitizePaths(value)
+  return sanitizeSecrets(readable)
+}
+
+/**
  * A capability report line is already a single measured value produced by main's
  * fixed allowlist, so it is carried as structured key/value text. Its status
  * travels with it so a reader can tell a measurement from something the app
@@ -98,18 +114,14 @@ function settingsFields(settings: AppSettings): SafeField[] {
  */
 function reportFields(report: DiagnosticReport, includeLocalPaths: boolean): SafeField[] {
   return report.entries.map((entry) => {
-    let value = entry.detail
+    const measured = entry.detail
       ? `${entry.value} — ${entry.detail} [${entry.status}]`
       : `${entry.value} [${entry.status}]`
-    if (entry.locational && !includeLocalPaths) {
-      value = '[withheld: include local paths in Settings to include this]'
-    } else if (!includeLocalPaths) {
-      value = sanitizePaths(value)
-    }
-    value = sanitizeSecrets(value)
     return {
       name: `${entry.source}/${entry.label}`,
-      value,
+      // Redacted as the field is built, not only when it is rendered: the
+      // preview keeps these fields, so a raw path must never reach one.
+      value: safeValue(measured, entry.locational === true, includeLocalPaths),
       locational: entry.locational === true,
     }
   })
@@ -118,14 +130,9 @@ function reportFields(report: DiagnosticReport, includeLocalPaths: boolean): Saf
 function renderFields(title: string, fields: SafeField[], includeLocalPaths: boolean) {
   const lines = [`## ${title}`]
   for (const field of fields) {
-    let value = field.value
-    if (field.locational && !includeLocalPaths) {
-      value = '[withheld: include local paths in Settings to include this]'
-    } else if (!includeLocalPaths) {
-      value = sanitizePaths(value)
-    }
-    value = sanitizeSecrets(value)
-    lines.push(`${field.name}: ${value}`)
+    lines.push(
+      `${field.name}: ${safeValue(field.value, field.locational === true, includeLocalPaths)}`,
+    )
   }
   return lines.join('\n')
 }
@@ -159,11 +166,10 @@ export function buildBundle(
   ]
 
   if (failures.length > 0) {
-    const failFields = failures.map((line, index) => {
-      let safeLine = sanitizeSecrets(line)
-      if (!includePaths) safeLine = sanitizePaths(safeLine)
-      return { name: `failure ${index + 1}`, value: safeLine }
-    })
+    const failFields = failures.map((line, index) => ({
+      name: `failure ${index + 1}`,
+      value: safeValue(line, false, includePaths),
+    }))
     sections.push({
       id: 'failures',
       title: 'Recent failures',
@@ -183,8 +189,11 @@ export function buildBundle(
   }
 
   // A capability entry can name the runtime executable, which is a path. It is
-  // the one report field that is locational, so it is opted into like any other.
-  const pathCount = includePaths ? countLocational(report, settings) : 0
+  // the one report field that is locational, so it is opted into like any other;
+  // every settings field is a preference value, and names no location.
+  const pathCount = includePaths
+    ? report.entries.filter((entry) => entry.locational === true).length
+    : 0
   const preview: SupportBundlePreview = {
     sections,
     redacted: 0,
@@ -195,12 +204,6 @@ export function buildBundle(
   preview.renderedBody = rendered
   preview.bytes = Buffer.byteLength(rendered)
   return preview
-}
-
-function countLocational(report: DiagnosticReport, settings: AppSettings): number {
-  let count = settingsFields(settings).filter((field) => field.locational).length
-  count += report.entries.filter((entry) => entry.locational === true).length
-  return count
 }
 
 export function renderBundle(preview: SupportBundlePreview, includeLocalPaths: boolean): string {

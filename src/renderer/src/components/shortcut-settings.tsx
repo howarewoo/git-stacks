@@ -43,14 +43,6 @@ export function ShortcutEditor({
   const isMac = isMacPlatform()
 
   React.useEffect(() => {
-    if (!open) {
-      setRecordingId(null)
-      setConflictMessage(null)
-      setSuccessMessage(null)
-    }
-  }, [open])
-
-  React.useEffect(() => {
     if (!recordingId) return
 
     const handleKeyDown = (event: KeyboardEvent) => {

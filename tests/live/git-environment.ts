@@ -49,16 +49,6 @@ export interface IsolatedGitEnvironment {
    * of this environment still restores the process rather than this one.
    */
   readonly original: NodeJS.ProcessEnv
-  /**
-   * More than one credential, when the run acts as more than one account.
-   *
-   * Each is scoped to the URL of the repository it is for, and Git presents only the
-   * header whose URL prefix matches the remote in hand. That is what lets one run
-   * clone the primary's repository and the reviewer's fork in the same clone
-   * directory without either account's token ever being offered to the other's
-   * remote.
-   */
-  readonly credentials?: ReadonlyArray<{ readonly url: string; readonly header: string }>
 }
 
 /**
@@ -216,8 +206,6 @@ export interface GitEnvironmentInput {
    * `git remote -v`, `.git/config` and every diagnostic would show it.
    */
   readonly credentials?: ReadonlyArray<{ readonly url: string; readonly header: string }>
-  /** Extra `-c` configuration this run needs on every command. */
-  readonly config?: ReadonlyArray<readonly [string, string]>
   /** The identity commits and clones are made with, so a diff has an author. */
   readonly author: { readonly name: string; readonly email: string }
   /** Git's own host key checking, left to Git, for any transport that uses it. */
@@ -310,7 +298,6 @@ export async function installIsolatedGitEnvironment(
   for (const credential of input.credentials ?? []) {
     config.set(`http.${credential.url}.extraheader`, credential.header)
   }
-  for (const [key, value] of input.config ?? []) config.set(key, value)
   const pairs = Array.from(config.entries())
   env.HOME = home
   env.XDG_CONFIG_HOME = home

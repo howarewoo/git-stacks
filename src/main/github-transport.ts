@@ -841,7 +841,6 @@ export interface DirectGitHubTransportOptions {
   reportRateLimit?: boolean
 }
 
-/** Authenticated REST/GraphQL access to GitHub over HTTP; it never spawns `gh`. */
 /** The origin an API base resolves to, or null when the base is not a URL. */
 function originOf(apiUrl: string): string | null {
   try {
@@ -851,6 +850,54 @@ function originOf(apiUrl: string): string | null {
   }
 }
 
+/**
+ * What one conditional read answers with: the stored body a 304 replays, the
+ * refusal a 304 nobody stored earns, and the validator a fresh body is stored
+ * under. Both transports carry this cache, so both ask here once: a 304 cannot
+ * mean one thing for one transport and another for the next.
+ */
+function conditionalResult<T>(
+  request: GitHubRestRequest,
+  cache: GitHubResponseCache | undefined,
+  key: string | null,
+  cached: CachedGitHubResponse | null,
+  response: GitHubRestResponse<T>,
+): GitHubRestResponse<T> {
+  const { status, data, headers, rateLimit, authority } = response
+  const method = request.method ?? 'GET'
+  if (status === 304) {
+    // A mutation opting in to 304 is documented to answer as "no change": there
+    // is no display body to replay for it, and callers that did not opt in
+    // treat an unexpected 304 as an error. A conditional GET keeps the
+    // requirement it always had, because its 304 does mean a stored body.
+    if (!cached && method !== 'GET' && request.acceptNoChange === true) {
+      return { status, data: null as T, headers, rateLimit, notModified: true }
+    }
+    // The 304 is already recorded against this host by the response that
+    // carried it; raising this must not record it again without a host.
+    if (!cached)
+      throw new GitHubTransportError({
+        status,
+        kind: 'invalid-response',
+        detail: 'GitHub answered 304 without a stored response',
+        rateLimit,
+      })
+    return { status, data: cached.body as T, headers, rateLimit, notModified: true, authority }
+  }
+  const etag = headers?.get('etag') ?? null
+  const lastModified = headers?.get('last-modified') ?? null
+  // A response the caller has already abandoned is not this caller's to record:
+  // pairing an old body with the validator in force after it would make the next
+  // legitimate 304 replay an incomplete list. The centre that owns this cache
+  // cancels the read that is no longer wanted, and a cancelled read writes
+  // nothing.
+  if (cache && key && method === 'GET' && (etag || lastModified) && !request.signal?.aborted) {
+    cache.set(key, { etag, lastModified, body: data, storedAt: new Date() })
+  }
+  return response
+}
+
+/** Authenticated REST/GraphQL access to GitHub over HTTP; it never spawns `gh`. */
 export class DirectGitHubTransport implements GitHubTransport {
   readonly kind = 'direct' as const
   private readonly options: DirectGitHubTransportOptions
@@ -1164,36 +1211,13 @@ export class DirectGitHubTransport implements GitHubTransport {
       request.body,
       request$,
     )
-    if (status === 304) {
-      // A mutation opting in to 304 is documented to answer as "no change":
-      // there is no display body to replay for it, and callers that did not
-      // opt in treat an unexpected 304 as an error. A conditional GET keeps
-      // the requirement it always had, because its 304 does mean a stored body.
-      if (!cached && method !== 'GET' && request.acceptNoChange === true) {
-        return { status, data: null as T, headers, rateLimit, notModified: true }
-      }
-      // The 304 is already recorded against this host by the response that
-      // carried it; raising this must not record it again without a host.
-      if (!cached)
-        throw new GitHubTransportError({
-          status,
-          kind: 'invalid-response',
-          detail: 'GitHub answered 304 without a stored response',
-          rateLimit,
-        })
-      return { status, data: cached.body as T, headers, rateLimit, notModified: true, authority }
-    }
-    const etag = headers.get('etag')
-    const lastModified = headers.get('last-modified')
-    // A response the caller has already abandoned is not this caller's to
-    // record: pairing an old body with the validator in force after it would
-    // make the next legitimate 304 replay an incomplete list. The centre that
-    // owns this cache cancels the read that is no longer wanted, and a
-    // cancelled read writes nothing.
-    if (cache && key && method === 'GET' && (etag || lastModified) && !request.signal?.aborted) {
-      cache.set(key, { etag, lastModified, body, storedAt: new Date() })
-    }
-    return { status, data: body as T, headers, rateLimit, authority }
+    return conditionalResult(request, cache, key, cached, {
+      status,
+      data: body as T,
+      headers,
+      rateLimit,
+      authority,
+    })
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
@@ -1708,44 +1732,8 @@ export class GhGitHubTransport implements GitHubTransport {
       key === null
         ? request
         : { ...request, headers: { ...request.headers, ...conditionalHeaders(cached) } }
-    const { status, data, headers, rateLimit, authority } = await this.request<T>(
-      conditional,
-      snapshot ?? undefined,
-    )
-    if (status === 304) {
-      // A mutation opting in to 304 is documented to answer as "no change", and
-      // callers that did not opt in treat an unexpected 304 as an error. A
-      // conditional GET keeps the requirement it always had.
-      const method = request.method ?? 'GET'
-      if (!cached && method !== 'GET' && request.acceptNoChange === true) {
-        return { status, data: null as T, headers, rateLimit, notModified: true }
-      }
-      // The 304 is already recorded against this host by the response that
-      // carried it; raising this must not record it again without a host.
-      if (!cached)
-        throw new GitHubTransportError({
-          status,
-          kind: 'invalid-response',
-          detail: 'GitHub answered 304 without a stored response',
-          rateLimit,
-        })
-      return { status, data: cached.body as T, headers, rateLimit, notModified: true, authority }
-    }
-    const etag = headers.get('etag')
-    const lastModified = headers.get('last-modified')
-    // A response the caller has already abandoned is not this caller's to
-    // record: pairing an old body with the validator in force after it would
-    // make the next legitimate 304 replay an incomplete list.
-    if (
-      cache &&
-      key &&
-      (request.method ?? 'GET') === 'GET' &&
-      (etag || lastModified) &&
-      !request.signal?.aborted
-    ) {
-      cache.set(key, { etag, lastModified, body: data, storedAt: new Date() })
-    }
-    return { status, data, headers, rateLimit, authority }
+    const response = await this.request<T>(conditional, snapshot ?? undefined)
+    return conditionalResult(request, cache, key, cached, response)
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {

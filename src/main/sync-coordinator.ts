@@ -524,13 +524,9 @@ export class RepositorySyncCoordinator {
       return snapshot
     }
     this.adopt(snapshot)
-    this.failures = 0
+    this.recovered()
     this.resumeAt = null
     this.rateLimitReset = null
-    this.secondarySuspended = false
-    if (!this.budgetExhausted()) {
-      this.parkUntil = 0
-    }
     this.emit({ kind: 'snapshot', snapshot: { ...snapshot, remote: this.freshness() } })
     this.emit({ kind: 'status', freshness: this.freshness() })
     this.scheduleRemote(this.intervalFor(this.currentTier()))
@@ -543,11 +539,7 @@ export class RepositorySyncCoordinator {
     )
     if (!this.isCurrent(sequence, repository)) return null
     this.checkedAt = this.clock.now()
-    this.failures = 0
-    this.secondarySuspended = false
-    if (!this.budgetExhausted()) {
-      this.parkUntil = 0
-    }
+    this.recovered()
     // An answer at all proves the limit is over, so a parked state lifts without
     // the person having to do anything. It proves nothing about the pull
     // requests: this read never asked for one, so the data on screen keeps the
@@ -577,6 +569,20 @@ export class RepositorySyncCoordinator {
   private intervalFor(tier: 'visible' | 'secondary'): number {
     if (this.failures > 0) return failureDelay(this.failures, this.intervals)
     return tier === 'visible' ? this.intervals.visibleMs : this.intervals.secondaryMs
+  }
+
+  /**
+   * Forgets the backoff a failed read accumulated. A read that answered proves
+   * the failure has passed, so the delay is dropped and the park lifts — but
+   * only once GitHub's remaining budget says there is room to spend: a low
+   * budget parks the next attempt rather than clearing the limit that caused it.
+   */
+  private recovered(): void {
+    this.failures = 0
+    this.secondarySuspended = false
+    if (!this.budgetExhausted()) {
+      this.parkUntil = 0
+    }
   }
 
   /** Nonessential polling stops once GitHub's remaining budget runs low. */

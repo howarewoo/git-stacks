@@ -48,23 +48,24 @@ export interface GitHubCliSources {
   status?: GitHubCliStatus | null
 }
 
+/**
+ * One bounded local command, and only whether it answered. What a probe could
+ * not read is reported by the caller as "could not be run": its stderr is the
+ * command's, not this build's, so none of it is kept here.
+ */
 async function probe(
   executable: string,
   args: readonly string[],
-): Promise<{ ok: boolean; output: string; error: string | null }> {
+): Promise<{ ok: boolean; output: string }> {
   try {
     const { stdout } = await exec(executable, [...args], {
       timeout: MAX_PROBE_SECONDS * 1000,
       maxBuffer: MAX_PROBE_BYTES,
       windowsHide: true,
     })
-    return { ok: true, output: stdout.trim(), error: null }
+    return { ok: true, output: stdout.trim() }
   } catch {
-    return {
-      ok: false,
-      output: '',
-      error: 'probe failed',
-    }
+    return { ok: false, output: '' }
   }
 }
 
