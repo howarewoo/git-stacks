@@ -103,6 +103,10 @@ width, single-quoted JavaScript strings, omitted semicolons where safe, and
 trailing commas. Linting and assist actions (including import sorting) are
 disabled; this replaces the formatter without introducing new code-quality rules.
 
+Unspecified options use the pinned Biome defaults. Keep `expand: "auto"` explicit
+to preserve compact `package.json` arrays and objects, and keep the HTML formatter
+explicitly enabled for HTML/SVG formatting.
+
 Biome formats JavaScript, TypeScript, JSX/TSX, JSON, and CSS here. Tailwind CSS
 directives are enabled; HTML and SVG formatting use Biome's experimental full
 support. It honors `.gitignore` and excludes `package-lock.json`, `.impeccable/`,
