@@ -36,6 +36,7 @@ import {
   resetInboxHostAllowances,
   type PullRequestInboxTarget,
 } from '../src/main/pr-inbox'
+import { evaluatePullRequestInbox, type PullRequestInboxFilter } from '../src/shared/pr-inbox'
 import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 
 const NOW = Date.parse('2026-03-01T12:00:00.000Z')
@@ -996,7 +997,7 @@ test('a read that cannot answer keeps the rows this identity confirmed', async (
     'github.com': {
       graphql: () => {
         if (down) throw new TypeError('fetch failed')
-        return answered(pullRequest())
+        return answered(pullRequest({ additions: 0, deletions: 0, reviewThreads: connection([]) }))
       },
     },
   })
@@ -1005,6 +1006,7 @@ test('a read that cannot answer keeps the rows this identity confirmed', async (
     const targets = [target('acme/app')]
     const confirmed = await service.refresh(targets, { now: NOW })
     assert.equal(confirmed.items.length, 1)
+    assert.deepEqual(confirmed.items[0].changeSize, { state: 'known', value: 0 })
 
     // The host stops answering; the rows GitHub confirmed for this identity are
     // what stays on screen, with the reason they are unconfirmed.
@@ -1012,6 +1014,8 @@ test('a read that cannot answer keeps the rows this identity confirmed', async (
     const stale = await service.refresh(targets, { now: NOW })
     assert.equal(stale.refresh.state, 'offline')
     assert.equal(stale.items.length, 1)
+    assert.deepEqual(stale.items[0].changeSize, { state: 'stale' })
+    assert.deepEqual(stale.items[0].unresolvedThreads, { state: 'stale' })
     assert.equal(stale.refresh.confirmedAt, confirmed.refresh.confirmedAt)
   } finally {
     api.restore()
@@ -2979,6 +2983,246 @@ test('a headerless GraphQL primary refusal stops only its own principal for the 
         )
       },
     )
+  } finally {
+    api.restore()
+  }
+})
+
+test('optional counts use the same bounded read and distinguish zero, truncation and missing facts', async () => {
+  const api = installSynthetic({
+    'github.com': {
+      graphql: () => ({
+        body: {
+          data: {
+            viewer: { login: VIEWER },
+            repository: {
+              open: connection([
+                pullRequest({ additions: 0, deletions: 0, reviewThreads: connection([]) }),
+                pullRequest({
+                  number: 2,
+                  additions: 10,
+                  deletions: 5,
+                  reviewThreads: connection([{ isResolved: false }, { isResolved: true }], true),
+                }),
+                pullRequest({ number: 3, additions: null, deletions: 4, reviewThreads: null }),
+              ]),
+              merged: connection([]),
+            },
+          },
+        },
+      }),
+    },
+  })
+  try {
+    const report = await readPullRequestInbox([target('acme/app')], { now: NOW })
+    assert.equal(api.graphqlCalls['github.com'], 1, 'counts do not add per-row requests')
+    assert.deepEqual(report.items.find((item) => item.number === 1)?.changeSize, {
+      state: 'known',
+      value: 0,
+    })
+    assert.deepEqual(report.items.find((item) => item.number === 1)?.unresolvedThreads, {
+      state: 'known',
+      value: 0,
+    })
+    assert.deepEqual(report.items.find((item) => item.number === 2)?.changeSize, {
+      state: 'known',
+      value: 15,
+    })
+    assert.deepEqual(report.items.find((item) => item.number === 2)?.unresolvedThreads, {
+      state: 'truncated',
+      value: 1,
+    })
+    assert.deepEqual(report.items.find((item) => item.number === 3)?.changeSize, {
+      state: 'unknown',
+    })
+    assert.deepEqual(report.items.find((item) => item.number === 3)?.unresolvedThreads, {
+      state: 'unknown',
+    })
+    assert.equal(report.refresh.requests, api.calls.length)
+  } finally {
+    api.restore()
+  }
+})
+
+test('refusing optional count schema retains original review membership and reports unsupported counts', async () => {
+  const api = installSynthetic({
+    'github.com': {
+      graphql: (_variables, call) =>
+        call === 0
+          ? {
+              body: {
+                errors: [{ message: 'Cannot query field "reviewThreads" on type "PullRequest"' }],
+              },
+            }
+          : answered(
+              pullRequest({
+                author: { login: VIEWER },
+                reviewDecision: 'APPROVED',
+                reviewRequests: { nodes: [] },
+              }),
+            ),
+    },
+  })
+  try {
+    const report = await readPullRequestInbox([target('acme/app')], { now: NOW })
+    assert.equal(api.graphqlCalls['github.com'], 2)
+    assert.equal(report.items[0]?.metadata, 'full')
+    assert.deepEqual(report.items[0]?.groups, ['my-prs-approved'])
+    assert.deepEqual(report.items[0]?.changeSize, { state: 'unsupported' })
+    assert.deepEqual(report.items[0]?.unresolvedThreads, { state: 'unsupported' })
+    assert.equal(report.refresh.requests, api.calls.length)
+  } finally {
+    api.restore()
+  }
+})
+
+test('raw optional fact payloads distinguish confirmed absence from unreadable facts in structured predicates', async () => {
+  const cases: {
+    override: Record<string, unknown>
+    criteria: PullRequestInboxFilter['criteria']
+    expected: 'match' | 'excluded' | 'unknown'
+  }[] = [
+    {
+      override: { commits: { nodes: [null] } },
+      criteria: { checks: ['none'] },
+      expected: 'unknown',
+    },
+    {
+      override: { commits: { nodes: [{ commit: {} }] } },
+      criteria: { checks: ['none'] },
+      expected: 'unknown',
+    },
+    {
+      override: { commits: { nodes: [{ commit: { statusCheckRollup: {} } }] } },
+      criteria: { checks: ['none'] },
+      expected: 'unknown',
+    },
+    { override: { commits: { nodes: [] } }, criteria: { checks: ['none'] }, expected: 'match' },
+    {
+      override: { commits: { nodes: [{ commit: { statusCheckRollup: null } }] } },
+      criteria: { checks: ['none'] },
+      expected: 'match',
+    },
+    {
+      override: { commits: { nodes: [{ commit: { statusCheckRollup: { state: 'PENDING' } } }] } },
+      criteria: { checks: ['pending'] },
+      expected: 'match',
+    },
+    { override: { reviewDecision: '' }, criteria: { reviews: ['none'] }, expected: 'unknown' },
+    {
+      override: { reviewDecision: 'UNRECOGNIZED' },
+      criteria: { reviews: ['none'] },
+      expected: 'unknown',
+    },
+    {
+      override: { reviewDecision: undefined },
+      criteria: { reviews: ['none'] },
+      expected: 'unknown',
+    },
+    { override: { reviewDecision: null }, criteria: { reviews: ['none'] }, expected: 'match' },
+    {
+      override: { reviewDecision: 'APPROVED' },
+      criteria: { reviews: ['APPROVED'] },
+      expected: 'match',
+    },
+    {
+      override: { reviewRequests: { nodes: null, pageInfo: { hasNextPage: false } } },
+      criteria: { reviewers: ['Grace'] },
+      expected: 'unknown',
+    },
+    {
+      override: { reviewRequests: { pageInfo: { hasNextPage: false } } },
+      criteria: { reviewers: ['Grace'] },
+      expected: 'unknown',
+    },
+    {
+      override: { reviewRequests: connection([null]) },
+      criteria: { reviewers: ['Grace'] },
+      expected: 'unknown',
+    },
+    {
+      override: { reviewRequests: connection([{ requestedReviewer: { __typename: 'User' } }]) },
+      criteria: { reviewers: ['Grace'] },
+      expected: 'unknown',
+    },
+    {
+      override: { reviewRequests: connection([]) },
+      criteria: { reviewers: ['Grace'] },
+      expected: 'excluded',
+    },
+    {
+      override: { reviewRequests: connection([{ requestedReviewer: { __typename: 'Team' } }]) },
+      criteria: { reviewers: ['Grace'] },
+      expected: 'excluded',
+    },
+    {
+      override: {
+        reviewRequests: connection([{ requestedReviewer: { __typename: 'User', login: 'Grace' } }]),
+      },
+      criteria: { reviewers: ['grace'] },
+      expected: 'match',
+    },
+    {
+      override: {
+        reviewRequests: connection(
+          [{ requestedReviewer: { __typename: 'User', login: 'Other' } }],
+          true,
+        ),
+      },
+      criteria: { reviewers: ['Grace'] },
+      expected: 'unknown',
+    },
+  ]
+  const api = installSynthetic({
+    'github.com': {
+      graphql: () => ({
+        body: {
+          data: {
+            viewer: { login: VIEWER },
+            repository: {
+              open: connection(
+                cases.map(({ override }, index) =>
+                  pullRequest({
+                    number: index + 1,
+                    isDraft: true,
+                    author: { login: VIEWER },
+                    reviewDecision: null,
+                    commits: { nodes: [] },
+                    reviewRequests: connection([]),
+                    ...override,
+                  }),
+                ),
+              ),
+              merged: connection([]),
+            },
+          },
+        },
+      }),
+    },
+  })
+  try {
+    const report = await readPullRequestInbox([target('acme/app')], { now: NOW })
+    assert.equal(report.items.length, cases.length)
+    assert.equal(api.graphqlCalls['github.com'], 1)
+    for (const [index, entry] of cases.entries()) {
+      const item = report.items.find((candidate) => candidate.number === index + 1)
+      assert.ok(item)
+      assert.deepEqual(
+        item.groups,
+        ['drafts'],
+        'optional knowledge flags do not alter built-in groups',
+      )
+      assert.equal(
+        evaluatePullRequestInbox(item, {
+          group: 'drafts',
+          search: '',
+          sort: 'updated-desc',
+          criteria: entry.criteria,
+        }),
+        entry.expected,
+        `raw case ${index + 1}: ${JSON.stringify(entry.override)}`,
+      )
+    }
   } finally {
     api.restore()
   }

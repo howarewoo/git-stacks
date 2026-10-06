@@ -1908,6 +1908,7 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+  overflow: auto;
 }
 
 .pr-inbox-filters {
@@ -1946,6 +1947,112 @@ button:disabled {
   margin: 0;
 }
 
+.pr-inbox-criteria,
+.pr-inbox-results {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.pr-inbox-criteria summary {
+  cursor: pointer;
+}
+
+.pr-inbox-criteria-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  padding-block-start: 12px;
+}
+
+.pr-inbox-criteria fieldset {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-control);
+  padding: 8px;
+}
+
+.pr-inbox-criteria label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  overflow-wrap: anywhere;
+}
+
+.pr-inbox-criteria input[type="checkbox"] {
+  accent-color: var(--gs-semantic-selection-text);
+}
+
+.pr-inbox-results {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pr-inbox-results > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pr-inbox-content > .pr-list {
+  flex: 1 0 180px;
+}
+
+.pr-inbox-view .pr-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 152px 140px 16px;
+  gap: 12px;
+  align-items: center;
+}
+
+.pr-inbox-view .pr-copy strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.pr-inbox-view .pr-copy small {
+  font-family: var(--gs-semantic-font-sans);
+}
+
+.pr-inbox-facts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.pr-inbox-view .pr-badges {
+  justify-content: start;
+  gap: 4px;
+}
+
+@media (max-width: 1199px) {
+  .pr-inbox-view .pr-row {
+    grid-template-columns: 44px minmax(0, 1fr) 16px;
+  }
+
+  .pr-inbox-facts,
+  .pr-inbox-view .pr-badges {
+    grid-column: 2;
+  }
+
+  .pr-inbox-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pr-inbox-view .pr-row > svg {
+    grid-column: 3;
+    grid-row: 1;
+  }
+}
+
 @media (max-width: 1040px) {
   /* The rail stacks above the rows rather than squeezing both: at this width a
      180px rail costs a third of the row's width for a two-word group name. */
@@ -1958,6 +2065,7 @@ button:disabled {
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
+    max-height: 120px;
     gap: 6px;
     border-inline-end: 0;
     border-block-end: 1px solid var(--gs-semantic-border-decorative);
@@ -1977,7 +2085,7 @@ button:disabled {
 
   .pr-inbox-search {
     min-width: 0;
-    flex-basis: 100%;
+    flex-basis: 220px;
   }
 }
 

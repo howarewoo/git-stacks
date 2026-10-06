@@ -53,13 +53,19 @@ export interface PullRequestInboxTarget {
 const FULL_FIELDS = `
     number title url headRefName headRefOid baseRefName isDraft state
     updatedAt mergedAt
+    additions deletions
+    reviewThreads(first: 100) { nodes { isResolved } pageInfo { hasNextPage } }
     author { login }
     headRepository { nameWithOwner }
     reviewDecision
-    reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { login } } } }
+    reviewRequests(first: 50) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }
     latestReviews(first: 1) { nodes { author { login } submittedAt } }
     comments(last: 1) { nodes { author { login } createdAt } }
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
+const MEMBERSHIP_FIELDS = FULL_FIELDS.replace(
+  '    additions deletions\n    reviewThreads(first: 100) { nodes { isResolved } pageInfo { hasNextPage } }\n',
+  '',
+)
 
 /**
  * The same read without the recent fields. A host that refuses them still
@@ -72,7 +78,7 @@ const BASIC_FIELDS = `
     updatedAt mergedAt
     author { login }
     headRepository { nameWithOwner }
-    reviewRequests(first: 50) { nodes { requestedReviewer { ... on User { login } } } }`
+    reviewRequests(first: 50) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }`
 
 const OPEN_PAGE_SIZE = 100
 const MERGED_PAGE_SIZE = 50
@@ -428,6 +434,27 @@ function requestedLogins(value: unknown): string[] {
   return logins
 }
 
+/** Pagination alone cannot establish a reviewer list that failed to decode. */
+function reviewRequestsComplete(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.nodes) ||
+    !isRecord(value.pageInfo) ||
+    value.pageInfo.hasNextPage !== false
+  )
+    return false
+  return value.nodes.every((node) => {
+    if (!isRecord(node) || !isRecord(node.requestedReviewer)) return false
+    const reviewer = node.requestedReviewer
+    if (reviewer.__typename === 'Team') return true
+    return (
+      (reviewer.__typename === undefined || reviewer.__typename === 'User') &&
+      typeof reviewer.login === 'string' &&
+      reviewer.login.trim().length > 0
+    )
+  })
+}
+
 /** The author of the most recent review or issue comment, whichever is later. */
 function lastTurnAuthor(
   latestReviews: unknown,
@@ -475,12 +502,52 @@ function inboxChecks(value: unknown): PullRequest['checks'] {
   return 'passing'
 }
 
+/** Explicitly empty checks are known; missing or unreadable rollups are not. */
+function inboxChecksKnown(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value.nodes)) return false
+  return value.nodes.every((node) => {
+    if (!isRecord(node) || !isRecord(node.commit)) return false
+    const rollup = node.commit.statusCheckRollup
+    if (rollup === null) return true
+    if (!isRecord(rollup)) return false
+    return (
+      rollup.state === 'SUCCESS' ||
+      rollup.state === 'FAILURE' ||
+      rollup.state === 'ERROR' ||
+      rollup.state === 'PENDING' ||
+      rollup.state === 'EXPECTED'
+    )
+  })
+}
+
 function inboxState(value: unknown, mergedAt: string | null): PullRequest['state'] {
   if (mergedAt) return 'MERGED'
   if (value === 'CLOSED' || value === 'MERGED') return value
   return 'OPEN'
 }
 
+function inboxCount(value: unknown, unsupported: boolean) {
+  if (unsupported) return { state: 'unsupported' as const }
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? { state: 'known' as const, value }
+    : { state: 'unknown' as const }
+}
+
+function inboxThreadCount(value: unknown, unsupported: boolean) {
+  if (unsupported) return { state: 'unsupported' as const }
+  if (!isRecord(value) || !Array.isArray(value.nodes)) return { state: 'unknown' as const }
+  if (value.nodes.some((node) => !isRecord(node) || typeof node.isResolved !== 'boolean')) {
+    return { state: 'unknown' as const }
+  }
+  const count = value.nodes.filter((node) => isRecord(node) && !node.isResolved).length
+  if (!isRecord(value.pageInfo) || typeof value.pageInfo.hasNextPage !== 'boolean') {
+    return { state: 'unknown' as const }
+  }
+  return {
+    state: value.pageInfo.hasNextPage ? ('truncated' as const) : ('known' as const),
+    value: count,
+  }
+}
 /**
  * One pull request node into an Inbox item, or null when the node is not a
  * pull request this build can describe. A node missing its number, title, URL,
@@ -494,6 +561,7 @@ function inboxItem(
     path: string
     host: string
     basic: boolean
+    countsUnsupported?: boolean
   },
 ): PullRequestInboxItem | null {
   if (!isRecord(node)) return null
@@ -515,6 +583,8 @@ function inboxItem(
   const headRepository = isRecord(node.headRepository)
     ? nodeDate(node.headRepository.nameWithOwner)
     : null
+  const additions = inboxCount(node.additions, context.basic || context.countsUnsupported === true)
+  const deletions = inboxCount(node.deletions, context.basic || context.countsUnsupported === true)
   return {
     number,
     title,
@@ -534,12 +604,28 @@ function inboxItem(
     host: context.host,
     author: nodeLogin(node.author),
     reviewRequested: requestedLogins(node.reviewRequests),
+    reviewRequestsComplete: reviewRequestsComplete(node.reviewRequests),
     reviewDecision: context.basic
       ? null
       : typeof node.reviewDecision === 'string'
         ? node.reviewDecision
         : null,
     metadata: context.basic ? 'degraded' : 'full',
+    reviewKnown:
+      !context.basic &&
+      (node.reviewDecision === null ||
+        node.reviewDecision === 'APPROVED' ||
+        node.reviewDecision === 'CHANGES_REQUESTED' ||
+        node.reviewDecision === 'REVIEW_REQUIRED'),
+    checksKnown: !context.basic && inboxChecksKnown(node.commits),
+    changeSize:
+      additions.state === 'known' && deletions.state === 'known'
+        ? inboxCount(additions.value + deletions.value, false)
+        : { state: context.basic || context.countsUnsupported ? 'unsupported' : 'unknown' },
+    unresolvedThreads: inboxThreadCount(
+      node.reviewThreads,
+      context.basic || context.countsUnsupported === true,
+    ),
     lastTurnLogin: turn.login,
     updatedAt: nodeDate(node.updatedAt),
     mergedAt,
@@ -607,6 +693,7 @@ async function readRepositoryInbox(
   const items: PullRequestInboxItem[] = []
   let viewer: string | null = null
   let basic = false
+  let countsUnsupported = false
   let truncated = false
   let openCursor: string | null = null
   let mergedCursor: string | null = null
@@ -619,17 +706,20 @@ async function readRepositoryInbox(
     const variables = { owner, name, openCursor, mergedCursor }
     let page: Record<string, unknown>
     try {
-      page = await transport.graphql(inboxQuery(basic ? BASIC_FIELDS : FULL_FIELDS), variables, {
-        signal: context.signal,
-      })
+      page = await transport.graphql(
+        inboxQuery(basic ? BASIC_FIELDS : countsUnsupported ? MEMBERSHIP_FIELDS : FULL_FIELDS),
+        variables,
+        {
+          signal: context.signal,
+        },
+      )
     } catch (error) {
       const detail = error instanceof GitHubTransportError ? error.detail : String(error)
       if (!basic && isSchemaRefusal(detail)) {
-        // The host refused a field its schema does not carry. The narrower read
-        // is the same read without the recent fields, so the rows survive with
-        // review state honestly unknown rather than being lost. The refused
-        // query was a real request and stays charged.
-        basic = true
+        // Optional counts must not remove the established membership facts.
+        if (!countsUnsupported && /additions|deletions|reviewThreads/u.test(detail))
+          countsUnsupported = true
+        else basic = true
         continue
       }
       throw error
@@ -665,6 +755,7 @@ async function readRepositoryInbox(
           path: context.target.path,
           host: context.host.host,
           basic,
+          countsUnsupported,
         })
         if (!item) continue
         const key = inboxItemKey(context.host.host, context.fullName, item.number)
@@ -1178,7 +1269,12 @@ export class PullRequestInboxService {
     if (this.identity !== identity || this.targets !== targetSet) this.invalidate()
     return {
       ...report,
-      items: this.confirmed?.items ?? [],
+      items:
+        this.confirmed?.items.map((item) => ({
+          ...item,
+          changeSize: { state: 'stale' },
+          unresolvedThreads: { state: 'stale' },
+        })) ?? [],
       refresh: { ...report.refresh, confirmedAt: this.confirmed?.refresh.confirmedAt ?? null },
     }
   }

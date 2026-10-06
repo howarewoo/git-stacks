@@ -12,8 +12,8 @@ import {
  * The person's saved Inbox filters, in one file beside the settings this app
  * already owns.
  *
- * Saved filters are named questions, not configuration: a group, a search, and
- * optionally one repository. The file is written atomically at owner-only
+ * Saved views keep the group's bounded criteria and chosen sort. The file is
+ * written atomically at owner-only
  * permissions, and a file that cannot be read or parsed is treated as no saved
  * filters rather than as an error, so a damaged file never blocks the queue it
  * does not describe.
@@ -47,12 +47,13 @@ export class PullRequestInboxFilters {
   /** The stored list with the initialization read joined to it. */
   async settled(): Promise<PullRequestInboxSavedFilter[]> {
     this.ready ??= this.load()
-    return this.ready
+    await this.ready
+    return this.list()
   }
 
   /** The saved filters as they were last read or written. */
   list(): PullRequestInboxSavedFilter[] {
-    return this.filters.map((filter) => ({ ...filter }))
+    return structuredClone(this.filters)
   }
 
   async load(): Promise<PullRequestInboxSavedFilter[]> {
@@ -99,6 +100,7 @@ export class PullRequestInboxFilters {
   private async write(
     drafts: readonly PullRequestInboxFilterDraft[],
   ): Promise<PullRequestInboxSavedFilter[]> {
+    await this.settled()
     const known = new Set(this.filters.map((filter) => filter.id))
     const next: PullRequestInboxSavedFilter[] = []
     const used = new Set<string>()
@@ -114,7 +116,8 @@ export class PullRequestInboxFilters {
         name: parsed.name,
         group: parsed.group,
         search: parsed.search,
-        repository: parsed.repository,
+        criteria: parsed.criteria,
+        sort: parsed.sort,
       })
     }
     const stored = parsePullRequestInboxSavedFilters(next)

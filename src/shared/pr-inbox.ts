@@ -211,6 +211,10 @@ export interface PullRequestInboxSignals {
  * One pull request in the Inbox: the shared {@link PullRequest} shape plus the
  * repository it belongs to and the facts its groups were decided from.
  */
+export type PullRequestInboxCount =
+  | { state: 'known' | 'truncated'; value: number }
+  | { state: 'unknown' | 'unsupported' | 'stale' }
+
 export interface PullRequestInboxItem extends Omit<PullRequest, 'reviewDecision'> {
   /** `owner/name` of the registered repository whose origin serves it. */
   repository: string
@@ -220,12 +224,17 @@ export interface PullRequestInboxItem extends Omit<PullRequest, 'reviewDecision'
   host: string
   author: string | null
   reviewRequested: readonly string[]
+  reviewRequestsComplete?: boolean
   reviewDecision: string | null
   lastTurnLogin: string | null
   updatedAt: string | null
   mergedAt: string | null
   /** Which recent facts this read obtained; a degraded read shows unknown, not absence. */
   metadata: PullRequestInboxMetadata
+  checksKnown?: boolean
+  reviewKnown?: boolean
+  changeSize?: PullRequestInboxCount
+  unresolvedThreads?: PullRequestInboxCount
   groups: PullRequestInboxGroupId[]
 }
 
@@ -299,17 +308,31 @@ function mergedWithinWindow(mergedAt: string | null, now: number, days: number):
 }
 
 /** The filters one Inbox view applies. `search` is free text; the rest are exact. */
+export type PullRequestInboxSort = 'updated-desc' | 'size-desc' | 'size-asc'
+
+export interface PullRequestInboxCriteria {
+  repositories?: string[]
+  authors?: string[]
+  reviewers?: string[]
+  lifecycle?: ('open' | 'draft' | 'closed' | 'merged')[]
+  reviews?: ('APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | 'none')[]
+  checks?: PullRequest['checks'][]
+  minSize?: number
+  maxSize?: number
+}
+
 export interface PullRequestInboxFilter {
   group: PullRequestInboxGroupId
   search: string
-  /** Exact `owner/name`, or null for every registered repository. */
-  repository: string | null
+  criteria: PullRequestInboxCriteria
+  sort: PullRequestInboxSort
 }
 
 export const PULL_REQUEST_INBOX_DEFAULT_FILTER: PullRequestInboxFilter = {
   group: 'review-requested',
   search: '',
-  repository: null,
+  criteria: {},
+  sort: 'updated-desc',
 }
 
 /**
@@ -340,19 +363,67 @@ export function filterPullRequestInbox(
   items: readonly PullRequestInboxItem[],
   filter: PullRequestInboxFilter,
 ): PullRequestInboxItem[] {
-  const repository = filter.repository ? filter.repository.toLowerCase() : null
-  return items.filter(
-    (item) =>
-      item.groups.includes(filter.group) &&
-      (repository === null || item.repository.toLowerCase() === repository) &&
-      matchesPullRequestInboxSearch(item, filter.search),
+  return sortPullRequestInbox(
+    items.filter((item) => evaluatePullRequestInbox(item, filter) === 'match'),
+    filter.sort,
   )
 }
 
-/** Updated instant of a row, or zero when GitHub reported none. */
-function inboxItemTime(item: PullRequestInboxItem): number {
+/** An explicit condition cannot match an unavailable fact, including zero. */
+export function evaluatePullRequestInbox(
+  item: PullRequestInboxItem,
+  filter: PullRequestInboxFilter,
+): 'match' | 'excluded' | 'unknown' {
+  if (!item.groups.includes(filter.group) || !matchesPullRequestInboxSearch(item, filter.search))
+    return 'excluded'
+  const c = filter.criteria
+  const matches = (values: readonly string[] | undefined, value: string) =>
+    !values?.length || values.some((candidate) => candidate.toLowerCase() === value.toLowerCase())
+  if (!matches(c.repositories, item.repository)) return 'excluded'
+  const lifecycle =
+    item.state === 'MERGED'
+      ? 'merged'
+      : item.state === 'CLOSED'
+        ? 'closed'
+        : item.draft
+          ? 'draft'
+          : 'open'
+  if (!matches(c.lifecycle, lifecycle)) return 'excluded'
+  let unknown = false
+  if (c.authors?.length) {
+    if (item.author === null) unknown = true
+    else if (!matches(c.authors, item.author)) return 'excluded'
+  }
+  if (
+    c.reviewers?.length &&
+    !item.reviewRequested.some((reviewer) => matches(c.reviewers, reviewer))
+  ) {
+    if (item.reviewRequestsComplete === true) return 'excluded'
+    unknown = true
+  }
+  if (c.reviews?.length) {
+    if (item.metadata !== 'full' || item.reviewKnown === false) unknown = true
+    else if (!matches(c.reviews, item.reviewDecision || 'none')) return 'excluded'
+  }
+  if (c.checks?.length) {
+    if (item.metadata !== 'full' || item.checksKnown === false) unknown = true
+    else if (!matches(c.checks, item.checks)) return 'excluded'
+  }
+  if (c.minSize !== undefined || c.maxSize !== undefined) {
+    if (item.changeSize?.state !== 'known') unknown = true
+    else if (
+      (c.minSize !== undefined && item.changeSize.value < c.minSize) ||
+      (c.maxSize !== undefined && item.changeSize.value > c.maxSize)
+    )
+      return 'excluded'
+  }
+  return unknown ? 'unknown' : 'match'
+}
+
+/** Updated instant, or null when the host did not report a valid one. */
+function inboxItemTime(item: PullRequestInboxItem): number | null {
   const parsed = Date.parse(item.updatedAt ?? '')
-  return Number.isFinite(parsed) ? parsed : 0
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 /**
@@ -362,10 +433,26 @@ function inboxItemTime(item: PullRequestInboxItem): number {
  */
 export function sortPullRequestInbox(
   items: readonly PullRequestInboxItem[],
+  sort: PullRequestInboxSort = 'updated-desc',
 ): PullRequestInboxItem[] {
   return [...items].sort((first, second) => {
-    const byTime = inboxItemTime(second) - inboxItemTime(first)
+    const a =
+      sort === 'updated-desc'
+        ? inboxItemTime(first)
+        : first.changeSize?.state === 'known'
+          ? first.changeSize.value
+          : null
+    const b =
+      sort === 'updated-desc'
+        ? inboxItemTime(second)
+        : second.changeSize?.state === 'known'
+          ? second.changeSize.value
+          : null
+    if (a === null && b !== null) return 1
+    if (b === null && a !== null) return -1
+    const byTime = a === null || b === null ? 0 : sort === 'size-asc' ? a - b : b - a
     if (byTime !== 0) return byTime
+    if (first.host !== second.host) return first.host.localeCompare(second.host)
     if (first.repository !== second.repository) {
       return first.repository.localeCompare(second.repository)
     }
@@ -847,12 +934,9 @@ function pullRequestInboxNotice(refresh: PullRequestInboxRefresh): PullRequestIn
 }
 
 /** A named filter a person saved, so the same question is one click away. */
-export interface PullRequestInboxSavedFilter {
+export interface PullRequestInboxSavedFilter extends PullRequestInboxFilter {
   id: string
   name: string
-  group: PullRequestInboxGroupId
-  search: string
-  repository: string | null
 }
 
 /**
@@ -860,12 +944,9 @@ export interface PullRequestInboxSavedFilter {
  * filter has no identity yet, and the main process assigns one and returns the
  * stored list, so the window never invents an identifier it cannot verify.
  */
-export interface PullRequestInboxFilterDraft {
+export interface PullRequestInboxFilterDraft extends PullRequestInboxFilter {
   id?: string
   name: string
-  group: PullRequestInboxGroupId
-  search: string
-  repository: string | null
 }
 
 /**
@@ -883,8 +964,10 @@ export function parsePullRequestInboxFilterDraft(
   if (!isPullRequestInboxGroupId(record.group)) return null
   const search = record.search ?? ''
   if (typeof search !== 'string' || search.length > MAX_SEARCH_LENGTH) return null
-  const repository = record.repository ?? null
-  if (repository !== null && (typeof repository !== 'string' || !repository)) return null
+  const criteria = parseInboxCriteria(record.criteria)
+  if (!criteria) return null
+  const sort = record.sort
+  if (sort !== 'updated-desc' && sort !== 'size-desc' && sort !== 'size-asc') return null
   const id = record.id
   if (id !== undefined && (typeof id !== 'string' || !id || id.length > MAX_NAME_LENGTH)) {
     return null
@@ -894,7 +977,8 @@ export function parsePullRequestInboxFilterDraft(
     name: name.trim(),
     group: record.group,
     search,
-    repository: typeof repository === 'string' ? repository : null,
+    criteria,
+    sort,
   }
 }
 
@@ -916,22 +1000,73 @@ export function parsePullRequestInboxSavedFilters(value: unknown): PullRequestIn
   for (const entry of value.slice(0, MAX_SAVED_FILTERS)) {
     if (typeof entry !== 'object' || entry === null) continue
     const record = entry as Record<string, unknown>
-    const id = record.id
-    const name = record.name
-    if (typeof id !== 'string' || !id || id.length > MAX_NAME_LENGTH) continue
-    if (typeof name !== 'string' || !name.trim() || name.length > MAX_NAME_LENGTH) continue
-    if (!isPullRequestInboxGroupId(record.group)) continue
-    const search = record.search
-    if (typeof search !== 'string' || search.length > MAX_SEARCH_LENGTH) continue
-    const repository = record.repository
-    if (repository !== null && (typeof repository !== 'string' || !repository)) continue
-    filters.push({
-      id,
-      name: name.trim(),
-      group: record.group,
-      search,
-      repository: typeof repository === 'string' ? repository : null,
-    })
+    if (typeof record.search !== 'string') continue
+    const migrated =
+      'criteria' in record
+        ? record
+        : {
+            ...record,
+            criteria:
+              typeof record.repository === 'string' ? { repositories: [record.repository] } : {},
+            sort: 'updated-desc',
+          }
+    if (
+      !('criteria' in record) &&
+      record.repository !== null &&
+      typeof record.repository !== 'string'
+    )
+      continue
+    const parsed = parsePullRequestInboxFilterDraft(migrated)
+    if (!parsed?.id) continue
+    filters.push({ ...parsed, id: parsed.id })
   }
   return filters
+}
+
+function parseInboxCriteria(value: unknown): PullRequestInboxCriteria | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const result: PullRequestInboxCriteria = {}
+  const choices: Record<string, readonly string[] | null> = {
+    repositories: null,
+    authors: null,
+    reviewers: null,
+    lifecycle: ['open', 'draft', 'closed', 'merged'],
+    reviews: ['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED', 'none'],
+    checks: ['none', 'passing', 'failing', 'pending'],
+  }
+  for (const key of Object.keys(record)) {
+    if (!Object.hasOwn(choices, key) && key !== 'minSize' && key !== 'maxSize') return null
+  }
+  for (const key of Object.keys(choices)) {
+    const values = record[key]
+    if (values === undefined) continue
+    const allowed = choices[key]
+    if (
+      !Array.isArray(values) ||
+      values.length > 100 ||
+      values.some(
+        (entry) =>
+          typeof entry !== 'string' ||
+          !entry.trim() ||
+          entry.length > 200 ||
+          (allowed && !allowed.includes(entry)),
+      )
+    )
+      return null
+    Object.assign(result, { [key]: [...new Set(values)] })
+  }
+  for (const key of ['minSize', 'maxSize'] as const) {
+    const count = record[key]
+    if (count === undefined) continue
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) return null
+    result[key] = count
+  }
+  if (
+    result.minSize !== undefined &&
+    result.maxSize !== undefined &&
+    result.minSize > result.maxSize
+  )
+    return null
+  return result
 }

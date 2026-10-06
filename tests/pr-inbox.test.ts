@@ -308,11 +308,16 @@ test('search matches what a row already shows, and every term must match', () =>
 test('a repository filter is exact and ignores case', () => {
   const rows = [item({ repository: 'acme/app' }), item({ repository: 'acme/Other', number: 2 })]
   assert.deepEqual(
-    filterPullRequestInbox(rows, filterWith({ repository: 'ACME/Other' })).map((row) => row.number),
+    filterPullRequestInbox(rows, filterWith({ criteria: { repositories: ['ACME/Other'] } })).map(
+      (row) => row.number,
+    ),
     [2],
   )
-  assert.equal(filterPullRequestInbox(rows, filterWith({ repository: 'acme' })).length, 0)
-  assert.equal(filterPullRequestInbox(rows, filterWith({ repository: null })).length, 2)
+  assert.equal(
+    filterPullRequestInbox(rows, filterWith({ criteria: { repositories: ['acme'] } })).length,
+    0,
+  )
+  assert.equal(filterPullRequestInbox(rows, filterWith({ criteria: {} })).length, 2)
 })
 
 test('a group filter shows only that group', () => {
@@ -523,7 +528,16 @@ test('a saved filter file that cannot be understood yields no filters, not a ref
       { id: 'd', name: '', group: 'drafts', search: '', repository: null },
       'nonsense',
     ]),
-    [{ id: 'a', name: 'Mine', group: 'my-prs-waiting', search: '', repository: null }],
+    [
+      {
+        id: 'a',
+        name: 'Mine',
+        group: 'my-prs-waiting',
+        search: '',
+        criteria: {},
+        sort: 'updated-desc',
+      },
+    ],
   )
 })
 
@@ -535,7 +549,13 @@ test('saving assigns identity, and saving again replaces the filter it names', a
     assert.deepEqual(await filters.load(), [])
 
     const first = await filters.save([
-      { name: 'Waiting on reviewers', group: 'my-prs-waiting', search: '', repository: null },
+      {
+        name: 'Waiting on reviewers',
+        group: 'my-prs-waiting',
+        search: '',
+        criteria: {},
+        sort: 'updated-desc',
+      },
     ])
     assert.equal(first.length, 1)
     assert.ok(first[0].id)
@@ -543,7 +563,7 @@ test('saving assigns identity, and saving again replaces the filter it names', a
     // A second draft with no identity is a new filter, not an edit of the first.
     const second = await filters.save([
       ...first,
-      { name: 'Needs me', group: 'needs-response', search: '', repository: null },
+      { name: 'Needs me', group: 'needs-response', search: '', criteria: {}, sort: 'updated-desc' },
     ])
     assert.equal(second.length, 2)
 
@@ -571,10 +591,13 @@ test('one invalid draft refuses the whole write rather than losing a filter', as
   try {
     const filters = new PullRequestInboxFilters(file)
     const saved = await filters.save([
-      { name: 'Kept', group: 'drafts', search: '', repository: null },
+      { name: 'Kept', group: 'drafts', search: '', criteria: {}, sort: 'updated-desc' },
     ])
     await assert.rejects(
-      filters.save([...saved, { name: '', group: 'drafts', search: '', repository: null }]),
+      filters.save([
+        ...saved,
+        { name: '', group: 'drafts', search: '', criteria: {}, sort: 'updated-desc' },
+      ]),
     )
     assert.deepEqual(await filters.load(), saved)
   } finally {
@@ -592,7 +615,8 @@ test('a saved filter list is bounded', async () => {
         name: `Filter ${index}`,
         group: 'drafts' as const,
         search: '',
-        repository: null,
+        criteria: {},
+        sort: 'updated-desc' as const,
       })),
     )
     assert.equal(saved.length, 20)
@@ -609,7 +633,8 @@ test('overlapping saves each store the list they were given', async () => {
     name,
     group: 'drafts' as const,
     search: name,
-    repository: null,
+    criteria: {},
+    sort: 'updated-desc' as const,
   })
   try {
     const filters = new PullRequestInboxFilters(file)
@@ -649,11 +674,13 @@ test('a save that cannot be written does not wedge the ones after it', async () 
   try {
     const filters = new PullRequestInboxFilters(blocked)
     await assert.rejects(
-      filters.save([{ name: 'Lost', group: 'drafts', search: '', repository: null }]),
+      filters.save([
+        { name: 'Lost', group: 'drafts', search: '', criteria: {}, sort: 'updated-desc' },
+      ]),
     )
     await rm(blocked, { recursive: true, force: true })
     const saved = await filters.save([
-      { name: 'Kept', group: 'drafts', search: '', repository: null },
+      { name: 'Kept', group: 'drafts', search: '', criteria: {}, sort: 'updated-desc' },
     ])
     assert.deepEqual(
       saved.map((filter) => filter.name),

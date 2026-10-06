@@ -5,6 +5,7 @@ import {
   PULL_REQUEST_INBOX_DEFAULT_FILTER,
   PULL_REQUEST_INBOX_GROUPS,
   filterPullRequestInbox,
+  evaluatePullRequestInbox,
   pullRequestInboxGroupLabel,
   pullRequestInboxPresentation,
   pullRequestInboxQueueCount,
@@ -14,6 +15,8 @@ import {
   type PullRequestInboxItem,
   type PullRequestInboxReport,
   type PullRequestInboxSavedFilter,
+  type PullRequestInboxCriteria,
+  type PullRequestInboxCount,
 } from '../../../shared/pr-inbox'
 import { LIST_PAGE_SIZE } from '../../../shared/performance'
 import { useListWindow } from '../lib/list-window'
@@ -76,11 +79,11 @@ function hasMetadata(item: PullRequestInboxItem): boolean {
 }
 
 function inboxCheckLabel(item: PullRequestInboxItem): string {
-  return hasMetadata(item) ? checkLabel(item.checks) : 'unknown'
+  return hasMetadata(item) && item.checksKnown !== false ? checkLabel(item.checks) : 'unknown'
 }
 
 function inboxReviewLabel(item: PullRequestInboxItem): string {
-  if (hasMetadata(item)) return reviewLabel(asSharedPullRequest(item))
+  if (hasMetadata(item) && item.reviewKnown !== false) return reviewLabel(asSharedPullRequest(item))
   return 'review state unknown'
 }
 
@@ -88,12 +91,18 @@ function inboxAuthorLabel(item: PullRequestInboxItem): string {
   return item.author ? `opened by ${item.author}` : 'author not reported'
 }
 
+function countLabel(count: PullRequestInboxCount | undefined): string {
+  if (count?.state === 'known') return String(count.value)
+  if (count?.state === 'truncated') return `${count.value}+ (truncated)`
+  return count?.state ?? 'unknown'
+}
+
 function rowLabel(item: PullRequestInboxItem, now: number): string {
   const pr = asSharedPullRequest(item)
   const layer = item.stack
     ? `, layer ${item.stack.position} of ${item.stack.size} in native stack #${item.stack.stackNumber}`
     : ''
-  return `Open pull request #${item.number} ${item.title} in ${item.repository}, ${inboxAuthorLabel(item)}, ${lifecycleLabel(pr)}, checks ${inboxCheckLabel(item)}, ${inboxReviewLabel(item)}${layer}, ${updatedLabel(item, now)}`
+  return `Open pull request #${item.number} ${item.title} in ${item.repository}, ${inboxAuthorLabel(item)}, ${item.head} into ${item.base}, ${lifecycleLabel(pr)}, checks ${inboxCheckLabel(item)}, ${inboxReviewLabel(item)}${layer}, ${updatedLabel(item, now)}, changed lines ${countLabel(item.changeSize)}, unresolved threads ${countLabel(item.unresolvedThreads)}`
 }
 
 function groupCounts(
@@ -184,9 +193,7 @@ export function PullRequestInboxView({
         {
           ...(existing ? { id: existing.id } : {}),
           name,
-          group: filter.group,
-          search: filter.search,
-          repository: filter.repository,
+          ...filter,
         },
       ])
       formApi.reset()
@@ -205,9 +212,17 @@ export function PullRequestInboxView({
   const counts = React.useMemo(() => groupCounts(report), [report])
   const shown = React.useMemo(() => filterPullRequestInbox(items, filter), [items, filter])
   const window = useListWindow(shown)
+  const unknownExcluded = React.useMemo(
+    () =>
+      items.reduce(
+        (count, item) => count + (evaluatePullRequestInbox(item, filter) === 'unknown' ? 1 : 0),
+        0,
+      ),
+    [items, filter],
+  )
   const filtering =
     filter.search.trim().length > 0 ||
-    filter.repository !== null ||
+    Object.keys(filter.criteria).length > 0 ||
     filter.group !== PULL_REQUEST_INBOX_DEFAULT_FILTER.group
   const presentation = pullRequestInboxPresentation({
     refresh: report?.refresh ?? {
@@ -239,10 +254,24 @@ export function PullRequestInboxView({
   }
 
   const repositories = React.useMemo(
-    () => [...new Set(items.map((item) => item.repository))].sort(),
-    [items],
+    () =>
+      [
+        ...new Set([
+          ...(report?.refresh.repositories.map((entry) => entry.repository) ?? []),
+          ...items.map((item) => item.repository),
+        ]),
+      ].sort(),
+    [items, report?.refresh.repositories],
   )
   const activeGroup = PULL_REQUEST_INBOX_GROUPS.find((group) => group.id === filter.group)
+  const setCriteria = (criteria: PullRequestInboxCriteria) => {
+    const present = Object.fromEntries(
+      Object.entries(criteria).filter(
+        ([, value]) => value !== undefined && (!Array.isArray(value) || value.length > 0),
+      ),
+    )
+    setFilter({ ...filter, criteria: present })
+  }
 
   /** Every stored filter except `drop`, re-expressed as a draft for the main process. */
   const draftsWithout = (drop?: { id: string }): PullRequestInboxFilterDraft[] =>
@@ -308,11 +337,14 @@ export function PullRequestInboxView({
                       setFilter({
                         group: saved.group,
                         search: saved.search,
-                        repository: saved.repository,
+                        criteria: structuredClone(saved.criteria),
+                        sort: saved.sort,
                       })
                     }
                     title={`${pullRequestInboxGroupLabel(saved.group)} · ${saved.search || 'no search'}${
-                      saved.repository ? ` · ${saved.repository}` : ''
+                      saved.criteria.repositories?.length
+                        ? ` · ${saved.criteria.repositories.join(', ')}`
+                        : ''
                     }`}
                     type="button"
                   >
@@ -343,14 +375,17 @@ export function PullRequestInboxView({
                 value={filter.search}
               />
             </Field>
-            <Field id="pr-inbox-repository" label="Repository">
+            <Field id="pr-inbox-sort" label="Sort">
               <Select
                 controlSize="compact"
-                onValueChange={(value) => setFilter({ ...filter, repository: value || null })}
-                value={filter.repository ?? ''}
+                value={filter.sort}
+                onValueChange={(value) =>
+                  setFilter({ ...filter, sort: value as PullRequestInboxFilter['sort'] })
+                }
                 options={[
-                  { value: '', label: 'All registered repositories' },
-                  ...repositories.map((repository) => ({ value: repository, label: repository })),
+                  { value: 'updated-desc', label: 'Recently updated' },
+                  { value: 'size-desc', label: 'Largest change' },
+                  { value: 'size-asc', label: 'Smallest change' },
                 ]}
               />
             </Field>
@@ -388,6 +423,147 @@ export function PullRequestInboxView({
                 Save
               </Button>
             </form>
+          </div>
+          <details className="pr-inbox-criteria" open={Object.keys(filter.criteria).length > 0}>
+            <summary>Structured criteria · AND across fields, OR within each field</summary>
+            <div className="pr-inbox-criteria-fields">
+              <fieldset>
+                <legend>Repositories</legend>
+                {repositories.map((repository) => {
+                  const identity = repository.toLowerCase()
+                  return (
+                    <label key={repository}>
+                      <input
+                        type="checkbox"
+                        checked={
+                          filter.criteria.repositories?.some(
+                            (value) => value.toLowerCase() === identity,
+                          ) ?? false
+                        }
+                        onChange={(event) => {
+                          const others =
+                            filter.criteria.repositories?.filter(
+                              (value) => value.toLowerCase() !== identity,
+                            ) ?? []
+                          setCriteria({
+                            ...filter.criteria,
+                            repositories: event.target.checked ? [...others, repository] : others,
+                          })
+                        }}
+                      />
+                      {repository}
+                    </label>
+                  )
+                })}
+              </fieldset>
+              {(['authors', 'reviewers'] as const).map((key) => (
+                <Field
+                  key={key}
+                  id={`pr-inbox-${key}`}
+                  label={
+                    key === 'authors'
+                      ? 'Authors (comma separated)'
+                      : 'Requested reviewers (comma separated)'
+                  }
+                >
+                  <Input
+                    key={JSON.stringify(filter.criteria[key])}
+                    defaultValue={filter.criteria[key]?.join(', ') ?? ''}
+                    onBlur={(event) =>
+                      setCriteria({
+                        ...filter.criteria,
+                        [key]: event.target.value
+                          .split(',')
+                          .map((value) => value.trim())
+                          .filter(Boolean),
+                      })
+                    }
+                  />
+                </Field>
+              ))}
+              {(
+                [
+                  ['lifecycle', 'Lifecycle', ['open', 'draft', 'closed', 'merged']],
+                  [
+                    'reviews',
+                    'Review decision',
+                    ['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED', 'none'],
+                  ],
+                  ['checks', 'Checks', ['passing', 'failing', 'pending', 'none']],
+                ] as const
+              ).map(([key, label, values]) => (
+                <fieldset key={key}>
+                  <legend>{label}</legend>
+                  {values.map((value) => (
+                    <label key={value}>
+                      <input
+                        type="checkbox"
+                        checked={
+                          (filter.criteria[key] as readonly string[] | undefined)?.includes(
+                            value,
+                          ) ?? false
+                        }
+                        onChange={(event) =>
+                          setCriteria({
+                            ...filter.criteria,
+                            [key]: event.target.checked
+                              ? [...(filter.criteria[key] ?? []), value]
+                              : filter.criteria[key]?.filter((entry) => entry !== value),
+                          })
+                        }
+                      />
+                      {value.toLowerCase().replaceAll('_', ' ')}
+                    </label>
+                  ))}
+                </fieldset>
+              ))}
+              {(['minSize', 'maxSize'] as const).map((key) => (
+                <Field
+                  key={key}
+                  id={`pr-inbox-${key}`}
+                  label={key === 'minSize' ? 'Minimum changed lines' : 'Maximum changed lines'}
+                >
+                  <Input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={filter.criteria[key] ?? ''}
+                    onChange={(event) =>
+                      setCriteria({
+                        ...filter.criteria,
+                        [key]: event.target.value === '' ? undefined : Number(event.target.value),
+                      })
+                    }
+                  />
+                </Field>
+              ))}
+            </div>
+          </details>
+          <div className="pr-inbox-results" aria-live="polite">
+            <span>
+              {shown.length} matching pull requests · {unknownExcluded} excluded because required
+              facts are unavailable
+            </span>
+            {Object.keys(filter.criteria).length > 0 ? (
+              <span>
+                Criteria:{' '}
+                {Object.entries(filter.criteria)
+                  .map(
+                    ([key, value]) =>
+                      `${key}: ${Array.isArray(value) ? value.join(' or ') : value}`,
+                  )
+                  .join(' · ')}
+              </span>
+            ) : (
+              <span>No structured criteria</span>
+            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setFilter(PULL_REQUEST_INBOX_DEFAULT_FILTER)}
+            >
+              Clear filters
+            </Button>
           </div>
           {activeGroup ? (
             <p className="pr-inbox-rule">
@@ -454,18 +630,27 @@ export function PullRequestInboxView({
                       <span className="pr-copy">
                         <strong>{item.title}</strong>
                         <small>
-                          {item.repository} · {inboxAuthorLabel(item)} · {item.head}{' '}
-                          <span aria-hidden="true">→</span> {item.base} · {updatedLabel(item, now)}
+                          {item.repository} · {inboxAuthorLabel(item)}
+                        </small>
+                        <small title={`${item.head} into ${item.base}`}>
+                          {item.head} into {item.base}
                         </small>
                       </span>
+                      <span className="pr-inbox-facts">
+                        <span title={item.updatedAt ?? 'Update time unknown'}>
+                          {updatedLabel(item, now)}
+                        </span>
+                        <span>Lines {countLabel(item.changeSize)}</span>
+                        <span>
+                          {item.stack
+                            ? `Layer ${item.stack.position}/${item.stack.size}`
+                            : 'Stack not reported'}
+                        </span>
+                        <span>Unresolved threads {countLabel(item.unresolvedThreads)}</span>
+                      </span>
                       <span className="pr-badges">
-                        {item.stack ? (
-                          <Badge variant="accent">
-                            layer {item.stack.position}/{item.stack.size}
-                          </Badge>
-                        ) : null}
                         <Badge variant={lifecycleVariant(pr)}>{lifecycleLabel(pr)}</Badge>
-                        {hasMetadata(item) ? (
+                        {hasMetadata(item) && item.checksKnown !== false ? (
                           <Badge variant={checksVariant(item.checks)}>
                             <ShieldCheck className="size-3" />
                             {checkLabel(item.checks)}
@@ -476,7 +661,13 @@ export function PullRequestInboxView({
                             checks unknown
                           </Badge>
                         )}
-                        <Badge variant={hasMetadata(item) ? reviewVariant(pr) : 'outline'}>
+                        <Badge
+                          variant={
+                            hasMetadata(item) && item.reviewKnown !== false
+                              ? reviewVariant(pr)
+                              : 'outline'
+                          }
+                        >
                           {inboxReviewLabel(item)}
                         </Badge>
                       </span>
@@ -524,13 +715,6 @@ export function PullRequestInboxView({
                   ? `${queued} pull request${queued === 1 ? '' : 's'} in the queue; this group, search, and repository show none of them.`
                   : 'Change or clear the search and the repository filter to see the other pull requests.'}
               </p>
-              <Button
-                onClick={() => setFilter(PULL_REQUEST_INBOX_DEFAULT_FILTER)}
-                size="sm"
-                variant="secondary"
-              >
-                Clear filters
-              </Button>
             </EmptyState>
           ) : (
             <EmptyState className="compact-empty">
