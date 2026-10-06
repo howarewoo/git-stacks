@@ -21,7 +21,6 @@ import type {
 
 export type WorkflowActionInput =
   | { kind: 'rename'; branch: Branch; name: string }
-  | { kind: 'deleteRemote'; branch: Branch; confirmation: string }
   | { kind: 'parent'; branch: Branch; name: string }
   | { kind: 'upstream'; branch: Branch; name: string }
   | { kind: 'pull'; strategy: 'ff-only' | 'merge' | 'rebase' }
@@ -93,8 +92,6 @@ export function workflowActionLabel(input: WorkflowActionInput): string {
   switch (input.kind) {
     case 'rename':
       return 'Rename branch'
-    case 'deleteRemote':
-      return 'Delete remote branch'
     case 'parent':
       return 'Set stack parent'
     case 'upstream':
@@ -133,10 +130,6 @@ export function workflowAction(
   switch (input.kind) {
     case 'rename':
       return { type: 'renameBranch', ref: input.branch.ref, name: input.name.trim() }
-    case 'deleteRemote':
-      // Deleting a remote branch is only safe against a captured remote tip.
-      if (!input.branch.oid || input.confirmation !== input.branch.name) return null
-      return { type: 'deleteRemoteBranch', ref: input.branch.ref, expectedOid: input.branch.oid }
     case 'parent':
       return { type: 'setParent', branch: input.branch.name, parent: input.name }
     case 'upstream':

@@ -965,6 +965,7 @@ export type GitAction =
   | { type: 'createPr'; title: string; body: string; base: string; draft: boolean }
   | { type: 'renameBranch'; ref: string; name: string }
   | { type: 'deleteRemoteBranch'; ref: string; expectedOid: string }
+  | { type: 'deleteRemoteBranches'; branches: { ref: string; expectedOid: string }[] }
   | { type: 'setUpstream'; ref: string; upstream: string | null }
   | { type: 'merge'; ref: string; expectedHead: string; expectedHeadRef: string }
   | {

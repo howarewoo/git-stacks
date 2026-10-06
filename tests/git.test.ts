@@ -1562,3 +1562,122 @@ test('branch deletion commits its ref before metadata cleanup', async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+for (const scenario of [
+  'success',
+  'stale',
+  'concurrent',
+  'protected',
+  'mixed',
+  'push-url',
+  'no-atomic',
+  'hook',
+  'single',
+  'single-no-atomic',
+] as const) {
+  test(`remote deletion is atomic and captured-lease guarded: ${scenario}`, async () => {
+    const { root, repo, git } = await fixture()
+    try {
+      const remote = join(root, 'remote.git')
+      execFileSync('git', ['init', '--bare', remote], { stdio: 'pipe' })
+      const bareGit = (...args: string[]) =>
+        execFileSync('git', ['-C', remote, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
+      git('remote', 'add', 'origin', remote)
+      for (const name of ['first', 'second', 'unselected']) git('branch', name)
+      git('push', 'origin', 'main', 'first', 'second', 'unselected')
+      bareGit('symbolic-ref', 'HEAD', 'refs/heads/main')
+      git('fetch', 'origin')
+      const expectedOid = git('rev-parse', 'main')
+      git('commit', '--allow-empty', '-m', 'Concurrent remote tip')
+      const changedOid = git('rev-parse', 'HEAD')
+      git('push', 'origin', 'HEAD:refs/heads/concurrent-object')
+      const branches = ['first', 'second'].map((name) => ({
+        ref: `refs/remotes/origin/${name}`,
+        expectedOid,
+      }))
+      if (scenario === 'stale') bareGit('update-ref', 'refs/heads/second', changedOid)
+      if (scenario === 'protected') branches[1].ref = 'refs/remotes/origin/main'
+      if (scenario === 'mixed') {
+        git('remote', 'add', 'other', remote)
+        git('fetch', 'other')
+        branches[1].ref = 'refs/remotes/other/second'
+      }
+      if (scenario === 'push-url') {
+        const fetchRemote = join(root, 'fetch.git')
+        execFileSync('git', ['clone', '--bare', remote, fetchRemote], { stdio: 'pipe' })
+        git('remote', 'set-url', 'origin', fetchRemote)
+        git('remote', 'set-url', '--push', 'origin', remote)
+      }
+      if (scenario === 'no-atomic' || scenario === 'single-no-atomic')
+        bareGit('config', 'receive.advertiseAtomic', 'false')
+      if (scenario === 'hook') {
+        const hook = join(remote, 'hooks', 'update')
+        await writeFile(hook, '#!/bin/sh\n[ "$1" != refs/heads/second ]\n')
+        await chmod(hook, 0o755)
+      }
+      const race =
+        scenario === 'concurrent'
+          ? beginGitRace({
+              matches: (args) => args.includes('push') && args.includes('--atomic'),
+              inject: () => {
+                runRealGit(remote, ['update-ref', 'refs/heads/second', changedOid])
+              },
+            })
+          : null
+      const single = scenario === 'single' || scenario === 'single-no-atomic'
+      try {
+        const action: GitAction = single
+          ? { type: 'deleteRemoteBranch', ...branches[0] }
+          : { type: 'deleteRemoteBranches', branches }
+        if (single || scenario === 'success' || scenario === 'push-url') {
+          await runAction(repo, action)
+          assert.throws(() => bareGit('show-ref', '--verify', 'refs/heads/first'))
+          if (!single) {
+            assert.throws(() => bareGit('show-ref', '--verify', 'refs/heads/second'))
+          } else assert.equal(bareGit('rev-parse', 'second'), expectedOid)
+          if (scenario === 'push-url') {
+            assert.equal(
+              execFileSync('git', ['-C', join(root, 'fetch.git'), 'rev-parse', 'first'], {
+                encoding: 'utf8',
+              }).trim(),
+              expectedOid,
+            )
+          }
+        } else {
+          await assert.rejects(runAction(repo, action))
+          assert.equal(bareGit('rev-parse', 'first'), expectedOid)
+          assert.equal(
+            bareGit('rev-parse', 'second'),
+            scenario === 'stale' || scenario === 'concurrent' ? changedOid : expectedOid,
+          )
+        }
+      } finally {
+        race?.end()
+      }
+      assert.equal(bareGit('rev-parse', 'unselected'), expectedOid)
+      for (const name of ['first', 'second', 'unselected']) {
+        assert.equal(git('rev-parse', `refs/heads/${name}`), expectedOid)
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}
+
+test('remote bulk deletion rejects empty, duplicate, and malformed targets', async () => {
+  const { root, repo } = await fixture()
+  try {
+    for (const branches of [
+      [],
+      [{ ref: 'refs/remotes/origin/a', expectedOid: 'bad' }],
+      Array.from({ length: 2 }, () => ({
+        ref: 'refs/remotes/origin/a',
+        expectedOid: '1'.repeat(40),
+      })),
+    ]) {
+      await assert.rejects(runAction(repo, { type: 'deleteRemoteBranches', branches }))
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

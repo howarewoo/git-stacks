@@ -15,14 +15,13 @@ import { workflowAction } from '../components/workflow-action'
 import { guardedBranch, liveGuardBase, publishPreview } from './DialogSpecimenData'
 
 /**
- * The three reviewed operations, wired to the real guard and the real action
+ * The reviewed operations, wired to the real guard and the real action
  * builder. Each card's submit is disabled by the same blocker the dialog uses,
  * and pressing it shows the Git action that would be dispatched, so the state a
  * person sees and the action that would run cannot drift apart.
  */
 export function LiveGuardedOperations() {
   const [forceName, setForceName] = React.useState('')
-  const [deleteName, setDeleteName] = React.useState('')
   const [ref, setRef] = React.useState('')
   const [ran, setRan] = React.useState<string | null>(null)
 
@@ -37,17 +36,6 @@ export function LiveGuardedOperations() {
     confirmationTarget: guardedBranch.name,
     confirmation: forceName,
     untitledBranches: [],
-  })
-  const deleteBlocker = workflowBlocker({
-    ...liveGuardBase,
-    kind: 'deleteRemote',
-    allowForce: false,
-    requiresLeaseApproval: false,
-    name: '',
-    requiresName: false,
-    previewToken: null,
-    confirmationTarget: guardedBranch.name,
-    confirmation: deleteName,
   })
   const mergeBlocker = workflowBlocker({
     ...liveGuardBase,
@@ -124,39 +112,6 @@ export function LiveGuardedOperations() {
           </WorkflowActions>
           <p className="specimen-banner-note" data-role="blocker">
             {publishBlocker ? publishBlocker.code : 'ready'}
-          </p>
-        </WorkflowFrame>
-      </section>
-
-      <section className="specimen-dialog" data-operation="delete-remote">
-        <header>
-          <strong>Delete remote branch</strong>
-          <span>
-            No preview exists for a local delete; the captured tip and the name are the guard.
-          </span>
-        </header>
-        <WorkflowFrame composition="destructive">
-          <TypedConfirmation
-            id="live-delete-name"
-            label={`Type ${guardedBranch.name} to confirm`}
-            value={deleteName}
-            onChange={setDeleteName}
-            target={guardedBranch.name}
-          />
-          <WorkflowActions>
-            <Button
-              variant="danger"
-              disabled={Boolean(deleteBlocker)}
-              tooltip={deleteBlocker?.message ?? 'Delete the remote branch and its pull request.'}
-              onClick={() =>
-                show({ kind: 'deleteRemote', branch: guardedBranch, confirmation: deleteName })
-              }
-            >
-              Delete remote branch
-            </Button>
-          </WorkflowActions>
-          <p className="specimen-banner-note" data-role="blocker">
-            {deleteBlocker ? deleteBlocker.code : 'ready'}
           </p>
         </WorkflowFrame>
       </section>

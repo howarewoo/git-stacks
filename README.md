@@ -223,15 +223,25 @@ Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
 palette. The safety suite advances pending hover timers after opening a
 destructive dialog to verify that contextual cards cannot cover its warning.
 
-### Deleting local branches
+### Deleting branches
 
 In **Branches**, choose **Select branches**, check the branches to remove, then
-choose **Delete selected**. **Select all visible** selects eligible rows on the
-currently mounted page only. Selections remain counted across filters and paging;
-**Clear selection** clears the checked branches while keeping selection mode open;
-**Done selecting** also exits selection mode. A successful deletion clears the
-checked branches without exiting selection mode. Opening another repository
-clears the selection and exits selection mode.
+choose **Delete selected**. Remote-only rows can be selected directly in **All**;
+switching to **Remote** is not required. The first checked branch chooses local or
+remote deletion for the batch. Other branch types are disabled until you
+**Clear selection**, so local and remote deletions cannot be mixed.
+
+**Select all visible** selects eligible rows of the batch's type on the currently
+mounted page only. With no checked branches, it selects local branches when any
+eligible local rows are visible; otherwise it selects remote branches. Check a
+remote row first to select all visible remotes in a mixed list.
+
+Selections remain counted across paging, search, **All**, **With PRs**, and filters
+matching their type. Switching to an incompatible **Local** or **Remote** filter
+clears the checked branches without exiting selection mode.
+**Clear selection** also keeps selection mode open; **Done selecting** exits it.
+A successful deletion clears the checked branches without exiting selection mode.
+Opening another repository clears the selection and exits selection mode.
 
 The confirmation lists each selected local ref and captured tip. Confirm with
 the delete button; typing a branch name is not required, including when
@@ -244,6 +254,23 @@ All selected refs are deleted together in one Git reference transaction.
 Remote branches, pull requests, and child-branch parent records are unchanged.
 Branch configuration is removed after deletion; if that cleanup fails, the error
 explicitly reports that the branches were already deleted.
+
+For remote deletion, the confirmation lists each captured remote-tracking ref and
+tip, with no name field or unmerged checkbox. The inspector and command palette
+open the same confirmation for a single remote branch. Local branches and their
+configuration remain; open pull requests may close, and collaborators will need
+to prune their fetched refs. Remote-only commits may become unreachable, and
+the app cannot undo deletion.
+
+A remote batch must belong to one configured remote. Git deletes all selected
+remote branches in one atomic push to that remote's configured push URL, with an
+explicit captured-tip lease for every branch. A mixed-remote selection, protected
+default/remote HEAD, changed tip, unsupported atomic push, or server rejection
+blocks deletion without removing other selected branches. There is no non-atomic
+fallback for a multi-branch deletion. Single-ref deletion does not need the server's
+atomic-push capability. Fetch and refresh to capture fresh tips after a stale-tip rejection.
+If transport fails after the push may have reached the server, the existing
+unknown-outcome notice remains; reconnect never replays deletion.
 
 ### Merging a pull request
 

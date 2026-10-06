@@ -378,6 +378,22 @@ function validateAction(value: unknown): GitAction {
         ref: requireRefInput(value.ref, 'remote branch ref'),
         expectedOid: requireOid(value.expectedOid, 'expectedOid')!,
       }
+    case 'deleteRemoteBranches': {
+      if (!Array.isArray(value.branches) || value.branches.length === 0) {
+        throw new Error('deleteRemoteBranches requires one or more branches')
+      }
+      const branches = value.branches.map((entry, index) => {
+        if (!isRecord(entry)) throw new Error(`branches[${index}] must be a branch target`)
+        return {
+          ref: requireRefInput(entry.ref, `branches[${index}].ref`),
+          expectedOid: requireOid(entry.expectedOid, `branches[${index}].expectedOid`)!,
+        }
+      })
+      if (new Set(branches.map(({ ref }) => ref)).size !== branches.length) {
+        throw new Error('branches must not contain duplicate refs')
+      }
+      return { type: 'deleteRemoteBranches', branches }
+    }
     case 'discardFile':
       return {
         type: 'discardFile',
@@ -5465,58 +5481,73 @@ async function ensureStackWriteAllowed(repoPath: string, action: GitAction): Pro
   }
   throw new Error('A stack operation is in progress; finish or abort it before other writes')
 }
-async function runDeleteRemoteBranch(
+async function runDeleteRemoteBranches(
   repoPath: string,
-  ref: string,
-  expectedOid: string,
+  branches: { ref: string; expectedOid: string }[],
 ): Promise<ActionResult> {
-  const prefix = 'refs/remotes/'
-  if (!ref.startsWith(prefix)) {
-    throw new Error('Only fetched remote branch refs can be deleted')
+  await ensureNoBusyOperation(repoPath, 'delete remote branches')
+  const targets: { remote: string; branch: string; expectedOid: string }[] = []
+  for (const { ref, expectedOid } of branches) {
+    if (!ref.startsWith('refs/remotes/')) {
+      throw new Error('Only fetched remote branch refs can be deleted')
+    }
+    const remote = await remoteForRefPath(repoPath, ref)
+    if (!remote) throw new Error('The selected remote branch has no configured remote')
+    const branch = ref.slice('refs/remotes/'.length + remote.length + 1)
+    if (!branch || branch === 'HEAD') {
+      throw new Error('The remote symbolic HEAD cannot be deleted')
+    }
+    await validateBranchName(repoPath, branch)
+    if (!(await refExists(repoPath, ref))) {
+      throw new Error(`Remote branch "${ref}" no longer exists locally`)
+    }
+    const localOid = stripTrailingNewline(
+      await runGit(repoPath, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]),
+    )
+    if (localOid.toLowerCase() !== expectedOid.toLowerCase()) {
+      throw new Error('The remote branch changed locally; refresh before deleting it')
+    }
+    const symbolic = await tryGit(repoPath, ['symbolic-ref', '--quiet', ref])
+    if (symbolic) throw new Error('The remote symbolic HEAD cannot be deleted')
+    targets.push({ remote, branch, expectedOid })
   }
-  await ensureNoBusyOperation(repoPath, 'delete a remote branch')
-  const remainder = ref.slice(prefix.length)
-  const remote = await remoteForRefPath(repoPath, ref)
-  if (!remote) throw new Error('The selected remote branch has no configured remote')
-  const branch = remainder.slice(remote.length + 1)
-  if (!branch || branch === 'HEAD') {
-    throw new Error('The remote symbolic HEAD cannot be deleted')
-  }
-  await validateBranchName(repoPath, branch)
-  if (!(await refExists(repoPath, ref))) {
-    throw new Error(`Remote branch "${ref}" no longer exists locally`)
-  }
-  const localOid = stripTrailingNewline(
-    await runGit(repoPath, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]),
-  )
-  if (localOid.toLowerCase() !== expectedOid.toLowerCase()) {
-    throw new Error('The remote branch changed locally; refresh before deleting it')
+  const remote = targets[0].remote
+  if (targets.some((target) => target.remote !== remote)) {
+    throw new Error('Remote branches must belong to the same configured remote')
   }
   const refs = await getRefs(repoPath)
   const defaultBranch = await getDefaultBranch(repoPath, refs, await getCurrentBranch(repoPath))
   const pushUrl = await getRemotePushUrl(repoPath, remote)
   const remoteHead = await remoteHeadDestination(repoPath, pushUrl)
-  if (branch === defaultBranch || remoteHead === `refs/heads/${branch}`) {
-    throw new Error('The default or remote HEAD branch cannot be deleted')
-  }
-  const symbolic = await tryGit(repoPath, ['symbolic-ref', '--quiet', ref])
-  if (symbolic) throw new Error('The remote symbolic HEAD cannot be deleted')
-  const remoteOid = await getRemoteOid(repoPath, pushUrl, `refs/heads/${branch}`)
-  if (!remoteOid || remoteOid.toLowerCase() !== expectedOid.toLowerCase()) {
-    throw new Error('The remote branch changed; fetch and refresh before deleting it')
+  for (const { branch, expectedOid } of targets) {
+    if (branch === defaultBranch || remoteHead === `refs/heads/${branch}`) {
+      throw new Error('The default or remote HEAD branch cannot be deleted')
+    }
+    const remoteOid = await getRemoteOid(repoPath, pushUrl, `refs/heads/${branch}`)
+    if (!remoteOid || remoteOid.toLowerCase() !== expectedOid.toLowerCase()) {
+      throw new Error('The remote branch changed; fetch and refresh before deleting it')
+    }
   }
   await runGit(repoPath, [
     '-c',
     'push.followTags=false',
     'push',
-    `--force-with-lease=refs/heads/${branch}:${expectedOid}`,
+    ...(targets.length > 1 ? ['--atomic'] : []),
+    ...targets.map(
+      ({ branch, expectedOid }) => `--force-with-lease=refs/heads/${branch}:${expectedOid}`,
+    ),
     '--no-mirror',
     '--no-follow-tags',
     '--',
     pushUrl,
-    `:refs/heads/${branch}`,
+    ...targets.map(({ branch }) => `:refs/heads/${branch}`),
   ])
-  return { message: `Deleted remote branch ${remote}/${branch}` }
+  return {
+    message:
+      targets.length === 1
+        ? `Deleted remote branch ${remote}/${targets[0].branch}`
+        : `Deleted ${targets.length} remote branches`,
+  }
 }
 
 /**
@@ -5817,7 +5848,9 @@ export async function runAction(
       case 'deleteBranches':
         return runDeleteBranches(root, action.branches, action.force)
       case 'deleteRemoteBranch':
-        return runDeleteRemoteBranch(root, action.ref, action.expectedOid)
+        return runDeleteRemoteBranches(root, [{ ref: action.ref, expectedOid: action.expectedOid }])
+      case 'deleteRemoteBranches':
+        return runDeleteRemoteBranches(root, action.branches)
       case 'renameBranch':
         return runRenameBranch(root, action.ref, action.name)
       case 'setUpstream':

@@ -191,6 +191,8 @@ function actionMessage(action: GitAction): string {
       return `Renamed ${action.ref} to ${action.name}`
     case 'deleteRemoteBranch':
       return `Deleted ${action.ref} from its remote`
+    case 'deleteRemoteBranches':
+      return `Deleted ${action.branches.length} remote branches`
     case 'setUpstream':
       return action.upstream ? `Tracking ${action.upstream}` : 'Stopped tracking the remote branch'
     case 'merge':

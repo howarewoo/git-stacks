@@ -12,7 +12,6 @@ export type WorkflowKind =
   | 'rename'
   | 'parent'
   | 'upstream'
-  | 'deleteRemote'
   | 'pull'
   | 'merge'
   | 'stash'
@@ -133,7 +132,7 @@ export const WORKFLOW_BLOCKER_MESSAGES: Record<WorkflowBlockerCode, string> = {
   'publish-title-required':
     'Every branch without an existing pull request needs a title before publishing.',
   'remote-tip-unavailable':
-    'The remote tip is unknown, so deletion cannot be verified. Fetch and try again.',
+    'The remote tip is unknown, so the push cannot be verified. Fetch and preview again.',
   'lease-approval-required':
     'Approve replacing published history with the exact remote tips listed below. Nothing is force pushed without that approval.',
   completed: 'This step already completed. Review the result, then choose the next operation.',
@@ -183,7 +182,6 @@ const nameKinds: readonly WorkflowKind[] = ['rename', 'parent', 'merge']
 function needsTypedConfirmation(input: WorkflowGuardInput): boolean {
   return (
     input.kind === 'forcePush' ||
-    input.kind === 'deleteRemote' ||
     ((input.kind === 'stack' || input.kind === 'surgery') && input.allowForce)
   )
 }
@@ -216,12 +214,6 @@ export function workflowBlocker(input: WorkflowGuardInput): WorkflowBlocker | nu
     if (!input.previewToken) return block('preview-missing')
     if (input.expectedOidMissing) return block('remote-tip-unavailable')
     if (input.rejectedTokens.includes(input.previewToken)) return block('preview-stale')
-  }
-
-  // Remote deletion has no preview to read: it is guarded by the exact branch
-  // name and the remote OID captured when the dialog opened.
-  if (input.kind === 'deleteRemote') {
-    if (input.expectedOidMissing) return block('remote-tip-unavailable')
   }
 
   // Replacing remote history always requires typing the branch name, including

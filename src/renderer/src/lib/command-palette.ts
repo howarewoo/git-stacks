@@ -795,6 +795,7 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
           isBusy ||
           operationActive ||
           !selectedBranch.oid ||
+          selectedBranch.ref.endsWith('/HEAD') ||
           selectedBranch.name.endsWith(`/${snapshot?.defaultBranch}`),
         disabledReason: isBusy
           ? 'App is busy'
@@ -802,10 +803,12 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
             ? 'Operation in progress'
             : !selectedBranch.oid
               ? 'Remote branch identity is unavailable'
-              : selectedBranch.name.endsWith(`/${snapshot?.defaultBranch}`)
-                ? 'Cannot delete the default branch on its remote'
-                : undefined,
-        intent: { kind: 'workflow', request: { kind: 'deleteRemote', branch: selectedBranch } },
+              : selectedBranch.ref.endsWith('/HEAD')
+                ? 'Cannot delete the remote symbolic HEAD'
+                : selectedBranch.name.endsWith(`/${snapshot?.defaultBranch}`)
+                  ? 'Cannot delete the default branch on its remote'
+                  : undefined,
+        intent: { kind: 'deleteBranch' },
       })
     }
   }

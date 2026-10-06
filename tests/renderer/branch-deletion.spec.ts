@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { LIST_PAGE_SIZE } from '../../src/shared/performance'
 import { switchDestination } from './helpers/destinations'
-import { openDeleteLocalBranchDialog } from './helpers/dialogs'
+import { openDeleteLocalBranchDialog, selectBranchInList } from './helpers/dialogs'
 import {
   failNextDoubleCall,
   getDispatchedActions,
@@ -58,7 +58,7 @@ test.describe('Local branch deletion', () => {
     page,
   }) => {
     const branches = await openSelection(page, LIST_PAGE_SIZE * 3)
-    for (const name of ['main', 'feature/checkout', 'origin/protected', 'unknown-tip']) {
+    for (const name of ['main', 'feature/checkout', 'unknown-tip']) {
       await getViewFilterInput(page).fill(name)
       await expect(selectBranch(page, name)).toBeDisabled()
     }
@@ -248,6 +248,239 @@ test.describe('Local branch deletion', () => {
         force: true,
         expectedOid: '45ea707145ea707145ea707145ea707145ea7071',
       },
+    ])
+  })
+})
+
+async function openRemoteBranches(page: Page) {
+  await openGallery(page, { scenario: 'shell-connected' })
+  const branches = await page.evaluate(async () => {
+    const snapshot = await window.desktop.refresh()
+    const template = snapshot.branches.find((branch) => !branch.current && !branch.remote)!
+    const remote = (name: string, oid: string) => ({
+      ...template,
+      name: `origin/${name}`,
+      ref: `refs/remotes/origin/${name}`,
+      oid,
+      current: false,
+      remote: true,
+      parent: null,
+      parentTip: null,
+      parentSource: null,
+      pr: null,
+      upstream: null,
+      upstreamRef: null,
+    })
+    const branches = [remote('cleanup-one', '1'.repeat(40)), remote('cleanup-two', '2'.repeat(40))]
+    window.fixture.pushSnapshot({
+      ...snapshot,
+      branches: [
+        ...snapshot.branches.filter((branch) => !branch.remote),
+        remote('main', '3'.repeat(40)),
+        remote('HEAD', '3'.repeat(40)),
+        remote('unknown-tip', ''),
+        ...branches,
+      ],
+    })
+    return branches
+  })
+  await settle(page)
+  await switchDestination(page, 'branches')
+  return branches
+}
+
+async function selectRemoteFilter(page: Page) {
+  await page
+    .getByRole('group', { name: 'Branch filters' })
+    .getByRole('button', { name: 'Remote', exact: true })
+    .click()
+}
+
+test.describe('Remote branch deletion', () => {
+  test('remote-only rows in All select directly and keep remote scope across All/Remote filters', async ({
+    page,
+  }) => {
+    const branches = await openRemoteBranches(page)
+    await expect(page.getByRole('button', { name: 'All', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await page.getByRole('button', { name: 'Select branches', exact: true }).click()
+    await selectBranch(page, branches[0].name).check()
+    await expect(selectBranch(page, 'feature/checkout-tests')).toBeDisabled()
+    await page.getByRole('checkbox', { name: 'Select all visible', exact: true }).check()
+    for (const branch of branches) await expect(selectBranch(page, branch.name)).toBeChecked()
+    await selectRemoteFilter(page)
+    await page.getByRole('button', { name: 'All', exact: true }).click()
+    for (const branch of branches) await expect(selectBranch(page, branch.name)).toBeChecked()
+    await page.getByRole('button', { name: 'Delete selected (2)', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Delete remote branches?', exact: true })
+    await expect(dialog.getByRole('textbox')).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Delete 2 remote branches', exact: true }).click()
+    await settle(page)
+    expect(await getDispatchedActions(page)).toEqual([
+      {
+        type: 'deleteRemoteBranches',
+        branches: branches.map((branch) => ({ ref: branch.ref, expectedOid: branch.oid })),
+      },
+    ])
+  })
+
+  test('select all in a remote-only All search chooses remote deletion without changing filters', async ({
+    page,
+  }) => {
+    const branches = await openRemoteBranches(page)
+    await getViewFilterInput(page).fill('origin/cleanup')
+    await page.getByRole('button', { name: 'Select branches', exact: true }).click()
+    await page.getByRole('checkbox', { name: 'Select all visible', exact: true }).check()
+    for (const branch of branches) await expect(selectBranch(page, branch.name)).toBeChecked()
+    await page.getByRole('button', { name: 'Delete selected (2)', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Delete remote branches?', exact: true })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await page.getByRole('button', { name: 'Clear selection', exact: true }).click()
+    await getViewFilterInput(page).fill('')
+    await expect(selectBranch(page, branches[0].name)).toBeEnabled()
+    await expect(selectBranch(page, 'feature/checkout-tests')).toBeEnabled()
+    expect(await getDispatchedActions(page)).toEqual([])
+  })
+
+  test('remote scope selects only eligible rows and clears local selections', async ({ page }) => {
+    const branches = await openRemoteBranches(page)
+    await page.getByRole('button', { name: 'Select branches', exact: true }).click()
+    await selectBranch(page, 'feature/checkout-tests').check()
+    await selectRemoteFilter(page)
+    await expect(
+      page.getByRole('button', { name: 'Delete selected (0)', exact: true }),
+    ).toBeDisabled()
+    for (const name of ['origin/main', 'origin/HEAD', 'origin/unknown-tip']) {
+      await expect(selectBranch(page, name)).toBeDisabled()
+    }
+    await page.getByRole('checkbox', { name: 'Select all visible', exact: true }).check()
+    for (const branch of branches) await expect(selectBranch(page, branch.name)).toBeChecked()
+    await expect(
+      page.getByRole('button', { name: 'Delete selected (2)', exact: true }),
+    ).toBeEnabled()
+    await page
+      .getByRole('group', { name: 'Branch filters' })
+      .getByRole('button', { name: 'Local', exact: true })
+      .click()
+    await expect(selectBranch(page, 'feature/checkout-tests')).not.toBeChecked()
+    expect(await getDispatchedActions(page)).toEqual([])
+  })
+
+  test('batch confirmation captures tips, cancels safely and submits without typed consent', async ({
+    page,
+  }) => {
+    const branches = await openRemoteBranches(page)
+    await selectRemoteFilter(page)
+    await page.getByRole('button', { name: 'Select branches', exact: true }).click()
+    await page.getByRole('checkbox', { name: 'Select all visible', exact: true }).check()
+    await page.getByRole('button', { name: 'Delete selected (2)', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Delete remote branches?', exact: true })
+    for (const branch of branches) {
+      await expect(dialog.getByText(branch.ref, { exact: true })).toBeVisible()
+      await expect(dialog.getByText(branch.oid, { exact: true })).toBeVisible()
+    }
+    await expect(dialog.getByRole('textbox')).toHaveCount(0)
+    await expect(
+      dialog.getByRole('checkbox', { name: 'Delete even if not merged', exact: true }),
+    ).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    expect(await getDispatchedActions(page)).toEqual([])
+    await page.getByRole('button', { name: 'Delete selected (2)', exact: true }).click()
+    await page.evaluate(async () => {
+      const snapshot = await window.desktop.refresh()
+      window.fixture.pushSnapshot({
+        ...snapshot,
+        branches: snapshot.branches.map((branch) => ({ ...branch, oid: 'f'.repeat(40) })),
+      })
+    })
+    await dialog.getByRole('button', { name: 'Delete 2 remote branches', exact: true }).click()
+    await settle(page)
+    expect(await getDispatchedActions(page)).toEqual([
+      {
+        type: 'deleteRemoteBranches',
+        branches: branches.map((branch) => ({ ref: branch.ref, expectedOid: branch.oid })),
+      },
+    ])
+  })
+
+  test('remote deletion failure stays inline with the captured targets', async ({ page }) => {
+    const branches = await openRemoteBranches(page)
+    await selectRemoteFilter(page)
+    await page.getByRole('button', { name: 'Select branches', exact: true }).click()
+    await page.getByRole('checkbox', { name: 'Select all visible', exact: true }).check()
+    await page.getByRole('button', { name: 'Delete selected (2)', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Delete remote branches?', exact: true })
+    await failNextDoubleCall(page, 'runAction', 'Remote tip changed; no branches were deleted')
+    await dialog.getByRole('button', { name: 'Delete 2 remote branches', exact: true }).click()
+    await settle(page)
+    await expect(dialog).toBeVisible()
+    await expect(
+      dialog.getByText('Remote tip changed; no branches were deleted', { exact: true }),
+    ).toBeVisible()
+    await expect(
+      dialog.getByRole('button', { name: 'Delete 2 remote branches', exact: true }),
+    ).toBeEnabled()
+    expect(await getDispatchedActions(page)).toEqual([
+      {
+        type: 'deleteRemoteBranches',
+        branches: branches.map((branch) => ({ ref: branch.ref, expectedOid: branch.oid })),
+      },
+    ])
+  })
+
+  test('inspector opens the shared single remote confirmation without a name field', async ({
+    page,
+  }) => {
+    const [branch] = await openRemoteBranches(page)
+    await selectRemoteFilter(page)
+    await selectBranchInList(page, branch.name)
+    await page
+      .locator('.details-pane')
+      .getByRole('button', { name: 'Delete remote branch…', exact: true })
+      .click()
+    const dialog = page.getByRole('dialog', { name: 'Delete remote branch?', exact: true })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('textbox')).toHaveCount(0)
+    await expect(
+      dialog.getByRole('checkbox', { name: 'Delete even if not merged', exact: true }),
+    ).toHaveCount(0)
+    expect(await getDispatchedActions(page)).toEqual([])
+    await dialog.getByRole('button', { name: 'Delete remote branch', exact: true }).click()
+    await settle(page)
+    expect(await getDispatchedActions(page)).toEqual([
+      {
+        type: 'deleteRemoteBranch',
+        ref: branch.ref,
+        expectedOid: branch.oid,
+      },
+    ])
+  })
+  test('palette hands off remote deletion to confirmation without dispatching on the first Enter', async ({
+    page,
+  }) => {
+    const [branch] = await openRemoteBranches(page)
+    await selectRemoteFilter(page)
+    await selectBranchInList(page, branch.name)
+    await page.keyboard.press('Meta+k')
+    const palette = page.getByRole('dialog', { name: 'Command palette' })
+    if (!(await palette.isVisible())) await page.keyboard.press('Control+k')
+    await expect(palette).toBeVisible()
+    await palette.getByRole('combobox').fill('delete remote branch')
+    await page.keyboard.press('Enter')
+    await expect(palette).toBeVisible()
+    expect(await getDispatchedActions(page)).toEqual([])
+    await page.keyboard.press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'Delete remote branch?', exact: true })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+    expect(await getDispatchedActions(page)).toEqual([])
+    await dialog.getByRole('button', { name: 'Delete remote branch', exact: true }).click()
+    await settle(page)
+    expect(await getDispatchedActions(page)).toEqual([
+      { type: 'deleteRemoteBranch', ref: branch.ref, expectedOid: branch.oid },
     ])
   })
 })

@@ -227,7 +227,7 @@ test('a busy dialog, an unfinished read, and a changed repository each block dis
 
 test('an incomplete typed confirmation cannot submit a destructive action', () => {
   const base = guard({
-    kind: 'deleteRemote',
+    kind: 'forcePush',
     requiresName: false,
     previewToken: 'lease-preview',
     confirmationTarget: defaultBranch.name,
@@ -591,33 +591,6 @@ test('a force-with-lease push only dispatches against a confirmed captured tip',
   )
 })
 
-test('remote deletion refuses to run without a captured remote tip or exact name', () => {
-  const input = { kind: 'deleteRemote', branch: defaultBranch, confirmation: 'main' } as const
-  assert.deepEqual(workflowAction(input, context), {
-    type: 'deleteRemoteBranch',
-    ref: 'refs/heads/main',
-    expectedOid: '1111111111111111111111111111111111111111',
-  })
-  assert.equal(workflowAction({ ...input, confirmation: 'mai' }, context), null)
-  assert.equal(
-    workflowAction({ ...input, branch: { ...defaultBranch, oid: undefined } }, context),
-    null,
-  )
-  assert.equal(
-    workflowBlocker(
-      guard({
-        kind: 'deleteRemote',
-        requiresName: false,
-        previewToken: 'lease',
-        expectedOidMissing: true,
-        confirmationTarget: 'main',
-        confirmation: 'main',
-      }),
-    )?.code,
-    'remote-tip-unavailable',
-  )
-})
-
 test('a blocked preview and a missing captured HEAD never dispatch a mutation', () => {
   const stack = {
     kind: 'stack',
@@ -959,42 +932,6 @@ test('an unforced publication needs no typed name', () => {
       }),
     ),
     null,
-  )
-})
-
-test('remote deletion is gated on the captured tip and the exact name, not a preview', () => {
-  const base = guard({
-    kind: 'deleteRemote',
-    requiresName: false,
-    previewToken: null,
-    expectedOidMissing: false,
-    confirmationTarget: featureBranch.name,
-  })
-  assert.equal(base.previewToken, null, 'a local preview carries no identity to require')
-  assert.equal(workflowBlocker(base)?.code, 'confirmation-incomplete')
-  assert.equal(workflowBlocker({ ...base, confirmation: featureBranch.name }), null)
-  assert.equal(
-    workflowBlocker({
-      ...base,
-      confirmation: featureBranch.name,
-      expectedOidMissing: true,
-    })?.code,
-    'remote-tip-unavailable',
-  )
-  assert.deepEqual(
-    workflowAction({ kind: 'deleteRemote', branch: featureBranch, confirmation: 'wrong' }, context),
-    null,
-  )
-  assert.deepEqual(
-    workflowAction(
-      { kind: 'deleteRemote', branch: featureBranch, confirmation: featureBranch.name },
-      context,
-    ),
-    {
-      type: 'deleteRemoteBranch',
-      ref: featureBranch.ref,
-      expectedOid: featureBranch.oid,
-    },
   )
 })
 
