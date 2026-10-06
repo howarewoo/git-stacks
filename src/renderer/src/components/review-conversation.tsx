@@ -251,15 +251,6 @@ export function ReviewConversation({
         // Only the summary that reached GitHub is retired. A refused write keeps
         // the body in the box so it can be corrected and sent again.
         formApi.setFieldValue('summary', '')
-        // A recovery adopts what GitHub already holds, and reports which drafts
-        // that was. Only those are dropped: the drafts that never went anywhere
-        // are still the reviewer's unsent work and stay pending.
-        const delivered = new Set(result.delivered ?? [])
-        onDraftChange(
-          delivered.size === 0
-            ? []
-            : (getDrafts()?.drafts ?? []).filter((draft) => !delivered.has(draft.id)),
-        )
         onReload()
         setNotice(
           `Sent one ${REVIEW_EVENT_LABELS[value.event].toLowerCase()} review with ${intended.length} comment${

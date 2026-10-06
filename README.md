@@ -152,6 +152,11 @@ the selected file. Scope read keys to their repository, host/CLI authority,
 pull request, ref, and comparison as applicable. Retire superseded reads before
 adopting pushed or confirmed results.
 
+Review line selections retire when any part of the displayed comparison changes.
+Confirmed review delivery retires only delivered draft identities in main's
+repository/account-scoped journal, even after navigation unmounts the workspace.
+Unsent drafts and settled recovery evidence remain intact.
+
 Shared settings writes reconcile through the authoritative settings read rather
 than publishing full reply snapshots. Main's settings and updater queues can
 commit concurrently admitted writes in a different order.

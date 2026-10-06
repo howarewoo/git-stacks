@@ -301,6 +301,10 @@ export function ReviewView({
     draftEdits.current += 1
   }, [identity])
   React.useEffect(() => {
+    // Numeric addresses are meaningful only in the comparison they were picked.
+    setSelection(null)
+  }, [files?.comparison.headOid, files?.comparison.baseOid, files?.comparison.baseRef])
+  React.useEffect(() => {
     if (!checksWatching || pane !== 'checks') return
     const timer = setInterval(() => setChecksReload((value) => value + 1), 10_000)
     return () => clearInterval(timer)

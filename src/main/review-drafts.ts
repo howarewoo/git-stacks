@@ -515,11 +515,9 @@ export async function readReviewDrafts(
  * Replaces the drafts of one pull request.
  *
  * Drafts survive leaving the workspace and reopening the repository, which is
- * the whole reason they are journalled rather than held in the view. A
- * successful submission is recorded as an empty draft list, so the words a
- * reviewer just sent are not offered again afterwards. Replacement is scoped
- * the same way lookup is, so saving here never overwrites another repository's
- * or another account's record for the same number.
+ * the whole reason they are journalled rather than held in the view. Replacement
+ * is scoped the same way lookup is, so saving here never overwrites another
+ * repository's or another account's record for the same number.
  *
  * The read and the write happen under the journal's cross-process lock, so a
  * second window or worktree saving its own pull request cannot read the state
@@ -558,17 +556,16 @@ export async function writeReviewDrafts(
 }
 
 /**
- * Drops the drafts of one pull request, used after GitHub has accepted them.
- *
- * Clearing is an update like any other and runs under the same lock, so it
- * cannot read the journal before another window's save and publish a version
- * that still holds drafts the reviewer has just sent.
+ * Retires only confirmed delivered draft identities for the submitting owner.
+ * The read/modify/write runs under the journal's cross-process lock so drafts
+ * added by another window while the review was in flight remain unsent work.
  */
-export async function clearReviewDrafts(
+export async function removeDeliveredReviewDrafts(
   repoPath: string,
   repo: string,
   viewer: string,
   number: number,
+  delivered: ReadonlySet<string>,
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await repositoryJournalPath(repoPath, DRAFTS_JOURNAL, signal)
@@ -576,10 +573,16 @@ export async function clearReviewDrafts(
     file,
     async () => {
       const records = await readDrafts(file)
-      await writeDrafts(
-        file,
-        records.filter((entry) => entry.number !== number || !sameOwner(entry, repo, viewer)),
-      )
+      const kept: ReviewDraftRecord[] = []
+      for (const entry of records) {
+        if (entry.number !== number || !sameOwner(entry, repo, viewer)) {
+          kept.push(entry)
+          continue
+        }
+        const drafts = entry.drafts.filter((draft) => !delivered.has(draft.id))
+        if (drafts.length > 0) kept.push({ ...entry, drafts, updatedAt: new Date().toISOString() })
+      }
+      await writeDrafts(file, kept)
     },
     signal,
   )

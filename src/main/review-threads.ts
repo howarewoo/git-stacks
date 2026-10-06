@@ -30,6 +30,7 @@ import {
   clearUncertainWrite,
   readUncertainWrites,
   recordUncertainWrite,
+  removeDeliveredReviewDrafts,
   retireSettledWrites,
 } from './review-drafts'
 import { markReviewSnapshotReviewed } from './review-snapshots'
@@ -1002,9 +1003,8 @@ export async function submitReview(
   const toSend = undelivered.map((entry) => entry.comment)
   const toRecord = undelivered.map((entry) => recordableComment(entry.comment, entry.draftId))
   // Everything in this payload is already on GitHub, so the outcome GitHub
-  // recorded for the review that carried them is what is reported. The
-  // settled records stay where they are: the view has not necessarily dropped
-  // these drafts yet, and a crash before it does must not cost the evidence.
+  // recorded for the review that carried them is what is reported.
+  // Settled evidence stays until a later payload acknowledges retirement.
   if (undelivered.length === 0) {
     const settledReview = guard.settled[0]
     if (files.comparison.headOid) {
@@ -1017,6 +1017,7 @@ export async function submitReview(
         settledReview?.id ?? null,
       ).catch(() => {})
     }
+    await removeDeliveredReviewDrafts(repoPath, repo, permissions.viewer, number, delivered)
     return {
       id: settledReview?.id ?? attempt,
       state: settledReview?.state ?? '',
@@ -1064,6 +1065,7 @@ export async function submitReview(
   // would be missing for precisely that one. So the journal is the first thing
   // that happens.
   await recordUncertainWrite(repoPath, journalled, signal)
+  let result: ReviewMutationResult
   try {
     const response = await reviewTransport(remote).rest<unknown>({
       method: 'POST',
@@ -1085,11 +1087,9 @@ export async function submitReview(
     const settledId = typeof record.id === 'number' ? String(record.id) : String(record.id ?? '')
     const settledState = typeof record.state === 'string' ? record.state : ''
     // GitHub answered, so this attempt is settled — but the record is kept as
-    // settled evidence rather than deleted. The view is told what was delivered,
-    // and the app can die between GitHub's answer and the view dropping the
-    // draft; with the record gone the next submission would post it again.
-    // Retiring it is the next payload's job, and only a payload that no longer
-    // mentions these comments can do that.
+    // settled evidence rather than deleted. A crash or failed draft cleanup
+    // must not lose the proof that these comments reached GitHub. Retiring it
+    // is the next payload's job, once it no longer mentions these drafts.
     await recordUncertainWrite(
       repoPath,
       {
@@ -1118,7 +1118,7 @@ export async function submitReview(
         settledId,
       ).catch(() => {})
     }
-    return {
+    result = {
       id: settledId,
       state: settledState,
       url: typeof record.html_url === 'string' ? record.html_url : null,
@@ -1139,6 +1139,11 @@ export async function submitReview(
     await clearUncertainWrite(repoPath, repo, number, permissions.viewer, journalled.id, signal)
     throw error
   }
+  // Durable cleanup belongs to this captured repository/account, not the
+  // renderer's current destination or authority. Keep it outside the POST
+  // failure handler: a cleanup failure must retain settled delivery evidence.
+  await removeDeliveredReviewDrafts(repoPath, repo, permissions.viewer, number, delivered)
+  return result
 }
 
 /**

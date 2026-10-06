@@ -2317,6 +2317,107 @@ test('several pending comments are written as one review, not one request each',
   assert.equal(body.commit_id, 'a'.repeat(40), 'the review names the head it was written against')
 })
 
+test('confirmed delivery retires only its original owner drafts without a renderer callback', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const sent = draft({ id: 'sent', ref: refFor(hunk, 1), body: 'Send this.' })
+  const unsent = draft({ ...sent, id: 'unsent', body: 'Still editing.' })
+  const record: ReviewDraftRecord = {
+    number: 7,
+    ...JOURNAL_OWNER,
+    comparison: comparison(),
+    drafts: [sent, unsent],
+    updatedAt: '2026-09-23T10:00:00Z',
+  }
+  const owners = [
+    JOURNAL_OWNER,
+    { ...JOURNAL_OWNER, viewer: 'grace' },
+    { ...JOURNAL_OWNER, repo: 'acme/other' },
+  ]
+  for (const owner of owners) await writeReviewDrafts(workspace.repo, { ...record, ...owner })
+  const { transport, writes } = threadDouble({ files: [apiFile({ patch })] })
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [sent],
+  }
+  const result = await submitReview(workspace.repo, 7, submission)
+  assert.deepEqual(result.delivered, [sent.id])
+  for (const owner of owners) {
+    const reopened = await readReviewDrafts(workspace.repo, owner.repo, owner.viewer, 7)
+    assert.deepEqual(reopened?.drafts, owner === JOURNAL_OWNER ? [unsent] : [sent, unsent])
+  }
+  // A stale window recovering the same delivered draft must also retire it,
+  // without posting again or deleting unrelated unsent work.
+  await writeReviewDrafts(workspace.repo, record)
+  await submitReview(workspace.repo, 7, submission)
+  assert.equal(writes.length, 1)
+  const reopened = await readReviewDrafts(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    JOURNAL_OWNER.viewer,
+    7,
+  )
+  assert.deepEqual(reopened?.drafts, [unsent])
+})
+
+test('a failed delivered-draft cleanup keeps settled evidence and recovers without another POST', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const sent = draft({ id: 'sent', ref: refFor(textHunk(entry, 0), 1), body: 'Send this.' })
+  await writeReviewDrafts(workspace.repo, {
+    number: 7,
+    ...JOURNAL_OWNER,
+    comparison: comparison(),
+    drafts: [sent],
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+  const lock = join(workspace.repo, '.git', 'git-stacks-review-drafts.json.lock')
+  const { transport, writes } = threadDouble({ files: [apiFile({ patch })] })
+  const rest = transport.rest.bind(transport)
+  transport.rest = async <T>(request: GitHubRestRequest) => {
+    const result = await rest<T>(request)
+    if (request.method === 'POST') await writeFile(lock, 'held by something else\n')
+    return result
+  }
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+  const submission = {
+    event: 'COMMENT' as const,
+    body: '',
+    comparison: comparison(),
+    drafts: [sent],
+  }
+  await assert.rejects(() => submitReview(workspace.repo, 7, submission))
+  const evidence = await readUncertainWrites(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    7,
+    JOURNAL_OWNER.viewer,
+  )
+  assert.equal(evidence[0]?.settled?.state, 'COMMENTED')
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts,
+    [sent],
+  )
+  await rm(lock)
+  const recovered = await submitReview(workspace.repo, 7, submission)
+  assert.deepEqual(recovered.delivered, [sent.id])
+  assert.equal(writes.length, 1)
+  assert.equal(
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7),
+    null,
+  )
+})
+
 test('a multi-line draft sends start_line and start_side with the last line as line/side', async (t) => {
   const workspace = await reviewWorkspace()
   t.after(workspace.dispose)
@@ -3980,16 +4081,6 @@ test('two windows that opened the same journal each send their own identical com
   assert.equal(posted.event, 'APPROVE', 'the request that left the app is the approval')
   assert.equal(posted.comments.length, 1)
   assert.equal(posted.comments[0]?.body, body)
-
-  // And the journal holds what the second window saved: the first window's
-  // draft is its own unsent work, and a save by one window never rewrites
-  // another one's comment into its own.
-  assert.equal(
-    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.drafts[0]
-      ?.id,
-    second.id,
-    'the second window saved its own draft, under its own identity',
-  )
 })
 
 test('a journal written before identities were generated still reads and still submits', async (t) => {
