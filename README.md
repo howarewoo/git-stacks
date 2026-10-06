@@ -223,6 +223,28 @@ Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
 palette. The safety suite advances pending hover timers after opening a
 destructive dialog to verify that contextual cards cannot cover its warning.
 
+### Deleting local branches
+
+In **Branches**, choose **Select branches**, check the branches to remove, then
+choose **Delete selected**. **Select all visible** selects eligible rows on the
+currently mounted page only. Selections remain counted across filters and paging;
+**Clear selection** clears the checked branches while keeping selection mode open;
+**Done selecting** also exits selection mode. A successful deletion clears the
+checked branches without exiting selection mode. Opening another repository
+clears the selection and exits selection mode.
+
+The confirmation lists each selected local ref and captured tip. Confirm with
+the delete button; typing a branch name is not required, including when
+**Delete even if not merged** is checked. Without that opt-in, any unmerged member
+blocks the whole batch. Current/default branches and branches used by another
+worktree remain protected even with the opt-in. If any captured tip changed,
+refresh and make a fresh selection instead of deleting unseen work.
+
+All selected refs are deleted together in one Git reference transaction.
+Remote branches, pull requests, and child-branch parent records are unchanged.
+Branch configuration is removed after deletion; if that cleanup fails, the error
+explicitly reports that the branches were already deleted.
+
 ### Merging a pull request
 
 Merging uses GitHub's asynchronous merge API for a pull request that belongs

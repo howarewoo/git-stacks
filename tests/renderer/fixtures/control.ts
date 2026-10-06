@@ -155,6 +155,8 @@ function actionMessage(action: GitAction): string {
       return `Created ${action.name} from ${action.parent}`
     case 'deleteBranch':
       return `Deleted ${action.ref}`
+    case 'deleteBranches':
+      return `Deleted ${action.branches.length} local branches`
     case 'stage':
       return `Staged ${action.paths.length} path${action.paths.length === 1 ? '' : 's'}`
     case 'unstage':

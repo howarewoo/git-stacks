@@ -947,6 +947,7 @@ export type GitAction =
   | { type: 'switch'; ref: string; carry?: boolean }
   | { type: 'createBranch'; name: string; parent: string }
   | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
+  | { type: 'deleteBranches'; branches: { ref: string; expectedOid: string }[]; force: boolean }
   | { type: 'stage' | 'unstage'; paths: string[] }
   | {
       type: 'commit'

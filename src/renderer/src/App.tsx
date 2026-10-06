@@ -133,7 +133,6 @@ import {
   OperationContext,
   PhaseStatus,
   WorkflowActions,
-  TypedConfirmation,
   WorkflowFrame,
 } from './components/workflow-composition'
 import { CLOSE_INTENT_MESSAGES, closeIntent } from './components/workflow-policy'
@@ -451,12 +450,26 @@ function formatBranchDate(value: string): string {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+function branchDeleteReason(branch: Branch, defaultBranch: string | null): string | null {
+  if (branch.remote) return 'Only local branches can be deleted.'
+  if (branch.current) return 'Switch to another branch before deleting the current branch.'
+  if (branch.name === defaultBranch) return 'The default branch cannot be deleted.'
+  if (!branch.oid) return 'The branch tip is unknown. Refresh before selecting it.'
+  return null
+}
+
 function App() {
   const desktop: DesktopAPI | null =
     typeof window !== 'undefined' && window.desktop ? window.desktop : null
   const [snapshot, setSnapshot] = React.useState<RepositorySnapshot | null>(null)
   const [recentRepositories, setRecentRepositories] = React.useState<RecentRepository[]>([])
   const [selectedBranchRef, setSelectedBranchRef] = React.useState<string | null>(null)
+  const [branchSelection, setBranchSelection] = React.useState<{
+    repoPath: string
+    refs: Set<string>
+  } | null>(null)
+  const branchSelectionMode =
+    branchSelection !== null && branchSelection.repoPath === snapshot?.path
   const [workspaceView, setWorkspaceView] = React.useState<WorkspaceView>('branches')
   const [branchFilter, setBranchFilter] = React.useState<BranchFilter>('all')
   const [search, setSearch] = React.useState('')
@@ -469,9 +482,10 @@ function App() {
   const [notice, setNotice] = React.useState<string | null>(null)
   const [newBranchOpen, setNewBranchOpen] = React.useState(false)
   const [deleteTarget, setDeleteTarget] = React.useState<{
-    branch: Branch
+    branches: Branch[]
     repoPath: string
   } | null>(null)
+  const deleteOpenerRef = React.useRef<HTMLElement | null>(null)
   const [prOpen, setPrOpen] = React.useState(false)
   const [deleteCloseNotice, setDeleteCloseNotice] = React.useState<string | null>(null)
   const [newBranchNotice, setNewBranchNotice] = React.useState<string | null>(null)
@@ -610,6 +624,18 @@ function App() {
   // A background snapshot only applies to the repository the window still shows.
   const snapshotPathRef = React.useRef<string | null>(null)
   const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
+    setBranchSelection((current) => {
+      if (current?.repoPath !== next.path) return null
+      const refs = new Set(
+        next.branches
+          .filter(
+            (branch) =>
+              current.refs.has(branch.ref) && !branchDeleteReason(branch, next.defaultBranch),
+          )
+          .map((branch) => branch.ref),
+      )
+      return { repoPath: next.path, refs }
+    })
     setSnapshot(next)
     snapshotPathRef.current = next.path
     // A snapshot the main process produced already knows its own freshness.
@@ -1504,53 +1530,43 @@ function App() {
   )
 
   const deleteForm = useForm({
-    defaultValues: { force: false, confirmation: '' },
+    defaultValues: { force: false },
     validators: {
-      onSubmit: ({ value }) => {
+      onSubmit: () => {
         const target = deleteTarget
         if (!target) return undefined
         if (snapshot?.path !== target.repoPath) {
           return 'The repository changed. Close this dialog and select the branch again.'
         }
-        if (value.force && value.confirmation !== target.branch.name) {
-          return {
-            fields: {
-              confirmation: 'Type the exact branch name to confirm deletion of unmerged work.',
-            },
-          }
-        }
-        if (!target.branch.oid) {
-          return 'The branch tip is unknown. Close this dialog and select it again.'
+        if (target.branches.length === 0 || target.branches.some((branch) => !branch.oid)) {
+          return 'A branch tip is unknown. Close this dialog and select the branches again.'
         }
         return undefined
       },
     },
     onSubmit: async ({ value }) => {
       const target = deleteTarget
-      const expectedOid = target?.branch.oid
-      if (!target || !expectedOid) return
+      if (!target || target.branches.length === 0) return
+      const branches = target.branches.map((branch) => ({
+        ref: branch.ref,
+        expectedOid: branch.oid!,
+      }))
       const success = await runAction(
-        { type: 'deleteBranch', ref: target.branch.ref, force: value.force, expectedOid },
-        'Delete branch',
+        branches.length === 1
+          ? { type: 'deleteBranch', ...branches[0], force: value.force }
+          : { type: 'deleteBranches', branches, force: value.force },
+        branches.length === 1 ? 'Delete branch' : 'Delete branches',
       )
-      if (success) setDeleteTarget(null)
+      if (success) {
+        setDeleteTarget(null)
+        setBranchSelection((current) => (current ? { ...current, refs: new Set<string>() } : null))
+      }
     },
   })
   const deleteForce = useSelector(deleteForm.store, (state) => state.values.force)
-  const deleteConfirmation = useSelector(deleteForm.store, (state) => state.values.confirmation)
-  // A force box that was ticked and cleared again left nothing behind, so it is
-  // as clean to dismiss as one that was never touched.
-  const deleteDirty = useSelector(
-    deleteForm.store,
-    (state) => state.values.force || state.values.confirmation !== '',
-  )
   const deleteSubmitting = useSelector(deleteForm.store, (state) => state.isSubmitting)
   const deleteBranchError = useSelector(deleteForm.store, (state) =>
-    // The confirmation is only asked for, and only read, while force is ticked.
-    firstFieldMessage(
-      state.values.force ? state.fieldMeta.confirmation?.errors : undefined,
-      state.errors,
-    ),
+    firstFieldMessage(state.errors),
   )
 
   const commitForm = useForm({
@@ -1610,7 +1626,8 @@ function App() {
         const failure = { form: readableError(value), fields: {} }
         if (action.type === 'createBranch') newBranchForm.setErrorMap({ onSubmit: failure })
         if (action.type === 'createPr') prForm.setErrorMap({ onSubmit: failure })
-        if (action.type === 'deleteBranch') deleteForm.setErrorMap({ onSubmit: failure })
+        if (action.type === 'deleteBranch' || action.type === 'deleteBranches')
+          deleteForm.setErrorMap({ onSubmit: failure })
         setActionError(`${label} failed: ${readableError(value)}`)
         const next = await refreshSnapshot()
         if (
@@ -1856,7 +1873,9 @@ function App() {
         (branch) =>
           !branch.remote &&
           branch.parent &&
-          branchByName.get(branch.parent)?.ref === deleteTarget.branch.ref,
+          deleteTarget.branches.some(
+            (target) => branchByName.get(branch.parent!)?.ref === target.ref,
+          ),
       )
     : []
 
@@ -1886,18 +1905,44 @@ function App() {
     setPrOpen(true)
   }, [prForm, selectedBranch, snapshot])
 
-  const openDeleteDialog = () => {
+  const selectedDeleteBranches =
+    branchSelection && branchSelection.repoPath === snapshot?.path
+      ? allBranches.filter((branch) => branchSelection.refs.has(branch.ref))
+      : []
+  const selectableVisibleBranches = branchWindow.visible.filter(
+    (branch) => !branchDeleteReason(branch, snapshot?.defaultBranch ?? null),
+  )
+  const selectedVisibleCount = selectableVisibleBranches.reduce(
+    (count, branch) => count + (branchSelection?.refs.has(branch.ref) ? 1 : 0),
+    0,
+  )
+  const toggleBranchSelection = (branch: Branch) => {
     if (
       !snapshot ||
-      !selectedBranch ||
-      selectedBranch.remote ||
-      selectedBranch.current ||
-      selectedBranch.name === snapshot.defaultBranch ||
       isBusy ||
-      operationActive
+      operationActive ||
+      branchDeleteReason(branch, snapshot.defaultBranch)
     )
       return
-    setDeleteTarget({ branch: selectedBranch, repoPath: snapshot.path })
+    setBranchSelection((current) => {
+      const refs = new Set(current?.repoPath === snapshot.path ? current.refs : [])
+      if (refs.has(branch.ref)) refs.delete(branch.ref)
+      else refs.add(branch.ref)
+      return { repoPath: snapshot.path, refs }
+    })
+  }
+  const openDeleteDialog = (branches: Branch[] = selectedBranch ? [selectedBranch] : []) => {
+    if (
+      !snapshot ||
+      branches.length === 0 ||
+      branches.some((branch) => branchDeleteReason(branch, snapshot.defaultBranch)) ||
+      isBusy ||
+      operationActive ||
+      shapeReason(branches.length === 1 ? 'deleteBranch' : 'deleteBranches')
+    )
+      return
+    deleteOpenerRef.current = document.activeElement as HTMLElement | null
+    setDeleteTarget({ branches, repoPath: snapshot.path })
     deleteForm.reset()
     setDeleteCloseNotice(null)
     setActionError(null)
@@ -2661,16 +2706,24 @@ function App() {
           className="branch-list"
           ref={branchRows.containerRef}
           role="tree"
+          aria-multiselectable={branchSelectionMode || undefined}
         >
           {branchWindow.visible.map((branch, branchIndex) => {
             const tree = branchTree.rows[branchWindow.start + branchIndex]
             const pullRequest = branch.pr
-            const selected = branch.ref === selectedBranch?.ref
+            const selected = branchSelectionMode
+              ? branchSelection.refs.has(branch.ref)
+              : branch.ref === selectedBranch?.ref
             const requiresRestack = branch.needsRestack || (branch.parentBehind ?? 0) > 0
             return (
               <BranchHoverCard branch={branch}>
                 <div
-                  aria-current={selected ? 'true' : undefined}
+                  aria-current={branch.ref === selectedBranch?.ref ? 'true' : undefined}
+                  aria-description={
+                    branchSelectionMode
+                      ? (branchDeleteReason(branch, snapshot?.defaultBranch ?? null) ?? undefined)
+                      : undefined
+                  }
                   aria-label={describeBranchRow({
                     ahead: branch.ahead,
                     behind: branch.behind,
@@ -2694,10 +2747,14 @@ function App() {
                     // The row's own controls keep their own activation; only the
                     // row background selects the branch.
                     const hit = event.target as Element
-                    if (hit !== event.currentTarget && hit.closest('a, button, [role="button"]')) {
+                    if (
+                      hit !== event.currentTarget &&
+                      hit.closest('a, button, label, [role="button"]')
+                    ) {
                       return
                     }
-                    setSelectedBranchRef(branch.ref)
+                    if (branchSelectionMode) toggleBranchSelection(branch)
+                    else setSelectedBranchRef(branch.ref)
                   }}
                   onFocus={() => branchRows.noteFocus(branchIndex)}
                   onKeyDown={(event) => {
@@ -2727,7 +2784,8 @@ function App() {
                     }
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault()
-                      setSelectedBranchRef(branch.ref)
+                      if (branchSelectionMode) toggleBranchSelection(branch)
+                      else setSelectedBranchRef(branch.ref)
                     }
                   }}
                   role="treeitem"
@@ -2750,6 +2808,24 @@ function App() {
                       style={{ '--branch-lane': elbow.lane } as React.CSSProperties}
                     />
                   ))}
+                  {branchSelectionMode ? (
+                    <Checkbox
+                      aria-label={`Select ${branch.name}`}
+                      className="relative z-[2] shrink-0"
+                      checked={selected}
+                      disabled={
+                        isBusy ||
+                        operationActive ||
+                        Boolean(branchDeleteReason(branch, snapshot.defaultBranch))
+                      }
+                      tabIndex={-1}
+                      title={
+                        branchDeleteReason(branch, snapshot.defaultBranch) ??
+                        `Select ${branch.name} for deletion`
+                      }
+                      onCheckedChange={() => toggleBranchSelection(branch)}
+                    />
+                  ) : null}
                   <span className={cn('branch-icon', branch.current && 'branch-icon-current')}>
                     {branch.remote ? (
                       <Cloud className="size-3.5" />
@@ -3035,6 +3111,82 @@ function App() {
     return (
       <div className="branches-view">
         {renderBranchFilters()}
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2">
+          {branchSelectionMode ? (
+            <>
+              <Checkbox
+                label="Select all visible"
+                checked={
+                  selectedVisibleCount > 0 &&
+                  selectedVisibleCount === selectableVisibleBranches.length
+                }
+                indeterminate={
+                  selectedVisibleCount > 0 &&
+                  selectedVisibleCount < selectableVisibleBranches.length
+                }
+                disabled={isBusy || operationActive || selectableVisibleBranches.length === 0}
+                onCheckedChange={(checked) => {
+                  const refs = new Set(branchSelection?.refs)
+                  for (const branch of selectableVisibleBranches) {
+                    if (checked) refs.add(branch.ref)
+                    else refs.delete(branch.ref)
+                  }
+                  setBranchSelection({ repoPath: snapshot.path, refs })
+                }}
+              />
+              <span role="status" className="text-sm text-[var(--gs-semantic-text-secondary)]">
+                {selectedDeleteBranches.length} selected
+              </span>
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  selectedDeleteBranches.length === 0 ||
+                  selectedDeleteBranches.some((branch) =>
+                    branchDeleteReason(branch, snapshot.defaultBranch),
+                  ) ||
+                  Boolean(shapeReason('deleteBranches'))
+                }
+                tooltip={
+                  shapeReason('deleteBranches') ??
+                  'Review the selected local branches before deleting.'
+                }
+                onClick={() => openDeleteDialog(selectedDeleteBranches)}
+              >
+                <Trash2 aria-hidden="true" className="size-3.5" />
+                Delete selected ({selectedDeleteBranches.length})
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={isBusy}
+                onClick={() => setBranchSelection({ repoPath: snapshot.path, refs: new Set() })}
+              >
+                Clear selection
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={isBusy}
+                onClick={() => setBranchSelection(null)}
+              >
+                Done selecting
+              </Button>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={isBusy || operationActive || Boolean(shapeReason('deleteBranches'))}
+              tooltip={shapeReason('deleteBranches') ?? 'Select multiple local branches to delete.'}
+              onClick={() => setBranchSelection({ repoPath: snapshot.path, refs: new Set() })}
+            >
+              Select branches
+            </Button>
+          )}
+        </div>
         {renderBranchList()}
       </div>
     )
@@ -3542,7 +3694,7 @@ function App() {
                     operationActive ||
                     Boolean(shapeReason('deleteBranch'))
                   }
-                  onClick={openDeleteDialog}
+                  onClick={() => openDeleteDialog()}
                   tooltip={
                     shapeReason('deleteBranch') ??
                     (selectedBranch.name === snapshot.defaultBranch
@@ -3863,7 +4015,7 @@ function App() {
           if (open) return
           const intent = closeIntent({
             busy: isBusy || deleteSubmitting,
-            dirty: deleteDirty,
+            dirty: deleteForce,
           })
           if (intent === 'allow') {
             setDeleteTarget(null)
@@ -3886,16 +4038,27 @@ function App() {
               if (target?.isConnected && !('disabled' in target && target.disabled)) return target
               return searchRef.current ?? false
             }
+            const opener = deleteOpenerRef.current
+            if (opener?.isConnected && !('disabled' in opener && opener.disabled)) return opener
             const trigger = deleteTriggerRef.current
             if (trigger && !trigger.disabled) return trigger
             return searchRef.current ?? false
           }}
         >
           <DialogHeader>
-            <DialogTitle>Delete local branch?</DialogTitle>
+            <DialogTitle>
+              {deleteTarget && deleteTarget.branches.length > 1
+                ? 'Delete local branches?'
+                : 'Delete local branch?'}
+            </DialogTitle>
             <DialogDescription>
-              Delete <strong>{deleteTarget?.branch.name}</strong> from this repository. Remote
-              branches and pull requests will not be deleted.
+              Delete{' '}
+              <strong>
+                {deleteTarget?.branches.length === 1
+                  ? deleteTarget.branches[0].name
+                  : `${deleteTarget?.branches.length ?? 0} selected local branches`}
+              </strong>{' '}
+              from this repository. Remote branches and pull requests will not be deleted.
             </DialogDescription>
           </DialogHeader>
           <form
@@ -3910,26 +4073,21 @@ function App() {
               {deleteCloseNotice ? (
                 <PhaseStatus phase="blocked" message={deleteCloseNotice} />
               ) : null}
-              <OperationContext
-                title={deleteTarget?.branch.name}
-                description={`Delete this local branch. ${
-                  deleteChildren.length > 0
-                    ? `${deleteChildren.length} child ${deleteChildren.length === 1 ? 'branch uses' : 'branches use'} this parent; deleting it does not retarget those branches.`
-                    : 'No local branches record this branch as their parent.'
-                }`}
-                facts={
-                  deleteTarget
-                    ? [
-                        { label: 'Local ref', value: deleteTarget.branch.ref, code: true },
-                        {
-                          label: 'Current tip',
-                          value: deleteTarget.branch.oid ?? 'Unavailable',
-                          code: true,
-                        },
-                      ]
-                    : []
-                }
-              />
+              <p className="workflow-note">
+                {deleteChildren.length > 0
+                  ? `${deleteChildren.length} local child branches use these parents. Deletion does not retarget those branches.`
+                  : 'No local branches record these branches as their parents.'}
+              </p>
+              {deleteTarget?.branches.map((branch) => (
+                <OperationContext
+                  key={branch.ref}
+                  title={branch.name}
+                  facts={[
+                    { label: 'Local ref', value: branch.ref, code: true },
+                    { label: 'Current tip', value: branch.oid ?? 'Unavailable', code: true },
+                  ]}
+                />
+              ))}
               <deleteForm.Field name="force">
                 {(field) => (
                   <Checkbox
@@ -3939,9 +4097,6 @@ function App() {
                     disabled={isBusy}
                     onCheckedChange={(checked) => {
                       field.handleChange(checked)
-                      // The typed name belonged to the force state it was
-                      // typed under, and so does the message it produced.
-                      deleteForm.setFieldValue('confirmation', '')
                       deleteForm.setErrorMap({ onSubmit: undefined })
                       setDeleteCloseNotice(null)
                     }}
@@ -3950,26 +4105,9 @@ function App() {
               </deleteForm.Field>
               <p className="delete-branch-note">
                 {deleteForce
-                  ? 'Commits that exist only on this branch can become unreachable.'
-                  : 'Git will refuse deletion if the branch is not fully merged.'}
+                  ? 'Commits that exist only on the selected branches can become unreachable.'
+                  : 'Git will refuse deletion if any selected branch is not fully merged.'}
               </p>
-              {deleteForce && deleteTarget ? (
-                <deleteForm.Field name="confirmation">
-                  {(field) => (
-                    <TypedConfirmation
-                      id="delete-branch-confirmation"
-                      label="Type the branch name to confirm"
-                      value={field.state.value}
-                      target={deleteTarget.branch.name}
-                      disabled={isBusy}
-                      onChange={(value) => {
-                        field.handleChange(value)
-                        setDeleteCloseNotice(null)
-                      }}
-                    />
-                  )}
-                </deleteForm.Field>
-              ) : null}
               {deleteBranchError ? (
                 <PhaseStatus phase="failed" message={deleteBranchError} />
               ) : null}
@@ -3985,21 +4123,27 @@ function App() {
                 <Button
                   disabled={
                     isBusy ||
-                    Boolean(shapeReason('deleteBranch')) ||
-                    (deleteForce && deleteConfirmation !== deleteTarget?.branch.name)
+                    snapshot?.path !== deleteTarget?.repoPath ||
+                    Boolean(
+                      shapeReason(
+                        deleteTarget?.branches.length === 1 ? 'deleteBranch' : 'deleteBranches',
+                      ),
+                    )
                   }
                   type="submit"
                   variant="danger"
-                  loading={busyAction === 'Delete branch'}
+                  loading={deleteSubmitting}
                   tooltip={
-                    shapeReason('deleteBranch') ??
-                    (deleteForce && deleteConfirmation !== deleteTarget?.branch.name
-                      ? 'Type the branch name to enable force deletion. Unmerged commits can become unreachable.'
-                      : 'Delete this local branch now. Remotes and pull requests are kept.')
+                    shapeReason(
+                      deleteTarget?.branches.length === 1 ? 'deleteBranch' : 'deleteBranches',
+                    ) ??
+                    'Delete the selected local branches now. Remotes and pull requests are kept.'
                   }
                 >
                   <Trash2 aria-hidden="true" className="size-3.5" />
-                  Delete branch
+                  {deleteTarget && deleteTarget.branches.length > 1
+                    ? `Delete ${deleteTarget.branches.length} branches`
+                    : 'Delete branch'}
                 </Button>
               </WorkflowActions>
             </WorkflowFrame>

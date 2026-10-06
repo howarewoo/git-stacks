@@ -128,39 +128,6 @@ test.describe('Safety and mutation dispatch invariants', () => {
   })
 
   test.describe('Typed confirmations gate destructive submission', () => {
-    test('delete branch force requires typing exact target branch name', async ({ page }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      const dialog = await openDeleteLocalBranchDialog(page, 'feature/checkout-tests')
-
-      const forceCheckbox = dialog.getByLabel('Delete even if not merged')
-      await forceCheckbox.check()
-
-      const submitBtn = dialog.getByRole('button', { name: 'Delete branch', exact: true })
-      const confirmInput = dialog.getByLabel('Type the branch name to confirm')
-      await expect(confirmInput).toBeVisible()
-
-      // Typing wrong branch name keeps submit disabled
-      await confirmInput.fill('other-branch')
-      await expect(submitBtn).toBeDisabled()
-
-      // Typing exact branch name enables submit
-      await confirmInput.fill('feature/checkout-tests')
-      await expect(submitBtn).toBeEnabled()
-
-      await submitBtn.click()
-      await settle(page)
-
-      const actions = await getDispatchedActions(page)
-      expect(actions.filter((action) => action.type === 'deleteBranch')).toEqual([
-        {
-          type: 'deleteBranch',
-          ref: 'refs/heads/feature/checkout-tests',
-          force: true,
-          expectedOid: '45ea707145ea707145ea707145ea707145ea7071',
-        },
-      ])
-    })
-
     test('force push with lease requires typing exact target branch name', async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
       const dialog = await openForcePushDialog(page)

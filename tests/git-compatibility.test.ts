@@ -468,6 +468,11 @@ test('a bare repository opens read-only and disables worktree actions', async ()
         force: true,
         expectedOid: git('rev-parse', 'feature'),
       },
+      {
+        type: 'deleteBranches',
+        branches: [{ ref: 'refs/heads/feature', expectedOid: git('rev-parse', 'feature') }],
+        force: true,
+      },
       { type: 'setParent', branch: 'feature', parent: 'main' },
       { type: 'renameBranch', ref: 'refs/heads/feature', name: 'renamed' },
       {
