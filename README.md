@@ -2445,11 +2445,12 @@ and never dispatches a checkout or remote mutation.
 
 The collapsed stack summary names the viewed layer and the reported stack size.
 Opening it reveals all returned native members in submitted order, initially
-scrolled to the viewed layer. The member list has one Tab stop, initialized to
-that layer; unmodified arrows and Home/End move focus within the list, and
-Enter/Space opens the focused PR. Full titles, lifecycle, draft, checks, and review
-facts reflow inside the bounded disclosure. The PR headline also discloses its
-full title without growing the default code header.
+scrolled to the viewed layer. All returned member rows stay mounted inside the
+local scroller, without repository-list paging state. The member list has one Tab
+stop, initialized to that layer; unmodified arrows and Home/End move focus within
+the list, and Enter/Space opens the focused PR. Full titles, lifecycle, draft,
+checks, and review facts reflow inside the bounded disclosure. The PR headline
+also discloses its full title without growing the default code header.
 
 Native membership is independent of optional layer metadata. One bounded,
 cancellable main-process GraphQL batch reads at most 32 members, including the
@@ -2457,7 +2458,8 @@ viewed layer, without dropping any submitted members. Unloaded or malformed
 checks/review facts remain unknown; a head disagreement with known native
 membership or the viewed PR is stale. Native lifecycle and draft facts remain
 visible when optional enrichment omits those fields. Partial membership reports
-its loaded count; unavailable membership is not presented as an empty stack.
+its loaded count; adjacent shortcuts never skip an omitted native position.
+Unavailable membership is not presented as an empty stack.
 
 **Blockers & relationship sources** shows actual local parent comparisons and
 reconciliation evidence, not a restack inference from failing checks or a merged

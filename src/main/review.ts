@@ -18,7 +18,6 @@ import type {
   ReviewReviewerSummary,
 } from '../shared/review'
 import {
-  adjacentStackLayer,
   isWhitespaceOnlyChange,
   looksGenerated,
   reviewChangeBlocks,
@@ -278,13 +277,12 @@ function stackRail(stacks: NativeStack[], number: number): ReviewStackRail {
     }
   }
   const selected = stack.pullRequests.find((member) => member.number === number)!
-  const previous = adjacentStackLayer(stack.pullRequests, number, -1)
-  const next = adjacentStackLayer(stack.pullRequests, number, 1)
   return {
     state: 'member',
     stack,
-    previous: previous?.position === selected.position - 1 ? previous : null,
-    next: next?.position === selected.position + 1 ? next : null,
+    previous:
+      stack.pullRequests.find((member) => member.position === selected.position - 1) ?? null,
+    next: stack.pullRequests.find((member) => member.position === selected.position + 1) ?? null,
     message:
       stack.pullRequests.length < stack.size
         ? 'Native membership is partial; omitted positions are not stack boundaries.'
@@ -452,7 +450,6 @@ async function readStackFacts(
       const expectedHead = member.number === number ? selectedHead : member.headSha
       const nativeHead = member.headSha
       if (
-        (expectedHead || nativeHead) &&
         typeof node.headRefOid === 'string' &&
         node.headRefOid &&
         ((expectedHead && node.headRefOid !== expectedHead) ||
@@ -469,22 +466,20 @@ async function readStackFacts(
           ? node.state
           : null
       const draft = typeof node.isDraft === 'boolean' ? node.isDraft : null
-      const commits = isRecord(node.commits) ? node.commits : null
-      const entries = commits && Array.isArray(commits.nodes) ? commits.nodes : null
-      const entry = entries?.length === 1 && isRecord(entries[0]) ? entries[0] : null
-      const commit = entry && isRecord(entry.commit) ? entry.commit : null
-      const rollup = commit?.statusCheckRollup
       let checks: ReviewStackMemberFacts['checks'] = 'unknown'
+      let review: ReviewStackMemberFacts['review'] = 'unknown'
       if (expectedHead && node.headRefOid === expectedHead) {
+        const commits = isRecord(node.commits) ? node.commits : null
+        const entries = commits && Array.isArray(commits.nodes) ? commits.nodes : null
+        const entry = entries?.length === 1 && isRecord(entries[0]) ? entries[0] : null
+        const commit = entry && isRecord(entry.commit) ? entry.commit : null
+        const rollup = commit?.statusCheckRollup
         if (rollup === null) checks = 'none'
         else if (isRecord(rollup)) {
           if (rollup.state === 'SUCCESS') checks = 'passing'
           else if (rollup.state === 'FAILURE' || rollup.state === 'ERROR') checks = 'failing'
           else if (rollup.state === 'PENDING' || rollup.state === 'EXPECTED') checks = 'pending'
         }
-      }
-      let review: ReviewStackMemberFacts['review'] = 'unknown'
-      if (expectedHead && node.headRefOid === expectedHead) {
         if (node.reviewDecision === null) review = 'none'
         else if (node.reviewDecision === 'APPROVED') review = 'approved'
         else if (node.reviewDecision === 'CHANGES_REQUESTED') review = 'changes-requested'

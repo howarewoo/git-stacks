@@ -50,7 +50,6 @@ import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pu
 import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import { createRequestGate } from '../lib/request-gate'
 import { cn } from '../lib/utils'
-import { useListWindow, useRovingListFocus } from '../lib/list-window'
 import { claimsRovingKey, rovingAction, rovingTabIndex, rovingTarget } from '../lib/tree-navigation'
 import { ReviewConversation, type ReviewSelection } from './review-conversation'
 import { sameReviewComparison } from '../../../shared/review'
@@ -1386,19 +1385,16 @@ function ReviewRail({
     () => members.filter((member) => Number.isSafeInteger(member.number) && member.number > 0),
     [members],
   )
-  const memberWindow = useListWindow(navigable, Math.max(1, navigable.length))
-  const memberRows = useRovingListFocus<HTMLOListElement>(
-    memberWindow,
-    '.review-stack-member:not(:disabled)',
-  )
+  const memberListRef = React.useRef<HTMLOListElement>(null)
+  const [activeMemberIndex, setActiveMemberIndex] = React.useState(0)
   React.useEffect(() => {
-    memberRows.noteFocus(
+    setActiveMemberIndex(
       Math.max(
         0,
         navigable.findIndex((member) => member.number === number),
       ),
     )
-  }, [navigable, number, memberRows.noteFocus])
+  }, [navigable, number])
   if (rail.state === 'unavailable') {
     return (
       <div className="review-rail" role="group" aria-label="Native stack layers">
@@ -1480,7 +1476,7 @@ function ReviewRail({
           {partial ? ` · Partial membership (${members.length} loaded)` : ' · All layers'}
         </summary>
         <ol
-          ref={memberRows.containerRef}
+          ref={memberListRef}
           className="review-stack-members"
           aria-label="Submitted native order"
         >
@@ -1498,11 +1494,9 @@ function ReviewRail({
                   className="review-stack-member"
                   aria-current={member.number === number ? 'page' : undefined}
                   onClick={() => onSelect(member.number)}
-                  tabIndex={
-                    memberIndex < 0 ? -1 : rovingTabIndex(memberIndex, memberRows.activeIndex)
-                  }
+                  tabIndex={memberIndex < 0 ? -1 : rovingTabIndex(memberIndex, activeMemberIndex)}
                   onFocus={(event) => {
-                    memberRows.noteFocus(memberIndex)
+                    setActiveMemberIndex(memberIndex)
                     event.currentTarget.scrollIntoView({ block: 'nearest' })
                   }}
                   onKeyDown={(event) => {
@@ -1512,7 +1506,9 @@ function ReviewRail({
                     const target = rovingTarget(action, memberIndex, navigable.length)
                     if (target === null) return
                     event.preventDefault()
-                    memberRows.focusMounted(target)
+                    memberListRef.current
+                      ?.querySelectorAll<HTMLButtonElement>('.review-stack-member:not(:disabled)')
+                      [target]?.focus()
                   }}
                 >
                   <span className="review-stack-identity">

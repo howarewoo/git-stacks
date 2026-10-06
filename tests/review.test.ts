@@ -890,6 +890,7 @@ test('headline stack facts use one bounded cancellable batch and reject malforme
   const controller = new AbortController()
   const { transport } = scriptedTransport([{ head, base: 'b'.repeat(40) }], [])
   const rest = transport.rest.bind(transport)
+  let omitPrecedingMember = false
   transport.rest = async <T>(request: GitHubRestRequest) => {
     if (!request.path?.includes('/stacks')) return rest<T>(request)
     return {
@@ -901,12 +902,16 @@ test('headline stack facts use one bounded cancellable batch and reject malforme
           number: 42,
           open: true,
           base: { ref: 'main' },
-          pull_requests: Array.from({ length: 40 }, (_, index) => ({
-            number: index + 1,
-            state: 'open',
-            draft: false,
-            head: { ref: `layer-${index + 1}`, sha: head },
-          })),
+          pull_requests: Array.from({ length: 40 }, (_, index) =>
+            omitPrecedingMember && index === 38
+              ? null
+              : {
+                  number: index + 1,
+                  state: 'open',
+                  draft: false,
+                  head: { ref: `layer-${index + 1}`, sha: head },
+                },
+          ),
         },
       ] as T,
     }
@@ -982,6 +987,8 @@ test('headline stack facts use one bounded cancellable batch and reject malforme
   const headline = await readReviewHeadline(workspace.repo, 40, controller.signal)
   assert.equal(batches, 1)
   assert.equal(headline.rail.stack?.pullRequests.length, 40)
+  assert.equal(headline.rail.previous?.number, 39)
+  assert.equal(headline.rail.next, null)
   assert.match(headline.rail.message, /bounded to 32/u)
   assert.deepEqual(headline.rail.facts?.[0], {
     number: 1,
@@ -1003,6 +1010,13 @@ test('headline stack facts use one bounded cancellable batch and reject malforme
   assert.equal(headline.rail.facts?.[2].review, 'unknown')
   assert.equal(headline.rail.facts?.at(-1)?.number, 40)
   assert.equal(headline.rail.facts?.at(-1)?.state, 'unavailable')
+
+  omitPrecedingMember = true
+  const partial = await readReviewHeadline(workspace.repo, 40, controller.signal)
+  assert.equal(partial.rail.stack?.size, 40)
+  assert.equal(partial.rail.stack?.pullRequests.length, 39)
+  assert.equal(partial.rail.previous, null, 'an omitted position is not an adjacent layer')
+  assert.equal(partial.rail.next, null)
 })
 
 test('headline metadata cancellation and selected native head disagreement preserve read authority', async (t) => {
