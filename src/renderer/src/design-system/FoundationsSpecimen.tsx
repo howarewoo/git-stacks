@@ -117,10 +117,13 @@ export function FoundationsSpecimen() {
             label="Parent branch"
             description="Selection is independent from checked-out state."
           >
-            <Select defaultValue="main">
-              <option value="main">main</option>
-              <option value="develop">develop</option>
-            </Select>
+            <Select
+              defaultValue="main"
+              options={[
+                { value: 'main', label: 'main' },
+                { value: 'develop', label: 'develop' },
+              ]}
+            />
           </Field>
           <Field
             id="specimen-description"
@@ -134,7 +137,7 @@ export function FoundationsSpecimen() {
             label="Include untracked files"
             description="Untracked files are included in the stash preview."
             checked={includeUntracked}
-            onChange={(event) => setIncludeUntracked(event.target.checked)}
+            onCheckedChange={setIncludeUntracked}
           />
           <Checkbox
             id="specimen-mixed"
@@ -171,31 +174,29 @@ export function FoundationsSpecimen() {
         </SurfaceHeader>
         <div className="controls-specimen-row">
           <Tooltip>
-            <TooltipTrigger asChild>
-              <Button variant="secondary">Focusable tooltip</Button>
-            </TooltipTrigger>
+            <TooltipTrigger render={<Button variant="secondary">Focusable tooltip</Button>} />
             <TooltipContent>
               Tooltip content is announced and dismissible with Escape.
             </TooltipContent>
           </Tooltip>
           <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
-              <Button variant="secondary">
-                Open actions
-                <ChevronDown aria-hidden="true" className="size-4" />
-              </Button>
-            </DropdownMenu.Trigger>
+            <DropdownMenu.Trigger
+              render={
+                <Button variant="secondary">
+                  Open actions
+                  <ChevronDown aria-hidden="true" className="size-4" />
+                </Button>
+              }
+            />
             <DropdownMenu.Content>
-              <DropdownMenu.Item onSelect={() => undefined}>Preview merge</DropdownMenu.Item>
+              <DropdownMenu.Item onClick={() => undefined}>Preview merge</DropdownMenu.Item>
               <DropdownMenu.Item disabled>Force push with lease</DropdownMenu.Item>
               <DropdownMenu.Separator />
-              <DropdownMenu.Item onSelect={() => undefined}>Browse history</DropdownMenu.Item>
+              <DropdownMenu.Item onClick={() => undefined}>Browse history</DropdownMenu.Item>
             </DropdownMenu.Content>
           </DropdownMenu.Root>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-            <DialogTrigger asChild>
-              <Button variant="accent">Open dialog</Button>
-            </DialogTrigger>
+            <DialogTrigger render={<Button variant="accent">Open dialog</Button>} />
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Keyboard-safe dialog</DialogTitle>

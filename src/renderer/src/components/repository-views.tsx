@@ -683,25 +683,22 @@ export function HistoryView({
             History branch
           </label>
           <Select
-            className="workflow-select"
+            className="workflow-select w-auto"
             id="history-ref"
             controlSize="compact"
             disabled={busy || loading || diffLoading}
             value={ref}
-            onChange={(event) => {
+            onValueChange={(value) => {
               setOffset(0)
-              setRef(event.target.value)
+              setRef(value)
             }}
-          >
-            {!snapshot.branches.some((branch) => branch.ref === ref) ? (
-              <option value={ref}>{ref}</option>
-            ) : null}
-            {snapshot.branches.map((branch) => (
-              <option key={branch.ref} value={branch.ref}>
-                {branch.name}
-              </option>
-            ))}
-          </Select>
+            options={[
+              ...(!snapshot.branches.some((branch) => branch.ref === ref)
+                ? [{ value: ref, label: ref }]
+                : []),
+              ...snapshot.branches.map((branch) => ({ value: branch.ref, label: branch.name })),
+            ]}
+          />
           <Button
             aria-label="Reload history"
             variant="ghost"
@@ -722,9 +719,10 @@ export function HistoryView({
         <div className="history-entries" role="list" aria-label="Commits" ref={commitListRef}>
           {visible.map((commit, commitIndex) => (
             <div className="history-item" key={commit.oid} role="listitem">
-              <button
+              <Button
                 aria-current={selected?.oid === commit.oid ? 'true' : undefined}
                 className={`history-row ${selected?.oid === commit.oid ? 'history-row-selected' : ''}`}
+                variant="unstyled"
                 disabled={diffLoading}
                 onClick={() => setSelected(commit)}
                 onFocus={() => setActiveCommitIndex(commitIndex)}
@@ -749,7 +747,7 @@ export function HistoryView({
                   </small>
                 </span>
                 <code className="history-oid">{commit.oid.slice(0, 8)}</code>
-              </button>
+              </Button>
             </div>
           ))}
         </div>
@@ -1000,18 +998,16 @@ export function StackView({
               id="stack-selection"
               className="workflow-select"
               value={root}
-              onChange={(event) => {
-                setSelection(event.target.value)
-                const branch = byName.get(event.target.value)
+              onValueChange={(value) => {
+                setSelection(value)
+                const branch = byName.get(value)
                 if (branch) onSelect(branch)
               }}
-            >
-              {[...groups].map(([name, branches]) => (
-                <option value={name} key={name}>
-                  {name} · {branches.length} branch{branches.length === 1 ? '' : 'es'}
-                </option>
-              ))}
-            </Select>
+              options={[...groups].map(([name, branches]) => ({
+                value: name,
+                label: `${name} · ${branches.length} branch${branches.length === 1 ? '' : 'es'}`,
+              }))}
+            />
             <p>
               {stale || unknown
                 ? [
@@ -1085,7 +1081,8 @@ export function StackView({
               <div className="stack-member" key={branch.ref} role="listitem">
                 <div className="stack-member-heading">
                   <BranchHoverCard branch={branch}>
-                    <button
+                    <Button
+                      variant="unstyled"
                       aria-label={describeBranchRow({
                         ahead: branch.ahead,
                         behind: branch.behind,
@@ -1129,7 +1126,7 @@ export function StackView({
                       <GitBranch className="size-4" />
                       <strong>{branch.name}</strong>
                       <ChevronRight className="size-3.5" />
-                    </button>
+                    </Button>
                   </BranchHoverCard>
                   {branch.current ? <Badge variant="accent">current</Badge> : null}
                   {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (

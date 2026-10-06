@@ -694,7 +694,12 @@ async function main() {
         ['Recently merged', 1],
       ]) {
         const btn = rail.getByRole('button', { name: `${label} ${count}` })
-        await btn.waitFor({ timeout: 15_000 })
+        await btn.waitFor({ timeout: 15_000 }).catch(async (error) => {
+          throw new Error(
+            `Missing inbox group ${label} ${count}.\n${await rail.ariaSnapshot()}\nStatus: ${JSON.stringify(await page.getByRole('status').allTextContents())}`,
+            { cause: error },
+          )
+        })
         if ((await btn.count()) !== 1) allGroupsVisible = false
       }
       check('the queue shows all six groups with the counts the facts decide', allGroupsVisible)
@@ -847,7 +852,8 @@ async function main() {
       await page.waitForTimeout(400)
       await filterName.fill('My draft sketches')
       await page.getByPlaceholder('Title, #number, repository, branch, or author').fill('sketch')
-      await page.getByRole('combobox', { name: 'Repository' }).selectOption('howarewoo/git-stacks')
+      await page.getByRole('combobox', { name: 'Repository' }).click()
+      await page.getByRole('option', { name: 'howarewoo/git-stacks', exact: true }).click()
       await page.getByRole('button', { name: 'Save', exact: true }).first().click()
       await page.waitForTimeout(700)
       await page.screenshot({ path: join(shotDir, 'inbox-saved-filter.png') })
@@ -882,7 +888,7 @@ async function main() {
       const searchBox = page.getByRole('searchbox', { name: 'Search the queue' })
       const searchValue = await searchBox.inputValue()
       const repoSelect = page.getByRole('combobox', { name: 'Repository' })
-      const repoValue = await repoSelect.inputValue()
+      const repoValue = await repoSelect.textContent()
 
       check(
         'restored saved filter activates its group, search and repository controls',

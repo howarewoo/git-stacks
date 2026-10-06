@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { Check, Copy, FolderOpen, LoaderCircle, Search, Terminal } from 'lucide-react'
+import { useForm, useSelector } from '@tanstack/react-form'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
@@ -22,6 +23,21 @@ import type {
 
 const SEARCH_REQUEST = 'onboarding:discovery'
 const CLONE_REQUEST = 'onboarding:clone'
+
+/**
+ * The editable values this dialog owns, and the state a replacement authority
+ * and a fresh opening both start from. They are stable objects rather than
+ * literals inside the hooks because `FormApi.update` compares the supplied
+ * defaults against the current ones on every render and re-applies them when
+ * they differ, so these have to stay the one snapshot the form was seeded with.
+ */
+const SEARCH_DEFAULTS = { query: '' }
+const CLONE_DEFAULTS = {
+  directoryName: '',
+  parentDirectory: '',
+  protocol: 'https' as CloneProtocol,
+  shallow: false,
+}
 
 function environmentFacts(status: GitEnvironmentStatus): ContextFact[] {
   return [
@@ -161,7 +177,6 @@ export function RepositoryDiscoveryDialog({
   open: boolean
 }) {
   const desktop = window.desktop
-  const [query, setQuery] = React.useState('')
   const [results, setResults] = React.useState<GitHubRepositorySummary[]>([])
   const [searching, setSearching] = React.useState(false)
   const [searched, setSearched] = React.useState(false)
@@ -172,10 +187,6 @@ export function RepositoryDiscoveryDialog({
     incompleteResults?: boolean
   } | null>(null)
   const [selected, setSelected] = React.useState<GitHubRepositorySummary | null>(null)
-  const [parentDirectory, setParentDirectory] = React.useState('')
-  const [directoryName, setDirectoryName] = React.useState('')
-  const [protocol, setProtocol] = React.useState<CloneProtocol>('https')
-  const [shallow, setShallow] = React.useState(false)
   const [commands, setCommands] = React.useState<CloneCommandPreview | null>(null)
   const [commandFailure, setCommandFailure] = React.useState<OnboardingFailure | null>(null)
   const [cloning, setCloning] = React.useState(false)
@@ -212,6 +223,44 @@ export function RepositoryDiscoveryDialog({
     },
     [desktop, searchGate],
   )
+
+  // The search term is a form value: what the person typed is submitted, not
+  // whatever the input happens to hold when the button is pressed.
+  const searchForm = useForm({
+    defaultValues: SEARCH_DEFAULTS,
+    onSubmit: async ({ value }) => {
+      await search(value.query)
+    },
+  })
+
+  // The clone configuration is the other half of the same dialog's editable
+  // state. None of it came from the account, so a replaced authority leaves it
+  // exactly as typed; only what the account answered is retired.
+  const cloneForm = useForm({
+    defaultValues: CLONE_DEFAULTS,
+    onSubmit: async ({ value }) => {
+      if (!desktop?.cloneRepository || !selected) return
+      if (!value.parentDirectory || !value.directoryName) return
+      setCloning(true)
+      setCloneFailure(null)
+      const outcome = await desktop.cloneRepository({
+        repository: selected,
+        protocol: value.protocol,
+        parentDirectory: value.parentDirectory,
+        directoryName: value.directoryName,
+        shallow: value.shallow,
+        requestId: CLONE_REQUEST,
+      })
+      setCloning(false)
+      if (outcome.ok) {
+        onCloned(outcome.value)
+        onOpenChange(false)
+        return
+      }
+      setCloneFailure(outcome.failure)
+    },
+  })
+  const cloneConfig = useSelector(cloneForm.store, (state) => state.values)
 
   // A replaced authority takes the account's findings with it, whether or not
   // the dialog is on screen: what this account can reach is what the CLI
@@ -250,8 +299,11 @@ export function RepositoryDiscoveryDialog({
   }, [authority, desktop, open, search])
 
   // The commands are recomputed by the main process, which owns the only code
-  // that can build them, so the copy is exactly what a clone would run.
+  // that can build them, so the copy is exactly what a clone would run. The
+  // configuration it composes is the form's own value, so the preview follows
+  // what the person typed rather than a second copy of it.
   React.useEffect(() => {
+    const { directoryName, parentDirectory, protocol, shallow } = cloneConfig
     if (!open || !selected || !parentDirectory || !directoryName) {
       setCommands(null)
       setCommandFailure(null)
@@ -280,49 +332,30 @@ export function RepositoryDiscoveryDialog({
     return () => {
       current = false
     }
-  }, [desktop, directoryName, open, parentDirectory, protocol, selected, shallow])
-
-  const startClone = async () => {
-    if (!desktop?.cloneRepository || !selected || !parentDirectory || !directoryName) return
-    setCloning(true)
-    setCloneFailure(null)
-    const outcome = await desktop.cloneRepository({
-      repository: selected,
-      protocol,
-      parentDirectory,
-      directoryName,
-      shallow,
-      requestId: CLONE_REQUEST,
-    })
-    setCloning(false)
-    if (outcome.ok) {
-      onCloned(outcome.value)
-      onOpenChange(false)
-      return
-    }
-    setCloneFailure(outcome.failure)
-  }
+  }, [cloneConfig, desktop, open, selected])
 
   // Discovery reads GitHub as the authenticated CLI account; which of the
   // distinct states that is decides whether an empty result is a fact about the
   // account or a fact about this computer, and each reads as its own thing.
   const authenticated = cliStatus?.state === 'authenticated'
-  const destinationReady = Boolean(parentDirectory && directoryName && commands)
+  const destinationReady = Boolean(
+    cloneConfig.parentDirectory && cloneConfig.directoryName && commands,
+  )
 
   return (
     <Dialog
       open={open}
-      onOpenChange={(next) => {
+      onOpenChange={(next, details) => {
         // Escape and a backdrop click never abandon a running clone.
-        if (!next && (cloning || busy)) return
+        if (!next && (cloning || busy)) {
+          details.cancel()
+          return
+        }
         if (!next) setCloneFailure(null)
         onOpenChange(next)
       }}
     >
-      <DialogContent
-        className="workflow-dialog max-w-3xl"
-        onEscapeKeyDown={(event) => cloning && event.preventDefault()}
-      >
+      <DialogContent className="workflow-dialog max-w-3xl">
         <DialogHeader>
           <DialogTitle>Clone from GitHub</DialogTitle>
           <DialogDescription>
@@ -337,18 +370,24 @@ export function RepositoryDiscoveryDialog({
             className="onboarding-search"
             onSubmit={(event) => {
               event.preventDefault()
-              void search(query)
+              event.stopPropagation()
+              void searchForm.handleSubmit()
             }}
           >
-            <Field id="repository-search" label="Search your repositories">
-              <Input
-                autoComplete="off"
-                id="repository-search"
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Name, owner, or description"
-                value={query}
-              />
-            </Field>
+            <searchForm.Field name="query">
+              {(field) => (
+                <Field id="repository-search" label="Search your repositories">
+                  <Input
+                    autoComplete="off"
+                    id="repository-search"
+                    onBlur={field.handleBlur}
+                    onChange={(event) => field.handleChange(event.target.value)}
+                    placeholder="Name, owner, or description"
+                    value={field.state.value}
+                  />
+                </Field>
+              )}
+            </searchForm.Field>
             <Button disabled={searching} type="submit" variant="accent">
               {searching ? (
                 <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
@@ -420,12 +459,13 @@ export function RepositoryDiscoveryDialog({
             <ul aria-label="Repositories you can reach" className="onboarding-results">
               {results.map((repository) => (
                 <li key={repository.fullName}>
-                  <button
+                  <Button
                     aria-pressed={selected?.fullName === repository.fullName}
                     className="onboarding-result"
+                    variant="unstyled"
                     onClick={() => {
                       setSelected(repository)
-                      setDirectoryName(repository.name)
+                      cloneForm.setFieldValue('directoryName', repository.name)
                       setCloneFailure(null)
                     }}
                     type="button"
@@ -441,7 +481,7 @@ export function RepositoryDiscoveryDialog({
                       <Badge variant="outline">{repository.defaultBranch}</Badge>
                       {!repository.canPush ? <Badge variant="outline">Read only</Badge> : null}
                     </span>
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -449,7 +489,14 @@ export function RepositoryDiscoveryDialog({
         </div>
 
         {selected ? (
-          <div className="onboarding-clone">
+          <form
+            className="onboarding-clone"
+            onSubmit={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              void cloneForm.handleSubmit()
+            }}
+          >
             <WorkflowSection label={`Clone ${selected.fullName}`}>
               {selected.empty ? (
                 <InlineAlert tone="info">
@@ -466,17 +513,24 @@ export function RepositoryDiscoveryDialog({
                     Folder
                   </label>
                   <div className="onboarding-folder">
-                    <Input
-                      aria-describedby="clone-folder-description"
-                      id="clone-folder"
-                      onChange={(event) => setDirectoryName(event.target.value)}
-                      value={directoryName}
-                    />
+                    <cloneForm.Field name="directoryName">
+                      {(field) => (
+                        <Input
+                          aria-describedby="clone-folder-description"
+                          id="clone-folder"
+                          onBlur={field.handleBlur}
+                          onChange={(event) => field.handleChange(event.target.value)}
+                          value={field.state.value}
+                        />
+                      )}
+                    </cloneForm.Field>
                     <Button
                       disabled={cloning}
                       onClick={async () => {
-                        const chosen = await desktop?.chooseDestinationDirectory?.(parentDirectory)
-                        if (chosen) setParentDirectory(chosen)
+                        const chosen = await desktop?.chooseDestinationDirectory?.(
+                          cloneConfig.parentDirectory,
+                        )
+                        if (chosen) cloneForm.setFieldValue('parentDirectory', chosen)
                       }}
                       type="button"
                       variant="secondary"
@@ -489,28 +543,37 @@ export function RepositoryDiscoveryDialog({
                     className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
                     id="clone-folder-description"
                   >
-                    {parentDirectory || 'Choose where the repository folder is created.'}
+                    {cloneConfig.parentDirectory ||
+                      'Choose where the repository folder is created.'}
                   </p>
                 </div>
-                <Field id="clone-protocol" label="Protocol">
-                  <SegmentedControl
-                    label="Protocol"
-                    onValueChange={(value) => setProtocol(value)}
-                    options={[
-                      { value: 'https', label: 'HTTPS' },
-                      { value: 'ssh', label: 'SSH' },
-                    ]}
-                    value={protocol}
-                  />
-                </Field>
+                <cloneForm.Field name="protocol">
+                  {(field) => (
+                    <Field id="clone-protocol" label="Protocol">
+                      <SegmentedControl
+                        label="Protocol"
+                        onValueChange={(value) => field.handleChange(value)}
+                        options={[
+                          { value: 'https', label: 'HTTPS' },
+                          { value: 'ssh', label: 'SSH' },
+                        ]}
+                        value={field.state.value}
+                      />
+                    </Field>
+                  )}
+                </cloneForm.Field>
               </div>
-              <Checkbox
-                checked={shallow}
-                description="Only the most recent commit, for a faster first clone."
-                disabled={cloning}
-                label="Shallow clone (--depth 1)"
-                onChange={(event) => setShallow(event.target.checked)}
-              />
+              <cloneForm.Field name="shallow">
+                {(field) => (
+                  <Checkbox
+                    checked={field.state.value}
+                    description="Only the most recent commit, for a faster first clone."
+                    disabled={cloning}
+                    label="Shallow clone (--depth 1)"
+                    onCheckedChange={(checked) => field.handleChange(checked)}
+                  />
+                )}
+              </cloneForm.Field>
               {commandFailure ? (
                 <InlineAlert tone="warning">{commandFailure.message}</InlineAlert>
               ) : null}
@@ -538,21 +601,16 @@ export function RepositoryDiscoveryDialog({
                   Cancel clone
                 </Button>
               ) : (
-                <Button
-                  disabled={!destinationReady}
-                  onClick={() => void startClone()}
-                  type="button"
-                  variant="accent"
-                >
+                <Button disabled={!destinationReady} type="submit" variant="accent">
                   <FolderOpen aria-hidden="true" className="size-4" />
                   Clone repository
                 </Button>
               )}
-              {!parentDirectory && !cloning ? (
+              {!cloneConfig.parentDirectory && !cloning ? (
                 <span className="onboarding-hint">Choose the folder to clone into.</span>
               ) : null}
             </div>
-          </div>
+          </form>
         ) : null}
       </DialogContent>
     </Dialog>

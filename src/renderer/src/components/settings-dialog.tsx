@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useForm, useSelector } from '@tanstack/react-form'
 import { AlertCircle, Check } from 'lucide-react'
 import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
@@ -134,9 +135,34 @@ export function SettingsDialog({
   const [report, setReport] = React.useState<DiagnosticReport | null>(null)
   const [bundle, setBundle] = React.useState<SupportBundlePreview | null>(null)
   const [hostStatus, setHostStatus] = React.useState<GitHubHostStatus | null>(null)
-  const [hostDraft, setHostDraft] = React.useState('')
-  const [editorDraft, setEditorDraft] = React.useState('')
-  const [mergeToolDraft, setMergeToolDraft] = React.useState('')
+  const form = useForm({
+    defaultValues: {
+      host: snapshot?.settings.github.host ?? '',
+      editor: snapshot?.settings.git.editor ?? '',
+      mergeTool: snapshot?.settings.git.mergeTool ?? '',
+    },
+    onSubmitMeta: { field: 'host' as 'host' | 'editor' | 'mergeTool' },
+    onSubmit: async ({ value, meta }): Promise<void> => {
+      const key = meta.field === 'host' ? 'github.host' : `git.${meta.field}`
+      if (busy || locked(key)) return
+      if (meta.field === 'host') {
+        const wanted = value.host.trim() || GITHUB_DEFAULT_HOST
+        const stored = await save({ github: { host: wanted } }, `GitHub host set to ${wanted}.`)
+        await refreshHostStatus()
+        if (stored && stored.github.host !== wanted)
+          setMessage(`GitHub host set to ${stored.github.host}.`)
+      } else {
+        const program = value[meta.field].trim()
+        await save(
+          { git: { [meta.field]: program || null } },
+          program
+            ? `${meta.field === 'editor' ? 'Editor' : 'Merge tool'} set to ${program}.`
+            : `${meta.field === 'editor' ? 'Editor' : 'Merge tool'} reset.`,
+        )
+      }
+    },
+  })
+  const formSubmitting = useSelector(form.store, (state) => state.isSubmitting)
   const [message, setMessage] = React.useState<string | null>(null)
   const [updates, setUpdates] = React.useState<UpdateStatus | null>(null)
 
@@ -172,15 +198,17 @@ export function SettingsDialog({
     try {
       const next = await desktop.settings()
       setSnapshot(next)
-      setHostDraft(next.settings.github.host)
-      setEditorDraft(next.settings.git.editor ?? '')
-      setMergeToolDraft(next.settings.git.mergeTool ?? '')
+      form.reset({
+        host: next.settings.github.host,
+        editor: next.settings.git.editor ?? '',
+        mergeTool: next.settings.git.mergeTool ?? '',
+      })
       onSettingsChange(next.settings)
       onShortcutBindingsChange(next.settings.shortcuts)
     } catch (value) {
       onError(value instanceof Error ? value.message : String(value))
     }
-  }, [desktop, onError, onSettingsChange, onShortcutBindingsChange])
+  }, [desktop, form, onError, onSettingsChange, onShortcutBindingsChange])
 
   React.useEffect(() => {
     if (!open) return
@@ -202,12 +230,14 @@ export function SettingsDialog({
       try {
         const next = await desktop.updateSettings(patch)
         setSnapshot(next)
-        setHostDraft(next.settings.github.host)
         onSettingsChange(next.settings)
         onShortcutBindingsChange(next.settings.shortcuts)
         setMessage(note)
-        setEditorDraft(next.settings.git.editor ?? '')
-        setMergeToolDraft(next.settings.git.mergeTool ?? '')
+        form.reset({
+          host: next.settings.github.host,
+          editor: next.settings.git.editor ?? '',
+          mergeTool: next.settings.git.mergeTool ?? '',
+        })
         return next.settings
       } catch (value) {
         onError(value instanceof Error ? value.message : String(value))
@@ -216,7 +246,7 @@ export function SettingsDialog({
         setBusy(false)
       }
     },
-    [desktop, onError, onSettingsChange, onShortcutBindingsChange],
+    [desktop, form, onError, onSettingsChange, onShortcutBindingsChange],
   )
 
   const lockFor = React.useCallback(
@@ -363,47 +393,39 @@ export function SettingsDialog({
 
             {section === 'github' && settings ? (
               <WorkflowSection label="GitHub host">
-                <Field
-                  id="settings-github-host"
-                  label="Host"
-                  description="The GitHub host this app works against. Leave it as github.com, or name your GitHub Enterprise Server host. CLI authentication status, every request, and every clone URL follow it."
-                  error={problemFor('github.host')}
-                >
-                  <input
-                    id="settings-github-host"
-                    className="w-full rounded-[length:var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-default)] bg-[var(--gs-semantic-surface-raised)] px-3 py-2"
-                    value={hostDraft}
-                    placeholder={GITHUB_DEFAULT_HOST}
-                    disabled={busy || locked('github.host')}
-                    onChange={(event) => setHostDraft(event.target.value)}
-                  />
-                </Field>
-                <Button
-                  variant="secondary"
-                  disabled={busy || locked('github.host')}
-                  onClick={async () => {
-                    setBusy(true)
-                    try {
-                      // The field holds the host in effect, so this submits that
-                      // host again instead of an empty draft, and the note names
-                      // the host that was stored — which is not the text that was
-                      // typed when a pasted URL was normalized down to its host.
-                      const wanted = hostDraft.trim() || GITHUB_DEFAULT_HOST
-                      const stored = await save(
-                        { github: { host: wanted } },
-                        `GitHub host set to ${wanted}.`,
-                      )
-                      await refreshHostStatus()
-                      if (stored && stored.github.host !== wanted) {
-                        setMessage(`GitHub host set to ${stored.github.host}.`)
-                      }
-                    } finally {
-                      setBusy(false)
-                    }
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    void form.handleSubmit({ field: 'host' })
                   }}
                 >
-                  Use this host
-                </Button>
+                  <form.Field name="host">
+                    {(field) => (
+                      <Field
+                        id="settings-github-host"
+                        label="Host"
+                        description="The GitHub host this app works against. Leave it as github.com, or name your GitHub Enterprise Server host. CLI authentication status, every request, and every clone URL follow it."
+                        error={problemFor('github.host')}
+                      >
+                        <Input
+                          value={field.state.value}
+                          placeholder={GITHUB_DEFAULT_HOST}
+                          disabled={busy || formSubmitting || locked('github.host')}
+                          onBlur={field.handleBlur}
+                          onChange={(event) => field.handleChange(event.target.value)}
+                        />
+                      </Field>
+                    )}
+                  </form.Field>
+                  <Button
+                    type="submit"
+                    variant="secondary"
+                    disabled={busy || formSubmitting || locked('github.host')}
+                  >
+                    Use this host
+                  </Button>
+                </form>
                 {hostStatus ? (
                   <OperationFacts
                     facts={[
@@ -447,10 +469,10 @@ export function SettingsDialog({
                     label="Read a GitHub Notifications inbox"
                     checked={settings.notifications.enabled}
                     disabled={busy || locked('notifications.enabled')}
-                    onChange={(event) =>
+                    onCheckedChange={(checked) =>
                       void save(
-                        { notifications: { enabled: event.target.checked } },
-                        event.target.checked
+                        { notifications: { enabled: checked } },
+                        checked
                           ? 'GitHub Notifications enabled. Authorize it from the Notification Center.'
                           : 'GitHub Notifications turned off. Its stored token is kept, and nothing else changed.',
                       )
@@ -507,50 +529,48 @@ export function SettingsDialog({
                 </WorkflowSection>
 
                 <WorkflowSection label="Tools">
-                  <Field
-                    id="settings-editor"
-                    label="Editor"
-                    description="One program name, no arguments. Leave empty to use this platform's default application."
-                    error={problemFor('git.editor', toolError(snapshot, 'editor'))}
-                  >
-                    <Input
-                      id="settings-editor"
-                      value={editorDraft}
-                      disabled={busy || locked('git.editor')}
-                      placeholder="platform default"
-                      onChange={(event) => setEditorDraft(event.target.value)}
-                      onBlur={() =>
-                        void save(
-                          { git: { editor: editorDraft.trim() || null } },
-                          editorDraft.trim()
-                            ? `Editor set to ${editorDraft.trim()}.`
-                            : 'Editor reset.',
-                        )
-                      }
-                    />
-                  </Field>
-                  <Field
-                    id="settings-merge-tool"
-                    label="Merge tool"
-                    description="One program name Git runs to resolve a conflict. Leave empty to use whatever Git is configured with."
-                    error={problemFor('git.mergeTool', toolError(snapshot, 'mergeTool'))}
-                  >
-                    <Input
-                      id="settings-merge-tool"
-                      value={mergeToolDraft}
-                      disabled={busy || locked('git.mergeTool')}
-                      placeholder="Git's own configuration"
-                      onChange={(event) => setMergeToolDraft(event.target.value)}
-                      onBlur={() =>
-                        void save(
-                          { git: { mergeTool: mergeToolDraft.trim() || null } },
-                          mergeToolDraft.trim()
-                            ? `Merge tool set to ${mergeToolDraft.trim()}.`
-                            : 'Merge tool reset.',
-                        )
-                      }
-                    />
-                  </Field>
+                  <form.Field name="editor">
+                    {(field) => (
+                      <Field
+                        id="settings-editor"
+                        label="Editor"
+                        description="One program name, no arguments. Leave empty to use this platform's default application."
+                        error={problemFor('git.editor', toolError(snapshot, 'editor'))}
+                      >
+                        <Input
+                          value={field.state.value}
+                          disabled={busy || formSubmitting || locked('git.editor')}
+                          placeholder="platform default"
+                          onChange={(event) => field.handleChange(event.target.value)}
+                          onBlur={() => {
+                            field.handleBlur()
+                            void form.handleSubmit({ field: 'editor' })
+                          }}
+                        />
+                      </Field>
+                    )}
+                  </form.Field>
+                  <form.Field name="mergeTool">
+                    {(field) => (
+                      <Field
+                        id="settings-merge-tool"
+                        label="Merge tool"
+                        description="One program name Git runs to resolve a conflict. Leave empty to use whatever Git is configured with."
+                        error={problemFor('git.mergeTool', toolError(snapshot, 'mergeTool'))}
+                      >
+                        <Input
+                          value={field.state.value}
+                          disabled={busy || formSubmitting || locked('git.mergeTool')}
+                          placeholder="Git's own configuration"
+                          onChange={(event) => field.handleChange(event.target.value)}
+                          onBlur={() => {
+                            field.handleBlur()
+                            void form.handleSubmit({ field: 'mergeTool' })
+                          }}
+                        />
+                      </Field>
+                    )}
+                  </form.Field>
                 </WorkflowSection>
 
                 <WorkflowSection label="Defaults">
@@ -658,10 +678,10 @@ export function SettingsDialog({
                     label="Reduce motion"
                     checked={settings.appearance.reduceMotion}
                     disabled={busy || locked('appearance.reduceMotion')}
-                    onChange={(event) =>
+                    onCheckedChange={(checked) =>
                       void save(
-                        { appearance: { reduceMotion: event.target.checked } },
-                        event.target.checked ? 'Motion reduced.' : 'Motion restored.',
+                        { appearance: { reduceMotion: checked } },
+                        checked ? 'Motion reduced.' : 'Motion restored.',
                       )
                     }
                   />
@@ -772,11 +792,11 @@ export function SettingsDialog({
                       label="Include local paths"
                       checked={settings.privacy.includeLocalPaths}
                       disabled={busy || locked('privacy.includeLocalPaths')}
-                      onChange={(event) => {
+                      onCheckedChange={(checked) => {
                         setBundle(null)
                         void save(
-                          { privacy: { includeLocalPaths: event.target.checked } },
-                          event.target.checked
+                          { privacy: { includeLocalPaths: checked } },
+                          checked
                             ? 'Local paths will be included in a support bundle.'
                             : 'Local paths will be withheld from a support bundle.',
                         )
@@ -851,8 +871,11 @@ export function SettingsDialog({
                         setSnapshot(next)
                         onSettingsChange(next.settings)
                         onShortcutBindingsChange(next.settings.shortcuts)
-                        setEditorDraft('')
-                        setMergeToolDraft('')
+                        form.reset({
+                          host: next.settings.github.host,
+                          editor: next.settings.git.editor ?? '',
+                          mergeTool: next.settings.git.mergeTool ?? '',
+                        })
                         setMessage('Settings restored to their defaults.')
                       })
                       .catch((value) =>

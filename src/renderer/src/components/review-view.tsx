@@ -36,6 +36,7 @@ import type { DesktopAPI, PullRequest, PullRequestStackMember } from '../../../s
 import { LIST_PAGE_SIZE } from '../../../shared/performance'
 import { Badge } from './ui/badge'
 import { Select } from './ui/select'
+import { Input } from './ui/input'
 import { Button, IconButton } from './ui/button'
 import { Checkbox } from './ui/checkbox'
 import { SegmentedControl } from './ui/segmented-control'
@@ -686,7 +687,7 @@ export function ReviewView({
             <Checkbox
               checked={hideWhitespace}
               label="Hide whitespace"
-              onChange={(event) => setHideWhitespace(event.target.checked)}
+              onCheckedChange={setHideWhitespace}
               title="Hide lines whose only difference from the line they replaced is spaces or tabs. GitHub's API has no whitespace option for a pull request diff, so this filters the text it already sent."
             />
             <IconButton
@@ -788,7 +789,8 @@ export function ReviewView({
                   </span>
                 ) : null}
               </div>
-              <input
+              <Input
+                unstyled
                 aria-label="Filter changed files"
                 className="review-tree-search"
                 onChange={(event) => setSearch(event.target.value)}
@@ -823,9 +825,10 @@ export function ReviewView({
                 >
                   {rows.map((row) =>
                     row.kind === 'directory' ? (
-                      <button
+                      <Button
                         aria-expanded={!collapsed.has(row.path)}
                         className="review-tree-row review-tree-directory"
+                        variant="unstyled"
                         data-review-row
                         key={row.id}
                         onClick={() =>
@@ -848,15 +851,16 @@ export function ReviewView({
                         <span className="review-tree-count">
                           {row.fileCount} file{row.fileCount === 1 ? '' : 's'}
                         </span>
-                      </button>
+                      </Button>
                     ) : (
-                      <button
+                      <Button
                         aria-current={row.path === selectedPath ? 'true' : undefined}
                         aria-label={`${row.path}, ${REVIEW_STATUS_LABELS[row.file.status]}, +${row.file.additions} minus ${row.file.deletions}${row.viewed ? ', viewed' : ''}`}
                         className={cn(
                           'review-tree-row',
                           row.path === selectedPath && 'review-tree-row-selected',
                         )}
+                        variant="unstyled"
                         data-review-row
                         key={row.id}
                         onClick={() => select(row.path)}
@@ -879,7 +883,7 @@ export function ReviewView({
                         <span className="review-tree-count">
                           +{row.file.additions} −{row.file.deletions}
                         </span>
-                      </button>
+                      </Button>
                     ),
                   )}
                 </div>
@@ -1303,20 +1307,18 @@ function ReviewHistoryBar({
             controlSize="compact"
             className="review-history-select"
             value={activeSnapshotOid ?? ''}
-            onChange={(event) =>
-              onSelectSnapshot(event.target.value === '' ? null : event.target.value)
-            }
-          >
-            <option value="">Current diff (head {currentShort})</option>
-            {snapshots
-              .slice()
-              .reverse()
-              .map((snapshot) => (
-                <option key={snapshot.headOid} value={snapshot.headOid}>
-                  {reviewSnapshotLabel(snapshot)}
-                </option>
-              ))}
-          </Select>
+            onValueChange={(value) => onSelectSnapshot(value === '' ? null : value)}
+            options={[
+              { value: '', label: `Current diff (head ${currentShort})` },
+              ...snapshots
+                .slice()
+                .reverse()
+                .map((snapshot) => ({
+                  value: snapshot.headOid,
+                  label: reviewSnapshotLabel(snapshot),
+                })),
+            ]}
+          />
         </label>
 
         <Button
@@ -1339,7 +1341,7 @@ function ReviewHistoryBar({
             <Checkbox
               checked={hideUnchanged}
               label="Hide unchanged files"
-              onChange={(event) => onToggleHideUnchanged(event.target.checked)}
+              onCheckedChange={onToggleHideUnchanged}
               title="Hide files whose contents did not change between the chosen snapshot and the current head."
             />
             {hideUnchanged && unchangedCount > 0 ? (

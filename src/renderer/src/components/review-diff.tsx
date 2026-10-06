@@ -7,6 +7,7 @@ import { useListWindow } from '../lib/list-window'
 import { ListWindowMore } from './list-window'
 import { Badge } from './ui/badge'
 import { cn } from '../lib/utils'
+import { Button } from './ui/button'
 import type { ReviewSelection } from './review-conversation'
 
 function lineClass(line: ReviewLine | null | undefined): string | undefined {
@@ -173,18 +174,19 @@ function UnifiedRows({
               key={`line:${row.hunkId}:${index}`}
             >
               {row.line.side === null ? null : (
-                <button
+                <Button
                   aria-label={`Comment on ${file.path} line ${
                     row.line.side === 'base' ? row.line.oldLine : row.line.newLine
                   } on the ${row.line.side}`}
                   className="review-line-gutter"
+                  variant="unstyled"
                   type="button"
                   onClick={(event) =>
                     onSelect(extendSelection(selection, file.path, row.line, event.shiftKey))
                   }
                 >
                   {row.number === null ? '' : row.number}
-                </button>
+                </Button>
               )}
               {row.line.text}
               {'\n'}
@@ -243,9 +245,10 @@ function SplitRows({
                     inSelection(selection, file.path, row.left.line) && 'review-line-selected',
                   )}
                 >
-                  <button
+                  <Button
                     aria-label={`Comment on ${file.path} line ${row.left.number} on the base`}
                     className="review-split-gutter"
+                    variant="unstyled"
                     type="button"
                     onClick={(event) =>
                       onSelect(
@@ -254,7 +257,7 @@ function SplitRows({
                     }
                   >
                     {row.left.number}
-                  </button>
+                  </Button>
                   {`${row.left.line.text}\n`}
                 </span>
               ) : (
@@ -268,9 +271,10 @@ function SplitRows({
                     inSelection(selection, file.path, row.right.line) && 'review-line-selected',
                   )}
                 >
-                  <button
+                  <Button
                     aria-label={`Comment on ${file.path} line ${row.right.number} on the head`}
                     className="review-split-gutter"
+                    variant="unstyled"
                     type="button"
                     onClick={(event) =>
                       onSelect(
@@ -279,7 +283,7 @@ function SplitRows({
                     }
                   >
                     {row.right.number}
-                  </button>
+                  </Button>
                   {`${row.right.line.text}\n`}
                 </span>
               ) : (

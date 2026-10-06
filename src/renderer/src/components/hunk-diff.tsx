@@ -285,8 +285,9 @@ function HunkLine({
     )
   }
   return (
-    <button
+    <Button
       type="button"
+      variant="unstyled"
       className={cn('hunk-line hunk-line-selectable', className, !selected && 'hunk-line-excluded')}
       disabled={disabled}
       aria-pressed={selected}
@@ -305,6 +306,6 @@ function HunkLine({
       </span>
       {line.text}
       {'\n'}
-    </button>
+    </Button>
   )
 }

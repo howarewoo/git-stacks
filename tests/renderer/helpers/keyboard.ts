@@ -63,35 +63,29 @@ export async function assertModalDialogFocusTrap(
 ): Promise<void> {
   await expect(dialogLocator).toBeVisible()
 
-  // Verify currently focused element is inside the dialog
-  const initialFocusInside = await dialogLocator.evaluate((dialogEl) => {
-    return dialogEl.contains(document.activeElement)
-  })
-  expect(
-    initialFocusInside,
-    `Initial focus after opening "${dialogName}" must be inside the dialog`,
-  ).toBe(true)
+  // Base UI redirects focus through portaled guards. Assert the settled destination,
+  // not the guard briefly focused while wrapping the modal's tab order.
+  const assertContained = async (message: string): Promise<void> => {
+    await expect
+      .poll(() => dialogLocator.evaluate((dialogEl) => dialogEl.contains(document.activeElement)), {
+        message,
+      })
+      .toBe(true)
+  }
 
-  // Tab forward 15 times; all visited activeElements must remain descendants of dialog
+  await assertContained(`Initial focus after opening "${dialogName}" must be inside the dialog`)
+
+  // Tab forward 15 times; every settled destination must remain inside the dialog.
   for (let i = 0; i < 15; i++) {
     await page.keyboard.press('Tab')
-    const isInside = await dialogLocator.evaluate((dialogEl) => {
-      return dialogEl.contains(document.activeElement)
-    })
-    expect(
-      isInside,
+    await assertContained(
       `Tab step ${i + 1} escaped "${dialogName}" dialog containment to background`,
-    ).toBe(true)
+    )
   }
 
   // Shift+Tab backward 10 times; must also remain inside dialog
   for (let i = 0; i < 10; i++) {
     await page.keyboard.press('Shift+Tab')
-    const isInside = await dialogLocator.evaluate((dialogEl) => {
-      return dialogEl.contains(document.activeElement)
-    })
-    expect(isInside, `Shift+Tab step ${i + 1} escaped "${dialogName}" dialog containment`).toBe(
-      true,
-    )
+    await assertContained(`Shift+Tab step ${i + 1} escaped "${dialogName}" dialog containment`)
   }
 }

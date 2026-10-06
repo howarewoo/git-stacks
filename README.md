@@ -485,6 +485,10 @@ when that is set, and cleans up its own processes, profile, and repository
 otherwise. It is complementary to the [packaged desktop smoke](#packaged-desktop-smoke),
 not a substitute for it.
 
+The interactive test-owned window has background throttling disabled so dialog
+teardown can receive animation frames even when another window occludes the run.
+This does not change production window scheduling.
+
 A control in that window is pressed at a real point, and the press counts only
 once the window reports that exact control receiving the click. A window that
 re-lays-out between measuring a control and pressing it has the press aimed
@@ -1408,9 +1412,11 @@ benchmark version; older measurements with different definitions are not
 carried into the current trend.
 
 The `startup` measurement runs the built Electron app against the 3,000-ref
-fixture. It starts before process launch and ends after the automation clicks
-the pre-seeded recent repository and its first 200 branch rows complete two
-animation frames. The `interaction` measurement starts at an actual input event
+fixture. It starts before process launch and ends after the automation activates
+the pre-seeded recent repository with Enter and its first 200 branch rows complete
+two animation frames. Keyboard activation avoids stale coordinates when the
+asynchronous Git environment report shifts the onboarding layout. The
+`interaction` measurement starts at an actual input event
 in the “Filter current view branches, files, and pull requests” field, not the
 command palette, and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
@@ -1668,6 +1674,8 @@ node tests/inbox.e2e.cjs [shots-dir]
 
 The smoke launches the real Electron main process and preload bridge — never a renderer fixture double — against a synthetic GitHub host this script owns, over verified TLS (`NODE_EXTRA_CA_CERTS`, no verification is disabled). The fixture certificate, repositories, tokens, `settings.json`/`repositories.json`, Chromium profile, and Git/gh configuration all live in the owned temporary root, so no ambient credential, personal repository, or OS secret store can reach the run. Credential sealing is provided by the shared external fixture at `tests/fixtures/isolated-desktop.cjs`, which replaces every native `safeStorage` entry point before the production main module loads and keeps Chromium on `--use-mock-keychain`/`--password-store=basic`; if that guard cannot be proven, the fixture refuses to load the production main. It observes, in the live window: the six Inbox groups with the counts the host answered, the `/` chord reaching the queue's search field, a matchless search reaching the filtered-empty state rather than an empty queue, clearing restoring the rows, a row opening its own repository's Review with no Git action, a row for another registered repository adopting that repository, and a saved filter surviving a real process restart. The synthetic host is the only authority: nothing here writes to GitHub.
 
+The provider CLI must independently trust the fixture's TLS issuer. `NODE_EXTRA_CA_CERTS` configures Node, not `gh`'s certificate verification; Node reaching the synthetic host is not proof that the CLI can. If the CLI rejects the certificate, record this smoke as blocked before Inbox data loads. Do not disable TLS verification or install the disposable issuer into a personal OS trust store to force a pass.
+
 This is a dev-main smoke; the packaged executable, preload packaging, and CSP remain the packaged desktop smoke's proof, and a real OS key-store acceptance is a separate manual gate.
 
 ### Update flow smoke
@@ -1716,6 +1724,21 @@ Screenshot tests wait for fonts and stable fixture state, use fixed data/timesta
 ### Changing tokens and components
 
 After editing `src/renderer/src/design-system/tokens.json`, run `npm run tokens:generate` and `npm run tokens:check`. Follow [DESIGN.md](DESIGN.md) for token roles and component rules.
+
+The renderer owns its shadcn `base-nova` library in `src/renderer/src/components/ui`, backed by `@base-ui/react`. Import the local wrappers in views rather than recreating primitive behavior. Keep token-based styling, CVA variants, and the existing `cn()` helper; there is no shadcn CLI runtime dependency.
+
+- Compose Base UI triggers with `render`, not Radix `asChild`. `DialogContent` accepts Base UI `initialFocus` and `finalFocus`; guarded roots refuse implicit dismissal through `onOpenChange`'s `details.cancel()`.
+- `Select` accepts `options` and a string-valued `onValueChange`; `''` can be a real option, not a missing value. Field selects fill their container; use `className="w-auto"` for content-sized inline toolbar selects.
+- `Checkbox` reports booleans through `onCheckedChange` and exposes mixed state through `indeterminate`. Use `RadioGroup` for form choices and `SegmentedControl` for an exactly-one-selected control with nonempty option keys.
+- Pass `disabled` explicitly to composite controls inside locked fieldsets. Portaled options must not remain usable during an operation.
+- Use TanStack Form's `useForm`, `form.Field`, `handleChange`, `handleBlur`, and `useSelector` for local form drafts. Native form submission prevents default and stops propagation before `form.handleSubmit`; await asynchronous transports and retain synchronous dispatch locks.
+- Keep hydrated `defaultValues` consistent with values passed to `form.reset`, including fields mounted only in another section. Do not duplicate repository previews, recovery state, editor documents, or persistent review drafts in form state. Clear credential fields before transport dispatch and on dismissal; never log them.
+
+`npm run test:controls` exercises the actual shared controls in Electron and the guarded recovery specimen through the production preload. Focused renderer coverage includes:
+
+```sh
+npm run test:ui -- tests/renderer/base-ui.spec.ts tests/renderer/tanstack-forms.spec.ts tests/renderer/safety.spec.ts
+```
 
 When adding a variant or migrating a view:
 

@@ -13,6 +13,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { Button } from './ui/button'
 import { claimsRovingKey, rovingAction, rovingTarget } from '../lib/tree-navigation'
 import type { ShortcutId } from '../../../shared/shortcuts'
 
@@ -140,9 +141,10 @@ export function WorkspaceNavigation({
         const active = activeView === id
         const count = countFor(id)
         return (
-          <button
+          <Button
             aria-current={active ? 'page' : undefined}
             className={cn('nav-item', active && 'nav-item-active')}
+            variant="unstyled"
             key={id}
             onClick={() => onSelect(id)}
             type="button"
@@ -157,7 +159,7 @@ export function WorkspaceNavigation({
               </span>
             ) : null}
             {active ? <span className="nav-current-marker" aria-hidden="true" /> : null}
-          </button>
+          </Button>
         )
       })}
     </nav>

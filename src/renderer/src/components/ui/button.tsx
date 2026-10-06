@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { Button as ButtonPrimitive } from '@base-ui/react/button'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '../../lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
@@ -21,6 +22,7 @@ const buttonVariants = cva(
         danger:
           'border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
         link: 'h-auto rounded-none p-0 text-[var(--gs-component-button-link)] underline decoration-[var(--gs-semantic-selection-border)] underline-offset-4 hover:decoration-[var(--gs-component-button-link)]',
+        unstyled: '',
       },
       size: {
         sm: 'min-h-[var(--gs-semantic-density-control-compact)] px-3 text-[length:var(--gs-semantic-type-label-size)]',
@@ -39,7 +41,8 @@ const buttonVariants = cva(
 )
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
+  extends Omit<ButtonPrimitive.Props, 'className'>, VariantProps<typeof buttonVariants> {
+  className?: string
   tooltip?: React.ReactNode
   loading?: boolean
 }
@@ -52,13 +55,16 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     const hint = tooltip ?? (size === 'icon' || size === 'icon-sm' ? props['aria-label'] : null)
     const isDisabled = disabled || loading
     const button = (
-      <button
+      <ButtonPrimitive
         ref={ref}
+        data-slot="button"
         type={type}
         aria-busy={loading || undefined}
         data-loading={loading || undefined}
         data-size={size ?? 'default'}
-        className={cn(buttonVariants({ variant, size, className }))}
+        className={
+          variant === 'unstyled' ? className : cn(buttonVariants({ variant, size, className }))
+        }
         disabled={isDisabled}
         {...props}
       />
@@ -66,20 +72,22 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     if (!hint) return button
     return (
       <Tooltip>
-        <TooltipTrigger asChild>
-          {isDisabled ? (
-            <span
-              role="group"
-              className="inline-flex shrink-0 rounded-[var(--gs-semantic-radius-control)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]"
-              tabIndex={0}
-              aria-label={typeof hint === 'string' ? hint : props['aria-label']}
-            >
-              {button}
-            </span>
-          ) : (
-            button
-          )}
-        </TooltipTrigger>
+        <TooltipTrigger
+          render={
+            isDisabled ? (
+              <span
+                role="group"
+                className="inline-flex shrink-0 rounded-[var(--gs-semantic-radius-control)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]"
+                tabIndex={0}
+                aria-label={typeof hint === 'string' ? hint : props['aria-label']}
+              >
+                {button}
+              </span>
+            ) : (
+              button
+            )
+          }
+        />
         <TooltipContent>
           {hint}
           {isDisabled && !tooltip ? ' — unavailable' : null}

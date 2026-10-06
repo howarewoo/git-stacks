@@ -21,7 +21,7 @@ if (!root) {
 
 createRoot(root).render(
   <React.StrictMode>
-    <TooltipProvider delayDuration={450} skipDelayDuration={150}>
+    <TooltipProvider delay={450} timeout={150}>
       <RepositoryHoverCardProvider>
         {recoverySpecimen ? <WorkflowRecoverySpecimen mode={recoveryMode} /> : <App />}
       </RepositoryHoverCardProvider>

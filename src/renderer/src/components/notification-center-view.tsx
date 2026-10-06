@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Trash2,
 } from 'lucide-react'
+import { useForm, useSelector } from '@tanstack/react-form'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
@@ -29,6 +30,16 @@ import {
   type NotificationModuleState,
   type NotificationThread,
 } from '../../../shared/notifications'
+
+/**
+ * The credential form's defaults. This is the state a closed dialog is reset to
+ * and the state a fresh one opens on: the token is empty and the boundary has
+ * not been acknowledged. It is a stable object rather than a literal inside the
+ * hook because `FormApi.update` compares the supplied defaults against the
+ * current ones on every render and re-applies them when they differ, so these
+ * have to remain the one snapshot the reset actually established.
+ */
+const CREDENTIAL_DEFAULTS = { accepted: false, token: '' }
 
 type Tone = 'info' | 'success' | 'warning' | 'error'
 
@@ -189,15 +200,35 @@ export function NotificationCredentialDialog({
   onSubmit: (token: string, accepted: boolean, host: string) => void
   open: boolean
 }) {
-  const [token, setToken] = React.useState('')
-  const [accepted, setAccepted] = React.useState(false)
+  // The token and the acknowledgement are one form. Nothing else about this
+  // dialog is editable, and nothing about the token outlives the submission
+  // that carries it: it is dropped the moment it is dispatched, and again when
+  // the dialog closes, so it is never logged, persisted, or re-submitted.
+  const credentialForm = useForm({
+    defaultValues: CREDENTIAL_DEFAULTS,
+    validators: {
+      onSubmit: ({ value }) =>
+        !value.accepted
+          ? 'Consent is required before authorizing notifications.'
+          : !value.token.trim()
+            ? 'Enter a notification credential.'
+            : undefined,
+    },
+    onSubmit: ({ formApi, value }) => {
+      if (busy) return
+      const token = value.token.trim()
+      formApi.setFieldValue('token', '')
+      onSubmit(token, value.accepted, host)
+    },
+  })
+  const credential = useSelector(credentialForm.store, (state) => state.values)
   React.useEffect(() => {
-    if (!open) {
-      setToken('')
-      setAccepted(false)
-    }
-  }, [open])
-  const canSubmit = accepted && token.trim().length > 0 && !busy
+    // Closing is the confirmed end of this attempt: the token and the
+    // acknowledgement are both dropped, so reopening starts from the same
+    // refusal it did the first time.
+    if (!open) credentialForm.reset()
+  }, [credentialForm, open])
+  const canSubmit = credential.accepted && credential.token.trim().length > 0 && !busy
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="workflow-dialog" aria-label="GitHub Notifications credential">
@@ -208,7 +239,14 @@ export function NotificationCredentialDialog({
             and reviews, and it neither borrows from nor widens that session.
           </DialogDescription>
         </DialogHeader>
-        <div className="dialog-form">
+        <form
+          className="dialog-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            void credentialForm.handleSubmit()
+          }}
+        >
           <ul className="m-0 grid list-none gap-2 p-0">
             {NOTIFICATION_CONSENT_POINTS.map((point) => (
               <li
@@ -244,41 +282,42 @@ export function NotificationCredentialDialog({
             >
               Personal access token
             </label>
-            <Input
-              id="notification-token"
-              autoComplete="off"
-              controlSize="compact"
-              onChange={(event) => setToken(event.target.value)}
-              placeholder="ghp_…"
-              spellCheck={false}
-              type="password"
-              value={token}
-            />
+            <credentialForm.Field name="token">
+              {(field) => (
+                <Input
+                  id="notification-token"
+                  autoComplete="off"
+                  controlSize="compact"
+                  onBlur={field.handleBlur}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                  placeholder="ghp_…"
+                  spellCheck={false}
+                  type="password"
+                  value={field.state.value}
+                />
+              )}
+            </credentialForm.Field>
           </div>
-          <Checkbox
-            checked={accepted}
-            description="It is stored separately from the GitHub CLI credential, is removed on its own, and asks nothing of the CLI session — pull requests, stacks, and reviews keep working on the account they already use."
-            label="I understand the boundary this credential adds."
-            onChange={(event) => setAccepted(event.target.checked)}
-          />
+          <credentialForm.Field name="accepted">
+            {(field) => (
+              <Checkbox
+                checked={field.state.value}
+                description="It is stored separately from the GitHub CLI credential, is removed on its own, and asks nothing of the CLI session — pull requests, stacks, and reviews keep working on the account they already use."
+                label="I understand the boundary this credential adds."
+                onCheckedChange={(checked) => field.handleChange(checked)}
+              />
+            )}
+          </credentialForm.Field>
           {error ? <InlineAlert tone="error">{error}</InlineAlert> : null}
           <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={!canSubmit}
-              loading={busy}
-              onClick={() => {
-                const value = token.trim()
-                onSubmit(value, accepted, host)
-                setToken('')
-              }}
-            >
+            <Button disabled={!canSubmit} loading={busy} type="submit">
               Authorize notifications
             </Button>
             <Button disabled={busy} onClick={() => onOpenChange(false)} variant="secondary">
               Cancel
             </Button>
           </div>
-        </div>
+        </form>
       </DialogContent>
     </Dialog>
   )

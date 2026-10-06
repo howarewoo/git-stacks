@@ -136,7 +136,7 @@ function Gallery() {
 
   // No StrictMode here: every fixture must mount exactly once so the call log stays deterministic.
   return (
-    <TooltipProvider delayDuration={450} skipDelayDuration={150}>
+    <TooltipProvider delay={450} timeout={150}>
       <RepositoryHoverCardProvider>{renderRoute(route, scenario)}</RepositoryHoverCardProvider>
     </TooltipProvider>
   )

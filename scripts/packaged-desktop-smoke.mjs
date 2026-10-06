@@ -1274,7 +1274,8 @@ async function mergeThroughUi(locators, branch) {
   await locators.page.getByRole('menuitem', { name: /Merge into current branch/ }).click()
   const dialog = locators.dialog()
   await dialog.waitFor()
-  await dialog.getByRole('combobox', { name: 'Branch to merge', exact: true }).selectOption(branch)
+  await dialog.getByRole('combobox', { name: 'Branch to merge', exact: true }).click()
+  await locators.page.getByRole('option', { name: branch, exact: true }).click()
   const submit = dialog.getByRole('button', { name: 'Merge into current branch', exact: true })
   await submit.waitFor()
   assert(!(await submit.isDisabled()), 'The merge dialog stayed disabled after choosing a branch')
@@ -2225,9 +2226,8 @@ async function run(options) {
       const dialog = locators.dialog()
       await dialog.waitFor()
       await dialog.getByRole('textbox', { name: 'Branch name', exact: true }).fill(FEATURE)
-      await dialog
-        .getByRole('combobox', { name: 'Parent branch', exact: true })
-        .selectOption('main')
+      await dialog.getByRole('combobox', { name: 'Parent branch', exact: true }).click()
+      await locators.page.getByRole('option', { name: 'main', exact: true }).click()
       const create = dialog.getByRole('button', { name: 'Create branch', exact: true })
       assert(
         !(await create.isDisabled()),

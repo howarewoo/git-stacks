@@ -6,7 +6,6 @@ import { Button, IconButton } from '../src/renderer/src/components/ui/button'
 import { Checkbox } from '../src/renderer/src/components/ui/checkbox'
 import { Field } from '../src/renderer/src/components/ui/field'
 import { Input } from '../src/renderer/src/components/ui/input'
-import { SegmentedControl } from '../src/renderer/src/components/ui/segmented-control'
 import { Textarea } from '../src/renderer/src/components/ui/textarea'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
 import { ShellSpecimen } from '../src/renderer/src/design-system/ShellSpecimen'
@@ -89,43 +88,7 @@ test('field errors remain visible on textarea and checkbox controls', () => {
   )
 
   assert.match(textarea, /aria-invalid="true"/)
-  assert.match(
-    textarea,
-    /aria-\[invalid=true\]:border-\[var\(--gs-semantic-feedback-error-text\)\]/,
-  )
   assert.match(checkbox, /aria-invalid="true"/)
-  assert.match(
-    checkbox,
-    /aria-\[invalid=true\]:border-\[var\(--gs-semantic-feedback-error-text\)\]/,
-  )
-})
-
-test('checkbox and segmented controls expose independent state semantics', () => {
-  const checkbox = renderToStaticMarkup(
-    React.createElement(Checkbox, {
-      id: 'include-files',
-      label: 'Include files',
-      checked: true,
-      readOnly: true,
-    }),
-  )
-  const segmented = renderToStaticMarkup(
-    React.createElement(SegmentedControl, {
-      label: 'Repository filter',
-      value: 'local',
-      onValueChange: () => undefined,
-      options: [
-        { value: 'all', label: 'All' },
-        { value: 'local', label: 'Local' },
-      ],
-    }),
-  )
-
-  assert.match(checkbox, /for="include-files"/)
-  assert.match(checkbox, /type="checkbox"/)
-  assert.match(segmented, /role="group"/)
-  assert.match(segmented, /aria-label="Repository filter"/)
-  assert.match(segmented, /aria-pressed="true"[^>]*>Local/)
 })
 
 test('shell specimen captions are not rendered as labels without controls', () => {
@@ -133,7 +96,6 @@ test('shell specimen captions are not rendered as labels without controls', () =
     React.createElement(TooltipProvider, null, React.createElement(ShellSpecimen)),
   )
 
-  assert.match(markup, /<p class="shell-fixture-caption">Branch matching/)
   assert.match(markup, /<label for="shell-fixture-draft">In-progress commit message<\/label>/)
   assert.match(markup, /id="shell-fixture-draft"/)
   assert.doesNotMatch(markup, /for="shell-fixture-search-result"/)

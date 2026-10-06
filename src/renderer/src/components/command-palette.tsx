@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { Badge } from './ui/badge'
+import { Input } from './ui/input'
 import { cn } from '../lib/utils'
 import {
   type CommandGroup,
@@ -126,9 +127,9 @@ export function CommandPaletteContent({
     setConfirmingId(null)
   }, [query])
 
-  // Radix dismisses the dialog from a document-level capture listener that runs
+  // Base UI dismisses the dialog from its own document-level listener that runs
   // before this input's own handler, so the armed state is reported upward for
-  // `onEscapeKeyDown` to keep a pending confirmation from closing the palette.
+  // the dialog's Root to keep a pending confirmation from closing the palette.
   React.useEffect(() => {
     onConfirmingChange?.(confirmingId)
   }, [confirmingId, onConfirmingChange])
@@ -227,7 +228,8 @@ export function CommandPaletteContent({
           className="mr-3 size-4 text-[var(--gs-semantic-text-secondary)]"
           aria-hidden="true"
         />
-        <input
+        <Input
+          unstyled
           ref={inputRef}
           type="text"
           role="combobox"
@@ -390,20 +392,29 @@ export function CommandPalette({
   }, [open])
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next, details) => {
+        // Base UI dismisses from its own document-level listener, which runs before
+        // the palette input's own key handler, so both conditions are checked here.
+        if (
+          !next &&
+          details.reason === 'escape-key' &&
+          !shouldDismissPaletteOnEscape(details.event, confirmingRef.current !== null)
+        ) {
+          details.cancel()
+          return
+        }
+        onOpenChange(next)
+      }}
+    >
       <DialogContent
         className="palette-dialog fixed left-1/2 top-[12%] z-[var(--gs-component-overlay-z-index)] grid grid-cols-[minmax(0,1fr)] max-h-[calc(88vh-1rem)] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 translate-y-0 gap-0 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-0 shadow-[var(--gs-semantic-elevation-large)] outline-none"
-        onCloseAutoFocus={(event) => {
-          event.preventDefault()
+        finalFocus={() => {
+          // The resolver is structurally typed for the shared lib, but Base can
+          // only be handed a real element, so narrow before returning it.
           const target = resolveFocusRestoreTarget(openerRef.current, searchFallbackRef?.current)
-          target?.focus()
-        }}
-        onEscapeKeyDown={(event) => {
-          // Radix dismisses from a document capture listener that runs before the
-          // input's own handler, so both conditions are checked here.
-          if (!shouldDismissPaletteOnEscape(event, confirmingRef.current !== null)) {
-            event.preventDefault()
-          }
+          return target instanceof HTMLElement ? target : false
         }}
       >
         <DialogHeader className="sr-only">

@@ -29,8 +29,9 @@ test.describe('Review snapshot history and comparison', () => {
     const toolbar = page.getByRole('toolbar', { name: 'Review update history' })
     const select = toolbar.getByLabel('Choose snapshot to compare against current head')
 
-    // Direct action: select earlier snapshot by value from dropdown
-    await select.selectOption('1111222233334444555566667777888899990000')
+    // Direct action: open the snapshot picker and choose the earlier snapshot
+    await select.click()
+    await page.getByRole('option', { name: /^1111222 /u }).click()
     await settle(page)
 
     // Comparing badge is visible

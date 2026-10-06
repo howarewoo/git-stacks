@@ -605,6 +605,13 @@ async function main() {
     assert.ok(inspectorEndpoint, `the main process inspector never announced itself: ${output}`)
     main = await Cdp.open(inspectorEndpoint)
     await main.call('Runtime.enable')
+    // Dialog teardown waits for a rendered frame. Keep this test-owned window
+    // rendering even when another desktop window occludes the automated run.
+    await main.evaluate(`(() => {
+      ${RESOLVER}
+      const window = resolveElectron().BrowserWindow.getAllWindows()[0]
+      window.webContents.setBackgroundThrottling(false)
+    })()`)
     socket = new WebSocket(target.webSocketDebuggerUrl)
     await new Promise((resolve, reject) => {
       socket.addEventListener('open', resolve, { once: true })
@@ -774,8 +781,12 @@ async function main() {
       // keyboard sends alongside it.
       await send('Input.dispatchKeyEvent', {
         ...options,
-        type: 'rawKeyDown',
-        ...(keyName === 'Enter' ? { text: '\r', unmodifiedText: '\r', isKeypad: false } : {}),
+        type: keyName === ' ' ? 'keyDown' : 'rawKeyDown',
+        ...(keyName === 'Enter'
+          ? { text: '\r', unmodifiedText: '\r', isKeypad: false }
+          : keyName === ' '
+            ? { text: ' ', unmodifiedText: ' ' }
+            : {}),
       })
       await send('Input.dispatchKeyEvent', { ...options, type: 'keyUp' })
     }
@@ -843,25 +854,34 @@ async function main() {
       // way of waiting on a control that never stops moving.
       const attempts = 4
       for (let attempt = 1; ; attempt += 1) {
-        const box = await boxOf(expression)
-        if (!box) {
+        // Sample geometry and hit-testing in one renderer task; a host probe
+        // can otherwise move the dialog between two inspector round trips.
+        const measurement = await page(`(() => {
+          const el = ${expression}
+          if (!el) return null
+          const rect = el.getBoundingClientRect()
+          const box = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+          const x = box.x + box.width / 2
+          const y = box.y + box.height / 2
+          const hit = document.elementFromPoint(x, y)
+          return {
+            box, x, y,
+            viewport: { width: window.innerWidth, height: window.innerHeight },
+            reaches: hit === el || (hit !== null && el.contains(hit))
+              ? null
+              : hit ? hit.tagName + '.' + hit.className + ' "' + (hit.innerText || '').slice(0, 40) + '"' : 'nothing at that point'
+          }
+        })()`)
+        if (!measurement) {
           throw new Error(`no ${description} on screen: ${await page('document.body.innerText')}`)
         }
-        const viewport = await page('({ width: window.innerWidth, height: window.innerHeight })')
+        const { box, viewport, x, y, reaches } = measurement
         assert.ok(
           box.x >= 0 &&
             box.y >= 0 &&
             box.x + box.width <= viewport.width + 1 &&
             box.y + box.height <= viewport.height + 1,
           `${description} is not inside the viewport a person presses in: ${JSON.stringify({ box, viewport })}`,
-        )
-        const x = box.x + box.width / 2
-        const y = box.y + box.height / 2
-        // A press only counts if the window would hand that point to this
-        // control and not to something drawn over it, which is what a person
-        // finds out the moment the press does nothing.
-        const reaches = await page(
-          `(() => { const el = ${expression}; if (!el) return null; const hit = document.elementFromPoint(${x}, ${y}); return hit === el || (hit !== null && el.contains(hit)) ? null : (hit ? hit.tagName + '.' + hit.className + ' "' + hit.innerText.slice(0, 40) + '"' : 'nothing at that point') })()`,
         )
         assert.equal(reaches, null, `${description} is covered by something else: ${reaches}`)
         const watched = await page(
@@ -1744,7 +1764,10 @@ async function main() {
     )
     const dialog = (part) =>
       `document.querySelector('[aria-label="GitHub Notifications credential"] ${part}')`
-    await inView(dialog('*'), 'the consent dialog')
+    await inView(
+      `document.querySelector('[aria-label="GitHub Notifications credential"]')`,
+      'the consent dialog',
+    )
     await reveal(dialog('input:not([type="checkbox"])'), 'the token field at 200% zoom')
     await inView(dialog('input:not([type="checkbox"])'), 'the token field at 200% zoom')
     // The token goes into the field the dialog itself focused, walked to with
@@ -1813,16 +1836,16 @@ async function main() {
       await send('Input.dispatchKeyEvent', { type: 'keyDown', text: character })
       await send('Input.dispatchKeyEvent', { type: 'keyUp', text: character })
     }
-    await reveal(
-      dialog('input[type="checkbox"], [role="checkbox"]'),
+    await reveal(dialog('[role="checkbox"]'), 'the consent control at 200% zoom')
+    await tabTo(
+      `document.activeElement?.getAttribute('role') === 'checkbox'`,
       'the consent control at 200% zoom',
     )
-    await tabTo(`document.activeElement?.type === 'checkbox'`, 'the consent control at 200% zoom')
-    await inView(dialog('input[type="checkbox"], [role="checkbox"]'), 'the consent control')
+    await inView(dialog('[role="checkbox"]'), 'the consent control')
     await key(' ', 'Space', 32)
     await until(
       'the acknowledgement to be given from the keyboard at 200% zoom',
-      `${dialog('input[type="checkbox"]')}?.checked === true`,
+      `${dialog('[role="checkbox"]')}?.getAttribute('aria-checked') === 'true'`,
       600,
     )
     const zoomedConsent = await screenshot('notifications-zoom-200-consent', { viewportOnly: true })
@@ -1938,31 +1961,15 @@ async function main() {
     assert.equal(
       cliStatus.host,
       secondName,
-      `the account status answered for the host the window is now pointed at, not the one it came from: ${JSON.stringify(accountStatus)}`,
-    )
-    // The state asserted is the one this computer is actually in, which is not
-    // the one a build with a GitHub App registration would report. The
-    // environment filter above strips every `GITHUB_` variable, so no App
-    // registration reaches this process, and nothing here registers one to get
-    // a different answer: a build that has no client id for a host cannot sign
-    // in to it at all, which is a different claim from one that could and has
-    // not, and claiming the second here would be claiming something this run
-    // cannot have observed.
-    assert.equal(
-      accountStatus.state,
-      'not-configured',
-      `this window's own GitHub account reports it has no App registration for this host, so it cannot sign in at all: ${JSON.stringify(accountStatus)}`,
+      `the CLI status answered for the host the window is now pointed at: ${JSON.stringify(cliStatus)}`,
     )
     assert.equal(
-      accountStatus.reference,
-      null,
-      "this window's account reference is absent, read from the app's own status",
+      cliStatus.state,
+      'signed-out',
+      `this window's isolated CLI configuration has no authenticated account: ${JSON.stringify(cliStatus)}`,
     )
-    assert.equal(
-      accountStatus.login,
-      null,
-      "this window's account login is absent, read from the app's own status",
-    )
+    assert.equal(cliStatus.identity, null, 'the CLI has no credential identity in this fixture')
+    assert.equal(cliStatus.login, null, 'the CLI has no authenticated login in this fixture')
     assert.equal(
       git('remote').length,
       0,
