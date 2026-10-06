@@ -111,14 +111,7 @@ export class PullRequestInboxFilters {
         parsed.id && known.has(parsed.id) && !used.has(parsed.id) ? parsed.id : randomUUID()
       if (used.has(id)) continue
       used.add(id)
-      next.push({
-        id,
-        name: parsed.name,
-        group: parsed.group,
-        search: parsed.search,
-        criteria: parsed.criteria,
-        sort: parsed.sort,
-      })
+      next.push({ ...parsed, id })
     }
     const stored = parsePullRequestInboxSavedFilters(next)
     await mkdir(dirname(this.file), { recursive: true })

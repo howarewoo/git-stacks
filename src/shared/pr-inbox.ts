@@ -426,32 +426,23 @@ function inboxItemTime(item: PullRequestInboxItem): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-/**
- * Rows ordered the way a triage queue is worked: the group is chosen, then
- * recency. Repository then number break ties, so the order is total and stable
- * for the same data and a refresh never reshuffles rows under the cursor.
- */
+/** Unknown sort values stay last; host, repository and PR number break ties. */
 export function sortPullRequestInbox(
   items: readonly PullRequestInboxItem[],
   sort: PullRequestInboxSort = 'updated-desc',
 ): PullRequestInboxItem[] {
+  const value =
+    sort === 'updated-desc'
+      ? inboxItemTime
+      : (item: PullRequestInboxItem) =>
+          item.changeSize?.state === 'known' ? item.changeSize.value : null
   return [...items].sort((first, second) => {
-    const a =
-      sort === 'updated-desc'
-        ? inboxItemTime(first)
-        : first.changeSize?.state === 'known'
-          ? first.changeSize.value
-          : null
-    const b =
-      sort === 'updated-desc'
-        ? inboxItemTime(second)
-        : second.changeSize?.state === 'known'
-          ? second.changeSize.value
-          : null
+    const a = value(first)
+    const b = value(second)
     if (a === null && b !== null) return 1
     if (b === null && a !== null) return -1
-    const byTime = a === null || b === null ? 0 : sort === 'size-asc' ? a - b : b - a
-    if (byTime !== 0) return byTime
+    const byValue = a === null || b === null ? 0 : sort === 'size-asc' ? a - b : b - a
+    if (byValue !== 0) return byValue
     if (first.host !== second.host) return first.host.localeCompare(second.host)
     if (first.repository !== second.repository) {
       return first.repository.localeCompare(second.repository)

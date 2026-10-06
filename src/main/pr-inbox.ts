@@ -12,6 +12,7 @@ import {
   sortPullRequestInbox,
   type PullRequestInboxBudget,
   type PullRequestInboxItem,
+  type PullRequestInboxCount,
   type PullRequestInboxRepositoryReport,
   type PullRequestInboxRepositoryStatus,
   type PullRequestInboxReport,
@@ -44,41 +45,21 @@ export interface PullRequestInboxTarget {
   originUrl: string | null
 }
 
-/**
- * Every field the Inbox needs from one pull request. The review decision, the
- * newest review, the newest comment, and the head's check rollup are the recent
- * additions; an enterprise host whose schema refuses them falls back to the
- * basic set below rather than losing the pull request.
- */
-const FULL_FIELDS = `
-    number title url headRefName headRefOid baseRefName isDraft state
-    updatedAt mergedAt
-    additions deletions
-    reviewThreads(first: 100) { nodes { isResolved } pageInfo { hasNextPage } }
-    author { login }
-    headRepository { nameWithOwner }
-    reviewDecision
-    reviewRequests(first: 50) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }
-    latestReviews(first: 1) { nodes { author { login } submittedAt } }
-    comments(last: 1) { nodes { author { login } createdAt } }
-    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
-const MEMBERSHIP_FIELDS = FULL_FIELDS.replace(
-  '    additions deletions\n    reviewThreads(first: 100) { nodes { isResolved } pageInfo { hasNextPage } }\n',
-  '',
-)
-
-/**
- * The same read without the recent fields. A host that refuses them still
- * answers authored, requested, and draft facts, so the queue keeps working and
- * says through the repository report that review state is unknown rather than
- * reading an absent review decision as "nobody reviewed it".
- */
+/** Fallbacks omit unsupported fields without changing the remaining query. */
 const BASIC_FIELDS = `
     number title url headRefName headRefOid baseRefName isDraft state
     updatedAt mergedAt
     author { login }
     headRepository { nameWithOwner }
     reviewRequests(first: 50) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }`
+const MEMBERSHIP_FIELDS = `${BASIC_FIELDS}
+    reviewDecision
+    latestReviews(first: 1) { nodes { author { login } submittedAt } }
+    comments(last: 1) { nodes { author { login } createdAt } }
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
+const FULL_FIELDS = `${MEMBERSHIP_FIELDS}
+    additions deletions
+    reviewThreads(first: 100) { nodes { isResolved } pageInfo { hasNextPage } }`
 
 const OPEN_PAGE_SIZE = 100
 const MERGED_PAGE_SIZE = 50
@@ -526,27 +507,40 @@ function inboxState(value: unknown, mergedAt: string | null): PullRequest['state
   return 'OPEN'
 }
 
-function inboxCount(value: unknown, unsupported: boolean) {
-  if (unsupported) return { state: 'unsupported' as const }
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? { state: 'known' as const, value }
-    : { state: 'unknown' as const }
+function inboxChangeSize(
+  additions: unknown,
+  deletions: unknown,
+  unsupported: boolean,
+): PullRequestInboxCount {
+  if (unsupported) return { state: 'unsupported' }
+  if (
+    typeof additions !== 'number' ||
+    !Number.isSafeInteger(additions) ||
+    additions < 0 ||
+    typeof deletions !== 'number' ||
+    !Number.isSafeInteger(deletions) ||
+    deletions < 0 ||
+    !Number.isSafeInteger(additions + deletions)
+  )
+    return { state: 'unknown' }
+  return { state: 'known', value: additions + deletions }
 }
 
-function inboxThreadCount(value: unknown, unsupported: boolean) {
-  if (unsupported) return { state: 'unsupported' as const }
-  if (!isRecord(value) || !Array.isArray(value.nodes)) return { state: 'unknown' as const }
-  if (value.nodes.some((node) => !isRecord(node) || typeof node.isResolved !== 'boolean')) {
-    return { state: 'unknown' as const }
+function inboxThreadCount(value: unknown, unsupported: boolean): PullRequestInboxCount {
+  if (unsupported) return { state: 'unsupported' }
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.nodes) ||
+    !isRecord(value.pageInfo) ||
+    typeof value.pageInfo.hasNextPage !== 'boolean'
+  )
+    return { state: 'unknown' }
+  let count = 0
+  for (const node of value.nodes) {
+    if (!isRecord(node) || typeof node.isResolved !== 'boolean') return { state: 'unknown' }
+    if (!node.isResolved) count += 1
   }
-  const count = value.nodes.filter((node) => isRecord(node) && !node.isResolved).length
-  if (!isRecord(value.pageInfo) || typeof value.pageInfo.hasNextPage !== 'boolean') {
-    return { state: 'unknown' as const }
-  }
-  return {
-    state: value.pageInfo.hasNextPage ? ('truncated' as const) : ('known' as const),
-    value: count,
-  }
+  return { state: value.pageInfo.hasNextPage ? 'truncated' : 'known', value: count }
 }
 /**
  * One pull request node into an Inbox item, or null when the node is not a
@@ -583,8 +577,7 @@ function inboxItem(
   const headRepository = isRecord(node.headRepository)
     ? nodeDate(node.headRepository.nameWithOwner)
     : null
-  const additions = inboxCount(node.additions, context.basic || context.countsUnsupported === true)
-  const deletions = inboxCount(node.deletions, context.basic || context.countsUnsupported === true)
+  const countsUnsupported = context.basic || context.countsUnsupported === true
   return {
     number,
     title,
@@ -618,14 +611,8 @@ function inboxItem(
         node.reviewDecision === 'CHANGES_REQUESTED' ||
         node.reviewDecision === 'REVIEW_REQUIRED'),
     checksKnown: !context.basic && inboxChecksKnown(node.commits),
-    changeSize:
-      additions.state === 'known' && deletions.state === 'known'
-        ? inboxCount(additions.value + deletions.value, false)
-        : { state: context.basic || context.countsUnsupported ? 'unsupported' : 'unknown' },
-    unresolvedThreads: inboxThreadCount(
-      node.reviewThreads,
-      context.basic || context.countsUnsupported === true,
-    ),
+    changeSize: inboxChangeSize(node.additions, node.deletions, countsUnsupported),
+    unresolvedThreads: inboxThreadCount(node.reviewThreads, countsUnsupported),
     lastTurnLogin: turn.login,
     updatedAt: nodeDate(node.updatedAt),
     mergedAt,

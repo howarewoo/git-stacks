@@ -3005,6 +3005,11 @@ test('optional counts use the same bounded read and distinguish zero, truncation
                   reviewThreads: connection([{ isResolved: false }, { isResolved: true }], true),
                 }),
                 pullRequest({ number: 3, additions: null, deletions: 4, reviewThreads: null }),
+                pullRequest({
+                  number: 4,
+                  reviewThreads: connection([{ isResolved: false }, { isResolved: null }]),
+                }),
+                pullRequest({ number: 5, reviewThreads: { nodes: [{ isResolved: false }] } }),
               ]),
               merged: connection([]),
             },
@@ -3038,6 +3043,11 @@ test('optional counts use the same bounded read and distinguish zero, truncation
     assert.deepEqual(report.items.find((item) => item.number === 3)?.unresolvedThreads, {
       state: 'unknown',
     })
+    for (const number of [4, 5]) {
+      assert.deepEqual(report.items.find((item) => item.number === number)?.unresolvedThreads, {
+        state: 'unknown',
+      })
+    }
     assert.equal(report.refresh.requests, api.calls.length)
   } finally {
     api.restore()
@@ -3171,6 +3181,31 @@ test('raw optional fact payloads distinguish confirmed absence from unreadable f
       },
       criteria: { reviewers: ['Grace'] },
       expected: 'unknown',
+    },
+    {
+      override: { additions: -1, deletions: 1 },
+      criteria: { minSize: 0 },
+      expected: 'unknown',
+    },
+    {
+      override: { additions: 0.5, deletions: 0.5 },
+      criteria: { minSize: 0 },
+      expected: 'unknown',
+    },
+    {
+      override: { additions: Number.MAX_SAFE_INTEGER + 1, deletions: -1 },
+      criteria: { minSize: 0 },
+      expected: 'unknown',
+    },
+    {
+      override: { additions: Number.MAX_SAFE_INTEGER, deletions: 1 },
+      criteria: { minSize: 0 },
+      expected: 'unknown',
+    },
+    {
+      override: { additions: Number.MAX_SAFE_INTEGER, deletions: 0 },
+      criteria: { minSize: Number.MAX_SAFE_INTEGER, maxSize: Number.MAX_SAFE_INTEGER },
+      expected: 'match',
     },
   ]
   const api = installSynthetic({
