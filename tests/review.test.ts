@@ -22,6 +22,7 @@ import {
   type GitHubRestRequest,
   type GitHubRestResponse,
   type GitHubTransport,
+  type GitHubGraphqlOptions,
 } from '../src/main/github-transport'
 import { GITHUB_DEFAULT_HOST } from '../src/shared/host'
 import {
@@ -878,6 +879,242 @@ test('headline reviewer reads distinguish complete, bounded, refused, and moved-
       assert.deepEqual(headline.reviewers.requested, [])
       assert.deepEqual(headline.reviewers.reviews, [])
     }
+  }
+})
+
+test('headline stack facts use one bounded cancellable batch and reject malformed or stale readiness', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const head = 'a'.repeat(40)
+  const controller = new AbortController()
+  const { transport } = scriptedTransport([{ head, base: 'b'.repeat(40) }], [])
+  const rest = transport.rest.bind(transport)
+  let omitPrecedingMember = false
+  transport.rest = async <T>(request: GitHubRestRequest) => {
+    if (!request.path?.includes('/stacks')) return rest<T>(request)
+    return {
+      status: 200,
+      rateLimit: rateLimit(),
+      data: [
+        {
+          id: 1,
+          number: 42,
+          open: true,
+          base: { ref: 'main' },
+          pull_requests: Array.from({ length: 40 }, (_, index) =>
+            omitPrecedingMember && index === 38
+              ? null
+              : {
+                  number: index + 1,
+                  state: 'open',
+                  draft: false,
+                  head: { ref: `layer-${index + 1}`, sha: head },
+                },
+          ),
+        },
+      ] as T,
+    }
+  }
+  let batches = 0
+  transport.graphql = async <T>(
+    query: string,
+    _variables: Record<string, unknown>,
+    options?: GitHubGraphqlOptions,
+  ) => {
+    if (query.includes('layer0:')) {
+      batches += 1
+      assert.equal(options?.signal, controller.signal)
+      assert.equal((query.match(/: pullRequest\(/gu) ?? []).length, 32)
+      assert.match(query, /pullRequest\(number: 40\)/u)
+      assert.doesNotMatch(query, /pullRequest\(number: 33\)/u)
+      return {
+        repository: {
+          layer0: {
+            title: 'Confirmed absence',
+            headRefOid: head,
+            state: 'MERGED',
+            isDraft: false,
+            reviewDecision: null,
+            commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+          },
+          layer1: {
+            title: 'Malformed nested facts',
+            headRefOid: head,
+            state: 'FUTURE',
+            isDraft: 'false',
+            reviewDecision: ['APPROVED'],
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: ['SUCCESS'] } } }] },
+          },
+          layer2: {
+            title: 'Wrong head',
+            headRefOid: 'c'.repeat(40),
+            state: 'OPEN',
+            isDraft: false,
+            reviewDecision: 'APPROVED',
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] },
+          },
+        },
+      } as T
+    }
+    if (query.includes('latestReviews'))
+      return {
+        repository: {
+          pullRequest: {
+            headRefOid: head,
+            reviewRequests: { nodes: [], pageInfo: { hasNextPage: false } },
+            latestReviews: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+        },
+      } as T
+    return {
+      repository: {
+        pullRequest: {
+          number: 40,
+          title: 'Selected final layer',
+          url: 'https://github.com/acme/widgets/pull/40',
+          headRefName: 'layer-40',
+          headRefOid: head,
+          baseRefName: 'layer-39',
+          isDraft: false,
+          state: 'OPEN',
+          body: '',
+        },
+      },
+    } as T
+  }
+  setGitHubTransport(transport)
+  const headline = await readReviewHeadline(workspace.repo, 40, controller.signal)
+  assert.equal(batches, 1)
+  assert.equal(headline.rail.stack?.pullRequests.length, 40)
+  assert.equal(headline.rail.previous?.number, 39)
+  assert.equal(headline.rail.next, null)
+  assert.match(headline.rail.message, /bounded to 32/u)
+  assert.deepEqual(headline.rail.facts?.[0], {
+    number: 1,
+    state: 'available',
+    title: 'Confirmed absence',
+    lifecycle: 'MERGED',
+    draft: false,
+    checks: 'none',
+    review: 'none',
+    message: '',
+  })
+  assert.equal(headline.rail.facts?.[1].state, 'partial')
+  assert.equal(headline.rail.facts?.[1].lifecycle, null)
+  assert.equal(headline.rail.facts?.[1].draft, null)
+  assert.equal(headline.rail.facts?.[1].checks, 'unknown')
+  assert.equal(headline.rail.facts?.[1].review, 'unknown')
+  assert.equal(headline.rail.facts?.[2].state, 'stale')
+  assert.equal(headline.rail.facts?.[2].checks, 'unknown')
+  assert.equal(headline.rail.facts?.[2].review, 'unknown')
+  assert.equal(headline.rail.facts?.at(-1)?.number, 40)
+  assert.equal(headline.rail.facts?.at(-1)?.state, 'unavailable')
+
+  omitPrecedingMember = true
+  const partial = await readReviewHeadline(workspace.repo, 40, controller.signal)
+  assert.equal(partial.rail.stack?.size, 40)
+  assert.equal(partial.rail.stack?.pullRequests.length, 39)
+  assert.equal(partial.rail.previous, null, 'an omitted position is not an adjacent layer')
+  assert.equal(partial.rail.next, null)
+})
+
+test('headline metadata cancellation and selected native head disagreement preserve read authority', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  for (const scenario of ['cancelled', 'native-head-moved', 'canonical-head-moved'] as const) {
+    await t.test(scenario, async () => {
+      const head = 'b'.repeat(40)
+      const nativeHead = scenario === 'native-head-moved' ? 'a'.repeat(40) : head
+      const metadataHead = scenario === 'canonical-head-moved' ? 'a'.repeat(40) : head
+      const controller = new AbortController()
+      const { transport } = scriptedTransport([{ head, base: 'c'.repeat(40) }], [])
+      const rest = transport.rest.bind(transport)
+      transport.rest = async <T>(request: GitHubRestRequest) => {
+        if (!request.path?.includes('/stacks')) return rest<T>(request)
+        return {
+          status: 200,
+          rateLimit: rateLimit(),
+          data: [
+            {
+              id: 1,
+              number: 42,
+              open: true,
+              base: { ref: 'main' },
+              pull_requests: [
+                { number: 1, state: 'open', draft: false, head: { ref: 'layer-1' } },
+                {
+                  number: 2,
+                  state: 'open',
+                  draft: false,
+                  head: { ref: 'layer-2', sha: nativeHead },
+                },
+              ],
+            },
+          ] as T,
+        }
+      }
+      transport.graphql = async <T>(
+        query: string,
+        _variables: Record<string, unknown>,
+        options?: GitHubGraphqlOptions,
+      ) => {
+        if (query.includes('layer0:')) {
+          assert.equal(options?.signal, controller.signal)
+          if (scenario === 'cancelled') controller.abort()
+          const facts = (headRefOid: string) => ({
+            title: 'Layer',
+            headRefOid,
+            state: 'OPEN',
+            isDraft: false,
+            reviewDecision: 'APPROVED',
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] },
+          })
+          return { repository: { layer0: facts(head), layer1: facts(metadataHead) } } as T
+        }
+        if (query.includes('latestReviews'))
+          return {
+            repository: {
+              pullRequest: {
+                headRefOid: head,
+                reviewRequests: { nodes: [], pageInfo: { hasNextPage: false } },
+                latestReviews: { nodes: [], pageInfo: { hasNextPage: false } },
+              },
+            },
+          } as T
+        return {
+          repository: {
+            pullRequest: {
+              number: 2,
+              title: 'Selected layer',
+              url: 'https://github.com/acme/widgets/pull/2',
+              headRefName: 'layer-2',
+              headRefOid: head,
+              baseRefName: 'layer-1',
+              isDraft: false,
+              state: 'OPEN',
+              body: '',
+            },
+          },
+        } as T
+      }
+      setGitHubTransport(transport)
+      if (scenario === 'cancelled') {
+        await assert.rejects(
+          readReviewHeadline(workspace.repo, 2, controller.signal),
+          (error: unknown) => error instanceof GitHubTransportError && error.kind === 'cancelled',
+        )
+      } else {
+        const headline = await readReviewHeadline(workspace.repo, 2, controller.signal)
+        assert.equal(headline.rail.facts?.[0].state, 'partial')
+        assert.equal(headline.rail.facts?.[0].checks, 'unknown')
+        assert.equal(headline.rail.facts?.[0].review, 'unknown')
+        assert.equal(headline.rail.facts?.[1].state, 'stale')
+        assert.equal(headline.rail.facts?.[1].checks, 'unknown')
+        assert.equal(headline.rail.facts?.[1].review, 'unknown')
+      }
+    })
   }
 })
 

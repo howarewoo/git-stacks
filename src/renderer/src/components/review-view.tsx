@@ -32,7 +32,12 @@ import {
   visibleReviewFileRows,
   withViewedFile,
 } from '../../../shared/review'
-import type { DesktopAPI, PullRequest, PullRequestStackMember } from '../../../shared/types'
+import type {
+  DesktopAPI,
+  PullRequest,
+  PullRequestStackMember,
+  RepositorySnapshot,
+} from '../../../shared/types'
 import { LIST_PAGE_SIZE } from '../../../shared/performance'
 import { Badge } from './ui/badge'
 import { Select } from './ui/select'
@@ -45,6 +50,7 @@ import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pu
 import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import { createRequestGate } from '../lib/request-gate'
 import { cn } from '../lib/utils'
+import { claimsRovingKey, rovingAction, rovingTabIndex, rovingTarget } from '../lib/tree-navigation'
 import { ReviewConversation, type ReviewSelection } from './review-conversation'
 import { sameReviewComparison } from '../../../shared/review'
 import { withReviewDraft } from '../../../shared/review-threads'
@@ -89,6 +95,7 @@ export function ReviewView({
   authority,
   desktop,
   pullRequests,
+  stackContext,
   number,
   onSelectNumber,
   onManageNumber,
@@ -107,6 +114,7 @@ export function ReviewView({
   authority: string
   desktop: DesktopAPI | undefined
   pullRequests: readonly PullRequest[]
+  stackContext: Pick<RepositorySnapshot, 'branches' | 'reconciliation'>
   number: number | null
   onSelectNumber: (number: number) => void
   onManageNumber: (number: number) => void
@@ -861,6 +869,7 @@ export function ReviewView({
             rail={headline.rail}
             number={headline.pullRequest.number}
             onSelect={onSelectNumber}
+            context={stackContext}
           />
 
           <div className="review-pane-switch" role="group" aria-label="Review contextual panes">
@@ -1314,9 +1323,16 @@ function ReviewHeadlineBlock({
   return (
     <header className="review-headline">
       <div className="review-headline-title">
-        <strong>
-          #{pr.number} {pr.title}
-        </strong>
+        <details className="review-headline-title-disclosure">
+          <summary>
+            <strong>
+              #{pr.number} {pr.title}
+            </strong>
+          </summary>
+          <p>
+            #{pr.number} {pr.title}
+          </p>
+        </details>
         <div className="pr-detail-meta">
           <Badge variant={pr.state === 'OPEN' ? 'success' : 'secondary'}>
             {pr.state.toLowerCase()}
@@ -1347,22 +1363,38 @@ function ReviewHeadlineBlock({
 }
 
 /**
- * The stack rail.
- *
- * It shows where this pull request sits in its native stack and offers the layers
- * directly above and below. Choosing one only changes what is being reviewed: it
- * dispatches no Git action, so the checked-out branch is untouched by moving
- * through a stack.
+ * Read-only native membership navigation. The full ordered rail is disclosed
+ * locally so a long submitted stack never takes the default code viewport.
  */
 function ReviewRail({
   rail,
   number,
   onSelect,
+  context,
 }: {
   rail: ReviewStackRail
   number: number
   onSelect: (number: number) => void
+  context: Pick<RepositorySnapshot, 'branches' | 'reconciliation'>
 }) {
+  const members = React.useMemo(
+    () => [...(rail.stack?.pullRequests ?? [])].sort((a, b) => a.position - b.position),
+    [rail.stack],
+  )
+  const navigable = React.useMemo(
+    () => members.filter((member) => Number.isSafeInteger(member.number) && member.number > 0),
+    [members],
+  )
+  const memberListRef = React.useRef<HTMLOListElement>(null)
+  const [activeMemberIndex, setActiveMemberIndex] = React.useState(0)
+  React.useEffect(() => {
+    setActiveMemberIndex(
+      Math.max(
+        0,
+        navigable.findIndex((member) => member.number === number),
+      ),
+    )
+  }, [navigable, number])
   if (rail.state === 'unavailable') {
     return (
       <div className="review-rail" role="group" aria-label="Native stack layers">
@@ -1373,32 +1405,223 @@ function ReviewRail({
     )
   }
   if (rail.state === 'not-stacked' || !rail.stack) {
+    const local = context.branches.find((branch) => !branch.remote && branch.pr?.number === number)
     return (
       <div className="review-rail" role="group" aria-label="Native stack layers">
         <p className="review-rail-note">
           <Layers aria-hidden="true" className="size-3.5" />
           {rail.message}
         </p>
+        {local?.parent ? (
+          <details className="review-stack-disclosure">
+            <summary>Local-only relationship · not submitted native membership</summary>
+            <p className="review-rail-note">
+              {local.name} → {local.parent}. Source:{' '}
+              {local.parentSource === 'recorded'
+                ? 'recorded local parent'
+                : local.parentSource === 'pullRequest'
+                  ? 'PR base'
+                  : local.parentSource === 'stack'
+                    ? 'previous native stack observation'
+                    : 'inferred ancestry — not confirmed'}
+              .
+            </p>
+          </details>
+        ) : null}
       </div>
     )
   }
+  const selected = members.find((member) => member.number === number)
+  const partial = members.length < rail.stack.size
+  const reconciliation = context.reconciliation?.stacks.find(
+    (entry) => entry.stackNumber === rail.stack?.number,
+  )
+  const localEvidence = members.flatMap((member) => {
+    const branch = context.branches.find(
+      (entry) =>
+        !entry.remote && entry.pr?.number === member.number && entry.pr.head === member.head,
+    )
+    if (!branch) return []
+    if (member.headSha && branch.pr?.headOid && member.headSha !== branch.pr.headOid) {
+      return [
+        `#${member.number}: local metadata for ${branch.name} names a different head than submitted native membership; local blocker attribution is stale.`,
+      ]
+    }
+    if (branch.needsRestack || (branch.parentBehind ?? 0) > 0) {
+      return [
+        `#${member.number}: local branch ${branch.name} requires restack (local parent comparison${branch.parentBehind ? `: ${branch.parentBehind} parent commits behind` : ''}).`,
+      ]
+    }
+    if (branch.parent && branch.parentBehind === null) {
+      return [
+        `#${member.number}: local parent comparison for ${branch.name} is unavailable; this is not evidence of a restack requirement.`,
+      ]
+    }
+    return []
+  })
   return (
     <nav className="review-rail" aria-label="Native stack layers">
-      <span className="review-rail-position">
-        Layer {rail.stack.pullRequests.find((member) => member.number === number)?.position ?? '?'}{' '}
-        of {rail.stack.size} in stack #{rail.stack.number}
-      </span>
+      <details
+        className="review-stack-disclosure"
+        onToggle={(event) => {
+          if (!event.currentTarget.open) return
+          const list = event.currentTarget.querySelector<HTMLOListElement>('.review-stack-members')
+          const current = list?.querySelector<HTMLElement>('[aria-current="page"]')
+          if (list && current)
+            list.scrollTop += current.getBoundingClientRect().top - list.getBoundingClientRect().top
+        }}
+      >
+        <summary>
+          Layer {selected?.position ?? '?'} of {rail.stack.size} · Stack #{rail.stack.number}
+          {partial ? ` · Partial membership (${members.length} loaded)` : ' · All layers'}
+        </summary>
+        <ol
+          ref={memberListRef}
+          className="review-stack-members"
+          aria-label="Submitted native order"
+        >
+          {members.map((member) => {
+            const facts = rail.facts?.find((entry) => entry.number === member.number)
+            const fresh = facts?.state === 'available' || facts?.state === 'partial'
+            const lifecycle = (fresh ? facts.lifecycle : null) ?? member.state
+            const draft = (fresh ? facts.draft : null) ?? member.draft
+            const memberIndex = navigable.indexOf(member)
+            return (
+              <li key={`${member.position}-${member.number}`}>
+                <Button
+                  disabled={!Number.isSafeInteger(member.number) || member.number <= 0}
+                  variant="unstyled"
+                  className="review-stack-member"
+                  aria-current={member.number === number ? 'page' : undefined}
+                  onClick={() => onSelect(member.number)}
+                  tabIndex={memberIndex < 0 ? -1 : rovingTabIndex(memberIndex, activeMemberIndex)}
+                  onFocus={(event) => {
+                    setActiveMemberIndex(memberIndex)
+                    event.currentTarget.scrollIntoView({ block: 'nearest' })
+                  }}
+                  onKeyDown={(event) => {
+                    if (!claimsRovingKey(event)) return
+                    const action = rovingAction(event.key)
+                    if (!action) return
+                    const target = rovingTarget(action, memberIndex, navigable.length)
+                    if (target === null) return
+                    event.preventDefault()
+                    memberListRef.current
+                      ?.querySelectorAll<HTMLButtonElement>('.review-stack-member:not(:disabled)')
+                      [target]?.focus()
+                  }}
+                >
+                  <span className="review-stack-identity">
+                    <strong>
+                      {member.position}. #{member.number}
+                    </strong>
+                    <span>{facts?.title ?? `Title unavailable · ${member.head}`}</span>
+                  </span>
+                  <span className="review-stack-facts">
+                    <Badge
+                      variant={
+                        lifecycle === 'MERGED'
+                          ? 'merged'
+                          : lifecycle === 'CLOSED'
+                            ? 'danger'
+                            : 'secondary'
+                      }
+                    >
+                      {lifecycle?.toLowerCase() ?? 'Lifecycle unknown'}
+                    </Badge>
+                    {draft === null ? (
+                      <span>Draft unknown</span>
+                    ) : draft ? (
+                      <Badge variant="secondary">Draft</Badge>
+                    ) : null}
+                    <span>
+                      {facts?.checks === 'none'
+                        ? 'No checks'
+                        : `Checks ${facts?.checks ?? 'unknown'}`}
+                    </span>
+                    <span>
+                      {facts?.review === 'none'
+                        ? 'No review decision'
+                        : `Review ${(facts?.review ?? 'unknown').replaceAll('-', ' ')}`}
+                    </span>
+                    {facts?.state !== 'available' ? (
+                      <span>{facts?.state ?? 'Metadata not loaded'}</span>
+                    ) : null}
+                    {facts?.message ? (
+                      <span className="review-stack-fact-note">{facts.message}</span>
+                    ) : null}
+                    {member.number === number ? <Badge variant="accent">Viewing</Badge> : null}
+                  </span>
+                </Button>
+              </li>
+            )
+          })}
+        </ol>
+        {rail.message ? <p className="review-rail-note">{rail.message}</p> : null}
+        <details className="review-stack-evidence">
+          <summary>Blockers & relationship sources</summary>
+          <p className="review-rail-note">
+            Submitted order comes from GitHub native membership. Inspection does not prepare or
+            repair the stack.
+          </p>
+          {localEvidence.length ? (
+            <ul>
+              {localEvidence.map((detail) => (
+                <li key={detail}>{detail}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="review-rail-note">
+              No local restack requirement reported for these matched branches.
+            </p>
+          )}
+          {reconciliation ? (
+            <>
+              <p className="review-rail-note">
+                Reconciliation source: {reconciliation.state} · {reconciliation.summary}
+              </p>
+              <p className="review-rail-note">
+                Submitted order: {reconciliation.submittedOrder.join(' → ') || 'Unavailable'}
+              </p>
+              {reconciliation.blockers.length ? (
+                <ul>
+                  {reconciliation.blockers.map((detail) => (
+                    <li key={detail}>{detail}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {reconciliation.members
+                .filter((entry) => entry.detail)
+                .map((entry) => (
+                  <p className="review-rail-note" key={entry.branch}>
+                    {entry.branch}: {entry.detail}
+                  </p>
+                ))}
+            </>
+          ) : (
+            <p className="review-rail-note">
+              No matching reconciliation report is available; no reconciliation blocker is inferred.
+            </p>
+          )}
+        </details>
+      </details>
       <LayerButton
         direction="previous"
         member={rail.previous}
         onSelect={onSelect}
-        boundary="This is the bottom layer of the stack."
+        boundary={
+          partial
+            ? 'The preceding member was not returned.'
+            : 'This is the bottom layer of the stack.'
+        }
       />
       <LayerButton
         direction="next"
         member={rail.next}
         onSelect={onSelect}
-        boundary="This is the top layer of the stack."
+        boundary={
+          partial ? 'The following member was not returned.' : 'This is the top layer of the stack.'
+        }
       />
     </nav>
   )
@@ -1429,7 +1652,7 @@ function LayerButton({
       ) : (
         <ChevronRight aria-hidden="true" className="size-3.5" />
       )}
-      {member ? `${label}: #${member.number} ${member.head}` : `${label}: none`}
+      {member ? `${label}: #${member.number}` : `${label}: none`}
     </Button>
   )
 }

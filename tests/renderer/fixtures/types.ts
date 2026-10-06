@@ -143,6 +143,8 @@ export interface FixtureScenario {
    * two claims disagreeing, and the workspace has to say which one it is showing.
    */
   readonly reviewHeadOid?: string
+  readonly reviewStackUnavailable?: boolean
+  readonly reviewStackFactsState?: 'partial' | 'stale' | 'unavailable'
   /**
    * The viewer's review permissions, when the scenario is not a reviewer with
    * full write access. A scenario that blocks one event, or that makes the

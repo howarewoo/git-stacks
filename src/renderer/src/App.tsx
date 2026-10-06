@@ -3005,6 +3005,7 @@ function App() {
           onSelectNumber={setReviewNumber}
           onManageNumber={(number) => openWorkflow({ kind: 'pr', number })}
           pullRequests={visiblePullRequests}
+          stackContext={snapshot}
         />
       )
     if (workspaceView === 'stashes') return renderStashes()

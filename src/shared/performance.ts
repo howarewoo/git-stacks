@@ -33,6 +33,8 @@ export const MAX_COMMAND_BYTES = 32 * 1024 * 1024
 export const GIT_CONCURRENCY = 8
 /** Branches that receive per-branch merge-base / rev-list analysis per snapshot. */
 export const SNAPSHOT_BRANCH_BUDGET = 1_500
+/** Native stack layers enriched in one readonly GraphQL summary batch. */
+export const REVIEW_STACK_METADATA_LIMIT = 32
 
 /**
  * What a snapshot deliberately left out. The renderer states these instead of
