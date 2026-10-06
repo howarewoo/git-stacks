@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test'
-import { openGallery, settle } from './helpers/gallery'
+import {
+  answerNextDoubleCall,
+  holdDoubleCall,
+  openGallery,
+  releaseDoubleCalls,
+  settle,
+} from './helpers/gallery'
 
 test.describe('Onboarding and repository discovery', () => {
   test('displays detected Git environment facts and standard Git explanation', async ({ page }) => {
@@ -94,6 +100,56 @@ test.describe('Onboarding and repository discovery', () => {
     // Close clone dialog
     await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
     await expect(dialog).not.toBeVisible()
+  })
+
+  test('a running clone keeps repository selection and dialog dismissal locked', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-no-repository' })
+    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
+    const repository = dialog.getByRole('button').filter({ hasText: 'howarewoo/git-stacks' })
+    await repository.click()
+    await dialog.getByRole('button', { name: 'Choose folder', exact: true }).click()
+    await holdDoubleCall(page, 'cloneRepository')
+    await dialog.getByRole('button', { name: 'Clone repository', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Cancel clone', exact: true })).toBeVisible()
+    await expect(repository).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeVisible()
+
+    await dialog.getByRole('button', { name: 'Cancel clone', exact: true }).click()
+    await answerNextDoubleCall(page, 'cloneRepository', {
+      ok: false,
+      failure: { reason: 'cancelled', message: 'Clone cancelled.' },
+    })
+    await releaseDoubleCalls(page, 'cloneRepository')
+    await expect(repository).toBeEnabled()
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(dialog).toBeHidden()
+  })
+
+  test('cancelling a replacement search preserves the last confirmed repository list', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-no-repository' })
+    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
+    await expect(dialog.getByText('howarewoo/git-stacks')).toBeVisible()
+    await holdDoubleCall(page, 'searchRepositories')
+    await dialog.getByPlaceholder('Name, owner, or description').fill('a replacement search')
+    await dialog.getByRole('button', { name: 'Search', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible()
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await answerNextDoubleCall(page, 'searchRepositories', {
+      ok: false,
+      failure: { reason: 'cancelled', message: 'Search cancelled.' },
+    })
+    await releaseDoubleCalls(page, 'searchRepositories')
+    await expect(dialog.getByRole('button', { name: 'Search', exact: true })).toBeEnabled()
+    await expect(dialog.getByText('howarewoo/git-stacks')).toBeVisible()
+    await expect(dialog.getByText('acme/widgets')).toBeVisible()
+    await expect(dialog.getByText('No repositories to show')).toHaveCount(0)
   })
 
   test('adding an existing repository and drag-and-drop triggers repository registration', async ({

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createRendererQueryClient } from '../src/renderer/src/lib/query-client'
 import {
   ChangesView,
   PullRequestListView,
@@ -29,9 +31,13 @@ const noopRequest = () => undefined
 function render(element: React.ReactElement): string {
   return renderToStaticMarkup(
     React.createElement(
-      TooltipProvider,
-      null,
-      React.createElement(RepositoryHoverCardProvider, null, element),
+      QueryClientProvider,
+      { client: createRendererQueryClient() },
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(RepositoryHoverCardProvider, null, element),
+      ),
     ),
   )
 }
@@ -363,6 +369,7 @@ test('reconciliation shows local-only stacks separately from matching submitted 
   const markup = render(
     React.createElement(ReconciliationPanel, {
       snapshot,
+      authority: 'fixture',
       busy: false,
       runAction: noopRunAction,
       actionError: null,
@@ -480,6 +487,7 @@ test('unmeasured parent comparison is not presented as publish-ready', () => {
   const markup = render(
     React.createElement(StackView, {
       snapshot,
+      authority: 'fixture',
       runAction: noopRunAction,
       actionError: null,
       onClearActionError: () => undefined,

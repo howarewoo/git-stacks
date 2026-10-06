@@ -1,5 +1,7 @@
 import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSettingsMutation } from '../lib/settings-query'
 import { AlertCircle, Check } from 'lucide-react'
 import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
@@ -130,11 +132,55 @@ export function SettingsDialog({
   onError,
 }: SettingsDialogProps) {
   const [section, setSection] = React.useState<Section>('cli')
-  const [snapshot, setSnapshot] = React.useState<SettingsSnapshot | null>(null)
-  const [busy, setBusy] = React.useState(false)
-  const [report, setReport] = React.useState<DiagnosticReport | null>(null)
-  const [bundle, setBundle] = React.useState<SupportBundlePreview | null>(null)
-  const [hostStatus, setHostStatus] = React.useState<GitHubHostStatus | null>(null)
+  const queryClient = useQueryClient()
+  const settingsQuery = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => desktop!.settings!(),
+    enabled: false,
+  })
+  const snapshot = settingsQuery.data ?? null
+  const diagnosticsQuery = useQuery({
+    queryKey: ['settings-diagnostics'],
+    queryFn: () => desktop!.diagnostics!(),
+    enabled: false,
+  })
+  const bundleQuery = useQuery({
+    queryKey: ['settings-support-bundle'],
+    queryFn: () => desktop!.supportBundlePreview!(),
+    enabled: false,
+  })
+  const hostKey = ['github-host-status', snapshot?.settings.github.host] as const
+  const hostQuery = useQuery({
+    queryKey: hostKey,
+    queryFn: () => desktop!.githubHostStatus!(),
+    enabled: false,
+  })
+  const report = diagnosticsQuery.data ?? null
+  const bundle = bundleQuery.data ?? null
+  const hostStatus = hostQuery.data ?? null
+  const saveMutation = useSettingsMutation((patch: SettingsPatch) =>
+    desktop!.updateSettings!(patch),
+  )
+  const resetMutation = useSettingsMutation(() => desktop!.resetSettings!())
+  const exportMutation = useMutation({
+    mutationFn: (id: string) => desktop!.exportSupportBundle!(id),
+  })
+  const updateMutation = useMutation({
+    mutationFn: async ({
+      step,
+    }: {
+      step: () => Promise<UpdateStatus | undefined> | undefined
+      busyWhile: boolean
+    }) => (await step()) ?? null,
+  })
+  const busy =
+    resetMutation.isPending ||
+    saveMutation.isPending ||
+    exportMutation.isPending ||
+    (updateMutation.isPending && updateMutation.variables?.busyWhile) ||
+    diagnosticsQuery.isFetching ||
+    bundleQuery.isFetching
+  const writeLock = React.useRef(false)
   const form = useForm({
     defaultValues: {
       host: snapshot?.settings.github.host ?? '',
@@ -164,7 +210,12 @@ export function SettingsDialog({
   })
   const formSubmitting = useSelector(form.store, (state) => state.isSubmitting)
   const [message, setMessage] = React.useState<string | null>(null)
-  const [updates, setUpdates] = React.useState<UpdateStatus | null>(null)
+  const updateQuery = useQuery({
+    queryKey: ['update-status'],
+    queryFn: () => desktop!.updateStatus!(),
+    enabled: false,
+  })
+  const updates = updateQuery.data ?? null
 
   /**
    * Every update step goes through main and the answer main gives back is what
@@ -174,30 +225,44 @@ export function SettingsDialog({
   const runUpdate = React.useCallback(
     async (step: () => Promise<UpdateStatus | undefined> | undefined, busyWhile: boolean) => {
       if (!step) return
-      if (busyWhile) setBusy(true)
+      if (busyWhile && writeLock.current) return
+      if (busyWhile) writeLock.current = true
       try {
-        const next = await step()
-        if (next) setUpdates(next)
+        const next = await updateMutation.mutateAsync({ step, busyWhile })
+        if (next) {
+          await queryClient.cancelQueries({ queryKey: ['update-status'] })
+          queryClient.setQueryData(['update-status'], next)
+        }
       } catch (value) {
         onError(value instanceof Error ? value.message : String(value))
       } finally {
-        if (busyWhile) setBusy(false)
+        if (busyWhile) writeLock.current = false
       }
     },
-    [onError],
+    [onError, queryClient, updateMutation],
   )
 
   React.useEffect(() => {
     if (!open || section !== 'updates') return
-    if (desktop?.updateStatus) void runUpdate(() => desktop.updateStatus?.(), false)
-    return desktop?.onUpdateStatus?.((status) => setUpdates(status))
-  }, [desktop, open, runUpdate, section])
+    if (desktop?.updateStatus)
+      void updateQuery
+        .refetch({ throwOnError: true })
+        .catch((value) => onError(value instanceof Error ? value.message : String(value)))
+    return desktop?.onUpdateStatus?.((status) => {
+      void queryClient
+        .cancelQueries({ queryKey: ['update-status'] })
+        .then(() => queryClient.setQueryData(['update-status'], status))
+    })
+  }, [desktop, open, queryClient, section])
 
   const refresh = React.useCallback(async () => {
     if (!desktop?.settings) return
     try {
-      const next = await desktop.settings()
-      setSnapshot(next)
+      const next = await queryClient.fetchQuery({
+        queryKey: ['settings'],
+        staleTime: 0,
+        queryFn: desktop.settings,
+      })
       form.reset({
         host: next.settings.github.host,
         editor: next.settings.git.editor ?? '',
@@ -208,7 +273,7 @@ export function SettingsDialog({
     } catch (value) {
       onError(value instanceof Error ? value.message : String(value))
     }
-  }, [desktop, form, onError, onSettingsChange, onShortcutBindingsChange])
+  }, [desktop, form, onError, onSettingsChange, onShortcutBindingsChange, queryClient])
 
   React.useEffect(() => {
     if (!open) return
@@ -226,12 +291,10 @@ export function SettingsDialog({
   const save = React.useCallback(
     async (patch: SettingsPatch, note: string): Promise<AppSettings | null> => {
       if (!desktop?.updateSettings) return null
-      setBusy(true)
+      if (writeLock.current) return null
+      writeLock.current = true
       try {
-        const next = await desktop.updateSettings(patch)
-        setSnapshot(next)
-        onSettingsChange(next.settings)
-        onShortcutBindingsChange(next.settings.shortcuts)
+        const next = await saveMutation.mutateAsync(patch)
         setMessage(note)
         form.reset({
           host: next.settings.github.host,
@@ -243,10 +306,10 @@ export function SettingsDialog({
         onError(value instanceof Error ? value.message : String(value))
         return null
       } finally {
-        setBusy(false)
+        writeLock.current = false
       }
     },
-    [desktop, form, onError, onSettingsChange, onShortcutBindingsChange],
+    [desktop, form, onError, onSettingsChange, onShortcutBindingsChange, queryClient, saveMutation],
   )
 
   const lockFor = React.useCallback(
@@ -275,11 +338,16 @@ export function SettingsDialog({
   const refreshHostStatus = React.useCallback(async () => {
     if (!desktop?.githubHostStatus) return
     try {
-      setHostStatus(await desktop.githubHostStatus())
+      const host = queryClient.getQueryData<SettingsSnapshot>(['settings'])?.settings.github.host
+      await queryClient.fetchQuery({
+        queryKey: ['github-host-status', host],
+        staleTime: 0,
+        queryFn: desktop.githubHostStatus,
+      })
     } catch {
-      setHostStatus(null)
+      queryClient.setQueryData(hostKey, null)
     }
-  }, [desktop])
+  }, [desktop, snapshot?.settings.github.host, queryClient])
 
   React.useEffect(() => {
     if (!open || section !== 'github') return
@@ -288,33 +356,28 @@ export function SettingsDialog({
 
   const openDiagnostics = React.useCallback(async () => {
     if (!desktop?.diagnostics) return
-    setBusy(true)
     try {
-      setReport(await desktop.diagnostics())
+      await diagnosticsQuery.refetch({ throwOnError: true })
     } catch (value) {
       onError(value instanceof Error ? value.message : String(value))
-    } finally {
-      setBusy(false)
     }
-  }, [desktop, onError])
+  }, [desktop, diagnosticsQuery, onError])
 
   const previewBundle = React.useCallback(async () => {
     if (!desktop?.supportBundlePreview) return
-    setBusy(true)
     try {
-      setBundle(await desktop.supportBundlePreview())
+      await bundleQuery.refetch({ throwOnError: true })
     } catch (value) {
       onError(value instanceof Error ? value.message : String(value))
-    } finally {
-      setBusy(false)
     }
-  }, [desktop, onError])
+  }, [desktop, bundleQuery, onError])
 
   const exportBundle = React.useCallback(async () => {
     if (!desktop?.exportSupportBundle || !bundle?.id) return
-    setBusy(true)
+    if (writeLock.current) return
+    writeLock.current = true
     try {
-      const result = await desktop.exportSupportBundle(bundle.id)
+      const result = await exportMutation.mutateAsync(bundle.id)
       setMessage(
         result.path
           ? `Support bundle written (${result.bytes} bytes).`
@@ -323,9 +386,9 @@ export function SettingsDialog({
     } catch (value) {
       onError(value instanceof Error ? value.message : String(value))
     } finally {
-      setBusy(false)
+      writeLock.current = false
     }
-  }, [desktop, bundle?.id, onError])
+  }, [desktop, bundle?.id, exportMutation, onError])
 
   // Reading the CLI status again is a real read of sanitized facts, and it is the
   // same read the rest of the window makes. Settings inspects that session; it
@@ -793,7 +856,7 @@ export function SettingsDialog({
                       checked={settings.privacy.includeLocalPaths}
                       disabled={busy || locked('privacy.includeLocalPaths')}
                       onCheckedChange={(checked) => {
-                        setBundle(null)
+                        void queryClient.resetQueries({ queryKey: ['settings-support-bundle'] })
                         void save(
                           { privacy: { includeLocalPaths: checked } },
                           checked
@@ -863,14 +926,11 @@ export function SettingsDialog({
                   variant="secondary"
                   disabled={busy || !desktop?.resetSettings}
                   onClick={() => {
-                    if (!desktop?.resetSettings) return
-                    setBusy(true)
-                    desktop
-                      .resetSettings()
+                    if (!desktop?.resetSettings || writeLock.current) return
+                    writeLock.current = true
+                    resetMutation
+                      .mutateAsync()
                       .then((next) => {
-                        setSnapshot(next)
-                        onSettingsChange(next.settings)
-                        onShortcutBindingsChange(next.settings.shortcuts)
                         form.reset({
                           host: next.settings.github.host,
                           editor: next.settings.git.editor ?? '',
@@ -881,7 +941,9 @@ export function SettingsDialog({
                       .catch((value) =>
                         onError(value instanceof Error ? value.message : String(value)),
                       )
-                      .finally(() => setBusy(false))
+                      .finally(() => {
+                        writeLock.current = false
+                      })
                   }}
                 >
                   <AlertCircle aria-hidden="true" className="size-4" /> Reset all

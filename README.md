@@ -135,6 +135,32 @@ and owner-only, synced atomic writes for review drafts, snapshots, and viewed
 files. Feature modules retain entry validation, retention limits, and locking;
 drafts must not evict unsent words to make room for another record.
 
+### Renderer server state
+
+TanStack Query owns renderer-side desktop read results and ordinary mutation
+lifecycles. Both the production renderer and fixture gallery use
+`createRendererQueryClient` from `src/renderer/src/lib/query-client.ts`. UI
+selection and unsent form edits stay local; Git, filesystem, credentials, and
+GitHub transport remain behind the typed `DesktopAPI` in main.
+
+Desktop IPC runs even when Chromium reports offline. Queries and mutations do
+not retry, refetch on focus/reconnect, or replay writes. Existing main-process
+freshness coordination and explicitly owned view polling retain their cadence.
+Inactive queries are discarded; snapshot responses retain their new object
+identity so file-content changes not represented by summary fields still reload
+the selected file. Scope read keys to their repository, host/CLI authority,
+pull request, ref, and comparison as applicable. Retire superseded reads before
+adopting pushed or confirmed results.
+
+Shared settings writes reconcile through the authoritative settings read rather
+than publishing full reply snapshots. Main's settings and updater queues can
+commit concurrently admitted writes in a different order.
+
+Cached display data never authorizes a Git or GitHub mutation: captured
+previews, live preflight checks, confirmation gates, same-event locks, and
+unknown-outcome reporting still apply. Notification credential handoff stays
+ephemeral and outside query keys, payloads, and mutation variables.
+
 ## Agent skills
 
 Repository-owned agent skills live in `.agents/skills/`. They are optional agent

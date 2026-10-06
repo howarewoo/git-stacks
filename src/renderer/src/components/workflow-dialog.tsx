@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink, Link2, LoaderCircle, Search, Trash2 } from 'lucide-react'
 import type {
   Branch,
@@ -9,7 +10,6 @@ import type {
   MergeAction,
   MergeLayerResult,
   MergeProgress,
-  MergeStatus,
   PublishLayerChoice,
   PublishProgress,
   PullRequest,
@@ -263,6 +263,8 @@ export type WorkflowStackAPI = Pick<
 
 interface PrLinkedIssuesSectionProps {
   pr: PullRequest & { body: string }
+  repositoryPath: string
+  authority: string
   onPrUpdate: (updated: PullRequest & { body: string }) => void
   disabled: boolean
   hasFormEdits: boolean
@@ -275,6 +277,8 @@ interface PrLinkedIssuesSectionProps {
 
 function PrLinkedIssuesSection({
   pr,
+  repositoryPath,
+  authority,
   onPrUpdate,
   disabled,
   hasFormEdits,
@@ -284,8 +288,28 @@ function PrLinkedIssuesSection({
   onMutationBusy,
   onBodyMutation,
 }: PrLinkedIssuesSectionProps) {
-  const [links, setLinks] = React.useState<LinkedIssue[]>([])
-  const [loading, setLoading] = React.useState(false)
+  const queryClient = useQueryClient()
+  const instance = React.useId()
+  const scope = { repositoryPath, authority, instance }
+  const [submittedQuery, setSubmittedQuery] = React.useState('')
+  const linksQuery = useQuery({
+    queryKey: ['workflow-issue-links', scope, pr.number],
+    enabled: false,
+    queryFn: async () => (await stackApi.pullRequestIssueLinks?.(pr.number)) ?? null,
+  })
+  const searchQuery = useQuery({
+    queryKey: ['workflow-issue-search', scope, submittedQuery],
+    enabled: false,
+    queryFn: async () => (await stackApi.searchIssues?.(submittedQuery)) ?? null,
+  })
+  const [linkIssueNumber, setLinkIssueNumber] = React.useState<number | null>(null)
+  const [unlinkIssueNumber, setUnlinkIssueNumber] = React.useState<number | null>(null)
+  const linkKey = ['workflow-issue-link-preview', scope, pr.number, linkIssueNumber] as const
+  const unlinkKey = ['workflow-issue-unlink-preview', scope, pr.number, unlinkIssueNumber] as const
+  const linkQuery = useQuery<IssueLinkPreview | null>({ queryKey: linkKey, enabled: false })
+  const unlinkQuery = useQuery<IssueLinkPreview | null>({ queryKey: unlinkKey, enabled: false })
+  const links = linksQuery.data?.links ?? []
+  const loading = linksQuery.isFetching
   // The issue search is its own form: it is submitted without nesting a second HTML
   // form inside the pull request form, and its query never enters the pull request
   // values the workflow submits.
@@ -294,95 +318,95 @@ function PrLinkedIssuesSection({
     onSubmit: async ({ value }) => {
       const query = value.query.trim()
       if (!query) {
-        setSearchResults([])
-        setSearchMessage(null)
+        setSubmittedQuery('')
         return
       }
-      setSearching(true)
-      setSearchMessage(null)
+      setSubmittedQuery(query)
       try {
-        const res = await stackApi.searchIssues?.(query)
-        setSearchResults(res?.issues ?? [])
-        if (res?.message) {
-          setSearchMessage(res.message)
-        } else if (res?.issues && res.issues.length === 0) {
-          setSearchMessage('No accessible issues found matching this query.')
-        }
+        await queryClient.fetchQuery({
+          queryKey: ['workflow-issue-search', scope, query],
+          staleTime: 0,
+          queryFn: async () => (await stackApi.searchIssues?.(query)) ?? null,
+        })
       } catch {
-        setSearchResults([])
-        setSearchMessage('Failed to search issues.')
-      } finally {
-        setSearching(false)
+        // The query error is rendered below; no failed read may offer stale rows.
       }
     },
   })
   const query = useSelector(search.store, (state) => state.values.query)
-  const [searching, setSearching] = React.useState(false)
-  const [searchResults, setSearchResults] = React.useState<RepositoryIssue[]>([])
-  const [searchMessage, setSearchMessage] = React.useState<string | null>(null)
+  const searching = searchQuery.isFetching
+  const searchResults =
+    submittedQuery && !searchQuery.isError ? (searchQuery.data?.issues ?? []) : []
+  const searchMessage = !submittedQuery
+    ? null
+    : searchQuery.isError
+      ? 'Failed to search issues.'
+      : (searchQuery.data?.message ??
+        (searchQuery.data?.issues.length === 0
+          ? 'No accessible issues found matching this query.'
+          : null))
   const [pendingUnlink, setPendingUnlink] = React.useState<LinkedIssue | null>(null)
   const [pendingClosingLink, setPendingClosingLink] = React.useState<RepositoryIssue | null>(null)
-  const [linkPreview, setLinkPreview] = React.useState<IssueLinkPreview | null>(null)
-  const [unlinkPreview, setUnlinkPreview] = React.useState<IssueLinkPreview | null>(null)
-  const [actionBusy, setActionBusy] = React.useState(false)
+  const linkPreview = linkQuery.data ?? null
+  const unlinkPreview = unlinkQuery.data ?? null
+  const [writing, setActionBusy] = React.useState(false)
+  const actionBusy = writing || linkQuery.isFetching || unlinkQuery.isFetching
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
   const closingAvailable = pr.base === defaultBranch
 
   const loadLinks = React.useCallback(async () => {
-    setLoading(true)
     try {
-      const res = await stackApi.pullRequestIssueLinks?.(pr.number)
-      setLinks(res?.links ?? [])
-      if (res?.message) {
-        setStatusMessage(res.message)
-      }
+      await linksQuery.refetch({ throwOnError: true })
     } catch {
-      setLinks([])
-    } finally {
-      setLoading(false)
+      queryClient.setQueryData(['workflow-issue-links', scope, pr.number], null)
     }
-  }, [pr.number, stackApi])
+  }, [pr.number, stackApi, linksQuery.refetch, authority])
 
   const previewLink = React.useCallback(
     async (issue: RepositoryIssue): Promise<IssueLinkPreview | null> => {
-      setActionBusy(true)
+      setLinkIssueNumber(issue.number)
+      const key = ['workflow-issue-link-preview', scope, pr.number, issue.number] as const
       try {
-        const preview =
-          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'link')) ?? null
-        setLinkPreview(preview)
+        const preview = await queryClient.fetchQuery({
+          queryKey: key,
+          staleTime: 0,
+          queryFn: async () =>
+            (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'link')) ?? null,
+        })
         return preview
       } catch {
-        setLinkPreview(null)
+        queryClient.setQueryData(key, null)
         setStatusMessage(
           'Could not read the pull request description, so the change cannot be previewed. Reload and try again.',
         )
         return null
-      } finally {
-        setActionBusy(false)
       }
     },
-    [pr.number, stackApi],
+    [pr.number, stackApi, repositoryPath, authority, queryClient, instance],
   )
 
   const previewUnlink = React.useCallback(
     async (issue: LinkedIssue): Promise<IssueLinkPreview | null> => {
-      setActionBusy(true)
+      setUnlinkIssueNumber(issue.number)
+      const key = ['workflow-issue-unlink-preview', scope, pr.number, issue.number] as const
       try {
-        const preview =
-          (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'unlink')) ?? null
-        setUnlinkPreview(preview)
+        const preview = await queryClient.fetchQuery({
+          queryKey: key,
+          staleTime: 0,
+          queryFn: async () =>
+            (await stackApi.previewIssueLink?.(pr.number, issue.number, 'closing', 'unlink')) ??
+            null,
+        })
         return preview
       } catch {
-        setUnlinkPreview(null)
+        queryClient.setQueryData(key, null)
         setStatusMessage(
           'Could not read the pull request description, so the change cannot be previewed. Reload and try again.',
         )
         return null
-      } finally {
-        setActionBusy(false)
       }
     },
-    [pr.number, stackApi],
+    [pr.number, stackApi, repositoryPath, authority, queryClient, instance],
   )
 
   React.useEffect(() => {
@@ -432,7 +456,13 @@ function PrLinkedIssuesSection({
         onBodyMutation(linkPreview)
         if (stackApi.pullRequest) {
           try {
-            onPrUpdate(await stackApi.pullRequest(pr.number))
+            onPrUpdate(
+              await queryClient.fetchQuery({
+                queryKey: ['workflow-pr', scope, pr.number],
+                staleTime: 0,
+                queryFn: () => stackApi.pullRequest!(pr.number),
+              }),
+            )
           } catch {
             setStatusMessage(
               'Closing link saved, but the latest pull request could not be read. Reload before editing more links.',
@@ -507,7 +537,13 @@ function PrLinkedIssuesSection({
         onBodyMutation(unlinkPreview)
         if (stackApi.pullRequest) {
           try {
-            onPrUpdate(await stackApi.pullRequest(pr.number))
+            onPrUpdate(
+              await queryClient.fetchQuery({
+                queryKey: ['workflow-pr', scope, pr.number],
+                staleTime: 0,
+                queryFn: () => stackApi.pullRequest!(pr.number),
+              }),
+            )
           } catch {
             setStatusMessage(
               'Closing link removed, but the latest pull request could not be read. Reload before editing more links.',
@@ -539,8 +575,10 @@ function PrLinkedIssuesSection({
         ) : null}
       </div>
 
-      {statusMessage ? (
-        <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">{statusMessage}</p>
+      {statusMessage || linksQuery.data?.message ? (
+        <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">
+          {statusMessage ?? linksQuery.data?.message}
+        </p>
       ) : null}
       {!closingAvailable ? (
         <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">
@@ -790,6 +828,7 @@ function PrLinkedIssuesSection({
 export function WorkflowDialog({
   request,
   snapshot,
+  authority,
   busy,
   actionError,
   onClearActionError,
@@ -801,6 +840,7 @@ export function WorkflowDialog({
 }: {
   request: WorkflowRequest
   snapshot: RepositorySnapshot
+  authority: string
   busy: boolean
   actionError: string | null
   /** Retires the previous attempt's failure when a fresh preview is read. */
@@ -855,22 +895,51 @@ export function WorkflowDialog({
   })
   const values = useSelector(form.store, (state) => state.values)
   const formSubmitting = useSelector(form.store, (state) => state.isSubmitting)
-  const [progress, setProgress] = React.useState<PublishProgress | null>(null)
-  const [mergeProgress, setMergeProgress] = React.useState<MergeProgress | null>(null)
-  const [mergeStatus, setMergeStatus] = React.useState<MergeStatus | null>(null)
-  const [mergeStatusError, setMergeStatusError] = React.useState<string | null>(null)
+  const queryClient = useQueryClient()
+  const instance = React.useId()
+  const queryScope = React.useMemo(() => ({ instance, authority }), [instance, authority])
+  const progressKey = ['workflow-publication-progress', snapshot.path, queryScope] as const
+  const mergeProgressKey = ['workflow-merge-progress', snapshot.path, queryScope] as const
+  const mergeStatusKey = ['workflow-merge-status', snapshot.path, queryScope] as const
+  const progressQuery = useQuery({
+    queryKey: progressKey,
+    enabled: false,
+    queryFn: async () => (await stackApi.submitStackProgress?.()) ?? null,
+  })
+  const mergeProgressQuery = useQuery<MergeProgress | null>({
+    queryKey: mergeProgressKey,
+    enabled: false,
+  })
+  const mergeStatusQuery = useQuery({
+    queryKey: mergeStatusKey,
+    enabled: false,
+    queryFn: () => stackApi.mergeStatus!(),
+  })
+  const progress = progressQuery.data ?? null
+  const mergeProgress = mergeProgressQuery.data ?? null
+  const mergeStatus = mergeStatusQuery.data ?? null
+  const setProgress = (value: PublishProgress | null) =>
+    queryClient.setQueryData(progressKey, value)
+  const mergeStatusError = mergeStatusQuery.error ? workflowError(mergeStatusQuery.error) : null
   const [mergeRunning, setMergeRunning] = React.useState(false)
-  const [preview, setPreview] = React.useState<StackPreview | null>(null)
-  const [surgery, setSurgery] = React.useState<SurgeryPreview | null>(null)
-  const [push, setPush] = React.useState<PushPreview | null>(null)
-  const [pr, setPr] = React.useState<(PullRequest & { body: string }) | null>(null)
+  const [attempt, setAttempt] = React.useState(0)
+  const previewKey = ['workflow-preview', snapshot.path, queryScope, request, attempt] as const
+  const previewQuery = useQuery<WorkflowData>({ queryKey: previewKey, enabled: false })
+  const preview = previewQuery.data?.kind === 'stack' ? previewQuery.data.value : null
+  const surgery = previewQuery.data?.kind === 'surgery' ? previewQuery.data.value : null
+  const push = previewQuery.data?.kind === 'forcePush' ? previewQuery.data.value : null
+  const pr = previewQuery.data?.kind === 'pr' ? previewQuery.data.value : null
+  const externalMutation = useMutation({
+    mutationFn: (url: string) => window.desktop.openExternal(url),
+  })
   const [issueMutationBusy, setIssueMutationBusy] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-  const [loading, setLoading] = React.useState(previewKinds.includes(request.kind))
-  const [loaded, setLoaded] = React.useState(false)
+  const [localError, setError] = React.useState<string | null>(null)
+  const error = localError ?? (previewQuery.error ? workflowError(previewQuery.error) : null)
+  const loading =
+    previewKinds.includes(request.kind) && (previewQuery.isPending || previewQuery.isFetching)
+  const loaded = previewQuery.isSuccess
   const [finished, setFinished] = React.useState(false)
   const [confirmPrState, setConfirmPrState] = React.useState(false)
-  const [attempt, setAttempt] = React.useState(0)
   const [rejectedIdentities, setRejectedIdentities] = React.useState<string[]>([])
   const [identity, setIdentity] = React.useState<string | null>(null)
   const [edited, setEdited] = React.useState(false)
@@ -917,13 +986,6 @@ export function WorkflowDialog({
     setCloseNotice(null)
   }
 
-  const initialLoad = React.useRef<{
-    request: WorkflowRequest
-    attempt: number
-    stackApi: WorkflowStackAPI
-    promise: Promise<WorkflowData>
-  } | null>(null)
-
   React.useEffect(() => {
     let active = true
     // Read from the store rather than a render snapshot: the insert preview is always
@@ -934,44 +996,34 @@ export function WorkflowDialog({
         : null
     setError(null)
     setIdentity(null)
-    setLoading(previewKinds.includes(request.kind))
-    setLoaded(false)
-    if (
-      initialLoad.current?.request !== request ||
-      initialLoad.current.attempt !== attempt ||
-      initialLoad.current.stackApi !== stackApi
-    ) {
-      const load = async (): Promise<WorkflowData> => {
-        if (request.kind === 'stack') {
-          return {
-            kind: 'stack',
-            value: await stackApi.stackPreview(request.operation, request.branch),
-          }
+    const load = async (): Promise<WorkflowData> => {
+      if (request.kind === 'stack') {
+        return {
+          kind: 'stack',
+          value: await stackApi.stackPreview(request.operation, request.branch),
         }
-        if (request.kind === 'surgery') {
-          return {
-            kind: 'surgery',
-            value: await window.desktop.surgeryPreview(
-              surgeryRequestFor(request, requestedName ?? ''),
-            ),
-          }
-        }
-        if (request.kind === 'forcePush') {
-          return { kind: 'forcePush', value: await window.desktop.pushPreview() }
-        }
-        if (request.kind === 'pr') {
-          return { kind: 'pr', value: await window.desktop.pullRequest(request.number) }
-        }
-        return { kind: 'local' }
       }
-      initialLoad.current = { request, attempt, stackApi, promise: load() }
+      if (request.kind === 'surgery') {
+        return {
+          kind: 'surgery',
+          value: await window.desktop.surgeryPreview(
+            surgeryRequestFor(request, requestedName ?? ''),
+          ),
+        }
+      }
+      if (request.kind === 'forcePush') {
+        return { kind: 'forcePush', value: await window.desktop.pushPreview() }
+      }
+      if (request.kind === 'pr') {
+        return { kind: 'pr', value: await window.desktop.pullRequest(request.number) }
+      }
+      return { kind: 'local' }
     }
-    void initialLoad.current.promise.then(
+    void queryClient.fetchQuery({ queryKey: previewKey, queryFn: load, staleTime: 0 }).then(
       (data) => {
         if (!active) return
         setRejectedIdentities([])
         if (data.kind === 'stack') {
-          setPreview(data.value)
           // Entered layer choices survive a preview reload; untouched layers are seeded
           // from the reviewed offer so title, body, draft and base start where Git Stacks
           // proposes them.
@@ -989,20 +1041,15 @@ export function WorkflowDialog({
             ),
           )
         } else if (data.kind === 'surgery') {
-          if (requestedName === null || requestedName === form.getFieldValue('name'))
-            setSurgery(data.value)
-        } else if (data.kind === 'forcePush') {
-          setPush(data.value)
+          if (requestedName !== null && requestedName !== form.getFieldValue('name'))
+            queryClient.setQueryData(previewKey, { kind: 'local' })
         } else if (data.kind === 'pr') {
-          setPr(data.value)
           if (!hasEditedRef.current) {
             form.setFieldValue('prTitle', data.value.title)
             form.setFieldValue('body', data.value.body)
             form.setFieldValue('prDraft', data.value.draft)
           }
         }
-        setLoaded(true)
-        setLoading(false)
         setIdentity(
           data.kind === 'surgery' &&
             requestedName !== null &&
@@ -1011,17 +1058,15 @@ export function WorkflowDialog({
             : previewIdentity(data),
         )
       },
-      (value) => {
+      () => {
         if (!active) return
-        setError(workflowError(value))
-        setLoading(false)
         setIdentity(null)
       },
     )
     return () => {
       active = false
     }
-  }, [request, attempt, stackApi])
+  }, [request, attempt, stackApi, queryScope])
 
   // A submission that stopped part-way survives a restart; show it before anything
   // else so a person can resume or dismiss it instead of starting a second one.
@@ -1035,30 +1080,36 @@ export function WorkflowDialog({
     // read queues behind the action producing the steps, so it would only ever report the
     // state after the whole operation finished.
     const unsubscribe = stackApi.onSubmitStackProgress?.((value) => {
-      if (active) setProgress(value)
+      if (active) {
+        void queryClient.cancelQueries({ queryKey: progressKey }).then(() => {
+          if (active) queryClient.setQueryData(progressKey, value)
+        })
+      }
     })
-    void stackApi.submitStackProgress?.().then(
-      (value) => active && setProgress(value),
+    void progressQuery.refetch({ throwOnError: true }).then(
+      () => undefined,
       () => active && setProgress(null),
     )
     return () => {
       active = false
       unsubscribe?.()
     }
-  }, [request, stackApi])
+  }, [request, stackApi, queryScope])
 
   // A merge waits on GitHub's background result, so the running state is pushed rather than
   // polled: a read would queue behind the merge that is producing it.
   React.useEffect(() => {
     if (request.kind !== 'stack' || request.operation !== 'merge') {
-      setMergeProgress(null)
+      queryClient.setQueryData(mergeProgressKey, null)
       return
     }
-    const unsubscribe = stackApi.onMergeProgress?.((value) => setMergeProgress(value))
+    const unsubscribe = stackApi.onMergeProgress?.((value) =>
+      queryClient.setQueryData(mergeProgressKey, value),
+    )
     return () => {
       unsubscribe?.()
     }
-  }, [request, stackApi])
+  }, [request, stackApi, queryScope])
 
   // What GitHub reported for earlier merge requests is read, never re-requested: a queue that
   // later merged or dropped a pull request, or a request that is still running, is only
@@ -1067,18 +1118,16 @@ export function WorkflowDialog({
   const readMergeStatus = React.useCallback(async () => {
     if (!stackApi.mergeStatus) return
     try {
-      setMergeStatus(await stackApi.mergeStatus())
-      setMergeStatusError(null)
-    } catch (error) {
+      await mergeStatusQuery.refetch({ throwOnError: true })
+    } catch {
       // The last result GitHub reported is kept: a failed read is not evidence that the
       // request or the queue changed.
-      setMergeStatusError(error instanceof Error ? error.message : String(error))
     }
-  }, [stackApi])
+  }, [stackApi, mergeStatusQuery.refetch, queryScope])
   React.useEffect(() => {
     if (request.kind !== 'stack' || request.operation !== 'merge') {
-      setMergeStatus(null)
-      setMergeStatusError(null)
+      queryClient.setQueryData(mergeStatusKey, null)
+      void queryClient.resetQueries({ queryKey: mergeStatusKey })
       return
     }
     void readMergeStatus()
@@ -1145,7 +1194,7 @@ export function WorkflowDialog({
   const readProgress = async () => {
     if (request.kind !== 'stack' || request.operation !== 'publish') return
     try {
-      setProgress((await stackApi.submitStackProgress?.()) ?? null)
+      await progressQuery.refetch({ throwOnError: true })
     } catch {
       setProgress(null)
     }
@@ -1722,7 +1771,7 @@ export function WorkflowDialog({
                             field.handleChange(event.target.value)
                             // A named insert has no preview yet: the reviewed rewrites below
                             // are the ones this exact name costs, so they are read again.
-                            setSurgery(null)
+                            queryClient.setQueryData(previewKey, { kind: 'local' })
                             setIdentity(null)
                           }}
                           onBlur={field.handleBlur}
@@ -2250,8 +2299,8 @@ export function WorkflowDialog({
                       size="sm"
                       variant="ghost"
                       onClick={() =>
-                        window.desktop
-                          .openExternal(pr.url)
+                        externalMutation
+                          .mutateAsync(pr.url)
                           .catch((value) => setError(workflowError(value)))
                       }
                     >
@@ -2312,13 +2361,17 @@ export function WorkflowDialog({
                   </form.Field>
                   <PrLinkedIssuesSection
                     pr={pr}
+                    repositoryPath={snapshot.path}
+                    authority={authority}
                     onPrUpdate={(updated) => {
-                      setPr(updated)
+                      queryClient.setQueryData(previewKey, { kind: 'pr', value: updated })
                       form.setFieldValue('body', updated.body)
                     }}
                     onBodyMutation={(mutation) => {
-                      setPr((current) =>
-                        current ? { ...current, body: mutation.newBody } : current,
+                      queryClient.setQueryData<WorkflowData>(previewKey, (current) =>
+                        current?.kind === 'pr'
+                          ? { ...current, value: { ...current.value, body: mutation.newBody } }
+                          : current,
                       )
                       form.setFieldValue('body', mutation.newBody)
                     }}

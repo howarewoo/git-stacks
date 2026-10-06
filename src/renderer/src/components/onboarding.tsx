@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { CancelledError, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, FolderOpen, LoaderCircle, Search, Terminal } from 'lucide-react'
 import { useForm, useSelector } from '@tanstack/react-form'
 import { Badge } from './ui/badge'
@@ -12,7 +13,6 @@ import { EmptyState, InlineAlert, LoadingState } from './ui/surface'
 import { OperationFacts, WorkflowSection, type ContextFact } from './workflow-composition'
 import { createRequestGate } from '../lib/request-gate'
 import type {
-  CloneCommandPreview,
   CloneProtocol,
   GitEnvironmentStatus,
   GitHubCliStatus,
@@ -177,20 +177,41 @@ export function RepositoryDiscoveryDialog({
   open: boolean
 }) {
   const desktop = window.desktop
-  const [results, setResults] = React.useState<GitHubRepositorySummary[]>([])
-  const [searching, setSearching] = React.useState(false)
-  const [searched, setSearched] = React.useState(false)
-  const [discoveryFailure, setDiscoveryFailure] = React.useState<OnboardingFailure | null>(null)
-  const [discoveryMeta, setDiscoveryMeta] = React.useState<{
-    totalCount?: number
-    truncated?: boolean
-    incompleteResults?: boolean
-  } | null>(null)
+  const queryClient = useQueryClient()
+  const [submittedSearch, setSubmittedSearch] = React.useState('')
+  const discoveryKey = ['onboarding-discovery', authority, submittedSearch] as const
+  const discovery = useQuery({
+    queryKey: discoveryKey,
+    enabled: false,
+    placeholderData: (previous, query) => (query?.queryKey[1] === authority ? previous : undefined),
+    queryFn: () =>
+      desktop.searchRepositories!({ query: submittedSearch, requestId: SEARCH_REQUEST }),
+  })
+  const results = discovery.data?.ok ? discovery.data.value.repositories : []
+  const discoveryMeta = discovery.data?.ok ? discovery.data.value : null
+  const discoveryFailure =
+    discovery.data && !discovery.data.ok && discovery.data.failure.reason !== 'cancelled'
+      ? discovery.data.failure
+      : null
+  const searching = discovery.isFetching
+  const searched = discovery.isFetched
   const [selected, setSelected] = React.useState<GitHubRepositorySummary | null>(null)
-  const [commands, setCommands] = React.useState<CloneCommandPreview | null>(null)
-  const [commandFailure, setCommandFailure] = React.useState<OnboardingFailure | null>(null)
-  const [cloning, setCloning] = React.useState(false)
-  const [cloneFailure, setCloneFailure] = React.useState<OnboardingFailure | null>(null)
+  const cloneMutation = useMutation({
+    mutationFn: (input: Parameters<NonNullable<typeof desktop.cloneRepository>>[0]) =>
+      desktop.cloneRepository!(input),
+  })
+  const destinationMutation = useMutation({
+    mutationFn: async (path: string) => (await desktop?.chooseDestinationDirectory?.(path)) ?? null,
+  })
+  const cancellation = useMutation({
+    mutationFn: async (requestId: string) => {
+      await desktop?.cancel?.(requestId)
+    },
+  })
+  const cloning = cloneMutation.isPending
+  const cloneFailure =
+    cloneMutation.data && !cloneMutation.data.ok ? cloneMutation.data.failure : null
+  const cloneLock = React.useRef(false)
 
   // One discovery search at a time, and only the newest one may answer. A
   // search is a read of the account in effect when it was asked for, so a
@@ -201,27 +222,29 @@ export function RepositoryDiscoveryDialog({
     async (next: string) => {
       if (!desktop?.searchRepositories) return
       const claim = searchGate.claim()
-      setSearching(true)
-      setDiscoveryFailure(null)
-      const outcome = await desktop.searchRepositories({ query: next, requestId: SEARCH_REQUEST })
-      if (!searchGate.current(claim)) return
-      setSearching(false)
-      if (outcome.ok) {
-        setResults(outcome.value.repositories)
-        setDiscoveryMeta({
-          totalCount: outcome.value.totalCount,
-          truncated: outcome.value.truncated,
-          incompleteResults: outcome.value.incompleteResults,
+      setSubmittedSearch(next)
+      const key = ['onboarding-discovery', authority, next] as const
+      await queryClient.cancelQueries({ queryKey: key })
+      await queryClient
+        .fetchQuery({
+          queryKey: key,
+          staleTime: 0,
+          queryFn: async () => {
+            const outcome = await desktop.searchRepositories!({
+              query: next,
+              requestId: SEARCH_REQUEST,
+            })
+            if (!searchGate.current(claim)) throw new Error('Discovery authority retired')
+            if (!outcome.ok && outcome.failure.reason === 'cancelled') {
+              await queryClient.cancelQueries({ queryKey: key, exact: true })
+              throw new CancelledError({ revert: true })
+            }
+            return outcome
+          },
         })
-        setSearched(true)
-      } else if (outcome.failure.reason !== 'cancelled') {
-        setDiscoveryFailure(outcome.failure)
-        setResults([])
-        setDiscoveryMeta(null)
-        setSearched(true)
-      }
+        .catch(() => undefined)
     },
-    [desktop, searchGate],
+    [authority, desktop, queryClient, searchGate],
   )
 
   // The search term is a form value: what the person typed is submitted, not
@@ -241,23 +264,27 @@ export function RepositoryDiscoveryDialog({
     onSubmit: async ({ value }) => {
       if (!desktop?.cloneRepository || !selected) return
       if (!value.parentDirectory || !value.directoryName) return
-      setCloning(true)
-      setCloneFailure(null)
-      const outcome = await desktop.cloneRepository({
-        repository: selected,
-        protocol: value.protocol,
-        parentDirectory: value.parentDirectory,
-        directoryName: value.directoryName,
-        shallow: value.shallow,
-        requestId: CLONE_REQUEST,
-      })
-      setCloning(false)
+      if (cloneLock.current) return
+      cloneLock.current = true
+      cloneMutation.reset()
+      let outcome
+      try {
+        outcome = await cloneMutation.mutateAsync({
+          repository: selected,
+          protocol: value.protocol,
+          parentDirectory: value.parentDirectory,
+          directoryName: value.directoryName,
+          shallow: value.shallow,
+          requestId: CLONE_REQUEST,
+        })
+      } finally {
+        cloneLock.current = false
+      }
       if (outcome.ok) {
         onCloned(outcome.value)
         onOpenChange(false)
         return
       }
-      setCloneFailure(outcome.failure)
     },
   })
   const cloneConfig = useSelector(cloneForm.store, (state) => state.values)
@@ -275,19 +302,12 @@ export function RepositoryDiscoveryDialog({
   // is left to finish.
   React.useEffect(() => {
     searchGate.reset()
-    void desktop?.cancel?.(SEARCH_REQUEST)
-    // The search in flight belongs to the retired account and will never
-    // publish, so its flag ends with it rather than leaving the field spinning
-    // for an answer this window has already refused.
-    setSearching(false)
-    setResults([])
+    void cancellation.mutateAsync(SEARCH_REQUEST)
+    void queryClient.cancelQueries({ queryKey: ['onboarding-discovery'] })
+    void queryClient.resetQueries({ queryKey: ['onboarding-discovery'] })
     setSelected(null)
-    setCommands(null)
-    setCommandFailure(null)
-    setDiscoveryMeta(null)
-    setDiscoveryFailure(null)
-    setSearched(false)
-  }, [authority, desktop, searchGate])
+    setSubmittedSearch('')
+  }, [authority, desktop, queryClient, searchGate])
 
   // Listing what the account can reach is the first thing this dialog shows,
   // and it is asked again whenever the account behind it changes: what this
@@ -302,37 +322,28 @@ export function RepositoryDiscoveryDialog({
   // that can build them, so the copy is exactly what a clone would run. The
   // configuration it composes is the form's own value, so the preview follows
   // what the person typed rather than a second copy of it.
+  const commandQuery = useQuery({
+    queryKey: ['onboarding-clone-command', authority, selected, cloneConfig],
+    enabled: false,
+    queryFn: () =>
+      desktop.previewCloneCommand!({
+        repository: selected!,
+        ...cloneConfig,
+      }),
+  })
   React.useEffect(() => {
-    const { directoryName, parentDirectory, protocol, shallow } = cloneConfig
-    if (!open || !selected || !parentDirectory || !directoryName) {
-      setCommands(null)
-      setCommandFailure(null)
-      return
-    }
-    let current = true
-    desktop
-      ?.previewCloneCommand?.({
-        repository: selected,
-        protocol,
-        parentDirectory,
-        directoryName,
-        shallow,
-      })
-      .then((outcome) => {
-        if (!current) return
-        if (outcome.ok) {
-          setCommands(outcome.value)
-          setCommandFailure(null)
-        } else {
-          setCommands(null)
-          setCommandFailure(outcome.failure)
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      current = false
-    }
-  }, [cloneConfig, desktop, open, selected])
+    if (
+      open &&
+      desktop?.previewCloneCommand &&
+      selected &&
+      cloneConfig.parentDirectory &&
+      cloneConfig.directoryName
+    )
+      void commandQuery.refetch()
+  }, [authority, cloneConfig, desktop, open, selected, commandQuery.refetch])
+  const commands = commandQuery.data?.ok ? commandQuery.data.value : null
+  const commandFailure =
+    commandQuery.data && !commandQuery.data.ok ? commandQuery.data.failure : null
 
   // Discovery reads GitHub as the authenticated CLI account; which of the
   // distinct states that is decides whether an empty result is a fact about the
@@ -351,7 +362,7 @@ export function RepositoryDiscoveryDialog({
           details.cancel()
           return
         }
-        if (!next) setCloneFailure(null)
+        if (!next) cloneMutation.reset()
         onOpenChange(next)
       }}
     >
@@ -398,7 +409,10 @@ export function RepositoryDiscoveryDialog({
             </Button>
             {searching ? (
               <Button
-                onClick={() => void desktop?.cancel(SEARCH_REQUEST)}
+                onClick={() => {
+                  void queryClient.cancelQueries({ queryKey: discoveryKey, exact: true })
+                  void cancellation.mutateAsync(SEARCH_REQUEST)
+                }}
                 type="button"
                 variant="ghost"
               >
@@ -462,11 +476,13 @@ export function RepositoryDiscoveryDialog({
                   <Button
                     aria-pressed={selected?.fullName === repository.fullName}
                     className="onboarding-result"
+                    disabled={cloning}
                     variant="unstyled"
                     onClick={() => {
+                      if (cloneLock.current) return
                       setSelected(repository)
                       cloneForm.setFieldValue('directoryName', repository.name)
-                      setCloneFailure(null)
+                      cloneMutation.reset()
                     }}
                     type="button"
                   >
@@ -527,7 +543,7 @@ export function RepositoryDiscoveryDialog({
                     <Button
                       disabled={cloning}
                       onClick={async () => {
-                        const chosen = await desktop?.chooseDestinationDirectory?.(
+                        const chosen = await destinationMutation.mutateAsync(
                           cloneConfig.parentDirectory,
                         )
                         if (chosen) cloneForm.setFieldValue('parentDirectory', chosen)
@@ -594,7 +610,7 @@ export function RepositoryDiscoveryDialog({
             <div className="onboarding-clone-actions">
               {cloning ? (
                 <Button
-                  onClick={() => void desktop?.cancel(CLONE_REQUEST)}
+                  onClick={() => void cancellation.mutateAsync(CLONE_REQUEST)}
                   type="button"
                   variant="secondary"
                 >

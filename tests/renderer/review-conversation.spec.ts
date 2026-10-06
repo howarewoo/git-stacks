@@ -106,6 +106,22 @@ test.describe('Leaving a review', () => {
     ])
   })
 
+  test('sequential typing keeps every draft character through leaving and returning', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: RANGE_FIRST }).click()
+    await addPendingComment(page, 'Comment on src/main/review.ts:1 (head)', '')
+    const editor = page.getByRole('textbox', { name: 'Comment on src/main/review.ts:1 (head)' })
+    const body = 'Keep every character in this unsent draft.'
+    await editor.pressSequentially(body, { delay: 10 })
+    await expect(editor).toHaveValue(body)
+    await switchDestination(page, 'history')
+    await switchDestination(page, 'review')
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+    await expect(editor).toHaveValue(body)
+    expect(await submissions(page)).toEqual([])
+  })
+
   test('several pending comments become one review rather than one request each', async ({
     page,
   }) => {

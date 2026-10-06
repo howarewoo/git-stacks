@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { useForm, useSelector, type ReactFormExtendedApi } from '@tanstack/react-form'
+import { useMutation } from '@tanstack/react-query'
 import { CheckCircle2, CircleDot, MessageSquarePlus, Trash2, TriangleAlert } from 'lucide-react'
 
 import type { ReviewFileSet, ReviewLineRef } from '../../../shared/review'
@@ -33,6 +34,8 @@ import { InlineAlert } from './ui/surface'
 import { useListWindow } from '../lib/list-window'
 import { ListWindowMore } from './list-window'
 import { cn } from '../lib/utils'
+
+export const ReviewQueryIdentity = React.createContext<readonly unknown[]>([])
 
 /**
  * A line range the reviewer has picked to comment on.
@@ -115,8 +118,7 @@ function isUncertainOutcome(cause: unknown): boolean {
 
 /**
  * What one submit carries that no draft holds: the decision and its summary.
- * The drafts themselves stay repository-owned records written through
- * `onDraftChange`, so nothing here is a second copy of a reviewer's words.
+ * Draft journals stay repository-owned; active editor values stay local.
  */
 type ReviewSubmitValues = { event: ReviewEvent; summary: string }
 
@@ -146,7 +148,7 @@ export interface ReviewConversationProps {
   read: ReviewThreadRead | null
   readState: 'loading' | 'ready' | 'failed'
   readError: string | null
-  drafts: ReviewDraftRecord | null
+  getDrafts: () => ReviewDraftRecord | null
   resolutions: ReviewDraftResolution[]
   selection: ReviewSelection | null
   onSelect: (selection: ReviewSelection) => void
@@ -163,7 +165,7 @@ export function ReviewConversation({
   read,
   readState,
   readError,
-  drafts,
+  getDrafts,
   resolutions,
   selection,
   onSelect,
@@ -174,8 +176,23 @@ export function ReviewConversation({
 }: ReviewConversationProps) {
   const [error, setError] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
+  const queryIdentity = React.useContext(ReviewQueryIdentity)
+  const submitLock = React.useRef(false)
+  const live = React.useRef(true)
+  React.useEffect(() => {
+    live.current = true
+    return () => {
+      live.current = false
+    }
+  }, [])
+  const submitMutation = useMutation({
+    mutationKey: [...queryIdentity, 'submit', files?.comparison],
+    mutationFn: (input: Parameters<NonNullable<DesktopAPI['reviewSubmit']>>[1]) =>
+      desktop!.reviewSubmit!(number, input),
+    retry: false,
+  })
 
-  const draftList = drafts?.drafts ?? []
+  const draftList = getDrafts()?.drafts ?? []
   const byId = React.useMemo(
     () => new Map(resolutions.map((entry) => [entry.id, entry])),
     [resolutions],
@@ -208,25 +225,28 @@ export function ReviewConversation({
   const form: ReviewSubmitForm = useForm({
     defaultValues: REVIEW_SUBMIT_DEFAULTS,
     onSubmit: async ({ value, formApi }): Promise<void> => {
-      if (!desktop?.reviewSubmit || intended.length === 0) return
-      if (blockedByStale || uncertain || Boolean(frozenReason)) return
+      const pending = (getDrafts()?.drafts ?? []).filter((draft) => draft.body.trim() !== '')
+      if (!desktop?.reviewSubmit || pending.length === 0) return
+      if (blockedByStale || uncertain || Boolean(frozenReason) || submitLock.current) return
       if (!files) {
         setError('The diff has to be loaded before a review can be sent.')
         return
       }
+      submitLock.current = true
       setError(null)
       setNotice(null)
       try {
-        const result = await desktop.reviewSubmit(number, {
+        const result = await submitMutation.mutateAsync({
           event: value.event,
           body: value.summary,
           // The whole intended review, including anything the backend will refuse.
           // It decides atomicity itself; the view must not decide it by omission.
-          drafts: intended,
+          drafts: pending,
           // The comparison the diff on screen was read at, so a pull request that
           // moved since is refused rather than re-anchored onto a new revision.
           comparison: files.comparison,
         })
+        if (!live.current) return
         setUncertain(false)
         // Only the summary that reached GitHub is retired. A refused write keeps
         // the body in the box so it can be corrected and sent again.
@@ -236,7 +256,9 @@ export function ReviewConversation({
         // are still the reviewer's unsent work and stay pending.
         const delivered = new Set(result.delivered ?? [])
         onDraftChange(
-          delivered.size === 0 ? [] : draftList.filter((draft) => !delivered.has(draft.id)),
+          delivered.size === 0
+            ? []
+            : (getDrafts()?.drafts ?? []).filter((draft) => !delivered.has(draft.id)),
         )
         onReload()
         setNotice(
@@ -245,15 +267,18 @@ export function ReviewConversation({
           }${result.state ? `; GitHub recorded it as ${result.state}` : ''}.`,
         )
       } catch (cause) {
+        if (!live.current) return
         setError(readableError(cause))
         // An outcome GitHub never confirmed leaves the write in doubt, so the
         // button stays disabled for this session too. The backend refuses the
         // same write after a reload; this keeps the two consistent meanwhile.
         setUncertain(isUncertainOutcome(cause))
+      } finally {
+        submitLock.current = false
       }
     },
   })
-  const sending = useSelector(form.store, (state) => state.isSubmitting)
+  const sending = submitMutation.isPending
 
   // Draft identities are minted where a draft is composed, not derived from
   // where the comment sits and not counted from what the journal last held.
@@ -280,7 +305,9 @@ export function ReviewConversation({
     // one would submit as two threads the reviewer never meant to write. That is
     // about the range; the identity above is about this composition of it.
     onDraftChange([
-      ...draftList.filter((entry) => reviewDraftKey(entry.ref, entry.startRef) !== range),
+      ...(getDrafts()?.drafts ?? []).filter(
+        (entry) => reviewDraftKey(entry.ref, entry.startRef) !== range,
+      ),
       draft,
     ])
     onClearSelection()
@@ -314,9 +341,15 @@ export function ReviewConversation({
         staleCount={stale.length}
         disabled={sending || Boolean(frozenReason)}
         onChangeBody={(id, body) =>
-          onDraftChange(draftList.map((draft) => (draft.id === id ? { ...draft, body } : draft)))
+          onDraftChange(
+            (getDrafts()?.drafts ?? []).map((draft) =>
+              draft.id === id ? { ...draft, body } : draft,
+            ),
+          )
         }
-        onRemove={(id) => onDraftChange(draftList.filter((draft) => draft.id !== id))}
+        onRemove={(id) =>
+          onDraftChange((getDrafts()?.drafts ?? []).filter((draft) => draft.id !== id))
+        }
       />
 
       <SubmitBar
@@ -389,6 +422,39 @@ function SelectionComposer({
   )
 }
 
+function DraftBodyEditor({
+  draft,
+  disabled,
+  onChangeBody,
+}: {
+  draft: ReviewDraft
+  disabled: boolean
+  onChangeBody: (id: string, body: string) => void
+}) {
+  // Query notifications are asynchronous; controlled input must update urgently.
+  const [body, setBody] = React.useState(draft.body)
+  const previousJournalBody = React.useRef(draft.body)
+  React.useEffect(() => {
+    const previous = previousJournalBody.current
+    previousJournalBody.current = draft.body
+    setBody((current) => (current === previous ? draft.body : current))
+  }, [draft.body])
+  return (
+    <Textarea
+      aria-label={`Comment on ${reviewDraftLabel(draft)}`}
+      disabled={disabled}
+      onChange={(event) => {
+        const next = event.target.value
+        setBody(next)
+        onChangeBody(draft.id, next)
+      }}
+      placeholder="What should the author know about these lines?"
+      rows={3}
+      value={body}
+    />
+  )
+}
+
 function DraftList({
   drafts,
   byId,
@@ -449,14 +515,7 @@ function DraftList({
                   about.
                 </p>
               ) : null}
-              <Textarea
-                aria-label={`Comment on ${reviewDraftLabel(draft)}`}
-                disabled={disabled}
-                onChange={(event) => onChangeBody(draft.id, event.target.value)}
-                placeholder="What should the author know about these lines?"
-                rows={3}
-                value={draft.body}
-              />
+              <DraftBodyEditor draft={draft} disabled={disabled} onChangeBody={onChangeBody} />
             </li>
           )
         })}
@@ -617,7 +676,28 @@ function ThreadList({
   const threads = read?.threads.threads ?? []
   const window_ = useListWindow(threads, LIST_PAGE_SIZE)
   const [replyFor, setReplyFor] = React.useState<string | null>(null)
-  const [busy, setBusy] = React.useState<string | null>(null)
+  const queryIdentity = React.useContext(ReviewQueryIdentity)
+  const actionLock = React.useRef(false)
+  const live = React.useRef(true)
+  React.useEffect(() => {
+    live.current = true
+    return () => {
+      live.current = false
+    }
+  }, [])
+  const replyMutation = useMutation({
+    mutationKey: [...queryIdentity, 'reply', read?.threads.comparison],
+    mutationFn: ({ threadId, body }: { threadId: string; body: string }) =>
+      desktop!.reviewReply!(number, threadId, body),
+    retry: false,
+  })
+  const resolveMutation = useMutation({
+    mutationKey: [...queryIdentity, 'resolve', read?.threads.comparison],
+    mutationFn: (thread: ReviewThread) =>
+      desktop!.reviewSetResolved!(number, thread.id, !thread.resolved),
+    retry: false,
+  })
+  const busy = resolveMutation.isPending ? (resolveMutation.variables?.id ?? null) : null
   const [actionError, setActionError] = React.useState<string | null>(null)
 
   // Threads whose last write left GitHub's answer unknown. A reply is its own
@@ -630,36 +710,41 @@ function ThreadList({
     onSubmitMeta: { threadId: '' },
     onSubmit: async ({ value, formApi, meta }): Promise<void> => {
       const threadId = meta.threadId
-      if (!desktop?.reviewReply || uncertain.has(threadId)) return
+      if (!desktop?.reviewReply || uncertain.has(threadId) || actionLock.current) return
+      actionLock.current = true
       setActionError(null)
       try {
-        await desktop.reviewReply(number, threadId, value.body)
+        await replyMutation.mutateAsync({ threadId, body: value.body })
+        if (!live.current) return
         // Only what GitHub accepted is cleared: a refused write keeps the words
         // in the box so the same reply can be corrected and sent again.
         formApi.resetField('body')
         setReplyFor(null)
         onReload()
       } catch (cause) {
+        if (!live.current) return
         setActionError(readableError(cause))
         if (isUncertainOutcome(cause)) {
           setUncertain((current) => new Set([...current, threadId]))
         }
+      } finally {
+        actionLock.current = false
       }
     },
   })
-  const replying = useSelector(replyForm.store, (state) => state.isSubmitting)
+  const replying = replyMutation.isPending
 
   const toggleResolved = async (thread: ReviewThread) => {
-    if (!desktop?.reviewSetResolved) return
-    setBusy(thread.id)
+    if (!desktop?.reviewSetResolved || actionLock.current) return
+    actionLock.current = true
     setActionError(null)
     try {
-      await desktop.reviewSetResolved(number, thread.id, !thread.resolved)
-      onReload()
+      await resolveMutation.mutateAsync(thread)
+      if (live.current) onReload()
     } catch (cause) {
-      setActionError(readableError(cause))
+      if (live.current) setActionError(readableError(cause))
     } finally {
-      setBusy(null)
+      actionLock.current = false
     }
   }
 

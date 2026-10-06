@@ -1,5 +1,7 @@
 import * as React from 'react'
 import { createRoot } from 'react-dom/client'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createRendererQueryClient } from '../../../src/renderer/src/lib/query-client'
 import App from '../../../src/renderer/src/App'
 import { RepositoryHoverCardProvider } from '../../../src/renderer/src/components/repository-hover-cards'
 import { TooltipProvider } from '../../../src/renderer/src/components/ui/tooltip'
@@ -19,6 +21,7 @@ import { galleryUrl } from '../fixtures/urls'
 import '../../../src/renderer/src/styles.css'
 import './specimen.css'
 
+const queryClient = createRendererQueryClient()
 const ROUTE_ENTRIES = Object.entries(GALLERY_ROUTES) as [GalleryRouteId, string][]
 
 function routeFromHash(hash: string): GalleryRouteId {
@@ -136,9 +139,11 @@ function Gallery() {
 
   // No StrictMode here: every fixture must mount exactly once so the call log stays deterministic.
   return (
-    <TooltipProvider delay={450} timeout={150}>
-      <RepositoryHoverCardProvider>{renderRoute(route, scenario)}</RepositoryHoverCardProvider>
-    </TooltipProvider>
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider delay={450} timeout={150}>
+        <RepositoryHoverCardProvider>{renderRoute(route, scenario)}</RepositoryHoverCardProvider>
+      </TooltipProvider>
+    </QueryClientProvider>
   )
 }
 
