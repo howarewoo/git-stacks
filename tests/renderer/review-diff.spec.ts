@@ -100,6 +100,7 @@ test.describe('The review diff surface', () => {
     await expect(page.locator('.review-conversation')).toContainText(
       'src/legacy/feature-gate.ts:14 (base)',
     )
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     await page.getByRole('button', { name: 'Add pending comment' }).click()
     await page
       .getByRole('textbox', { name: 'Comment on src/legacy/feature-gate.ts:14 (base)' })

@@ -3307,11 +3307,8 @@ textarea.conflict-content {
   animation: dialog-in 140ms cubic-bezier(0.2, 0, 0, 1) both;
 }
 
-/* Review workspace.
-   Four regions read as one page: the headline and stack rail never scroll, and
-   the file tree, the diff, and the commit list each scroll on their own. Only
-   the diff region grows, so a long commit list cannot push the patch off the
-   screen and a long patch cannot squeeze the tree out of reach. */
+/* Review keeps code and secondary context independently mounted and locally
+   scrollable. Narrow workspaces switch panes rather than divide code height. */
 .review-view {
   display: flex;
   min-height: 0;
@@ -3462,12 +3459,80 @@ textarea.conflict-content {
   display: grid;
   min-height: 0;
   flex: 1;
-  grid-template-areas:
-    "tree diff commits"
-    "tree diff conversation";
-  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(240px, 340px);
-  grid-template-rows: minmax(0, 28%) minmax(0, 1fr);
+  grid-template-areas: "tree diff";
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
+}
+
+.review-body-context {
+  grid-template-areas: "tree diff context";
+  grid-template-columns: minmax(160px, 200px) minmax(0, 1fr) minmax(300px, 38%);
+}
+
+.review-context {
+  grid-area: context;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+}
+
+.review-context [hidden],
+.review-context[hidden] {
+  display: none;
+}
+
+.review-pane-switch {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 4px 12px;
+  overflow-x: auto;
+}
+
+.review-pane-switch button {
+  flex-shrink: 0;
+}
+
+.review-history-disclosure {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-history-disclosure summary {
+  cursor: pointer;
+  padding: 4px;
+}
+
+.review-history-disclosure summary:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+}
+
+.review-history-warning {
+  margin: 0;
+  padding: 4px 12px;
+  color: var(--gs-semantic-feedback-warning-text);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-about {
+  padding: 12px 16px;
+}
+
+.review-about h2 {
+  font-size: var(--gs-semantic-type-body-size);
+}
+
+.review-description {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.review-context .review-commits,
+.review-context .review-conversation {
+  border-inline-start: 0;
 }
 
 .review-conversation {
@@ -3846,6 +3911,7 @@ textarea.conflict-content {
   height: 100%;
   flex-direction: column;
   overflow: auto;
+  padding-bottom: 4px;
   border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-control);
   background: var(--gs-semantic-surface-inset);
@@ -3941,65 +4007,142 @@ textarea.conflict-content {
   font-variant-numeric: tabular-nums;
 }
 
-/* Too narrow for three columns: the commit list moves under the diff rather
-   than disappearing, so the pull request's commits stay reachable, and the
-   conversation follows it. */
-@container review (max-width: 1320px) {
-  .review-body {
-    grid-template-areas:
-      "tree diff"
-      "tree commits"
-      "tree conversation";
-    grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
-    grid-template-rows: minmax(0, 24%) minmax(0, 24%) minmax(0, 1fr);
+@container review (max-width: 1100px) {
+  .review-body-context {
+    grid-template-areas: "context";
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .review-commits,
-  .review-conversation {
-    border-block-start: 1px solid var(--gs-semantic-border-decorative);
-    border-inline-start: 0;
+  .review-body-context > .review-tree,
+  .review-body-context > .review-diff {
+    display: none;
   }
 }
 
-/* Too narrow even for that: one region at a time, tree first.
-   The four regions share the window rather than each growing to its content, so
-   the patch is on screen when the workspace opens instead of below a screenful
-   of file rows, and each region scrolls inside its own share. The pane is the
-   scroll container at this width, exactly as it is for the other workspaces.
-   The conversation is last, so the reviewer's own words and the decision to
-   submit them follow the diff they are about. */
-@container review (max-width: 720px) {
+@container review (max-width: 600px) {
   .review-body {
-    grid-template-areas:
-      "tree"
-      "diff"
-      "commits"
-      "conversation";
+    grid-template-columns: minmax(100px, 28%) minmax(0, 1fr);
+  }
+
+  .review-body-context {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto;
   }
 
-  /* Content-sized rows, each region capped, so the four stack at a usable size
-     instead of one region claiming the whole workspace. The pane is the scroll
-     container at this width, as it is for every other workspace, so the view
-     grows to the sum of the caps and each region scrolls inside itself. */
-  .review-tree,
-  .review-commits,
-  .review-conversation {
-    max-height: 15rem;
+  .review-toolbar {
+    padding: 4px 8px;
+    gap: 4px;
   }
 
-  .review-conversation {
-    border-block-start: 1px solid var(--gs-semantic-border-decorative);
-    border-inline-start: 0;
+  .review-headline {
+    padding: 8px 12px;
   }
 
-  .review-diff {
-    max-height: 60dvh;
+  .review-rail {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 4px 8px;
   }
 
-  .review-tree {
-    border-block-end: 1px solid var(--gs-semantic-border-decorative);
-    border-inline-end: 0;
+  .review-rail > * {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+}
+
+/* Desktop zoom keeps Review inside the window instead of adopting the gallery's
+   vertically stacked small-screen shell. Navigation and data each scroll locally. */
+@media (max-width: 760px) {
+  html:has(.review-view),
+  body:has(.review-view),
+  #root:has(.review-view),
+  .app-shell:has(.review-view) {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .workspace:has(.review-view) {
+    display: grid;
+    flex: 1 1 0%;
+    grid-template-columns: 150px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .workspace:has(.review-view) .main-pane {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .workspace:has(.review-view) .sidebar {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .workspace:has(.review-view) .sidebar-scroll {
+    overflow: auto;
+  }
+
+  .workspace:has(.review-view) .workspace-nav {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app-shell:has(.review-view) .toolbar-search {
+    width: auto;
+    min-width: 0;
+    flex: 1;
+    order: 0;
+  }
+
+  .review-view {
+    overflow-y: auto;
+  }
+
+  .review-body {
+    min-height: 240px;
+  }
+}
+
+.pr-workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pr-workspace-row > .pr-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.review-toolbar .list-title-group:has(.sr-only) {
+  flex: 0;
+  min-width: 0;
+}
+
+.review-actions {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.review-actions summary {
+  padding: 8px;
+  cursor: pointer;
+  font-size: var(--gs-semantic-type-label-size);
+}
+
+.review-actions[open] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+@media (max-height: 600px) {
+  .review-view {
+    overflow-y: auto;
+  }
+
+  .review-body {
+    min-height: 360px;
   }
 }

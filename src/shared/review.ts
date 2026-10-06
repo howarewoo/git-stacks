@@ -226,9 +226,22 @@ export interface ReviewStackRail {
   message: string
 }
 
+export interface ReviewReviewerSummary {
+  state: 'available' | 'partial' | 'unavailable'
+  requested: Array<{ kind: 'user' | 'team'; name: string }>
+  reviews: Array<{
+    login: string
+    state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING'
+    headOid: string | null
+  }>
+  /** Explains missing or bounded data; empty only when both lists are complete. */
+  message: string
+}
+
 export interface ReviewHeadline {
   pullRequest: PullRequest & { body: string }
   rail: ReviewStackRail
+  reviewers: ReviewReviewerSummary
 }
 
 /**

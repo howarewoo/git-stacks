@@ -1827,6 +1827,28 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshotsByPath: inboxSnapshots,
     inbox: inboxQueue,
   },
+  'pr-inbox-same-number': {
+    name: 'pr-inbox-same-number',
+    summary: 'Two repositories both have PR #81, with distinct heads and review facts.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: {
+      ...inboxSnapshots,
+      [SPECIMENS_PATH]: {
+        ...specimensSnapshot,
+        pullRequests: [{ ...specimensPr77, number: 81 }],
+        branches: specimensSnapshot.branches.map((branch) =>
+          branch.pr ? { ...branch, pr: { ...branch.pr, number: 81 } } : branch,
+        ),
+      },
+    },
+    inbox: {
+      ...inboxQueue,
+      items: inboxQueue.items.map((item) =>
+        item.repositoryPath === SPECIMENS_PATH ? { ...item, number: 81 } : item,
+      ),
+    },
+  },
   'pr-inbox-no-repository': {
     name: 'pr-inbox-no-repository',
     summary: 'The queue with no repository open: it spans every registered repository.',
