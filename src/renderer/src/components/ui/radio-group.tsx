@@ -3,10 +3,8 @@ import { RadioGroup as RadioGroupPrimitive } from '@base-ui/react/radio-group'
 import { Radio as RadioPrimitive } from '@base-ui/react/radio'
 import { cn } from '../../lib/utils'
 
-export interface RadioGroupProps extends Omit<
-  RadioGroupPrimitive.Props<string>,
-  'className' | 'onValueChange'
-> {
+export interface RadioGroupProps
+  extends Omit<RadioGroupPrimitive.Props<string>, 'className' | 'onValueChange'> {
   className?: string
   onValueChange?: (value: string) => void
 }

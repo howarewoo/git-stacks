@@ -267,7 +267,7 @@ export function planSurgery(capture: SurgeryCapture, request: SurgeryRequest): S
   const expected = new Set(chain.filter((branch) => branch !== removedBranch))
   if (inserted) expected.add(inserted.branch)
   const order: string[] = []
-  for (let cursor = capture.trunk; ;) {
+  for (let cursor = capture.trunk; ; ) {
     const next = [...expected].find(
       (branch) => !order.includes(branch) && parentAfter(branch) === cursor,
     )

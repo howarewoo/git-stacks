@@ -100,7 +100,11 @@ export type LiveForeignKind = 'fork' | 'repository'
 export interface LiveBypassActor {
   readonly actorId: number
   readonly actorType:
-    'Integration' | 'Team' | 'OrganizationAdmin' | 'EnterpriseAdmin' | 'RepositoryRole'
+    | 'Integration'
+    | 'Team'
+    | 'OrganizationAdmin'
+    | 'EnterpriseAdmin'
+    | 'RepositoryRole'
   readonly bypassMode: 'always' | 'pull_request'
 }
 

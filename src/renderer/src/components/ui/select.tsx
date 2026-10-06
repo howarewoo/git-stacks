@@ -9,10 +9,11 @@ export interface SelectOption {
   disabled?: boolean
 }
 
-export interface SelectProps extends Omit<
-  React.ButtonHTMLAttributes<HTMLButtonElement>,
-  'value' | 'defaultValue' | 'onChange' | 'children' | 'type'
-> {
+export interface SelectProps
+  extends Omit<
+    React.ButtonHTMLAttributes<HTMLButtonElement>,
+    'value' | 'defaultValue' | 'onChange' | 'children' | 'type'
+  > {
   options: readonly SelectOption[]
   value?: string
   defaultValue?: string

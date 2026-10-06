@@ -84,7 +84,14 @@ export interface GitHubFixtureRepositoryState {
   mergeQueueRefs?: string[]
   mergeQueueMembers?: Record<string, { position: number; state: string; enqueuedAt: string }>
   mergeQueueFields?:
-    'refused' | 'absent' | 'malformed' | 'entry' | 'state' | 'date' | 'no-head' | 'no-base'
+    | 'refused'
+    | 'absent'
+    | 'malformed'
+    | 'entry'
+    | 'state'
+    | 'date'
+    | 'no-head'
+    | 'no-base'
   /**
    * Releases a group the queue has just accepted, so the enqueue answer stays terminal while
    * the membership is gone by the time the run reads it back.
@@ -512,7 +519,14 @@ export interface GitHubFixtureState {
    * `entry` answers membership truthfully and the entry with values no queue can hold.
    */
   mergeQueueFields?:
-    'refused' | 'absent' | 'malformed' | 'entry' | 'state' | 'date' | 'no-head' | 'no-base'
+    | 'refused'
+    | 'absent'
+    | 'malformed'
+    | 'entry'
+    | 'state'
+    | 'date'
+    | 'no-head'
+    | 'no-base'
   /**
    * Releases a group the queue has just accepted, so the enqueue answer stays terminal while
    * the membership is gone by the time the run reads it back.

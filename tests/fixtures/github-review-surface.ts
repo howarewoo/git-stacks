@@ -110,7 +110,7 @@ function gitFileChanges(pr: GitHubFixtureState['prs'][number]): GitFileChange[] 
   const names = hostGit(['diff', '--no-color', '--name-status', '-M', '-z', mergeBase, head])
   const fields = names.split('\0').filter((field) => field !== '')
   const changes: GitFileChange[] = []
-  for (let index = 0; index < fields.length;) {
+  for (let index = 0; index < fields.length; ) {
     const status = fields[index][0]
     if (status === 'R' || status === 'C') {
       const previousFilename = fields[index + 1]

@@ -19,8 +19,9 @@ import type { GitAction } from '../src/shared/types'
 
 // Git Stacks captures Node's spawn API when its own modules load, and the race
 // fixture shims that API, so the Git Stacks modules under test are loaded here.
-const { getFileView, getPushPreview, getSnapshot, resolveRepository, runAction } =
-  await import('../src/main/git')
+const { getFileView, getPushPreview, getSnapshot, resolveRepository, runAction } = await import(
+  '../src/main/git'
+)
 // Loaded after the race fixture owns the spawn API, so the queue under test is
 // the one the window's own action handler submits Git work through.
 const { RepositoryOperations } = await import('../src/main/repository-operations')

@@ -3060,10 +3060,10 @@ function App() {
     const parent = selectedBranch.parent ? branchByName.get(selectedBranch.parent) : null
     const canRebase = Boolean(
       selectedBranch.current &&
-      selectedBranch.parent &&
-      parent &&
-      !selectedBranch.remote &&
-      !operationActive,
+        selectedBranch.parent &&
+        parent &&
+        !selectedBranch.remote &&
+        !operationActive,
     )
     return (
       <aside className="details-pane" id="branch-inspector" aria-label="Selected branch details">

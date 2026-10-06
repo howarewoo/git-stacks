@@ -9,8 +9,9 @@ import type { SurgeryPreview, SurgeryRequest } from '../src/shared/types'
 // Git Stacks captures Node's spawn API when its own modules load, so the modules
 // under test are imported after the harness is installed rather than statically.
 const { getSnapshot, runAction } = await import('../src/main/git')
-const { getStackProgress, previewStack, previewSurgery, runSurgery } =
-  await import('../src/main/stacks')
+const { getStackProgress, previewStack, previewSurgery, runSurgery } = await import(
+  '../src/main/stacks'
+)
 const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 

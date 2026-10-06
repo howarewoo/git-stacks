@@ -4708,64 +4708,62 @@ test('a lock this build cannot read is refused rather than guessed at', async (t
   assert.equal(await readFile(`${journal}.lock`, 'utf8'), 'held by something else\n')
 })
 
-test(
-  'a lock that cannot be read at all refuses at once rather than spinning on it',
-  { timeout: 10_000 },
-  async (t) => {
-    const workspace = await reviewWorkspace()
-    t.after(workspace.dispose)
-    const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts.json')
-    await writeReviewDrafts(workspace.repo, {
-      number: 7,
-      repo: JOURNAL_OWNER.repo,
-      viewer: JOURNAL_OWNER.viewer,
-      comparison: comparison(),
-      drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'before' })],
-      updatedAt: '2026-09-23T10:00:00Z',
-    })
-    // The lock is there, and it is not something that can be read: a directory
-    // where the protocol puts a file. A writer that treats "I could not read it"
-    // as "it is not there" retries for ever against a lock that never goes away,
-    // holding a window on a save that will never complete and saying nothing
-    // about why. The one failure worth retrying is the lock being absent, which
-    // means the holder let go.
-    await mkdir(`${journal}.lock`)
+test('a lock that cannot be read at all refuses at once rather than spinning on it', {
+  timeout: 10_000,
+}, async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts.json')
+  await writeReviewDrafts(workspace.repo, {
+    number: 7,
+    repo: JOURNAL_OWNER.repo,
+    viewer: JOURNAL_OWNER.viewer,
+    comparison: comparison(),
+    drafts: [draft({ id: 'd1', ref: draftRef(3), body: 'before' })],
+    updatedAt: '2026-09-23T10:00:00Z',
+  })
+  // The lock is there, and it is not something that can be read: a directory
+  // where the protocol puts a file. A writer that treats "I could not read it"
+  // as "it is not there" retries for ever against a lock that never goes away,
+  // holding a window on a save that will never complete and saying nothing
+  // about why. The one failure worth retrying is the lock being absent, which
+  // means the holder let go.
+  await mkdir(`${journal}.lock`)
 
-    await assert.rejects(
-      () =>
-        writeReviewDrafts(workspace.repo, {
-          number: 8,
-          repo: JOURNAL_OWNER.repo,
-          viewer: JOURNAL_OWNER.viewer,
-          comparison: comparison(),
-          drafts: [draft({ id: 'd2', ref: draftRef(4), body: 'after' })],
-          updatedAt: '2026-09-23T10:05:00Z',
-        }),
-      (error: Error) => {
-        // The refusal is bounded by the test's own timeout: a writer that retries
-        // an unreadable lock never answers at all, and this is the assertion that
-        // it answers.
-        assert.ok(error.message.includes(`${journal}.lock`), 'the refusal names the lock file')
-        assert.match(error.message, /a directory rather than a lock file/)
-        assert.match(error.message, /Nothing was written/)
-        assert.match(error.message, /Close every Git Stacks window/)
-        return true
-      },
-    )
+  await assert.rejects(
+    () =>
+      writeReviewDrafts(workspace.repo, {
+        number: 8,
+        repo: JOURNAL_OWNER.repo,
+        viewer: JOURNAL_OWNER.viewer,
+        comparison: comparison(),
+        drafts: [draft({ id: 'd2', ref: draftRef(4), body: 'after' })],
+        updatedAt: '2026-09-23T10:05:00Z',
+      }),
+    (error: Error) => {
+      // The refusal is bounded by the test's own timeout: a writer that retries
+      // an unreadable lock never answers at all, and this is the assertion that
+      // it answers.
+      assert.ok(error.message.includes(`${journal}.lock`), 'the refusal names the lock file')
+      assert.match(error.message, /a directory rather than a lock file/)
+      assert.match(error.message, /Nothing was written/)
+      assert.match(error.message, /Close every Git Stacks window/)
+      return true
+    },
+  )
 
-    // Nothing was taken, nothing was written, and what was already journalled is
-    // exactly as it was.
-    assert.ok(
-      (await readFile(journal, 'utf8')).includes('before'),
-      'the record already on disk is untouched',
-    )
-    assert.equal(
-      await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8),
-      null,
-      'and the refused save left no record of its own',
-    )
-  },
-)
+  // Nothing was taken, nothing was written, and what was already journalled is
+  // exactly as it was.
+  assert.ok(
+    (await readFile(journal, 'utf8')).includes('before'),
+    'the record already on disk is untouched',
+  )
+  assert.equal(
+    await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 8),
+    null,
+    'and the refused save left no record of its own',
+  )
+})
 
 /** An unresolved attempt exactly as a lost review response would record it. */
 function uncertain(id: string, number: number): ReviewUncertainWrite {

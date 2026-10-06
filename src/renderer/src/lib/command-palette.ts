@@ -247,11 +247,11 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
   // Restack stack
   const canRestack = Boolean(
     snapshot &&
-    selectedBranch &&
-    !selectedBranch.remote &&
-    selectedBranch.name !== snapshot.defaultBranch &&
-    !isBusy &&
-    !operationActive,
+      selectedBranch &&
+      !selectedBranch.remote &&
+      selectedBranch.name !== snapshot.defaultBranch &&
+      !isBusy &&
+      !operationActive,
   )
   items.push({
     id: 'stack.restack',
@@ -415,12 +415,12 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
   // Publish / Sync stack
   const canPublish = Boolean(
     snapshot &&
-    selectedBranch &&
-    !selectedBranch.remote &&
-    selectedBranch.name !== snapshot.defaultBranch &&
-    snapshot.github.available &&
-    !isBusy &&
-    !operationActive,
+      selectedBranch &&
+      !selectedBranch.remote &&
+      selectedBranch.name !== snapshot.defaultBranch &&
+      snapshot.github.available &&
+      !isBusy &&
+      !operationActive,
   )
   items.push({
     id: 'stack.publish',

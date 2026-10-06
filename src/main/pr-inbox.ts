@@ -1121,7 +1121,8 @@ export class PullRequestInboxService {
      * there is nothing to compare, and the list the read was handed is it.
      */
     private readonly currentTargets:
-      (() => Promise<readonly PullRequestInboxTarget[]>) | null = null,
+      | (() => Promise<readonly PullRequestInboxTarget[]>)
+      | null = null,
   ) {}
 
   /** Drops the retained rows at an identity boundary rather than keeping them. */

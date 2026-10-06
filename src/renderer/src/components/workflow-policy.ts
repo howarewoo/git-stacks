@@ -32,7 +32,14 @@ export type WorkflowComposition = 'form' | 'reviewed' | 'destructive'
  * completion percentage.
  */
 export type WorkflowPhase =
-  'loading' | 'submitting' | 'failed' | 'stale' | 'succeeded' | 'partial' | 'blocked' | 'ready'
+  | 'loading'
+  | 'submitting'
+  | 'failed'
+  | 'stale'
+  | 'succeeded'
+  | 'partial'
+  | 'blocked'
+  | 'ready'
 
 export interface PhasePresentation {
   label: string

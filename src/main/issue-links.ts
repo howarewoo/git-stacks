@@ -155,7 +155,7 @@ export function removeClosingReference(
   // blank lines — is preserved exactly.
   const lines = body.split('\n')
   const lineStarts: number[] = []
-  for (let offset = 0; offset < body.length;) {
+  for (let offset = 0; offset < body.length; ) {
     lineStarts.push(offset)
     const next = body.indexOf('\n', offset)
     if (next === -1) break

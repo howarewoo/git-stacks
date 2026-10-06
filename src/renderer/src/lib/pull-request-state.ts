@@ -7,7 +7,14 @@ import type {
 } from '../../../shared/pull-request-checks'
 
 export type StatusBadgeVariant =
-  'secondary' | 'outline' | 'accent' | 'info' | 'success' | 'warning' | 'danger' | 'merged'
+  | 'secondary'
+  | 'outline'
+  | 'accent'
+  | 'info'
+  | 'success'
+  | 'warning'
+  | 'danger'
+  | 'merged'
 
 /** Checks are their own state: pending, failing, passing, or genuinely none. */
 export function checksVariant(checks: PullRequest['checks']): StatusBadgeVariant {
