@@ -126,7 +126,6 @@ export function ShellSpecimen() {
           </div>
           <div className="sidebar-scroll">
             <div className="nav-section">
-              <span className="nav-label">Workspace</span>
               <WorkspaceNavigation
                 activeView={activeView}
                 attentionCount={1}

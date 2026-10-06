@@ -159,6 +159,7 @@ test.describe('PR Inbox queue', () => {
     await expect(page.getByText('No pull request selected')).toHaveCount(0)
     // The origin the workspace reports is the repository the row named, so the
     // remote this window would use is that one and not a look-alike.
+    await page.locator('summary', { hasText: 'Repository info' }).click()
     await expect(
       page.getByText('git@github.com:howarewoo/design-system-specimens.git'),
     ).toBeVisible()
@@ -580,6 +581,7 @@ test.describe('PR Inbox to Review, in one window', () => {
     // The workspace on screen is that repository's, with its own canonical
     // origin: nothing here resolved the row against the repository that was
     // already open.
+    await page.locator('summary', { hasText: 'Repository info' }).click()
     await expect(
       page.getByText('git@github.com:howarewoo/design-system-specimens.git'),
     ).toBeVisible()
@@ -736,6 +738,7 @@ test.describe('PR Inbox transitions', () => {
     // The foreign row is opened first, so this window is showing a repository
     // the next world will not have.
     await rows(page).nth(1).getByRole('button').click()
+    await page.locator('summary', { hasText: 'Repository info' }).click()
     await expect(
       page.getByText('git@github.com:howarewoo/design-system-specimens.git'),
     ).toBeVisible()

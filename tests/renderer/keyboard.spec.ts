@@ -66,6 +66,46 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Working changes' })).toBeVisible()
   })
 
+  test('destination arrow navigation crosses group labels without activating a view', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    const nav = page.getByRole('navigation', { name: 'Workspace destinations' })
+    await nav.getByRole('button', { name: /^Stashes/ }).focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(nav.getByRole('button', { name: /^Pull requests/ })).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(nav.getByRole('button', { name: /^Diagnostics/ })).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(nav.getByRole('button', { name: /^Branches/ })).toBeFocused()
+    await expect(page.getByRole('heading', { level: 1, name: 'Branches' })).toBeVisible()
+    expect(await getDispatchedActions(page)).toEqual([])
+  })
+
+  test('collapsed layer editing is keyboard reachable and still opens a reviewed workflow', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
+    const disclosure = inspector.locator('summary', { hasText: 'Edit stack layers' })
+    const insert = inspector.getByRole('button', { name: 'Insert layer above…' })
+    await expect(insert).toBeHidden()
+    await disclosure.focus()
+    await page.keyboard.press('Enter')
+    await expect(insert).toBeVisible()
+    await insert.focus()
+    await page.keyboard.press('Enter')
+    const dialog = page.getByRole('dialog', { name: 'Insert a stack layer' })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
+    expect(await getDispatchedActions(page)).toEqual([])
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(insert).toBeFocused()
+    await disclosure.focus()
+    await page.keyboard.press('Enter')
+    await expect(insert).toBeHidden()
+  })
+
   test('segmented control branch filters respond to keyboard activation', async ({ page }) => {
     await openGallery(page, { scenario: 'shell-connected' })
 

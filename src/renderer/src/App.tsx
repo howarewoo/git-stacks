@@ -2358,14 +2358,14 @@ function App() {
           label="Open another repository"
           onClick={() => openRepository()}
           disabled={isBusy}
+          variant="ghost"
         >
-          <MoreHorizontal className="size-4" />
+          <FolderOpen className="size-4" />
         </IconButton>
       </div>
 
       <div className="sidebar-scroll">
         <div className="nav-section">
-          <span className="nav-label">Workspace</span>
           <WorkspaceNavigation
             activeView={workspaceView}
             attentionCount={capabilityAttention}
@@ -2379,8 +2379,8 @@ function App() {
         </div>
 
         {snapshot ? (
-          <div className="nav-section nav-section-bordered">
-            <span className="nav-label">Repository</span>
+          <details className="nav-section nav-section-bordered sidebar-disclosure">
+            <summary>Repository info</summary>
             <div className="sidebar-info-row">
               <GitFork className="size-4" />
               <span className="sidebar-info-value" title={snapshot.remoteUrl ?? undefined}>
@@ -2396,7 +2396,7 @@ function App() {
                 {snapshot.defaultBranch || '—'}
               </span>
             </div>
-          </div>
+          </details>
         ) : null}
 
         <div className="nav-section nav-section-bordered recent-section">
@@ -2406,6 +2406,7 @@ function App() {
               label="Open a repository"
               onClick={() => openRepository()}
               disabled={isBusy}
+              variant="ghost"
             >
               <Plus className="size-3.5" />
             </IconButton>
@@ -2420,6 +2421,7 @@ function App() {
               {recentRepositories.map((repository) => (
                 <Button
                   className="recent-item"
+                  aria-current={repository.path === snapshot?.path ? 'true' : undefined}
                   disabled={isBusy}
                   key={repository.path}
                   onClick={() => openRepository(repository.path)}
@@ -2620,21 +2622,6 @@ function App() {
         </div>
       ) : null}
       <div className="toolbar-spacer" />
-      <Button
-        className="toolbar-control"
-        size="sm"
-        variant="secondary"
-        onClick={() => setPaletteOpen(true)}
-        aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['palette.open'], isMac)}
-        aria-label="Open command palette"
-        tooltip="Search actions, repositories, branches, PRs, issues, and settings"
-      >
-        <Search className="size-3.5" />
-        Palette
-        <kbd className="ml-1 rounded border border-[var(--gs-semantic-border-essential)] px-1 font-mono text-[10px] opacity-75">
-          {formatChord(shortcutBindings['palette.open'], isMac)}
-        </kbd>
-      </Button>
       <div className="toolbar-search">
         <Search className="size-3.5" />
         <Input
@@ -3289,7 +3276,11 @@ function App() {
           <div>
             <h2 title={selectedBranch.name}>{selectedBranch.name}</h2>
           </div>
-          <IconButton label="Clear branch selection" onClick={() => setSelectedBranchRef(null)}>
+          <IconButton
+            label="Clear branch selection"
+            onClick={() => setSelectedBranchRef(null)}
+            variant="ghost"
+          >
             <X className="size-4" />
           </IconButton>
         </div>
@@ -3377,114 +3368,123 @@ function App() {
                 <Upload className="size-3.5" />
                 Publish stack…
               </Button>
-              {(() => {
-                // The three surgeries act on the selected layer, so each one is offered
-                // only where it can be expressed: a parent to move down onto, a layer
-                // above to move up past, and no layer above to remove.
-                const parent = selectedBranch.parent ?? null
-                const above = snapshot.branches.find(
-                  (branch) => !branch.remote && branch.parent === selectedBranch.name,
-                )
-                const common = isBusy || operationActive
-                return (
-                  <>
-                    <Button
-                      variant="ghost"
-                      disabled={common || Boolean(shapeReason('executeSurgery'))}
-                      tooltip={
-                        shapeReason('executeSurgery') ??
-                        'Preview a new layer on this branch, replaying the layers above it onto it.'
-                      }
-                      onClick={() =>
-                        openWorkflow({
-                          kind: 'surgery',
-                          request: { kind: 'insert', branch: selectedBranch.name, name: '' },
-                        })
-                      }
-                    >
-                      <Layers className="size-3.5" />
-                      Insert layer above…
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      disabled={common || !parent || Boolean(shapeReason('executeSurgery'))}
-                      tooltip={
-                        shapeReason('executeSurgery') ??
-                        (parent
-                          ? `Preview reparenting ${selectedBranch.name} onto ${parent} and replaying the layers above it.`
-                          : 'This layer already sits directly on the stack trunk.')
-                      }
-                      onClick={() =>
-                        parent
-                          ? openWorkflow({
+              <details className="detail-disclosure">
+                <summary>Edit stack layers</summary>
+                <div className="detail-disclosure-actions">
+                  {(() => {
+                    // The three surgeries act on the selected layer, so each one is offered
+                    // only where it can be expressed: a parent to move down onto, a layer
+                    // above to move up past, and no layer above to remove.
+                    const parent = selectedBranch.parent ?? null
+                    const above = snapshot.branches.find(
+                      (branch) => !branch.remote && branch.parent === selectedBranch.name,
+                    )
+                    const common = isBusy || operationActive
+                    return (
+                      <>
+                        <Button
+                          variant="ghost"
+                          disabled={common || Boolean(shapeReason('executeSurgery'))}
+                          tooltip={
+                            shapeReason('executeSurgery') ??
+                            'Preview a new layer on this branch, replaying the layers above it onto it.'
+                          }
+                          onClick={() =>
+                            openWorkflow({
                               kind: 'surgery',
-                              request: {
-                                kind: 'move',
-                                branch: selectedBranch.name,
-                                target: parent,
-                              },
+                              request: { kind: 'insert', branch: selectedBranch.name, name: '' },
                             })
-                          : undefined
-                      }
-                    >
-                      Move layer down…
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      disabled={common || !above?.parent || Boolean(shapeReason('executeSurgery'))}
-                      tooltip={
-                        shapeReason('executeSurgery') ??
-                        (above
-                          ? `Preview moving ${selectedBranch.name} above ${above.name} and replaying both layers.`
-                          : 'No layer sits above this one.')
-                      }
-                      onClick={() =>
-                        above
-                          ? openWorkflow({
+                          }
+                        >
+                          <Layers className="size-3.5" />
+                          Insert layer above…
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          disabled={common || !parent || Boolean(shapeReason('executeSurgery'))}
+                          tooltip={
+                            shapeReason('executeSurgery') ??
+                            (parent
+                              ? `Preview reparenting ${selectedBranch.name} onto ${parent} and replaying the layers above it.`
+                              : 'This layer already sits directly on the stack trunk.')
+                          }
+                          onClick={() =>
+                            parent
+                              ? openWorkflow({
+                                  kind: 'surgery',
+                                  request: {
+                                    kind: 'move',
+                                    branch: selectedBranch.name,
+                                    target: parent,
+                                  },
+                                })
+                              : undefined
+                          }
+                        >
+                          Move layer down…
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          disabled={
+                            common || !above?.parent || Boolean(shapeReason('executeSurgery'))
+                          }
+                          tooltip={
+                            shapeReason('executeSurgery') ??
+                            (above
+                              ? `Preview moving ${selectedBranch.name} above ${above.name} and replaying both layers.`
+                              : 'No layer sits above this one.')
+                          }
+                          onClick={() =>
+                            above
+                              ? openWorkflow({
+                                  kind: 'surgery',
+                                  request: {
+                                    kind: 'move',
+                                    branch: selectedBranch.name,
+                                    target: above.name,
+                                  },
+                                })
+                              : undefined
+                          }
+                        >
+                          Move layer up…
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          disabled={
+                            common || Boolean(above) || Boolean(shapeReason('executeSurgery'))
+                          }
+                          tooltip={
+                            shapeReason('executeSurgery') ??
+                            (above
+                              ? 'Reorder the layers above this one first: removing a middle layer has to replay them, and the preview shows it.'
+                              : 'Preview deleting this local branch, retargeting nothing above it, and closing its pull request.')
+                          }
+                          onClick={() =>
+                            openWorkflow({
                               kind: 'surgery',
-                              request: {
-                                kind: 'move',
-                                branch: selectedBranch.name,
-                                target: above.name,
-                              },
+                              request: { kind: 'remove', branch: selectedBranch.name },
                             })
-                          : undefined
-                      }
-                    >
-                      Move layer up…
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      disabled={common || Boolean(above) || Boolean(shapeReason('executeSurgery'))}
-                      tooltip={
-                        shapeReason('executeSurgery') ??
-                        (above
-                          ? 'Reorder the layers above this one first: removing a middle layer has to replay them, and the preview shows it.'
-                          : 'Preview deleting this local branch, retargeting nothing above it, and closing its pull request.')
-                      }
-                      onClick={() =>
-                        openWorkflow({
-                          kind: 'surgery',
-                          request: { kind: 'remove', branch: selectedBranch.name },
-                        })
-                      }
-                    >
-                      Remove layer…
-                    </Button>
-                  </>
-                )
-              })()}
-              <Button
-                variant="ghost"
-                disabled={isBusy || operationActive || Boolean(shapeReason('setParent'))}
-                tooltip={
-                  shapeReason('setParent') ??
-                  'Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants.'
-                }
-                onClick={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
-              >
-                Set stack parent…
-              </Button>
+                          }
+                        >
+                          Remove layer…
+                        </Button>
+                      </>
+                    )
+                  })()}
+                  <Button
+                    variant="ghost"
+                    disabled={isBusy || operationActive || Boolean(shapeReason('setParent'))}
+                    tooltip={
+                      shapeReason('setParent') ??
+                      'Record a different local parent without rewriting commits. Preview Restack next to move this branch and descendants.'
+                    }
+                    onClick={() => openWorkflow({ kind: 'parent', branch: selectedBranch })}
+                  >
+                    Set stack parent…
+                  </Button>
+                </div>
+              </details>
               {selectedPullRequest?.state === 'OPEN' ? (
                 <Button
                   variant="secondary"
@@ -3893,7 +3893,21 @@ function App() {
           </Badge>
         ) : null}
         {snapshot ? <RemoteFreshnessBadge freshness={remoteStatus ?? snapshot.remote} /> : null}
-        <span className="titlebar-build">Native Git workspace</span>
+        <Button
+          className="titlebar-command"
+          size="sm"
+          variant="secondary"
+          onClick={() => setPaletteOpen(true)}
+          aria-keyshortcuts={ariaKeyShortcuts(shortcutBindings['palette.open'], isMac)}
+          aria-label="Open command palette"
+          tooltip="Search actions, repositories, branches, PRs, issues, and settings"
+        >
+          <Search className="size-3.5" />
+          Palette
+          <kbd className="ml-1 rounded border border-[var(--gs-semantic-border-essential)] px-1 font-mono text-[length:var(--gs-semantic-type-metadata-size)]">
+            {formatChord(shortcutBindings['palette.open'], isMac)}
+          </kbd>
+        </Button>
       </header>
       {error ? (
         <InlineAlert

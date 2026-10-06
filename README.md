@@ -1670,6 +1670,16 @@ Open the loopback URL printed by Vite. No GitHub credentials, Electron preload, 
 
 Append `#/index` for the scenario directory. App scenarios use `/?scenario=shell-connected#/app`; the gallery activates the real App's Open local repository control to load the deterministic snapshot. `shell-no-repository` and `shell-loading` intentionally stay on the no-repository/loading surface. Component routes retain `#/design-system-controls`, `#/design-system-shell-specimen`, `#/design-system-data-specimen`, and `#/design-system-dialog-specimen` in this separate gallery only.
 
+For workspace refinements, exercise `shell-connected` and `shell-long-content`
+at 1000×700, 1440×940, 1920×1080, and the 720×470 zoom-equivalent viewport.
+Check the title-bar palette independently of the toolbar filter, arrow-key
+navigation across group labels, repository switching through recents, and
+keyboard expansion of **Repository info** and **Edit stack layers**. Opening a
+disclosure must not dispatch Git; layer actions must still enter their reviewed
+workflows. The keyboard, accessibility, safety, and motion/zoom renderer suites
+cover these contracts. After intentional shell changes, update the affected
+macOS visual baselines with `npm run test:visual:update`.
+
 The typed control surface is `window.fixture`: `actions` and `externalUrls` record dispatch; `calls` records reads and writes; `hold(method)` and `release(method, occurrence?)` control in-flight requests, oldest first (or targeted by `'oldest'` or `'newest'`); `failNext(method, message)` rejects one request; `answerNext(method, value)` answers one request with a value the producer itself would return, so a spec can put a read that ended on the wire; and `setScenario(name)` installs another scenario's answers into the double that is already installed, without remounting the App — the window keeps its destination, its state, and its reads in flight, and subsequent reads answer from the newly selected scenario's own repository (or refuse when it has none), while the repository already displayed is preserved until the user or application opens another repository or refreshes. That is what makes an in-place transition provable: a remount is indistinguishable from a first load, and every in-place transition — a read that ends, a read that is replaced, a read that names no account — would only ever be provable by reloading the page.
 
 `pull-requests-checks-detail` and `pull-requests-checks-stale` are the checks

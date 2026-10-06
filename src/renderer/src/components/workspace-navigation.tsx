@@ -49,19 +49,20 @@ type WorkspaceDestination = {
   id: WorkspaceView
   label: string
   icon: LucideIcon
+  group: 'Repository' | 'GitHub' | 'Workspace'
 }
 
 const workspaceDestinations: readonly WorkspaceDestination[] = [
-  { id: 'branches', label: 'Branches', icon: GitBranch },
-  { id: 'stacks', label: 'Stacks', icon: Layers },
-  { id: 'history', label: 'History', icon: History },
-  { id: 'changes', label: 'Working changes', icon: Files },
-  { id: 'pullRequests', label: 'Pull requests', icon: GitPullRequest },
-  { id: 'prInbox', label: 'PR Inbox', icon: Inbox },
-  { id: 'review', label: 'Review', icon: MessageSquareDiff },
-  { id: 'stashes', label: 'Stashes', icon: Archive },
-  { id: 'diagnostics', label: 'Diagnostics', icon: SlidersHorizontal },
-  { id: 'notifications', label: 'GitHub Notifications', icon: Bell },
+  { id: 'branches', label: 'Branches', icon: GitBranch, group: 'Repository' },
+  { id: 'stacks', label: 'Stacks', icon: Layers, group: 'Repository' },
+  { id: 'changes', label: 'Working changes', icon: Files, group: 'Repository' },
+  { id: 'history', label: 'History', icon: History, group: 'Repository' },
+  { id: 'stashes', label: 'Stashes', icon: Archive, group: 'Repository' },
+  { id: 'pullRequests', label: 'Pull requests', icon: GitPullRequest, group: 'GitHub' },
+  { id: 'review', label: 'Review', icon: MessageSquareDiff, group: 'GitHub' },
+  { id: 'prInbox', label: 'PR Inbox', icon: Inbox, group: 'GitHub' },
+  { id: 'notifications', label: 'GitHub Notifications', icon: Bell, group: 'GitHub' },
+  { id: 'diagnostics', label: 'Diagnostics', icon: SlidersHorizontal, group: 'Workspace' },
 ]
 
 /** The spoken name of a destination, used for the workspace-change announcement. */
@@ -137,29 +138,33 @@ export function WorkspaceNavigation({
         items[target].focus()
       }}
     >
-      {workspaceDestinations.map(({ id, label, icon: Icon }) => {
+      {workspaceDestinations.map(({ id, label, icon: Icon, group }, index) => {
         const active = activeView === id
         const count = countFor(id)
         return (
-          <Button
-            aria-current={active ? 'page' : undefined}
-            className={cn('nav-item', active && 'nav-item-active')}
-            variant="unstyled"
-            key={id}
-            onClick={() => onSelect(id)}
-            type="button"
-          >
-            <Icon aria-hidden="true" className="size-4" />
-            <span className="nav-item-label">{label}</span>
-            {count !== undefined ? (
-              <span
-                className={cn('nav-count', id === 'changes' && count > 0 && 'nav-count-accent')}
-              >
-                {count}
-              </span>
+          <React.Fragment key={id}>
+            {workspaceDestinations[index - 1]?.group !== group ? (
+              <span className="nav-label nav-group-label">{group}</span>
             ) : null}
-            {active ? <span className="nav-current-marker" aria-hidden="true" /> : null}
-          </Button>
+            <Button
+              aria-current={active ? 'page' : undefined}
+              className={cn('nav-item', active && 'nav-item-active')}
+              variant="unstyled"
+              onClick={() => onSelect(id)}
+              type="button"
+            >
+              <Icon aria-hidden="true" className="size-4" />
+              <span className="nav-item-label">{label}</span>
+              {count !== undefined ? (
+                <span
+                  className={cn('nav-count', id === 'changes' && count > 0 && 'nav-count-accent')}
+                >
+                  {count}
+                </span>
+              ) : null}
+              {active ? <span className="nav-current-marker" aria-hidden="true" /> : null}
+            </Button>
+          </React.Fragment>
         )
       })}
     </nav>

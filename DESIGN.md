@@ -203,6 +203,8 @@ The palette is a cool-gray workbench with quiet semantic feedback. Workbench Ink
 Git Stacks is a desktop workbench, not a mobile or web client. The existing shell uses a three-pane composition: repository navigation, primary work area, and details. Dense branch, pull-request, stash, history, and diff rows use the compact rhythm; forms and primary work surfaces use standard density. Controls are 36px compact or 44px standard, and rows are 44px compact or 56px standard, with content allowed to grow when necessary.
 
 The spacing system follows a 4px rhythm with 4, 8, 12, 16, 20, 24, 32, and 40px steps. The foundation radius scale reserves 12px for controls, 16px for nested items, and 24px for work surfaces and dialogs, while pills use 999px. These are target roles, not a claim that every existing component already consumes them. The existing renderer breakpoints at 1040px and 1199px adapt the shell to narrower desktop renderer widths; the native product remains centered on the 1000×700 minimum and 1440×940 default window sizes.
+
+Shell panes use 12px canvas gutters at default and wide desktop sizes and 8px gutters below 1200px. Repository and inspector headers have a 72px minimum; list headers share that minimum and grow when controls wrap. Main headers and inspector sections use consistent 20px horizontal insets. Branch identities use the 13px monospace label role, supporting copy uses 12px metadata, and workspace titles use the 20px heading role.
 Motion uses 120ms fast, 180ms standard, and 240ms deliberate transitions with `cubic-bezier(0.2, 0, 0, 1)` easing. The generated reduced-motion rule maps each duration to `0.01ms`; status text and operation locks remain when animation is removed.
 
 Overlay content is layered above the shell through the named z-index scale: base `0`, content `1`, floating `10`, overlay `60`, and popover `70`. Overlay surfaces do not compete with arbitrary per-view z-index values.
@@ -260,6 +262,10 @@ The renderer owns its [shadcn/ui](https://ui.shadcn.com/)-style component librar
 
 - **Style:** The shell uses quiet text and count metadata with a selected state separate from checked-out state. Active navigation uses the selection role, while primary action emphasis remains Workbench Ink.
 - **Keyboard:** Global `:focus-visible` treatment is available for keyboard navigation and controls. Disabled or unavailable actions retain a text or tooltip explanation. Disabled menu items may receive arrow-key focus so their reason remains discoverable, but cannot activate.
+- **Grouping:** Repository groups Branches, Stacks, Working changes, History, and Stashes. GitHub groups Pull requests, Review, PR Inbox, and GitHub Notifications. Workspace holds Diagnostics. These headings organize one continuous keyboard route; arrows, Home, and End skip the headings without activating a destination.
+- **Search placement:** The global command palette lives in the title bar; the repository toolbar keeps its distinct in-view filter, synchronization actions, and details toggle. The toolbar stays on one row at the native minimum width and wraps at narrower zoomed widths.
+- **Repository context:** The open-folder control switches repositories; the current recent repository is explicitly marked. Remote and default-branch facts live in the keyboard-operable Repository info disclosure rather than competing with navigation. Connection and runtime controls use separate readable footer rows.
+- **Inspector hierarchy:** Branch identity and state come first, followed by stack position, the primary stack workflow, synchronization facts, pull-request context, and branch actions. Insert, move, remove, and parent-edit actions remain available under Edit stack layers; opening the disclosure never mutates Git, and each action retains its existing preview, confirmation, and operation locks.
 
 ### Keyboard and screen-reader contract
 
