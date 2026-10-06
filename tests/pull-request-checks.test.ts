@@ -13,8 +13,9 @@ import {
 // static import above would hand Git Stacks the unpatched `execFile`.
 const { execFileSync } = await import('node:child_process')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
-const { DirectGitHubTransport, GitHubTransportError, setGitHubTransport } =
-  await import('../src/main/github-transport')
+const { DirectGitHubTransport, GitHubTransportError, setGitHubTransport } = await import(
+  '../src/main/github-transport'
+)
 // The dynamic import is this file's convention, and the reason is written above:
 // the harness must patch Node's spawn API before Git Stacks captures it.
 const {

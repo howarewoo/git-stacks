@@ -1523,9 +1523,9 @@ async function branchRecords(
     const configuredTipOid = configuredTip ? await resolveCommit(repoPath, configuredTip) : null
     const invalidParentTip = Boolean(
       configuredTip &&
-      (!isOid(configuredTip) ||
-        !configuredTipOid ||
-        !(await isAncestor(repoPath, configuredTipOid, oid))),
+        (!isOid(configuredTip) ||
+          !configuredTipOid ||
+          !(await isAncestor(repoPath, configuredTipOid, oid))),
     )
     const validTip = invalidParentTip ? null : configuredTip
     const source: BranchRecord['parentSource'] = configuredParent
@@ -1986,10 +1986,10 @@ async function capturePlan(
       parent === trunk ? await resolveCommit(root, `refs/remotes/origin/${trunk}`) : null
     const trunkDiverged = Boolean(
       localTrunkOid &&
-      remoteTrunkOid &&
-      localTrunkOid !== remoteTrunkOid &&
-      !(await isAncestor(root, localTrunkOid, remoteTrunkOid)) &&
-      !(await isAncestor(root, remoteTrunkOid, localTrunkOid)),
+        remoteTrunkOid &&
+        localTrunkOid !== remoteTrunkOid &&
+        !(await isAncestor(root, localTrunkOid, remoteTrunkOid)) &&
+        !(await isAncestor(root, remoteTrunkOid, localTrunkOid)),
     )
     if (trunkDiverged && !preferRemoteTrunk) {
       blockers.push(

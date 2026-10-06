@@ -140,7 +140,8 @@ export function updateRefusal(reason: UpdateRejection, message: string): UpdateO
 }
 
 export type UpdateOutcome<T> =
-  { ok: true; value: T } | { ok: false; failure: UpdateRejectionReport }
+  | { ok: true; value: T }
+  | { ok: false; failure: UpdateRejectionReport }
 
 /** What the updater is doing, and what it last concluded. */
 export type UpdatePhase =

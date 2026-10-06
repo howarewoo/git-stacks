@@ -208,8 +208,8 @@
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr) 340px;
   grid-template-areas:
-    'header header'
-    'surface log';
+    "header header"
+    "surface log";
   gap: 0;
   background: var(--gs-semantic-surface-canvas);
   color: var(--gs-semantic-text-primary);
@@ -327,8 +327,8 @@
     grid-template-rows: auto minmax(0, 1fr);
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
-      'header'
-      'surface';
+      "header"
+      "surface";
   }
 
   .specimen-header {

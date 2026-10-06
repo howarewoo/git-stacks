@@ -882,43 +882,36 @@ async function cliLines(
   )
 }
 
-test(
-  'an installed GitHub CLI is reported by version alone, and never as authentication',
-  {
-    skip: process.platform === 'win32' ? 'the controlled CLI uses a POSIX shebang' : false,
-  },
-  async () => {
-    await withTempDir(async (dir) => {
-      const cli = await installControlledGh(
-        `process.stdout.write('gh version 2.62.0 (2024-11-14)\\n')`,
-        dir,
-      )
+test('an installed GitHub CLI is reported by version alone, and never as authentication', {
+  skip: process.platform === 'win32' ? 'the controlled CLI uses a POSIX shebang' : false,
+}, async () => {
+  await withTempDir(async (dir) => {
+    const cli = await installControlledGh(
+      `process.stdout.write('gh version 2.62.0 (2024-11-14)\\n')`,
+      dir,
+    )
 
-      const sources = await readGitHubCliSources({ PATH: cli.path })
-      assert.equal(sources.probe?.install, 'present')
-      const lines = await cliLines({ githubCli: sources })
-      assert.equal(lines['gh --version']?.value, 'gh version 2.62.0')
-      assert.equal(lines['gh --version']?.status, 'confirmed')
-      // The build date the CLI prints is not part of the version, and nothing
-      // else it was asked is reported. No status line appears at all: this probe
-      // established an installed version, never an account.
-      assert.equal(JSON.stringify(lines).includes('2024-11-14'), false)
-      assert.equal(lines['GitHub CLI authentication'], undefined)
-      assert.deepEqual(await readFile(cli.invoked, 'utf8'), '["--version"]\n')
-    })
-  },
-)
+    const sources = await readGitHubCliSources({ PATH: cli.path })
+    assert.equal(sources.probe?.install, 'present')
+    const lines = await cliLines({ githubCli: sources })
+    assert.equal(lines['gh --version']?.value, 'gh version 2.62.0')
+    assert.equal(lines['gh --version']?.status, 'confirmed')
+    // The build date the CLI prints is not part of the version, and nothing
+    // else it was asked is reported. No status line appears at all: this probe
+    // established an installed version, never an account.
+    assert.equal(JSON.stringify(lines).includes('2024-11-14'), false)
+    assert.equal(lines['GitHub CLI authentication'], undefined)
+    assert.deepEqual(await readFile(cli.invoked, 'utf8'), '["--version"]\n')
+  })
+})
 
-test(
-  'the GitHub CLI probe inherits no credential and reports an absent CLI as optional',
-  {
-    skip: process.platform === 'win32' ? 'the controlled CLI uses a POSIX shebang' : false,
-  },
-  async () => {
-    await withTempDir(async (dir) => {
-      const observed = join(dir, 'inherited.txt')
-      const cli = await installControlledGh(
-        `process.stdout.write('gh version 2.62.0\\n')
+test('the GitHub CLI probe inherits no credential and reports an absent CLI as optional', {
+  skip: process.platform === 'win32' ? 'the controlled CLI uses a POSIX shebang' : false,
+}, async () => {
+  await withTempDir(async (dir) => {
+    const observed = join(dir, 'inherited.txt')
+    const cli = await installControlledGh(
+      `process.stdout.write('gh version 2.62.0\\n')
 import { writeFileSync } from 'node:fs'
 writeFileSync(${JSON.stringify(observed)}, JSON.stringify({
   ghToken: process.env.GH_TOKEN ?? null,
@@ -927,108 +920,103 @@ writeFileSync(${JSON.stringify(observed)}, JSON.stringify({
   enterpriseToken: process.env.GH_ENTERPRISE_TOKEN ?? null,
   scoped: Object.keys(process.env).filter((name) => name.startsWith('GIT_STACKS_GITHUB_TOKEN_')),
 }))`,
-        dir,
-      )
+      dir,
+    )
 
-      // The machine's own ambient credential is what a version query must never
-      // see, so it is handed to the probe and has to come out the other side gone.
-      const sources = await readGitHubCliSources({
-        PATH: cli.path,
-        GH_TOKEN: 'ghp_thismachinecredential000000000000',
-        GITHUB_TOKEN: 'another-ambient-token',
-        GIT_STACKS_GITHUB_TOKEN: 'scoped-ambient-token',
-        GH_ENTERPRISE_TOKEN: 'enterprise-ambient-token',
-        GIT_STACKS_GITHUB_TOKEN_GITHUB_COM: 'host-scoped-ambient-token',
-      })
-      assert.equal(sources.probe?.install, 'present')
-      assert.deepEqual(JSON.parse(await readFile(observed, 'utf8')), {
-        ghToken: null,
-        githubToken: null,
-        gitStacksToken: null,
-        enterpriseToken: null,
-        scoped: [],
-      })
-
-      // A PATH with no CLI on it is the ordinary case on most machines, and it is
-      // a fact about the machine rather than a fault to fix: nothing in this app,
-      // and no sign-in, depends on the CLI being installed.
-      await mkdir(join(dir, 'empty'), { recursive: true })
-      const absent = await readGitHubCliSources({ PATH: join(dir, 'empty') })
-      assert.equal(absent.probe?.install, 'missing')
-      const lines = await cliLines({ githubCli: absent })
-      assert.equal(lines['gh --version']?.status, 'unavailable')
-      assert.equal(lines['gh --version']?.value, 'not installed')
-      assert.match(lines['gh --version']?.detail ?? '', /required/u)
+    // The machine's own ambient credential is what a version query must never
+    // see, so it is handed to the probe and has to come out the other side gone.
+    const sources = await readGitHubCliSources({
+      PATH: cli.path,
+      GH_TOKEN: 'ghp_thismachinecredential000000000000',
+      GITHUB_TOKEN: 'another-ambient-token',
+      GIT_STACKS_GITHUB_TOKEN: 'scoped-ambient-token',
+      GH_ENTERPRISE_TOKEN: 'enterprise-ambient-token',
+      GIT_STACKS_GITHUB_TOKEN_GITHUB_COM: 'host-scoped-ambient-token',
     })
-  },
-)
+    assert.equal(sources.probe?.install, 'present')
+    assert.deepEqual(JSON.parse(await readFile(observed, 'utf8')), {
+      ghToken: null,
+      githubToken: null,
+      gitStacksToken: null,
+      enterpriseToken: null,
+      scoped: [],
+    })
 
-test(
-  'a failing or unrecognisable GitHub CLI reports unavailable without echoing what it printed',
-  {
-    skip: process.platform === 'win32' ? 'the controlled CLI uses a POSIX shebang' : false,
-  },
-  async () => {
-    await withTempDir(async (dir) => {
-      // A CLI that exits non-zero after writing a credential-shaped string and a
-      // path to itself: neither may reach the report or the bundle.
-      const secret = 'ghp_thisoutputcredential0000000000000'
-      const failing = await installControlledGh(
-        `process.stdout.write('token ${secret}\\n/usr/local/bin/gh: broken\\n')
+    // A PATH with no CLI on it is the ordinary case on most machines, and it is
+    // a fact about the machine rather than a fault to fix: nothing in this app,
+    // and no sign-in, depends on the CLI being installed.
+    await mkdir(join(dir, 'empty'), { recursive: true })
+    const absent = await readGitHubCliSources({ PATH: join(dir, 'empty') })
+    assert.equal(absent.probe?.install, 'missing')
+    const lines = await cliLines({ githubCli: absent })
+    assert.equal(lines['gh --version']?.status, 'unavailable')
+    assert.equal(lines['gh --version']?.value, 'not installed')
+    assert.match(lines['gh --version']?.detail ?? '', /required/u)
+  })
+})
+
+test('a failing or unrecognisable GitHub CLI reports unavailable without echoing what it printed', {
+  skip: process.platform === 'win32' ? 'the controlled CLI uses a POSIX shebang' : false,
+}, async () => {
+  await withTempDir(async (dir) => {
+    // A CLI that exits non-zero after writing a credential-shaped string and a
+    // path to itself: neither may reach the report or the bundle.
+    const secret = 'ghp_thisoutputcredential0000000000000'
+    const failing = await installControlledGh(
+      `process.stdout.write('token ${secret}\\n/usr/local/bin/gh: broken\\n')
 process.stderr.write('gh: fatal ${secret}\\n')
 process.exit(1)`,
-        dir,
-      )
-      const failureSources = await readGitHubCliSources({ PATH: failing.path })
-      assert.equal(failureSources.probe?.install, 'unreadable')
-      const failureLines = await cliLines({ githubCli: failureSources })
-      assert.equal(failureLines['gh --version']?.status, 'unavailable')
-      assert.equal(failureLines['gh --version']?.value, 'could not be read')
-      assert.equal(JSON.stringify(failureLines).includes(secret), false)
-      assert.equal(JSON.stringify(failureLines).includes('/usr/local/bin'), false)
+      dir,
+    )
+    const failureSources = await readGitHubCliSources({ PATH: failing.path })
+    assert.equal(failureSources.probe?.install, 'unreadable')
+    const failureLines = await cliLines({ githubCli: failureSources })
+    assert.equal(failureLines['gh --version']?.status, 'unavailable')
+    assert.equal(failureLines['gh --version']?.value, 'could not be read')
+    assert.equal(JSON.stringify(failureLines).includes(secret), false)
+    assert.equal(JSON.stringify(failureLines).includes('/usr/local/bin'), false)
 
-      // Output this build does not recognise is reported as unrecognised. A
-      // version-shaped number that is not a version is the case that matters:
-      // believing it would put a fabricated version in a bug report.
-      const malformedDir = join(dir, 'malformed')
-      await mkdir(malformedDir, { recursive: true })
-      const malformed = await installControlledGh(
-        `process.stdout.write('gh version nightly.build ${secret} at /Users/someone/tools/gh\\n')`,
-        malformedDir,
-      )
-      const malformedLines = await cliLines({
-        githubCli: await readGitHubCliSources({ PATH: malformed.path }),
-      })
-      assert.equal(malformedLines['gh --version']?.status, 'unavailable')
-      assert.equal(malformedLines['gh --version']?.value, 'could not be read')
-      assert.equal(JSON.stringify(malformedLines).includes(secret), false)
-      assert.equal(JSON.stringify(malformedLines).includes('/Users/someone'), false)
-
-      // The same report is what a support bundle carries, so the exclusions hold
-      // there as well.
-      const bundle = buildBundle(
-        {
-          entries: [
-            {
-              source: 'github',
-              label: 'gh --version',
-              value: malformedLines['gh --version']!.value,
-              status: 'unavailable',
-              detail: malformedLines['gh --version']!.detail,
-            },
-          ],
-          generatedAt: '2026-09-25T12:00:00.000Z',
-          appVersion: '0.1.0',
-        },
-        DEFAULT_SETTINGS,
-        [],
-      )
-      const rendered = renderBundle(bundle, false)
-      assert.match(rendered, /github\/gh --version: could not be read/u)
-      assert.equal(rendered.includes(secret), false)
+    // Output this build does not recognise is reported as unrecognised. A
+    // version-shaped number that is not a version is the case that matters:
+    // believing it would put a fabricated version in a bug report.
+    const malformedDir = join(dir, 'malformed')
+    await mkdir(malformedDir, { recursive: true })
+    const malformed = await installControlledGh(
+      `process.stdout.write('gh version nightly.build ${secret} at /Users/someone/tools/gh\\n')`,
+      malformedDir,
+    )
+    const malformedLines = await cliLines({
+      githubCli: await readGitHubCliSources({ PATH: malformed.path }),
     })
-  },
-)
+    assert.equal(malformedLines['gh --version']?.status, 'unavailable')
+    assert.equal(malformedLines['gh --version']?.value, 'could not be read')
+    assert.equal(JSON.stringify(malformedLines).includes(secret), false)
+    assert.equal(JSON.stringify(malformedLines).includes('/Users/someone'), false)
+
+    // The same report is what a support bundle carries, so the exclusions hold
+    // there as well.
+    const bundle = buildBundle(
+      {
+        entries: [
+          {
+            source: 'github',
+            label: 'gh --version',
+            value: malformedLines['gh --version']!.value,
+            status: 'unavailable',
+            detail: malformedLines['gh --version']!.detail,
+          },
+        ],
+        generatedAt: '2026-09-25T12:00:00.000Z',
+        appVersion: '0.1.0',
+      },
+      DEFAULT_SETTINGS,
+      [],
+    )
+    const rendered = renderBundle(bundle, false)
+    assert.match(rendered, /github\/gh --version: could not be read/u)
+    assert.equal(rendered.includes(secret), false)
+  })
+})
 
 test('GitHub CLI version parsing and report projection exclude untrusted output on every platform', async () => {
   const secret = 'ghp_thisoutputcredential0000000000000'

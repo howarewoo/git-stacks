@@ -9,7 +9,13 @@ export type ReviewSide = 'base' | 'head'
 
 /** GitHub's own vocabulary for what a pull request did to one file. */
 export type ReviewFileStatus =
-  'added' | 'removed' | 'renamed' | 'copied' | 'modified' | 'changed' | 'unchanged'
+  | 'added'
+  | 'removed'
+  | 'renamed'
+  | 'copied'
+  | 'modified'
+  | 'changed'
+  | 'unchanged'
 
 /**
  * Why a file has no reviewable text.
@@ -242,7 +248,8 @@ export interface ReviewViewedRecord {
 export const REVIEW_VIEWED_MAX_RECORDS = 50
 
 export type ReviewChangeBlock =
-  { kind: 'change'; removes: number[]; adds: number[] } | { kind: 'single'; index: number }
+  | { kind: 'change'; removes: number[]; adds: number[] }
+  | { kind: 'single'; index: number }
 
 /**
  * Groups a hunk's lines into context runs and changed runs.

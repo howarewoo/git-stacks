@@ -1,9 +1,9 @@
-@import 'tailwindcss';
-@import './design-system/tokens.css';
+@import "tailwindcss";
+@import "./design-system/tokens.css";
 
 /* Production renderer sources only: the development/test fixture gallery lives in tests/. */
-@source './';
-@source not '../../../tests';
+@source "./";
+@source not "../../../tests";
 
 :root {
   color: var(--gs-semantic-text-primary);
@@ -109,7 +109,7 @@ button:disabled {
   -webkit-app-region: drag;
 }
 
-.titlebar :is(button, a, input, select, textarea, [role='button'], [tabindex]) {
+.titlebar :is(button, a, input, select, textarea, [role="button"], [tabindex]) {
   -webkit-app-region: no-drag;
 }
 
@@ -1415,7 +1415,7 @@ button:disabled {
   border-color: var(--gs-semantic-border-essential);
 }
 
-.onboarding-result[aria-pressed='true'] {
+.onboarding-result[aria-pressed="true"] {
   border-color: var(--gs-semantic-selection-border);
   background: var(--gs-semantic-selection-background);
 }
@@ -3208,8 +3208,8 @@ textarea.conflict-content {
   .gs-button,
   .gs-segmented-control button,
   .gs-checkbox > label,
-  input:not([type='checkbox']),
-  [data-slot='select-trigger'],
+  input:not([type="checkbox"]),
+  [data-slot="select-trigger"],
   textarea {
     min-width: 44px;
     min-height: 44px;
@@ -3280,9 +3280,9 @@ textarea.conflict-content {
 /* The stored "reduce motion" preference. It sits beside the media query above
    rather than replacing it, so a choice made here holds on a computer that has
    not asked for reduced motion itself. */
-:root[data-motion='reduced'] *,
-:root[data-motion='reduced'] *::before,
-:root[data-motion='reduced'] *::after {
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
   animation-duration: 0.01ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.01ms !important;
@@ -3463,8 +3463,8 @@ textarea.conflict-content {
   min-height: 0;
   flex: 1;
   grid-template-areas:
-    'tree diff commits'
-    'tree diff conversation';
+    "tree diff commits"
+    "tree diff conversation";
   grid-template-columns: minmax(200px, 260px) minmax(0, 1fr) minmax(240px, 340px);
   grid-template-rows: minmax(0, 28%) minmax(0, 1fr);
   overflow: hidden;
@@ -3947,9 +3947,9 @@ textarea.conflict-content {
 @container review (max-width: 1320px) {
   .review-body {
     grid-template-areas:
-      'tree diff'
-      'tree commits'
-      'tree conversation';
+      "tree diff"
+      "tree commits"
+      "tree conversation";
     grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
     grid-template-rows: minmax(0, 24%) minmax(0, 24%) minmax(0, 1fr);
   }
@@ -3971,10 +3971,10 @@ textarea.conflict-content {
 @container review (max-width: 720px) {
   .review-body {
     grid-template-areas:
-      'tree'
-      'diff'
-      'commits'
-      'conversation';
+      "tree"
+      "diff"
+      "commits"
+      "conversation";
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto auto;
   }

@@ -26,8 +26,8 @@
     "test:inbox:electron": "node tests/inbox.e2e.cjs",
     "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
-    "format": "prettier --write .",
-    "format:check": "prettier --check . '!./.github/workflows/pullfrog.yml'",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
     "package": "npm run build && npm run provision:git-runtime && npm run verify:git-runtime && electron-builder --dir --publish never && npm run verify:packaged-git-runtime",
     "dist": "npm run build && npm run provision:git-runtime && npm run verify:git-runtime && electron-builder --publish never && npm run verify:packaged-git-runtime",
     "build:promotion-helper": "node scripts/build-promotion-helper.mjs",
@@ -41,27 +41,17 @@
     "directories": {
       "output": "release"
     },
-    "files": [
-      "out/main/**/*",
-      "out/preload/**/*",
-      "out/renderer/**/*",
-      "package.json"
-    ],
+    "files": ["out/main/**/*", "out/preload/**/*", "out/renderer/**/*", "package.json"],
     "extraResources": [
       {
         "from": "resources/git",
         "to": "git",
-        "filter": [
-          "**/*",
-          "!.provision/**"
-        ]
+        "filter": ["**/*", "!.provision/**"]
       },
       {
         "from": "resources/promote",
         "to": "promote",
-        "filter": [
-          "**/*"
-        ]
+        "filter": ["**/*"]
       }
     ],
     "afterPack": "scripts/refresh-win-git-runtime.cjs",
@@ -71,21 +61,15 @@
       "identity": "Developer ID Application",
       "sign": "scripts/sign-mac-git-runtime.cjs",
       "signIgnore": "Contents/Resources/git/",
-      "target": [
-        "dmg"
-      ]
+      "target": ["dmg"]
     },
     "win": {
       "icon": "resources/icon.ico",
-      "target": [
-        "nsis"
-      ]
+      "target": ["nsis"]
     },
     "linux": {
       "icon": "resources/icon.png",
-      "target": [
-        "AppImage"
-      ],
+      "target": ["AppImage"],
       "category": "Development"
     }
   },
@@ -101,6 +85,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
+    "@biomejs/biome": "2.5.15",
     "@electron/asar": "3.4.1",
     "@electron/osx-sign": "1.3.3",
     "@playwright/test": "1.63.0",
@@ -112,7 +97,6 @@
     "electron": "44.4.3",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
-    "prettier": "3.9.8",
     "tailwindcss": "4.3.3",
     "tsx": "4.23.15",
     "typescript": "7.0.2",

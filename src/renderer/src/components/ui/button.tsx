@@ -41,7 +41,8 @@ const buttonVariants = cva(
 )
 
 export interface ButtonProps
-  extends Omit<ButtonPrimitive.Props, 'className'>, VariantProps<typeof buttonVariants> {
+  extends Omit<ButtonPrimitive.Props, 'className'>,
+    VariantProps<typeof buttonVariants> {
   className?: string
   tooltip?: React.ReactNode
   loading?: boolean

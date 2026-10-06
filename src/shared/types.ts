@@ -442,7 +442,13 @@ export interface RepositorySnapshot {
 
 /** A GitHub mutation whose outcome the app refuses to guess after a lost network. */
 export type RemoteMutationKind =
-  'merge' | 'review-submit' | 'force-push' | 'delete' | 'retarget' | 'create-pr' | 'publish'
+  | 'merge'
+  | 'review-submit'
+  | 'force-push'
+  | 'delete'
+  | 'retarget'
+  | 'create-pr'
+  | 'publish'
 
 /**
  * A high-impact GitHub mutation that did not complete. It is listed for the
@@ -459,7 +465,12 @@ export interface PendingRemoteMutation {
 }
 
 export type RemoteFreshnessState =
-  'fresh' | 'refreshing' | 'stale' | 'offline' | 'rate-limited' | 'unauthorized'
+  | 'fresh'
+  | 'refreshing'
+  | 'stale'
+  | 'offline'
+  | 'rate-limited'
+  | 'unauthorized'
 
 /** How far the GitHub data in a snapshot can be trusted, and when it was checked. */
 export interface RemoteFreshness {
@@ -552,7 +563,12 @@ export interface LfsPointer {
 }
 /** What Git itself recorded as happening: a revert undoes a commit. */
 export type ConflictOperation =
-  'rebase' | 'merge' | 'cherryPick' | 'revert' | 'stashApply' | 'unknown'
+  | 'rebase'
+  | 'merge'
+  | 'cherryPick'
+  | 'revert'
+  | 'stashApply'
+  | 'unknown'
 export type ConflictKind = 'content' | 'addAdd' | 'modifyDelete' | 'deleteModify' | 'rename'
 export type ConflictChoice = 'current' | 'incoming' | 'both' | 'delete'
 /** A path one side of the operation moved, as Git's own diff reported it. */
@@ -641,7 +657,13 @@ export interface StackPreview {
  * described as anything else.
  */
 export type SyncLayerState =
-  'merged' | 'retargeted' | 'needs-force' | 'needs-rebase' | 'needs-push' | 'up-to-date' | 'blocked'
+  | 'merged'
+  | 'retargeted'
+  | 'needs-force'
+  | 'needs-rebase'
+  | 'needs-push'
+  | 'up-to-date'
+  | 'blocked'
 
 /** What syncing a layer does to the remote branch of the same name. */
 export type SyncPushKind = 'none' | 'create' | 'fast-forward' | 'force'
@@ -970,7 +992,12 @@ export type GitAction =
   | StackAction
 
 export type MergeLayerStatus =
-  'merged' | 'enqueued' | 'failed' | 'pending' | 'not-requested' | 'not-merged'
+  | 'merged'
+  | 'enqueued'
+  | 'failed'
+  | 'pending'
+  | 'not-requested'
+  | 'not-merged'
 
 export interface MergeLayerResult {
   branch: string

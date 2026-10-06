@@ -9,8 +9,9 @@ import type { SurgeryRequest } from '../src/shared/types'
 // The modules under test resolve the GitHub transport when they load, so they are
 // imported after the harness installs its double rather than at the top of the file.
 const { getSnapshot, runAction } = await import('../src/main/git')
-const { getStackProgress, previewSurgery, runSurgery, validateSurgeryRequest } =
-  await import('../src/main/stacks')
+const { getStackProgress, previewSurgery, runSurgery, validateSurgeryRequest } = await import(
+  '../src/main/stacks'
+)
 
 test('IPC accepts each surgery request shape and rejects missing kind-specific fields', () => {
   for (const request of [

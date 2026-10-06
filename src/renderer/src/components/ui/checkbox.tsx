@@ -3,10 +3,11 @@ import { Checkbox as CheckboxPrimitive } from '@base-ui/react/checkbox'
 import { Check, Minus } from 'lucide-react'
 import { cn } from '../../lib/utils'
 
-export interface CheckboxProps extends Omit<
-  CheckboxPrimitive.Root.Props,
-  'className' | 'render' | 'nativeButton' | 'onCheckedChange' | 'children'
-> {
+export interface CheckboxProps
+  extends Omit<
+    CheckboxPrimitive.Root.Props,
+    'className' | 'render' | 'nativeButton' | 'onCheckedChange' | 'children'
+  > {
   className?: string
   label?: React.ReactNode
   description?: React.ReactNode

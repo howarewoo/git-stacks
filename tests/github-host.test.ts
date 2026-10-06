@@ -183,7 +183,8 @@ interface Recorded {
 }
 
 type Answer =
-  { status?: number; body?: unknown; headers?: Record<string, string> } | { throws: Error }
+  | { status?: number; body?: unknown; headers?: Record<string, string> }
+  | { throws: Error }
 
 /**
  * A `fetch` that answers by URL and keeps every request it received, so each case

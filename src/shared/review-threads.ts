@@ -383,7 +383,8 @@ export interface ReviewUncertainWrite {
  * else's review, so `unknown` holds and is never a licence to adopt.
  */
 export type ReviewBoundary =
-  { kind: 'complete'; latestReviewId: string | null } | { kind: 'unknown' }
+  | { kind: 'complete'; latestReviewId: string | null }
+  | { kind: 'unknown' }
 
 /** A boundary that was never established, for the writes that establish none. */
 export const UNKNOWN_REVIEW_BOUNDARY: ReviewBoundary = { kind: 'unknown' }

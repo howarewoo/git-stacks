@@ -433,105 +433,101 @@ test('a manifest with no signature beside it is not this channel’s history', (
   assert.match(run.out, /with no signature beside it/u)
 })
 
-test(
-  'the producer’s own reader asks gh for the channel’s manifest',
-  {
-    // The default reader shells out to `gh`, which is a release job's tool, and
-    // the job that publishes runs on ubuntu-24.04. It is exercised here with a
-    // stand-in rather than the network, and the stand-in is the only program the
-    // child can find: the search path is the fixture directory alone, so a fixture
-    // that is missing, or present but not executable, is a command that fails and
-    // a release that stops — never a real `gh` on this machine, and never the
-    // network. The stand-in is a Node script with an absolute interpreter, so it
-    // depends on no shell and on nothing else being found by name either.
-    skip:
-      process.platform === 'win32' ? 'the reader is proven on the platform that publishes' : false,
-  },
-  () => {
-    const key = releaseKey()
-    const manifest = signedManifest('stable', '1.4.0', 12)
-    const bytes = Buffer.from(JSON.stringify(manifest))
-    const root = mkdtempSync(join(tmpdir(), 'git-stacks-gh-'))
-    const assets = join(root, 'assets')
-    const tools = join(root, 'tools')
-    mkdirSync(join(root, 'resources'), { recursive: true })
-    mkdirSync(assets, { recursive: true })
-    mkdirSync(tools, { recursive: true })
-    writeFileSync(
-      join(root, 'resources', 'update-trusted-keys.json'),
-      JSON.stringify(keySet([{ keyId: key.keyId, publicKey: key.publicKey }])),
-    )
-    writeFileSync(join(assets, 'update-stable.json'), bytes)
-    writeFileSync(
-      join(assets, 'update-stable.json.sig'),
-      JSON.stringify({
-        keyId: key.keyId,
-        signature: sign(null, bytes, key.privateKey).toString('base64'),
-      }),
-    )
-    writeFileSync(
-      join(tools, 'gh'),
+test('the producer’s own reader asks gh for the channel’s manifest', {
+  // The default reader shells out to `gh`, which is a release job's tool, and
+  // the job that publishes runs on ubuntu-24.04. It is exercised here with a
+  // stand-in rather than the network, and the stand-in is the only program the
+  // child can find: the search path is the fixture directory alone, so a fixture
+  // that is missing, or present but not executable, is a command that fails and
+  // a release that stops — never a real `gh` on this machine, and never the
+  // network. The stand-in is a Node script with an absolute interpreter, so it
+  // depends on no shell and on nothing else being found by name either.
+  skip:
+    process.platform === 'win32' ? 'the reader is proven on the platform that publishes' : false,
+}, () => {
+  const key = releaseKey()
+  const manifest = signedManifest('stable', '1.4.0', 12)
+  const bytes = Buffer.from(JSON.stringify(manifest))
+  const root = mkdtempSync(join(tmpdir(), 'git-stacks-gh-'))
+  const assets = join(root, 'assets')
+  const tools = join(root, 'tools')
+  mkdirSync(join(root, 'resources'), { recursive: true })
+  mkdirSync(assets, { recursive: true })
+  mkdirSync(tools, { recursive: true })
+  writeFileSync(
+    join(root, 'resources', 'update-trusted-keys.json'),
+    JSON.stringify(keySet([{ keyId: key.keyId, publicKey: key.publicKey }])),
+  )
+  writeFileSync(join(assets, 'update-stable.json'), bytes)
+  writeFileSync(
+    join(assets, 'update-stable.json.sig'),
+    JSON.stringify({
+      keyId: key.keyId,
+      signature: sign(null, bytes, key.privateKey).toString('base64'),
+    }),
+  )
+  writeFileSync(
+    join(tools, 'gh'),
+    [
+      `#!${process.execPath}`,
+      'const { copyFileSync, readdirSync, existsSync } = require("node:fs")',
+      'const { join } = require("node:path")',
+      'const flags = process.argv.slice(2)',
+      'let dir = null',
+      'let name = null',
+      'for (let at = 0; at < flags.length; at += 1) {',
+      '  if (flags[at] === "--dir") { dir = flags[at + 1]; at += 1 }',
+      '  if (flags[at] === "--pattern") { name = flags[at + 1]; at += 1 }',
+      '}',
+      'if (flags[0] === "release" && flags[1] === "view") {',
+      '  if (existsSync(process.env.PROBE_ASSETS_DIR)) process.stdout.write(readdirSync(process.env.PROBE_ASSETS_DIR).join("\\n"))',
+      '  else { process.stderr.write("release not found\\n"); process.exit(1) }',
+      '} else {',
+      '  const source = join(process.env.PROBE_ASSETS_DIR, name)',
+      '  try {',
+      '    copyFileSync(source, join(dir, name))',
+      '  } catch {',
+      '    process.stderr.write("release not found\\n")',
+      '    process.exit(1)',
+      '  }',
+      '}',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
+  admitOwnedProviderCliRoot(tools)
+  const run = spawnSync(
+    process.execPath,
+    [
+      join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+      '--eval',
       [
-        `#!${process.execPath}`,
-        'const { copyFileSync, readdirSync, existsSync } = require("node:fs")',
-        'const { join } = require("node:path")',
-        'const flags = process.argv.slice(2)',
-        'let dir = null',
-        'let name = null',
-        'for (let at = 0; at < flags.length; at += 1) {',
-        '  if (flags[at] === "--dir") { dir = flags[at + 1]; at += 1 }',
-        '  if (flags[at] === "--pattern") { name = flags[at + 1]; at += 1 }',
-        '}',
-        'if (flags[0] === "release" && flags[1] === "view") {',
-        '  if (existsSync(process.env.PROBE_ASSETS_DIR)) process.stdout.write(readdirSync(process.env.PROBE_ASSETS_DIR).join("\\n"))',
-        '  else { process.stderr.write("release not found\\n"); process.exit(1) }',
-        '} else {',
-        '  const source = join(process.env.PROBE_ASSETS_DIR, name)',
-        '  try {',
-        '    copyFileSync(source, join(dir, name))',
-        '  } catch {',
-        '    process.stderr.write("release not found\\n")',
-        '    process.exit(1)',
-        '  }',
-        '}',
+        'import { pathToFileURL } from "node:url"',
+        'import(pathToFileURL(process.env.PROBE_MODULE).href).then((helper) => {',
+        '  process.stdout.write(JSON.stringify(helper.publishedManifest("stable", "owner/repo")))',
+        '}).catch((error) => {',
+        '  console.error(`release-update: ${error instanceof Error ? error.message : String(error)}`)',
+        '  process.exit(1)',
+        '})',
       ].join('\n'),
-      { mode: 0o755 },
-    )
-    admitOwnedProviderCliRoot(tools)
-    const run = spawnSync(
-      process.execPath,
-      [
-        join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
-        '--eval',
-        [
-          'import { pathToFileURL } from "node:url"',
-          'import(pathToFileURL(process.env.PROBE_MODULE).href).then((helper) => {',
-          '  process.stdout.write(JSON.stringify(helper.publishedManifest("stable", "owner/repo")))',
-          '}).catch((error) => {',
-          '  console.error(`release-update: ${error instanceof Error ? error.message : String(error)}`)',
-          '  process.exit(1)',
-          '})',
-        ].join('\n'),
-      ],
-      {
-        cwd: root,
-        encoding: 'utf8',
-        env: {
-          PATH: tools,
-          PROBE_ASSETS_DIR: assets,
-          PROBE_MODULE: fileURLToPath(
-            new URL('../scripts/release-update-common.ts', import.meta.url),
-          ),
-        },
+    ],
+    {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        PATH: tools,
+        PROBE_ASSETS_DIR: assets,
+        PROBE_MODULE: fileURLToPath(
+          new URL('../scripts/release-update-common.ts', import.meta.url),
+        ),
       },
-    )
-    rmSync(root, { recursive: true, force: true })
-    assert.equal(
-      run.status,
-      0,
-      `the reader read what the release publishes: ${run.stdout}${run.stderr}`,
-    )
-    assert.match(`${run.stdout}`, /"sequence":12/u)
-    assert.match(`${run.stdout}`, /"version":"1\.4\.0"/u)
-  },
-)
+    },
+  )
+  rmSync(root, { recursive: true, force: true })
+  assert.equal(
+    run.status,
+    0,
+    `the reader read what the release publishes: ${run.stdout}${run.stderr}`,
+  )
+  assert.match(`${run.stdout}`, /"sequence":12/u)
+  assert.match(`${run.stdout}`, /"version":"1\.4\.0"/u)
+})

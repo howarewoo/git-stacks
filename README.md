@@ -59,7 +59,8 @@ npm run dev            # run the app
 npm run build          # typecheck + production build
 npm test               # the test suite
 npm run test:live       # the disposable GitHub end-to-end suite (no credentials)
-npm run format:check   # formatting gate
+npm run format         # apply Biome formatting
+npm run format:check   # check Biome formatting without writing
 npm run bench:performance  # large-repository benchmarks
 npm run build:promotion-helper  # build the atomic no-replace rename helper
 ```
@@ -92,6 +93,27 @@ do not pin a terminal commit to an exact watcher event count.
 
 Destination-focus checks activate the named navigation control with Enter and
 verify heading focus and the live announcement, independently of shortcut bindings.
+
+### Formatting
+
+[Biome](https://biomejs.dev/) owns repository formatting through `biome.json`.
+Use `npm run format` to apply changes and `npm run format:check` for a read-only
+check. The configuration preserves two-space indentation, a 100-column line
+width, single-quoted JavaScript strings, omitted semicolons where safe, and
+trailing commas. Linting and assist actions (including import sorting) are
+disabled; this replaces the formatter without introducing new code-quality rules.
+
+Biome formats JavaScript, TypeScript, JSX/TSX, JSON, and CSS here. Tailwind CSS
+directives are enabled; HTML and SVG formatting use Biome's experimental full
+support. It honors `.gitignore` and excludes `package-lock.json`, `.impeccable/`,
+and generated `src/renderer/src/design-system/tokens.css`. Validate the latter
+with `npm run tokens:check`; edit `tokens.json` and regenerate rather than
+formatting the generated CSS.
+
+[Markdown and YAML are not supported by Biome](https://biomejs.dev/introduction/language-support/).
+Review their formatting manually; `format:check` does not validate Markdown
+documentation, agent skills, or YAML workflows. No second formatter is retained.
+Use the Biome editor extension for on-save formatting with the same configuration.
 
 ### Shared persistence and IPC boundaries
 
@@ -137,8 +159,9 @@ Unlike [flatten-pr-graph](.agents/skills/flatten-pr-graph/SKILL.md), which order
 and deliberately skips checks, ready-stack verifies each changed layer. See its
 [verification scenarios](.agents/skills/ready-stack/references/verification.md)
 for activation, safety, recovery, and behavioral evaluation. For Markdown-only
-skill changes, use `npm run format:check` and exercise the skill with disposable
-fixtures or read-only preview; application tests do not validate agent behavior.
+skill changes, review formatting manually and exercise the skill with disposable
+fixtures or read-only preview; Biome does not check Markdown, and application tests
+do not validate agent behavior.
 
 ## Live local and remote freshness
 

@@ -166,134 +166,124 @@ async function dispatchMerge(harness: GitHubHarness, token: string) {
   })
 }
 
-test(
-  'a request that enqueues after the run is reported as enqueued on the first refresh',
-  { concurrency: false },
-  async () => {
-    await withLiveGitHub(async (harness) => {
-      await publishedStack(harness)
-      const running = await harness.readState()
-      running.asyncMergeStaysPending = true
-      await harness.writeState(running)
-      const preview = await mergePreviewFor(harness, 'child')
-      const result = await dispatchMerge(harness, preview.token)
-      assert.deepEqual(
-        result.merge?.layers.map((layer) => layer.status),
-        ['pending', 'pending'],
-        'a run GitHub is still running is not a finished merge',
-      )
+test('a request that enqueues after the run is reported as enqueued on the first refresh', {
+  concurrency: false,
+}, async () => {
+  await withLiveGitHub(async (harness) => {
+    await publishedStack(harness)
+    const running = await harness.readState()
+    running.asyncMergeStaysPending = true
+    await harness.writeState(running)
+    const preview = await mergePreviewFor(harness, 'child')
+    const result = await dispatchMerge(harness, preview.token)
+    assert.deepEqual(
+      result.merge?.layers.map((layer) => layer.status),
+      ['pending', 'pending'],
+      'a run GitHub is still running is not a finished merge',
+    )
 
-      // The queue accepts the group between the run and the first refresh.
-      const accepted = await harness.readState()
-      accepted.asyncMergeStaysPending = false
-      accepted.asyncMergeResult = { status: 'enqueued' }
-      await harness.writeState(accepted)
-      const first = await getMergeStatus(harness.repo)
-      assert.deepEqual(
-        first?.layers.map((layer) => [
-          layer.pullRequest,
-          layer.status,
-          layer.queue?.outcome ?? null,
-        ]),
-        [
-          [prFor(accepted, 'parent').number, 'enqueued', 'queued'],
-          [prFor(accepted, 'child').number, 'enqueued', 'queued'],
-        ],
-        'the queue that accepted the group reports holding it, by GitHub membership',
-      )
+    // The queue accepts the group between the run and the first refresh.
+    const accepted = await harness.readState()
+    accepted.asyncMergeStaysPending = false
+    accepted.asyncMergeResult = { status: 'enqueued' }
+    await harness.writeState(accepted)
+    const first = await getMergeStatus(harness.repo)
+    assert.deepEqual(
+      first?.layers.map((layer) => [layer.pullRequest, layer.status, layer.queue?.outcome ?? null]),
+      [
+        [prFor(accepted, 'parent').number, 'enqueued', 'queued'],
+        [prFor(accepted, 'child').number, 'enqueued', 'queued'],
+      ],
+      'the queue that accepted the group reports holding it, by GitHub membership',
+    )
 
-      // The enqueue is journalled, so it outlives the result endpoint.
-      const expired = await harness.readState()
-      delete expired.asyncMerge
-      await harness.writeState(expired)
-      const later = await getMergeStatus(harness.repo)
-      assert.deepEqual(
-        later?.layers.map((layer) => [layer.pullRequest, layer.status]),
-        [
-          [prFor(accepted, 'parent').number, 'enqueued'],
-          [prFor(accepted, 'child').number, 'enqueued'],
-        ],
-        'the accepted enqueue survives the request expiring',
-      )
-    })
-  },
-)
+    // The enqueue is journalled, so it outlives the result endpoint.
+    const expired = await harness.readState()
+    delete expired.asyncMerge
+    await harness.writeState(expired)
+    const later = await getMergeStatus(harness.repo)
+    assert.deepEqual(
+      later?.layers.map((layer) => [layer.pullRequest, layer.status]),
+      [
+        [prFor(accepted, 'parent').number, 'enqueued'],
+        [prFor(accepted, 'child').number, 'enqueued'],
+      ],
+      'the accepted enqueue survives the request expiring',
+    )
+  })
+})
 
-test(
-  'a pull request closed before the first refresh is a queue drop, not an enqueue',
-  { concurrency: false },
-  async () => {
-    await withLiveGitHub(async (harness) => {
-      const ready = await publishedStack(harness)
-      const parentNumber = prFor(ready, 'parent').number
-      const running = await harness.readState()
-      running.asyncMergeStaysPending = true
-      await harness.writeState(running)
-      const preview = await mergePreviewFor(harness, 'child')
-      await dispatchMerge(harness, preview.token)
+test('a pull request closed before the first refresh is a queue drop, not an enqueue', {
+  concurrency: false,
+}, async () => {
+  await withLiveGitHub(async (harness) => {
+    const ready = await publishedStack(harness)
+    const parentNumber = prFor(ready, 'parent').number
+    const running = await harness.readState()
+    running.asyncMergeStaysPending = true
+    await harness.writeState(running)
+    const preview = await mergePreviewFor(harness, 'child')
+    await dispatchMerge(harness, preview.token)
 
-      // Somebody closes the group underneath the queue before anything is read back.
-      const closed = await harness.readState()
-      closed.asyncMergeStaysPending = false
-      closed.asyncMergeResult = { status: 'enqueued' }
-      const parent = prFor(closed, 'parent')
-      parent.state = 'CLOSED'
-      parent.mergedAt = null
-      await harness.writeState(closed)
-      const status = await getMergeStatus(harness.repo)
-      assert.equal(
-        status?.layers.find((layer) => layer.pullRequest === parentNumber)?.status,
-        'not-merged',
-      )
-      assert.equal(
-        status?.layers.find((layer) => layer.pullRequest === parentNumber)?.queue?.outcome,
-        'dropped',
-        'a closed pull request is read as dropped on the very refresh that learns the enqueue',
-      )
-    })
-  },
-)
+    // Somebody closes the group underneath the queue before anything is read back.
+    const closed = await harness.readState()
+    closed.asyncMergeStaysPending = false
+    closed.asyncMergeResult = { status: 'enqueued' }
+    const parent = prFor(closed, 'parent')
+    parent.state = 'CLOSED'
+    parent.mergedAt = null
+    await harness.writeState(closed)
+    const status = await getMergeStatus(harness.repo)
+    assert.equal(
+      status?.layers.find((layer) => layer.pullRequest === parentNumber)?.status,
+      'not-merged',
+    )
+    assert.equal(
+      status?.layers.find((layer) => layer.pullRequest === parentNumber)?.queue?.outcome,
+      'dropped',
+      'a closed pull request is read as dropped on the very refresh that learns the enqueue',
+    )
+  })
+})
 
-test(
-  'a later refresh that cannot read the pull request keeps what a read confirmed',
-  { concurrency: false },
-  async () => {
-    await withLiveGitHub(async (harness) => {
-      const ready = await publishedStack(harness)
-      const parentNumber = prFor(ready, 'parent').number
-      const preview = await mergePreviewFor(harness, 'parent')
-      const result = await dispatchMerge(harness, preview.token)
-      assert.equal(result.merge?.layers[0]?.status, 'merged', 'GitHub landed the request')
+test('a later refresh that cannot read the pull request keeps what a read confirmed', {
+  concurrency: false,
+}, async () => {
+  await withLiveGitHub(async (harness) => {
+    const ready = await publishedStack(harness)
+    const parentNumber = prFor(ready, 'parent').number
+    const preview = await mergePreviewFor(harness, 'parent')
+    const result = await dispatchMerge(harness, preview.token)
+    assert.equal(result.merge?.layers[0]?.status, 'merged', 'GitHub landed the request')
 
-      const confirmed = await getMergeStatus(harness.repo)
-      assert.equal(confirmed?.layers[0]?.status, 'merged')
+    const confirmed = await getMergeStatus(harness.repo)
+    assert.equal(confirmed?.layers[0]?.status, 'merged')
 
-      // GitHub stops answering for the pull request. A read that cannot reach it has no
-      // evidence that the merge was undone, and must not report the request as queued.
-      const unreachable = await harness.readState()
-      // A pull request is read over GraphQL, so the rule takes that endpoint down and
-      // repeats, because what is being tested is a GitHub that cannot answer for this pull
-      // request, not one dropped response.
-      unreachable.lostResponses = Array.from({ length: 8 }, () => ({
-        method: 'POST',
-        pathIncludes: 'graphql',
-        status: 502,
-        message: 'Bad gateway',
-      }))
-      await harness.writeState(unreachable)
-      const failed = await getMergeStatus(harness.repo)
-      assert.equal(
-        failed?.layers[0]?.status,
-        'merged',
-        'a failed read is not evidence that a confirmed merge was undone',
-      )
+    // GitHub stops answering for the pull request. A read that cannot reach it has no
+    // evidence that the merge was undone, and must not report the request as queued.
+    const unreachable = await harness.readState()
+    // A pull request is read over GraphQL, so the rule takes that endpoint down and
+    // repeats, because what is being tested is a GitHub that cannot answer for this pull
+    // request, not one dropped response.
+    unreachable.lostResponses = Array.from({ length: 8 }, () => ({
+      method: 'POST',
+      pathIncludes: 'graphql',
+      status: 502,
+      message: 'Bad gateway',
+    }))
+    await harness.writeState(unreachable)
+    const failed = await getMergeStatus(harness.repo)
+    assert.equal(
+      failed?.layers[0]?.status,
+      'merged',
+      'a failed read is not evidence that a confirmed merge was undone',
+    )
 
-      // The confirmation itself was journalled, so a restart keeps it too.
-      const again = await harness.readState()
-      delete again.lostResponses
-      await harness.writeState(again)
-      const recovered = await getMergeStatus(harness.repo)
-      assert.equal(recovered?.layers[0]?.status, 'merged')
-    })
-  },
-)
+    // The confirmation itself was journalled, so a restart keeps it too.
+    const again = await harness.readState()
+    delete again.lostResponses
+    await harness.writeState(again)
+    const recovered = await getMergeStatus(harness.repo)
+    assert.equal(recovered?.layers[0]?.status, 'merged')
+  })
+})

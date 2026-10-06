@@ -3815,7 +3815,7 @@ async function conflictMoves(
     ])
     if (!listing) continue
     const fields = listing.split('\0')
-    for (let index = 0; index < fields.length - 1;) {
+    for (let index = 0; index < fields.length - 1; ) {
       const status = fields[index++]
       const from = fields[index++]
       if (status.startsWith('R')) {

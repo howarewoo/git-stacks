@@ -741,7 +741,11 @@ export function pullRequestInboxRefreshFailure(
 }
 
 export type PullRequestInboxListState =
-  'rows' | 'empty' | 'filtered-empty' | 'unconfirmed' | 'loading'
+  | 'rows'
+  | 'empty'
+  | 'filtered-empty'
+  | 'unconfirmed'
+  | 'loading'
 
 export interface PullRequestInboxNotice {
   tone: 'info' | 'warning' | 'error'

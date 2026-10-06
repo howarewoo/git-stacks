@@ -21,7 +21,8 @@ const EXIT_CROSS_DEVICE = 5
 export type PromotionRefusal = 'exists' | 'unsupported' | 'cross-device' | 'unavailable' | 'failed'
 
 export type PromotionResult =
-  { moved: true } | { moved: false; refusal: PromotionRefusal; detail: string }
+  | { moved: true }
+  | { moved: false; refusal: PromotionRefusal; detail: string }
 
 let resourcesRoot: string | null = null
 

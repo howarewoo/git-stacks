@@ -243,60 +243,58 @@ test('the bundled runtime replaces PATH Git and the system override reverses it'
   }
 })
 
-test(
-  'repository opening, streamed diffs, conflict previews, and mergetool work without PATH Git',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const { root, repo, git } = await repository()
-    const tool = join(root, 'merge-tool.sh')
-    await writeFile(tool, '#!/bin/sh\nprintf "resolved by tool\\n" > "$1"\n', { mode: 0o755 })
-    git('config', 'mergetool.git-stacks-test.trustExitCode', 'true')
-    git('config', 'mergetool.git-stacks-test.cmd', `/bin/sh "${tool}" "$MERGED"`)
-    git('config', 'merge.tool', 'git-stacks-test')
-    await writeFile(join(repo, 'shared.txt'), 'base\n')
-    git('add', '.')
-    git('commit', '-m', 'Base')
-    git('checkout', '-b', 'topic')
-    await writeFile(join(repo, 'shared.txt'), 'topic\n')
-    git('add', '.')
-    git('commit', '-m', 'Topic edit')
-    git('checkout', 'main')
-    await writeFile(join(repo, 'shared.txt'), 'main\n')
-    git('add', '.')
-    git('commit', '-m', 'Main edit')
-    const merged = spawnSync(realGit, ['-C', repo, 'merge', 'topic'], { encoding: 'utf8' })
-    assert.notEqual(merged.status, 0)
+test('repository opening, streamed diffs, conflict previews, and mergetool work without PATH Git', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const { root, repo, git } = await repository()
+  const tool = join(root, 'merge-tool.sh')
+  await writeFile(tool, '#!/bin/sh\nprintf "resolved by tool\\n" > "$1"\n', { mode: 0o755 })
+  git('config', 'mergetool.git-stacks-test.trustExitCode', 'true')
+  git('config', 'mergetool.git-stacks-test.cmd', `/bin/sh "${tool}" "$MERGED"`)
+  git('config', 'merge.tool', 'git-stacks-test')
+  await writeFile(join(repo, 'shared.txt'), 'base\n')
+  git('add', '.')
+  git('commit', '-m', 'Base')
+  git('checkout', '-b', 'topic')
+  await writeFile(join(repo, 'shared.txt'), 'topic\n')
+  git('add', '.')
+  git('commit', '-m', 'Topic edit')
+  git('checkout', 'main')
+  await writeFile(join(repo, 'shared.txt'), 'main\n')
+  git('add', '.')
+  git('commit', '-m', 'Main edit')
+  const merged = spawnSync(realGit, ['-C', repo, 'merge', 'topic'], { encoding: 'utf8' })
+  assert.notEqual(merged.status, 0)
 
-    const previousPath = process.env.PATH
-    const previousExecPath = process.env.GIT_EXEC_PATH
-    try {
-      process.env.PATH = ''
-      process.env.GIT_EXEC_PATH = join(root, 'wrong-helpers')
-      configureGitRuntime({
-        appVersion: APP_VERSION,
-        packaged: true,
-        resourcesRoot: releaseResources,
-        useSystemGit: false,
-      })
-      const snapshot = await getSnapshot(repo)
-      assert.equal(snapshot.capabilities.gitVersion, (await resolveGitRuntime()).versionOutput)
-      const file = await getFileView(repo, 'shared.txt')
-      assert.match(file.unstagedDiff, /shared\.txt/u)
-      const conflict = await getConflictView(repo, 'shared.txt')
-      assert.equal(conflict.base, 'base\n')
-      assert.equal(conflict.current, 'main\n')
-      assert.equal(conflict.incoming, 'topic\n')
-      await runConflictMergeTool(repo, 'shared.txt', conflict.fingerprint)
-      assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'resolved by tool\n')
-    } finally {
-      if (previousPath === undefined) delete process.env.PATH
-      else process.env.PATH = previousPath
-      if (previousExecPath === undefined) delete process.env.GIT_EXEC_PATH
-      else process.env.GIT_EXEC_PATH = previousExecPath
-      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
-    }
-  },
-)
+  const previousPath = process.env.PATH
+  const previousExecPath = process.env.GIT_EXEC_PATH
+  try {
+    process.env.PATH = ''
+    process.env.GIT_EXEC_PATH = join(root, 'wrong-helpers')
+    configureGitRuntime({
+      appVersion: APP_VERSION,
+      packaged: true,
+      resourcesRoot: releaseResources,
+      useSystemGit: false,
+    })
+    const snapshot = await getSnapshot(repo)
+    assert.equal(snapshot.capabilities.gitVersion, (await resolveGitRuntime()).versionOutput)
+    const file = await getFileView(repo, 'shared.txt')
+    assert.match(file.unstagedDiff, /shared\.txt/u)
+    const conflict = await getConflictView(repo, 'shared.txt')
+    assert.equal(conflict.base, 'base\n')
+    assert.equal(conflict.current, 'main\n')
+    assert.equal(conflict.incoming, 'topic\n')
+    await runConflictMergeTool(repo, 'shared.txt', conflict.fingerprint)
+    assert.equal(await readFile(join(repo, 'shared.txt'), 'utf8'), 'resolved by tool\n')
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    if (previousExecPath === undefined) delete process.env.GIT_EXEC_PATH
+    else process.env.GIT_EXEC_PATH = previousExecPath
+    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+  }
+})
 
 test('a packaged build refuses PATH Git until the system override is explicit', async () => {
   const empty = await temporaryRoot('git-stacks-empty-')
@@ -323,188 +321,182 @@ test('a packaged build refuses PATH Git until the system override is explicit', 
   }
 })
 
-test(
-  'a runtime that does not match its release digest, build, or platform is rejected',
-  { skip: process.platform === 'win32' },
-  async () => {
-    configureGitRuntime({ appVersion: APP_VERSION, packaged: true, useSystemGit: false })
-    try {
-      const tampered = await provisionRuntime({ digest: '0'.repeat(64) })
-      configureGitRuntime({ resourcesRoot: tampered.resourcesRoot })
-      await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
-      const marker = join(tampered.resourcesRoot, 'executed')
-      await writeFile(
-        tampered.executable,
-        `#!/bin/sh\nprintf ran > \"${marker}\"\necho git version ${systemVersion}\n`,
-        { mode: 0o755 },
-      )
-      configureGitRuntime({
-        resourcesRoot: tampered.resourcesRoot,
-        env: { ...process.env, GIT_STACKS_BUNDLED_GIT: realGit },
-      })
-      await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
-      await assert.rejects(readFile(marker), { code: 'ENOENT' })
-      configureGitRuntime({
-        resourcesRoot: releaseResources,
-        env: { ...process.env, GIT_STACKS_BUNDLED_GIT: tampered.executable },
-      })
-      assert.equal((await resolveGitRuntime()).executable, releaseExecutable)
-      await assert.rejects(readFile(marker), { code: 'ENOENT' })
-      await rm(tampered.manifestPath)
-      configureGitRuntime({ resourcesRoot: tampered.resourcesRoot })
-      await assert.rejects(resolveGitRuntime(), /manifest records app version none/u)
-      await assert.rejects(readFile(marker), { code: 'ENOENT' })
-
-      const otherBuild = await provisionRuntime({ appVersion: '9.9.9' })
-      configureGitRuntime({ resourcesRoot: otherBuild.resourcesRoot, env: process.env })
-      await assert.rejects(resolveGitRuntime(), /does not match this build/u)
-
-      const unrecorded = await provisionRuntime({ recordPlatform: false })
-      configureGitRuntime({ resourcesRoot: unrecorded.resourcesRoot })
-      await assert.rejects(resolveGitRuntime(), /records no Git runtime for/u)
-
-      const otherVersion = await provisionRuntime({
-        reportedVersion: systemVersion,
-        version: '2.30.0',
-      })
-      configureGitRuntime({ resourcesRoot: otherVersion.resourcesRoot })
-      await assert.rejects(resolveGitRuntime(), /reports .* but the release manifest records/u)
-
-      const cachedFixture = await provisionRuntime()
-      configureGitRuntime({ resourcesRoot: cachedFixture.resourcesRoot })
-      assert.equal((await resolveGitRuntime()).source, 'bundled')
-      const cachedMarker = join(cachedFixture.resourcesRoot, 'cached-executed')
-      await writeFile(
-        cachedFixture.executable,
-        `#!/bin/sh\nprintf ran > \"${cachedMarker}\"\necho git version ${systemVersion}\n`,
-        { mode: 0o755 },
-      )
-      await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
-      await assert.rejects(readFile(cachedMarker), { code: 'ENOENT' })
-    } finally {
-      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
-    }
-  },
-)
-test(
-  'cached validation rejects an altered or removed helper in a disposable copied distribution before execution even when bin/git is intact',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const tmp = await temporaryRoot('git-stacks-helper-tamper-')
-    execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), tmp])
+test('a runtime that does not match its release digest, build, or platform is rejected', {
+  skip: process.platform === 'win32',
+}, async () => {
+  configureGitRuntime({ appVersion: APP_VERSION, packaged: true, useSystemGit: false })
+  try {
+    const tampered = await provisionRuntime({ digest: '0'.repeat(64) })
+    configureGitRuntime({ resourcesRoot: tampered.resourcesRoot })
+    await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
+    const marker = join(tampered.resourcesRoot, 'executed')
+    await writeFile(
+      tampered.executable,
+      `#!/bin/sh\nprintf ran > \"${marker}\"\necho git version ${systemVersion}\n`,
+      { mode: 0o755 },
+    )
     configureGitRuntime({
-      appVersion: APP_VERSION,
-      packaged: true,
-      resourcesRoot: tmp,
-      useSystemGit: false,
+      resourcesRoot: tampered.resourcesRoot,
+      env: { ...process.env, GIT_STACKS_BUNDLED_GIT: realGit },
     })
-    try {
-      const initial = await resolveGitRuntime()
-      assert.equal(initial.source, 'bundled')
+    await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
+    await assert.rejects(readFile(marker), { code: 'ENOENT' })
+    configureGitRuntime({
+      resourcesRoot: releaseResources,
+      env: { ...process.env, GIT_STACKS_BUNDLED_GIT: tampered.executable },
+    })
+    assert.equal((await resolveGitRuntime()).executable, releaseExecutable)
+    await assert.rejects(readFile(marker), { code: 'ENOENT' })
+    await rm(tampered.manifestPath)
+    configureGitRuntime({ resourcesRoot: tampered.resourcesRoot })
+    await assert.rejects(resolveGitRuntime(), /manifest records app version none/u)
+    await assert.rejects(readFile(marker), { code: 'ENOENT' })
 
-      const helperRelative = join('libexec', 'git-core', 'git-remote-https')
-      const helperPath = join(tmp, 'git', platform, helperRelative)
-      const marker = join(tmp, 'helper-marker')
+    const otherBuild = await provisionRuntime({ appVersion: '9.9.9' })
+    configureGitRuntime({ resourcesRoot: otherBuild.resourcesRoot, env: process.env })
+    await assert.rejects(resolveGitRuntime(), /does not match this build/u)
 
-      // Replace helper with executable script while bin/git remains untouched
-      await writeFile(helperPath, `#!/bin/sh\nprintf executed > "${marker}"\nexit 1\n`, {
-        mode: 0o755,
-      })
+    const unrecorded = await provisionRuntime({ recordPlatform: false })
+    configureGitRuntime({ resourcesRoot: unrecorded.resourcesRoot })
+    await assert.rejects(resolveGitRuntime(), /records no Git runtime for/u)
 
-      await assert.rejects(
-        resolveGitRuntime(),
-        /The bundled Git runtime files do not match the signed release inventory/u,
-      )
-      await assert.rejects(readFile(marker), { code: 'ENOENT' })
+    const otherVersion = await provisionRuntime({
+      reportedVersion: systemVersion,
+      version: '2.30.0',
+    })
+    configureGitRuntime({ resourcesRoot: otherVersion.resourcesRoot })
+    await assert.rejects(resolveGitRuntime(), /reports .* but the release manifest records/u)
 
-      // Remove helper while bin/git remains untouched
-      await rm(helperPath)
-      await assert.rejects(
-        resolveGitRuntime(),
-        /The bundled Git runtime files do not match the signed release inventory/u,
-      )
-    } finally {
-      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
-    }
-  },
-)
-test(
-  'a cached packaged runtime refuses a removed, malformed, or replaced release manifest before a Git operation',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const resources = await temporaryRoot('git-stacks-manifest-tamper-')
-    execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), resources])
-    const manifestPath = join(resources, 'git', 'runtime-manifest.json')
-    const original = await readFile(manifestPath, 'utf8')
-    const { repo } = await repository()
-    const initialHead = headOid(repo)
-    const replacements = [
-      null,
-      '{invalid json',
-      JSON.stringify({ ...JSON.parse(original), appVersion: '9.9.9' }),
-      JSON.stringify({
-        ...JSON.parse(original),
-        platforms: {
-          [platform]: { ...JSON.parse(original).platforms[platform], source: 'replaced source' },
-        },
-      }),
-    ]
-    try {
-      for (const replacement of replacements) {
-        await writeFile(manifestPath, original)
-        configureGitRuntime({
-          appVersion: APP_VERSION,
-          packaged: true,
-          resourcesRoot: resources,
-          useSystemGit: false,
-          env: process.env,
-        })
-        assert.equal((await resolveGitRuntime()).source, 'bundled')
-        if (replacement === null) await rm(manifestPath)
-        else await writeFile(manifestPath, replacement)
-        await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
-        await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
-        assert.equal(headOid(repo), initialHead)
-      }
-      configureGitRuntime({ useSystemGit: true })
-      assert.equal((await resolveGitRuntime()).source, 'system')
-      configureGitRuntime({ useSystemGit: false })
-      await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+    const cachedFixture = await provisionRuntime()
+    configureGitRuntime({ resourcesRoot: cachedFixture.resourcesRoot })
+    assert.equal((await resolveGitRuntime()).source, 'bundled')
+    const cachedMarker = join(cachedFixture.resourcesRoot, 'cached-executed')
+    await writeFile(
+      cachedFixture.executable,
+      `#!/bin/sh\nprintf ran > \"${cachedMarker}\"\necho git version ${systemVersion}\n`,
+      { mode: 0o755 },
+    )
+    await assert.rejects(resolveGitRuntime(), /does not match its release digest/u)
+    await assert.rejects(readFile(cachedMarker), { code: 'ENOENT' })
+  } finally {
+    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+  }
+})
+test('cached validation rejects an altered or removed helper in a disposable copied distribution before execution even when bin/git is intact', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const tmp = await temporaryRoot('git-stacks-helper-tamper-')
+  execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), tmp])
+  configureGitRuntime({
+    appVersion: APP_VERSION,
+    packaged: true,
+    resourcesRoot: tmp,
+    useSystemGit: false,
+  })
+  try {
+    const initial = await resolveGitRuntime()
+    assert.equal(initial.source, 'bundled')
+
+    const helperRelative = join('libexec', 'git-core', 'git-remote-https')
+    const helperPath = join(tmp, 'git', platform, helperRelative)
+    const marker = join(tmp, 'helper-marker')
+
+    // Replace helper with executable script while bin/git remains untouched
+    await writeFile(helperPath, `#!/bin/sh\nprintf executed > "${marker}"\nexit 1\n`, {
+      mode: 0o755,
+    })
+
+    await assert.rejects(
+      resolveGitRuntime(),
+      /The bundled Git runtime files do not match the signed release inventory/u,
+    )
+    await assert.rejects(readFile(marker), { code: 'ENOENT' })
+
+    // Remove helper while bin/git remains untouched
+    await rm(helperPath)
+    await assert.rejects(
+      resolveGitRuntime(),
+      /The bundled Git runtime files do not match the signed release inventory/u,
+    )
+  } finally {
+    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+  }
+})
+test('a cached packaged runtime refuses a removed, malformed, or replaced release manifest before a Git operation', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const resources = await temporaryRoot('git-stacks-manifest-tamper-')
+  execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), resources])
+  const manifestPath = join(resources, 'git', 'runtime-manifest.json')
+  const original = await readFile(manifestPath, 'utf8')
+  const { repo } = await repository()
+  const initialHead = headOid(repo)
+  const replacements = [
+    null,
+    '{invalid json',
+    JSON.stringify({ ...JSON.parse(original), appVersion: '9.9.9' }),
+    JSON.stringify({
+      ...JSON.parse(original),
+      platforms: {
+        [platform]: { ...JSON.parse(original).platforms[platform], source: 'replaced source' },
+      },
+    }),
+  ]
+  try {
+    for (const replacement of replacements) {
       await writeFile(manifestPath, original)
-      assert.equal((await resolveGitRuntime()).source, 'bundled')
-
-      const semanticResources = await temporaryRoot('git-stacks-manifest-bytes-')
-      execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), semanticResources])
-      const semanticManifest = join(semanticResources, 'git', 'runtime-manifest.json')
-      const equivalent = JSON.parse(original) as { platforms: Record<string, { source: string }> }
-      equivalent.platforms[platform].source = 'upstream \uFFFD'
-      const valid = Buffer.from(JSON.stringify(equivalent))
-      const offset = valid.indexOf(Buffer.from('\uFFFD'))
-      assert.notEqual(offset, -1)
-      await writeFile(semanticManifest, valid)
       configureGitRuntime({
         appVersion: APP_VERSION,
         packaged: true,
-        resourcesRoot: semanticResources,
+        resourcesRoot: resources,
         useSystemGit: false,
         env: process.env,
       })
       assert.equal((await resolveGitRuntime()).source, 'bundled')
-      const invalid = Buffer.concat([
-        valid.subarray(0, offset),
-        Buffer.from([0xff]),
-        valid.subarray(offset + Buffer.byteLength('\uFFFD')),
-      ])
-      assert.equal(invalid.toString('utf8'), valid.toString('utf8'))
-      await writeFile(semanticManifest, invalid)
+      if (replacement === null) await rm(manifestPath)
+      else await writeFile(manifestPath, replacement)
       await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
       await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
       assert.equal(headOid(repo), initialHead)
-    } finally {
-      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
     }
-  },
-)
+    configureGitRuntime({ useSystemGit: true })
+    assert.equal((await resolveGitRuntime()).source, 'system')
+    configureGitRuntime({ useSystemGit: false })
+    await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+    await writeFile(manifestPath, original)
+    assert.equal((await resolveGitRuntime()).source, 'bundled')
+
+    const semanticResources = await temporaryRoot('git-stacks-manifest-bytes-')
+    execFileSync('cp', ['-R', '-P', join(releaseResources, 'git'), semanticResources])
+    const semanticManifest = join(semanticResources, 'git', 'runtime-manifest.json')
+    const equivalent = JSON.parse(original) as { platforms: Record<string, { source: string }> }
+    equivalent.platforms[platform].source = 'upstream \uFFFD'
+    const valid = Buffer.from(JSON.stringify(equivalent))
+    const offset = valid.indexOf(Buffer.from('\uFFFD'))
+    assert.notEqual(offset, -1)
+    await writeFile(semanticManifest, valid)
+    configureGitRuntime({
+      appVersion: APP_VERSION,
+      packaged: true,
+      resourcesRoot: semanticResources,
+      useSystemGit: false,
+      env: process.env,
+    })
+    assert.equal((await resolveGitRuntime()).source, 'bundled')
+    const invalid = Buffer.concat([
+      valid.subarray(0, offset),
+      Buffer.from([0xff]),
+      valid.subarray(offset + Buffer.byteLength('\uFFFD')),
+    ])
+    assert.equal(invalid.toString('utf8'), valid.toString('utf8'))
+    await writeFile(semanticManifest, invalid)
+    await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+    await assert.rejects(runGit(repo, ['status', '--porcelain']), /runtime manifest/u)
+    assert.equal(headOid(repo), initialHead)
+  } finally {
+    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+  }
+})
 
 test('Windows afterPack records signed EXE bytes without changing archive provenance or other payload files', async () => {
   const appOutDir = await temporaryRoot('git-stacks-signed-win-')
@@ -626,43 +618,41 @@ test('core workflows complete against the bundled runtime and the system Git', a
   configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
 })
 
-test(
-  'guarded ref transactions report the required Git version before running',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const old = await provisionRuntime({ version: '2.20.1', reportedVersion: '2.20.1' })
-    const { repo, git } = await repository()
-    try {
-      await writeFile(join(repo, 'shared.txt'), 'base\n')
-      git('add', '.')
-      git('commit', '-m', 'Initial commit')
-      configureGitRuntime({
-        appVersion: APP_VERSION,
-        packaged: true,
-        resourcesRoot: old.resourcesRoot,
-        useSystemGit: false,
-      })
-      const runtime = await resolveGitRuntime()
-      assert.equal(runtime.version, '2.20.1')
-      assert.equal(runtime.meetsMinimum, false)
-      assert.equal(runtime.capabilities.referenceTransactions, false)
+test('guarded ref transactions report the required Git version before running', {
+  skip: process.platform === 'win32',
+}, async () => {
+  const old = await provisionRuntime({ version: '2.20.1', reportedVersion: '2.20.1' })
+  const { repo, git } = await repository()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'Initial commit')
+    configureGitRuntime({
+      appVersion: APP_VERSION,
+      packaged: true,
+      resourcesRoot: old.resourcesRoot,
+      useSystemGit: false,
+    })
+    const runtime = await resolveGitRuntime()
+    assert.equal(runtime.version, '2.20.1')
+    assert.equal(runtime.meetsMinimum, false)
+    assert.equal(runtime.capabilities.referenceTransactions, false)
 
-      await assert.rejects(
-        requireGitCapability('referenceTransactions', 'merge a branch'),
-        /Cannot merge a branch: bundled Git 2\.20\.1 .* is older than the required Git 2\.29\.0/u,
-      )
-      await writeFile(join(repo, 'other.txt'), 'other\n')
-      await runAction(repo, { type: 'stage', paths: ['other.txt'] })
-      await assert.rejects(
-        runAction(repo, commitAction(repo, 'Add other file')),
-        /is older than the required Git 2\.29\.0/u,
-      )
-      assert.equal(git('log', '--format=%s', '-1'), 'Initial commit')
-    } finally {
-      configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
-    }
-  },
-)
+    await assert.rejects(
+      requireGitCapability('referenceTransactions', 'merge a branch'),
+      /Cannot merge a branch: bundled Git 2\.20\.1 .* is older than the required Git 2\.29\.0/u,
+    )
+    await writeFile(join(repo, 'other.txt'), 'other\n')
+    await runAction(repo, { type: 'stage', paths: ['other.txt'] })
+    await assert.rejects(
+      runAction(repo, commitAction(repo, 'Add other file')),
+      /is older than the required Git 2\.29\.0/u,
+    )
+    assert.equal(git('log', '--format=%s', '-1'), 'Initial commit')
+  } finally {
+    configureGitRuntime({ resourcesRoot: null, packaged: false, useSystemGit: false })
+  }
+})
 
 function shellQuotedPath(file: string): string {
   return `'${file.replaceAll('\\', '/').replaceAll("'", `'"'"'`)}'`

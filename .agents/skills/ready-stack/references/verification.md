@@ -111,8 +111,8 @@ command spelling or on auto-loading the metadata.
 
 ## Repository checks
 
-For changes to this Markdown skill, run `npm run format:check` from the repository
-root using Node 24 and the committed npm lockfile. Application builds/tests do
-not exercise skill behavior. Use the scenarios above for the behavioral smoke,
+For changes to this Markdown skill, review formatting manually: the repository's
+Biome `npm run format:check` does not support Markdown. Application builds/tests
+do not exercise skill behavior. Use the scenarios above for the behavioral smoke,
 and report fixture-only versus native GitHub evidence explicitly. Run-specific
 commands, outcomes, and remaining limits belong in the PR, not this reference.

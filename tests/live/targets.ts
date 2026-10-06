@@ -1496,10 +1496,12 @@ export class GitHubLiveTarget extends DisposableTarget {
         // has to be this run's own before anything is written to it — the read proves
         // the exact name and the exact marker, because an unrelated repository that
         // happens to occupy the name would otherwise receive this run's first commit.
-        if (!(
-          error instanceof GitHubTransportError &&
-          (error.kind === 'network' || error.kind === 'timeout')
-        )) {
+        if (
+          !(
+            error instanceof GitHubTransportError &&
+            (error.kind === 'network' || error.kind === 'timeout')
+          )
+        ) {
           throw error
         }
         const existing = await readRepositoryIdentity(admin, fullName, marker)

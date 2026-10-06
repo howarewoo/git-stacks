@@ -475,347 +475,328 @@ syncBuiltinESMExports()
   }
 })
 
-test(
-  'a publication banks its sequence, replaces the live pair, and reads both back',
-  { skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false },
-  () => {
-    const space = workspace()
-    const key = ephemeralKey('release-a')
-    declarePublished(space, key)
-    try {
-      assert.equal(
-        injectKeys(space, {
-          UPDATE_SIGNING_KEY: key.secret,
-          UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
-          UPDATE_SIGNING_KEY_ID: key.keyId,
-        }).code,
-        0,
-      )
-      const first = release(space, { version: '0.1.0', key })
-      assert.equal(first.code, 0, `the release published: ${first.out}`)
-      assert.match(first.out, /issuing stable sequence 1/u)
-      assert.match(first.out, /banking stable sequence 1 as history-stable-000000000001\.json/u)
-      const live = assetOn(space, MANIFEST)
-      const detached = assetOn(space, SIGNATURE)
-      assert.notEqual(live, null, 'the live manifest is published')
-      assert.notEqual(detached, null, 'the live signature is published')
-      assert.deepEqual(installedBuildAccepts([key.registry], live as Buffer, detached as Buffer), {
-        ok: true,
-        version: '0.1.0',
-      })
-      // The banked copy is the same bytes under a name of its own, and it is
-      // what the next release reads its sequence from.
-      assert.deepEqual(assetOn(space, historyFileName(CHANNEL as never, 1)), live)
-      assert.deepEqual(assetOn(space, historySignatureFileName(CHANNEL as never, 1)), detached)
-      const second = release(space, { version: '0.1.1', key })
-      assert.equal(second.code, 0, `the next release published: ${second.out}`)
-      assert.match(second.out, /issuing stable sequence 2/u)
-      assert.deepEqual(
-        installedBuildAccepts(
-          [key.registry],
-          assetOn(space, MANIFEST) as Buffer,
-          assetOn(space, SIGNATURE) as Buffer,
-        ),
-        { ok: true, version: '0.1.1' },
-      )
-      // Sequence 1 is still there, unchanged: history is appended to, never
-      // rewritten by a later publication.
-      assert.deepEqual(assetOn(space, historyFileName(CHANNEL as never, 1)), live)
-    } finally {
-      rmSync(space.root, { recursive: true, force: true })
-    }
-  },
-)
-
-test(
-  'a publication interrupted while replacing the live manifest leaves the previous release readable',
-  { skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false },
-  () => {
-    const space = workspace()
-    const key = ephemeralKey('release-a')
-    declarePublished(space, key)
-    try {
+test('a publication banks its sequence, replaces the live pair, and reads both back', {
+  skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false,
+}, () => {
+  const space = workspace()
+  const key = ephemeralKey('release-a')
+  declarePublished(space, key)
+  try {
+    assert.equal(
       injectKeys(space, {
         UPDATE_SIGNING_KEY: key.secret,
         UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
         UPDATE_SIGNING_KEY_ID: key.keyId,
-      })
-      assert.equal(release(space, { version: '0.1.0', key }).code, 0)
-      const published = assetOn(space, MANIFEST)
-      const publishedSignature = assetOn(space, SIGNATURE)
+      }).code,
+      0,
+    )
+    const first = release(space, { version: '0.1.0', key })
+    assert.equal(first.code, 0, `the release published: ${first.out}`)
+    assert.match(first.out, /issuing stable sequence 1/u)
+    assert.match(first.out, /banking stable sequence 1 as history-stable-000000000001\.json/u)
+    const live = assetOn(space, MANIFEST)
+    const detached = assetOn(space, SIGNATURE)
+    assert.notEqual(live, null, 'the live manifest is published')
+    assert.notEqual(detached, null, 'the live signature is published')
+    assert.deepEqual(installedBuildAccepts([key.registry], live as Buffer, detached as Buffer), {
+      ok: true,
+      version: '0.1.0',
+    })
+    // The banked copy is the same bytes under a name of its own, and it is
+    // what the next release reads its sequence from.
+    assert.deepEqual(assetOn(space, historyFileName(CHANNEL as never, 1)), live)
+    assert.deepEqual(assetOn(space, historySignatureFileName(CHANNEL as never, 1)), detached)
+    const second = release(space, { version: '0.1.1', key })
+    assert.equal(second.code, 0, `the next release published: ${second.out}`)
+    assert.match(second.out, /issuing stable sequence 2/u)
+    assert.deepEqual(
+      installedBuildAccepts(
+        [key.registry],
+        assetOn(space, MANIFEST) as Buffer,
+        assetOn(space, SIGNATURE) as Buffer,
+      ),
+      { ok: true, version: '0.1.1' },
+    )
+    // Sequence 1 is still there, unchanged: history is appended to, never
+    // rewritten by a later publication.
+    assert.deepEqual(assetOn(space, historyFileName(CHANNEL as never, 1)), live)
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
 
-      // The interruption: the live manifest's asset is deleted and the upload
-      // that would replace it never completes.
-      const interrupted = release(space, {
-        version: '0.1.1',
-        key,
-        failUploads: [MANIFEST],
-      })
-      assert.equal(interrupted.code, 1, 'the interrupted publication stops')
-      assert.match(interrupted.out, /uploading update-stable\.json to updates-stable failed/u)
-      assert.equal(assetOn(space, MANIFEST), null, 'the fixed name is gone, mid-publication')
+test('a publication interrupted while replacing the live manifest leaves the previous release readable', {
+  skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false,
+}, () => {
+  const space = workspace()
+  const key = ephemeralKey('release-a')
+  declarePublished(space, key)
+  try {
+    injectKeys(space, {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: key.keyId,
+    })
+    assert.equal(release(space, { version: '0.1.0', key }).code, 0)
+    const published = assetOn(space, MANIFEST)
+    const publishedSignature = assetOn(space, SIGNATURE)
 
-      // The previous release is still readable from its banked copy, and it is
-      // still the release clients would have been offered before this run.
-      assert.deepEqual(
-        installedBuildAccepts(
-          [key.registry],
-          assetOn(space, historyFileName(CHANNEL as never, 1)) as Buffer,
-          assetOn(space, historySignatureFileName(CHANNEL as never, 1)) as Buffer,
-        ),
-        { ok: true, version: '0.1.0' },
-        'the banked history is the release clients already trust',
-      )
-      assert.deepEqual(assetOn(space, historyFileName(CHANNEL as never, 1)), published)
-      assert.deepEqual(
-        assetOn(space, historySignatureFileName(CHANNEL as never, 1)),
-        publishedSignature,
-      )
+    // The interruption: the live manifest's asset is deleted and the upload
+    // that would replace it never completes.
+    const interrupted = release(space, {
+      version: '0.1.1',
+      key,
+      failUploads: [MANIFEST],
+    })
+    assert.equal(interrupted.code, 1, 'the interrupted publication stops')
+    assert.match(interrupted.out, /uploading update-stable\.json to updates-stable failed/u)
+    assert.equal(assetOn(space, MANIFEST), null, 'the fixed name is gone, mid-publication')
 
-      // The retry reads that history, so it cannot reuse the sequence the
-      // interrupted run spent, and it puts the live pair back.
-      const retry = release(space, { version: '0.1.1', key })
-      assert.equal(retry.code, 0, `the retry published: ${retry.out}`)
-      assert.match(retry.out, /issuing stable sequence 3/u)
-      assert.match(retry.out, /does not currently publish sequence 2/u)
-      assert.deepEqual(
-        installedBuildAccepts(
-          [key.registry],
-          assetOn(space, MANIFEST) as Buffer,
-          assetOn(space, SIGNATURE) as Buffer,
-        ),
-        { ok: true, version: '0.1.1' },
-      )
-    } finally {
-      rmSync(space.root, { recursive: true, force: true })
-    }
-  },
-)
+    // The previous release is still readable from its banked copy, and it is
+    // still the release clients would have been offered before this run.
+    assert.deepEqual(
+      installedBuildAccepts(
+        [key.registry],
+        assetOn(space, historyFileName(CHANNEL as never, 1)) as Buffer,
+        assetOn(space, historySignatureFileName(CHANNEL as never, 1)) as Buffer,
+      ),
+      { ok: true, version: '0.1.0' },
+      'the banked history is the release clients already trust',
+    )
+    assert.deepEqual(assetOn(space, historyFileName(CHANNEL as never, 1)), published)
+    assert.deepEqual(
+      assetOn(space, historySignatureFileName(CHANNEL as never, 1)),
+      publishedSignature,
+    )
 
-test(
-  'a channel whose two live assets are both missing is not an empty channel',
-  { skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false },
-  () => {
-    const space = workspace()
-    const key = ephemeralKey('release-a')
-    declarePublished(space, key)
-    try {
-      injectKeys(space, {
+    // The retry reads that history, so it cannot reuse the sequence the
+    // interrupted run spent, and it puts the live pair back.
+    const retry = release(space, { version: '0.1.1', key })
+    assert.equal(retry.code, 0, `the retry published: ${retry.out}`)
+    assert.match(retry.out, /issuing stable sequence 3/u)
+    assert.match(retry.out, /does not currently publish sequence 2/u)
+    assert.deepEqual(
+      installedBuildAccepts(
+        [key.registry],
+        assetOn(space, MANIFEST) as Buffer,
+        assetOn(space, SIGNATURE) as Buffer,
+      ),
+      { ok: true, version: '0.1.1' },
+    )
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
+
+test('a channel whose two live assets are both missing is not an empty channel', {
+  skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false,
+}, () => {
+  const space = workspace()
+  const key = ephemeralKey('release-a')
+  declarePublished(space, key)
+  try {
+    injectKeys(space, {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: key.keyId,
+    })
+    assert.equal(release(space, { version: '0.1.0', key }).code, 0)
+    rmSync(join(space.releaseDir, TAG, MANIFEST), { force: true })
+    rmSync(join(space.releaseDir, TAG, SIGNATURE), { force: true })
+
+    const next = release(space, { version: '0.1.1', key })
+    assert.equal(next.code, 0, `the next release published over the gap: ${next.out}`)
+    assert.match(
+      next.out,
+      /issuing stable sequence 2/u,
+      'a sequence already issued is never issued again, however the live pair is left',
+    )
+    assert.deepEqual(
+      installedBuildAccepts(
+        [key.registry],
+        assetOn(space, MANIFEST) as Buffer,
+        assetOn(space, SIGNATURE) as Buffer,
+      ),
+      { ok: true, version: '0.1.1' },
+    )
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
+
+test('a bank interrupted between its two assets is completed, not treated as history', {
+  skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false,
+}, () => {
+  const space = workspace()
+  const key = ephemeralKey('release-a')
+  declarePublished(space, key)
+  try {
+    injectKeys(space, {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: key.keyId,
+    })
+    assert.equal(release(space, { version: '0.1.0', key }).code, 0)
+    // The residue a cancelled bank leaves: a manifest with no signature beside
+    // it, holding bytes no key signed for that name.
+    const residue = join(space.releaseDir, TAG, historyFileName(CHANNEL as never, 2))
+    copyFileSync(join(space.releaseDir, TAG, historyFileName(CHANNEL as never, 1)), residue)
+    writeFileSync(residue, `${readFileSync(residue, 'utf8')}\n`)
+
+    const next = release(space, { version: '0.1.1', key })
+    assert.equal(next.code, 0, `the residue did not strand the channel: ${next.out}`)
+    assert.match(next.out, /issuing stable sequence 2/u, 'a half-written bank is not history')
+    const banked = assetOn(space, historyFileName(CHANNEL as never, 2))
+    assert.deepEqual(
+      installedBuildAccepts(
+        [key.registry],
+        banked as Buffer,
+        assetOn(space, historySignatureFileName(CHANNEL as never, 2)) as Buffer,
+      ),
+      { ok: true, version: '0.1.1' },
+      'what is banked at a sequence is the release that issued it',
+    )
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
+
+test('re-running one publication does not rewrite the sequence it banked', {
+  skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false,
+}, () => {
+  const space = workspace()
+  const key = ephemeralKey('release-a')
+  declarePublished(space, key)
+  try {
+    injectKeys(space, {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: key.keyId,
+    })
+    assert.equal(release(space, { version: '0.1.0', key }).code, 0)
+    const installerName = assetNameFor(BUILDS[0].file('0.1.0'))
+    const installer = assetOn(space, installerName)
+    assert.notEqual(installer, null)
+    const again = space.run(
+      'release-update-publish.ts',
+      [
+        '--channel',
+        CHANNEL,
+        '--repo',
+        REPO,
+        '--feed',
+        'channel-feed',
+        '--installers',
+        'channel-assets',
+      ],
+      {
         UPDATE_SIGNING_KEY: key.secret,
         UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
-        UPDATE_SIGNING_KEY_ID: key.keyId,
-      })
-      assert.equal(release(space, { version: '0.1.0', key }).code, 0)
-      rmSync(join(space.releaseDir, TAG, MANIFEST), { force: true })
-      rmSync(join(space.releaseDir, TAG, SIGNATURE), { force: true })
+        FIXTURE_GH_FAIL_UPLOAD: installerName,
+      },
+    )
+    assert.equal(again.code, 0, `the publication is safe to repeat: ${again.out}`)
+    assert.match(again.out, /is already on updates-stable with these exact bytes/u)
+    assert.deepEqual(assetOn(space, installerName), installer, 'the live installer is not replaced')
+    assert.match(
+      again.out,
+      /sequence 1 is already banked on updates-stable with these exact bytes/u,
+    )
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
 
-      const next = release(space, { version: '0.1.1', key })
-      assert.equal(next.code, 0, `the next release published over the gap: ${next.out}`)
-      assert.match(
-        next.out,
-        /issuing stable sequence 2/u,
-        'a sequence already issued is never issued again, however the live pair is left',
-      )
-      assert.deepEqual(
-        installedBuildAccepts(
-          [key.registry],
-          assetOn(space, MANIFEST) as Buffer,
-          assetOn(space, SIGNATURE) as Buffer,
-        ),
-        { ok: true, version: '0.1.1' },
-      )
-    } finally {
-      rmSync(space.root, { recursive: true, force: true })
+test('an installer published under a name the live manifest binds to other bytes is refused', {
+  skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false,
+}, () => {
+  const space = workspace()
+  const key = ephemeralKey('release-a')
+  declarePublished(space, key)
+  try {
+    injectKeys(space, {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: key.keyId,
+    })
+    assert.equal(release(space, { version: '0.1.0', key }).code, 0)
+    // The same version, rebuilt: identical installer names, different bytes.
+    // The manifest is a new sequence, but the asset names it publishes are the
+    // names clients are already fetching.
+    stageInstallers(space, '0.1.0', 'a different installer')
+    const env = {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
     }
-  },
-)
-
-test(
-  'a bank interrupted between its two assets is completed, not treated as history',
-  { skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false },
-  () => {
-    const space = workspace()
-    const key = ephemeralKey('release-a')
-    declarePublished(space, key)
-    try {
-      injectKeys(space, {
-        UPDATE_SIGNING_KEY: key.secret,
-        UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
-        UPDATE_SIGNING_KEY_ID: key.keyId,
-      })
-      assert.equal(release(space, { version: '0.1.0', key }).code, 0)
-      // The residue a cancelled bank leaves: a manifest with no signature beside
-      // it, holding bytes no key signed for that name.
-      const residue = join(space.releaseDir, TAG, historyFileName(CHANNEL as never, 2))
-      copyFileSync(join(space.releaseDir, TAG, historyFileName(CHANNEL as never, 1)), residue)
-      writeFileSync(residue, `${readFileSync(residue, 'utf8')}\n`)
-
-      const next = release(space, { version: '0.1.1', key })
-      assert.equal(next.code, 0, `the residue did not strand the channel: ${next.out}`)
-      assert.match(next.out, /issuing stable sequence 2/u, 'a half-written bank is not history')
-      const banked = assetOn(space, historyFileName(CHANNEL as never, 2))
-      assert.deepEqual(
-        installedBuildAccepts(
-          [key.registry],
-          banked as Buffer,
-          assetOn(space, historySignatureFileName(CHANNEL as never, 2)) as Buffer,
-        ),
-        { ok: true, version: '0.1.1' },
-        'what is banked at a sequence is the release that issued it',
-      )
-    } finally {
-      rmSync(space.root, { recursive: true, force: true })
-    }
-  },
-)
-
-test(
-  're-running one publication does not rewrite the sequence it banked',
-  { skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false },
-  () => {
-    const space = workspace()
-    const key = ephemeralKey('release-a')
-    declarePublished(space, key)
-    try {
-      injectKeys(space, {
-        UPDATE_SIGNING_KEY: key.secret,
-        UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
-        UPDATE_SIGNING_KEY_ID: key.keyId,
-      })
-      assert.equal(release(space, { version: '0.1.0', key }).code, 0)
-      const installerName = assetNameFor(BUILDS[0].file('0.1.0'))
-      const installer = assetOn(space, installerName)
-      assert.notEqual(installer, null)
-      const again = space.run(
-        'release-update-publish.ts',
+    for (const [script, args] of [
+      [
+        'release-update-manifest.ts',
+        [
+          'build',
+          '--channel',
+          CHANNEL,
+          '--version',
+          '0.1.0',
+          '--descriptors',
+          'descriptors',
+          '--artifact-dir',
+          'signed-release',
+          '--out-dir',
+          'channel-feed',
+          '--stage-dir',
+          'channel-assets',
+          '--repo',
+          REPO,
+          '--sequence',
+          '9',
+        ],
+      ],
+      ['release-update-sign.ts', ['--channel', CHANNEL, '--manifest', `channel-feed/${MANIFEST}`]],
+      [
+        'release-update-verify.ts',
         [
           '--channel',
           CHANNEL,
-          '--repo',
-          REPO,
-          '--feed',
-          'channel-feed',
-          '--installers',
+          '--manifest',
+          `channel-feed/${MANIFEST}`,
+          '--artifact-dir',
           'channel-assets',
         ],
-        {
-          UPDATE_SIGNING_KEY: key.secret,
-          UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
-          FIXTURE_GH_FAIL_UPLOAD: installerName,
-        },
-      )
-      assert.equal(again.code, 0, `the publication is safe to repeat: ${again.out}`)
-      assert.match(again.out, /is already on updates-stable with these exact bytes/u)
-      assert.deepEqual(
-        assetOn(space, installerName),
-        installer,
-        'the live installer is not replaced',
-      )
-      assert.match(
-        again.out,
-        /sequence 1 is already banked on updates-stable with these exact bytes/u,
-      )
-    } finally {
-      rmSync(space.root, { recursive: true, force: true })
+      ],
+    ] as [string, string[]][]) {
+      assert.equal(space.run(script, args, env).code, 0)
     }
-  },
-)
-
-test(
-  'an installer published under a name the live manifest binds to other bytes is refused',
-  { skip: process.platform === 'win32' ? 'the publishing job runs on ubuntu' : false },
-  () => {
-    const space = workspace()
-    const key = ephemeralKey('release-a')
-    declarePublished(space, key)
-    try {
-      injectKeys(space, {
-        UPDATE_SIGNING_KEY: key.secret,
-        UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
-        UPDATE_SIGNING_KEY_ID: key.keyId,
-      })
-      assert.equal(release(space, { version: '0.1.0', key }).code, 0)
-      // The same version, rebuilt: identical installer names, different bytes.
-      // The manifest is a new sequence, but the asset names it publishes are the
-      // names clients are already fetching.
-      stageInstallers(space, '0.1.0', 'a different installer')
-      const env = {
-        UPDATE_SIGNING_KEY: key.secret,
-        UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
-      }
-      for (const [script, args] of [
-        [
-          'release-update-manifest.ts',
-          [
-            'build',
-            '--channel',
-            CHANNEL,
-            '--version',
-            '0.1.0',
-            '--descriptors',
-            'descriptors',
-            '--artifact-dir',
-            'signed-release',
-            '--out-dir',
-            'channel-feed',
-            '--stage-dir',
-            'channel-assets',
-            '--repo',
-            REPO,
-            '--sequence',
-            '9',
-          ],
-        ],
-        [
-          'release-update-sign.ts',
-          ['--channel', CHANNEL, '--manifest', `channel-feed/${MANIFEST}`],
-        ],
-        [
-          'release-update-verify.ts',
-          [
-            '--channel',
-            CHANNEL,
-            '--manifest',
-            `channel-feed/${MANIFEST}`,
-            '--artifact-dir',
-            'channel-assets',
-          ],
-        ],
-      ] as [string, string[]][]) {
-        assert.equal(space.run(script, args, env).code, 0)
-      }
-      const published = space.run(
-        'release-update-publish.ts',
-        [
-          '--channel',
-          CHANNEL,
-          '--repo',
-          REPO,
-          '--feed',
-          'channel-feed',
-          '--installers',
-          'channel-assets',
-        ],
-        env,
-      )
-      assert.equal(published.code, 1)
-      assert.match(
-        published.out,
-        /is published under a name the live stable manifest already binds to different bytes/u,
-      )
-      assert.deepEqual(
-        installedBuildAccepts(
-          [key.registry],
-          assetOn(space, MANIFEST) as Buffer,
-          assetOn(space, SIGNATURE) as Buffer,
-        ),
-        { ok: true, version: '0.1.0' },
-      )
-    } finally {
-      rmSync(space.root, { recursive: true, force: true })
-    }
-  },
-)
+    const published = space.run(
+      'release-update-publish.ts',
+      [
+        '--channel',
+        CHANNEL,
+        '--repo',
+        REPO,
+        '--feed',
+        'channel-feed',
+        '--installers',
+        'channel-assets',
+      ],
+      env,
+    )
+    assert.equal(published.code, 1)
+    assert.match(
+      published.out,
+      /is published under a name the live stable manifest already binds to different bytes/u,
+    )
+    assert.deepEqual(
+      installedBuildAccepts(
+        [key.registry],
+        assetOn(space, MANIFEST) as Buffer,
+        assetOn(space, SIGNATURE) as Buffer,
+      ),
+      { ok: true, version: '0.1.0' },
+    )
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
 
 /**
  * A rotation, in the order a rotation has to happen in: a build is given the
@@ -826,110 +807,106 @@ test(
  * is then offered to the build an earlier release packaged — which is the only
  * trust set an installed app has, because the key is compiled into it.
  */
-test(
-  'a key is introduced in one release and signs in the next, and the builds in between accept both',
-  {
-    skip:
-      process.platform === 'win32'
-        ? 'the release job that injects keys runs on every platform'
-        : false,
-  },
-  () => {
-    const space = workspace()
-    const old = ephemeralKey('release-old')
-    const fresh = ephemeralKey('release-new')
-    declarePublished(space, old, fresh)
-    const retired = hoursFromNow(24 * 45)
-    try {
-      // Before the rotation: one key, and every installed build trusts it.
-      const beforeRotation = injectKeys(space, {
-        UPDATE_SIGNING_KEY: old.secret,
-        UPDATE_SIGNING_PUBLIC_KEY: old.registry.publicKey,
-        UPDATE_SIGNING_KEY_ID: old.keyId,
-      })
-      assert.equal(beforeRotation.code, 0, beforeRotation.out)
-      assert.equal(release(space, { version: '0.1.0', key: old }).code, 0)
-      const installedTrust = JSON.parse(
-        readFileSync(join(space.root, 'resources', 'update-trusted-keys.json'), 'utf8'),
-      ).keys as TrustedUpdateKey[]
-      assert.deepEqual(
-        installedTrust.map((entry) => entry.keyId),
-        [old.keyId],
-      )
+test('a key is introduced in one release and signs in the next, and the builds in between accept both', {
+  skip:
+    process.platform === 'win32'
+      ? 'the release job that injects keys runs on every platform'
+      : false,
+}, () => {
+  const space = workspace()
+  const old = ephemeralKey('release-old')
+  const fresh = ephemeralKey('release-new')
+  declarePublished(space, old, fresh)
+  const retired = hoursFromNow(24 * 45)
+  try {
+    // Before the rotation: one key, and every installed build trusts it.
+    const beforeRotation = injectKeys(space, {
+      UPDATE_SIGNING_KEY: old.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: old.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: old.keyId,
+    })
+    assert.equal(beforeRotation.code, 0, beforeRotation.out)
+    assert.equal(release(space, { version: '0.1.0', key: old }).code, 0)
+    const installedTrust = JSON.parse(
+      readFileSync(join(space.root, 'resources', 'update-trusted-keys.json'), 'utf8'),
+    ).keys as TrustedUpdateKey[]
+    assert.deepEqual(
+      installedTrust.map((entry) => entry.keyId),
+      [old.keyId],
+    )
 
-      // Release two: the new key rides along, the manifest is still signed with
-      // the old one, and the builds it packages verify it.
-      const bridge = release(space, {
-        version: '0.1.1',
-        key: old,
-        extra: {
-          UPDATE_SIGNING_ADDITIONAL_KEY_ID: fresh.keyId,
-          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: fresh.registry.publicKey,
-          UPDATE_SIGNING_ADDITIONAL_VALID_FROM: '2020-01-01T00:00:00.000Z',
-          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: hoursFromNow(24 * 400),
-        },
-      })
-      assert.equal(bridge.code, 0, `the bridge release published: ${bridge.out}`)
-      assert.match(bridge.out, /it also carries release-new/u)
-      const bridgeTrust = JSON.parse(
-        readFileSync(join(space.root, 'resources', 'update-trusted-keys.json'), 'utf8'),
-      ).keys as TrustedUpdateKey[]
-      assert.deepEqual(
-        bridgeTrust.map((entry) => entry.keyId),
-        [old.keyId, fresh.keyId],
-        'the build this release packages trusts both keys',
-      )
-      const bridgeManifest = readFileSync(join(space.root, 'channel-feed', MANIFEST))
-      const bridgeSignature = readFileSync(join(space.root, 'channel-feed', SIGNATURE))
-      assert.equal(
-        signedBy(bridgeSignature),
-        old.keyId,
-        'the bridge manifest is signed with the key every installed build already trusts',
-      )
-      assert.deepEqual(
-        installedBuildAccepts(installedTrust, bridgeManifest, bridgeSignature),
-        { ok: true, version: '0.1.1' },
-        'a build packaged before the rotation installs the release that introduces it',
-      )
+    // Release two: the new key rides along, the manifest is still signed with
+    // the old one, and the builds it packages verify it.
+    const bridge = release(space, {
+      version: '0.1.1',
+      key: old,
+      extra: {
+        UPDATE_SIGNING_ADDITIONAL_KEY_ID: fresh.keyId,
+        UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: fresh.registry.publicKey,
+        UPDATE_SIGNING_ADDITIONAL_VALID_FROM: '2020-01-01T00:00:00.000Z',
+        UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: hoursFromNow(24 * 400),
+      },
+    })
+    assert.equal(bridge.code, 0, `the bridge release published: ${bridge.out}`)
+    assert.match(bridge.out, /it also carries release-new/u)
+    const bridgeTrust = JSON.parse(
+      readFileSync(join(space.root, 'resources', 'update-trusted-keys.json'), 'utf8'),
+    ).keys as TrustedUpdateKey[]
+    assert.deepEqual(
+      bridgeTrust.map((entry) => entry.keyId),
+      [old.keyId, fresh.keyId],
+      'the build this release packages trusts both keys',
+    )
+    const bridgeManifest = readFileSync(join(space.root, 'channel-feed', MANIFEST))
+    const bridgeSignature = readFileSync(join(space.root, 'channel-feed', SIGNATURE))
+    assert.equal(
+      signedBy(bridgeSignature),
+      old.keyId,
+      'the bridge manifest is signed with the key every installed build already trusts',
+    )
+    assert.deepEqual(
+      installedBuildAccepts(installedTrust, bridgeManifest, bridgeSignature),
+      { ok: true, version: '0.1.1' },
+      'a build packaged before the rotation installs the release that introduces it',
+    )
 
-      // Release three: the new key signs, and the build that carried both
-      // accepts it. The old key is still trusted, until the window says otherwise.
-      const switched = release(space, {
-        version: '0.1.2',
-        key: fresh,
-        extra: {
-          UPDATE_SIGNING_ADDITIONAL_KEY_ID: old.keyId,
-          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: old.registry.publicKey,
-          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: retired,
-        },
-      })
-      assert.equal(switched.code, 0, `the switching release published: ${switched.out}`)
-      assert.match(switched.out, /it also carries release-old/u)
-      const switchedManifest = readFileSync(join(space.root, 'channel-feed', MANIFEST))
-      const switchedSignature = readFileSync(join(space.root, 'channel-feed', SIGNATURE))
-      assert.equal(signedBy(switchedSignature), fresh.keyId)
-      assert.deepEqual(
-        installedBuildAccepts(bridgeTrust, switchedManifest, switchedSignature),
-        { ok: true, version: '0.1.2' },
-        'the bridge build installs the release signed with the key it was given',
-      )
+    // Release three: the new key signs, and the build that carried both
+    // accepts it. The old key is still trusted, until the window says otherwise.
+    const switched = release(space, {
+      version: '0.1.2',
+      key: fresh,
+      extra: {
+        UPDATE_SIGNING_ADDITIONAL_KEY_ID: old.keyId,
+        UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: old.registry.publicKey,
+        UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: retired,
+      },
+    })
+    assert.equal(switched.code, 0, `the switching release published: ${switched.out}`)
+    assert.match(switched.out, /it also carries release-old/u)
+    const switchedManifest = readFileSync(join(space.root, 'channel-feed', MANIFEST))
+    const switchedSignature = readFileSync(join(space.root, 'channel-feed', SIGNATURE))
+    assert.equal(signedBy(switchedSignature), fresh.keyId)
+    assert.deepEqual(
+      installedBuildAccepts(bridgeTrust, switchedManifest, switchedSignature),
+      { ok: true, version: '0.1.2' },
+      'the bridge build installs the release signed with the key it was given',
+    )
 
-      // And the release that retires the old key: a build that trusts only the
-      // new one no longer accepts what the old one signed, which is the whole
-      // point of the window the overlap names.
-      const retirement = release(space, { version: '0.1.3', key: fresh })
-      assert.equal(retirement.code, 0, retirement.out)
-      const onlyNew: TrustedUpdateKey[] = [fresh.registry]
-      assert.deepEqual(
-        installedBuildAccepts(onlyNew, bridgeManifest, bridgeSignature),
-        { ok: false, reason: 'no-trusted-key' },
-        'a build that has dropped the old key cannot verify what the old key signed',
-      )
-    } finally {
-      rmSync(space.root, { recursive: true, force: true })
-    }
-  },
-)
+    // And the release that retires the old key: a build that trusts only the
+    // new one no longer accepts what the old one signed, which is the whole
+    // point of the window the overlap names.
+    const retirement = release(space, { version: '0.1.3', key: fresh })
+    assert.equal(retirement.code, 0, retirement.out)
+    const onlyNew: TrustedUpdateKey[] = [fresh.registry]
+    assert.deepEqual(
+      installedBuildAccepts(onlyNew, bridgeManifest, bridgeSignature),
+      { ok: false, reason: 'no-trusted-key' },
+      'a build that has dropped the old key cannot verify what the old key signed',
+    )
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
 
 test('a rotation that is only half declared is refused', () => {
   const space = workspace()
