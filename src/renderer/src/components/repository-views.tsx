@@ -882,6 +882,7 @@ export function StackView({
   busy,
   runAction,
   onRequest,
+  onReviewNumber,
   onSelect,
   search,
   onCreate,
@@ -891,6 +892,7 @@ export function StackView({
   onSelect: (branch: Branch) => void
   search: string
   onCreate: () => void
+  onReviewNumber: (number: number) => void
 }) {
   const [selection, setSelection] = React.useState<string | null>(null)
   const { byName, groups } = React.useMemo(() => {
@@ -1170,7 +1172,7 @@ export function StackView({
                         size="sm"
                         variant="link"
                         disabled={busy}
-                        onClick={() => onRequest({ kind: 'pr', number: branch.pr!.number })}
+                        onClick={() => onReviewNumber(branch.pr!.number)}
                       >
                         #{branch.pr.number} {branch.pr.title}
                       </Button>

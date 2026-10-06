@@ -169,6 +169,7 @@ export function DataSurfacesSpecimen() {
                 createTooltip="Fixture only: creates a draft pull request from the current branch."
                 onCreate={() => record('Create PR', {})}
                 onRequest={openWorkflow}
+                onReviewNumber={(number) => record('Review PR', { number })}
                 pullRequests={pullRequestSnapshot.pullRequests.filter((pr) =>
                   matchesPullRequest(pr, search),
                 )}

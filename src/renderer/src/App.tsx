@@ -2394,135 +2394,138 @@ function App() {
 
   const renderToolbar = () => (
     <div className="toolbar" role="toolbar" aria-label="Repository actions">
-      <div className="toolbar-actions">
-        <div className="toolbar-action-group" role="group" aria-label="Synchronization actions">
-          <Button
-            disabled={!snapshot || isBusy || operationActive}
-            onClick={() => runAction({ type: 'fetch' }, 'Fetch')}
-            tooltip="Fetch remote updates without changing your working tree."
-            size="sm"
-            variant="secondary"
-          >
-            {busyAction === 'Fetch' ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <Download className="size-3.5" />
-            )}
-            Fetch
-          </Button>
-          <Button
-            disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('pull'))}
-            onClick={() => openWorkflow({ kind: 'pull' })}
-            tooltip={
-              shapeReason('pull') ?? 'Choose how to integrate updates from this branch’s upstream.'
-            }
-            size="sm"
-            variant="secondary"
-          >
-            {busyAction === 'Pull' ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <ArrowDown className="size-3.5" />
-            )}
-            Pull
-          </Button>
-          <Button
-            disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('push'))}
-            onClick={() => runAction({ type: 'push' }, 'Push')}
-            tooltip={
-              shapeReason('push') ?? 'Push the current branch without rewriting remote history.'
-            }
-            size="sm"
-            variant="secondary"
-          >
-            {busyAction === 'Push' ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <Upload className="size-3.5" />
-            )}
-            Push
-          </Button>
-        </div>
-        <span className="toolbar-divider" aria-hidden="true" />
-        <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
-          <Button
-            disabled={
-              !snapshot || isBusy || operationActive || Boolean(shapeReason('createBranch'))
-            }
-            tooltip={
-              shapeReason('createBranch') ??
-              'Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed.'
-            }
-            onClick={openBranchDialog}
-            size="sm"
-          >
-            <Plus className="size-3.5" />
-            New branch
-          </Button>
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger
-              render={
-                <Button
-                  aria-label="More Git actions"
-                  tooltip="More actions: preview merge, force push with lease, stash, or browse history."
-                  size="icon-sm"
-                  variant="secondary"
-                  disabled={!snapshot || isBusy}
-                >
-                  <MoreHorizontal className="size-4" />
-                </Button>
+      {workspaceView !== 'review' ? (
+        <div className="toolbar-actions">
+          <div className="toolbar-action-group" role="group" aria-label="Synchronization actions">
+            <Button
+              disabled={!snapshot || isBusy || operationActive}
+              onClick={() => runAction({ type: 'fetch' }, 'Fetch')}
+              tooltip="Fetch remote updates without changing your working tree."
+              size="sm"
+              variant="secondary"
+            >
+              {busyAction === 'Fetch' ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
+              )}
+              Fetch
+            </Button>
+            <Button
+              disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('pull'))}
+              onClick={() => openWorkflow({ kind: 'pull' })}
+              tooltip={
+                shapeReason('pull') ??
+                'Choose how to integrate updates from this branch’s upstream.'
               }
-            />
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
-                <DropdownMenu.Item
-                  disabled={operationActive || !currentBranch || Boolean(shapeReason('merge'))}
-                  onClick={() => openWorkflow({ kind: 'merge' })}
-                >
-                  Merge into current branch…
-                </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  disabled={
-                    operationActive ||
-                    !currentBranch ||
-                    currentBranch === snapshot?.defaultBranch ||
-                    Boolean(shapeReason('forcePush'))
-                  }
-                  onClick={() => openWorkflow({ kind: 'forcePush' })}
-                >
-                  Force push with lease…
-                </DropdownMenu.Item>
-                <DropdownMenu.Item
-                  disabled={
-                    operationActive ||
-                    !snapshot?.files.length ||
-                    snapshot.limits.filesTruncated ||
-                    Boolean(shapeReason('stash'))
-                  }
-                  onClick={() => openWorkflow({ kind: 'stash' })}
-                >
-                  Stash changes…
-                </DropdownMenu.Item>
-                {shapeReason('merge') ||
-                shapeReason('forcePush') ||
-                shapeReason('stash') ||
-                snapshot?.limits.filesTruncated ? (
-                  <p className="workflow-note" role="status">
-                    {shapeReason('merge') ??
-                      shapeReason('forcePush') ??
-                      shapeReason('stash') ??
-                      'Stash unavailable while the changed-file listing is incomplete.'}
-                  </p>
-                ) : null}
-                <DropdownMenu.Separator className="workflow-menu-separator" />
-                <DropdownMenu.Item onClick={() => setWorkspaceView('history')}>
-                  Browse commit history
-                </DropdownMenu.Item>
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
+              size="sm"
+              variant="secondary"
+            >
+              {busyAction === 'Pull' ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <ArrowDown className="size-3.5" />
+              )}
+              Pull
+            </Button>
+            <Button
+              disabled={!snapshot || isBusy || operationActive || Boolean(shapeReason('push'))}
+              onClick={() => runAction({ type: 'push' }, 'Push')}
+              tooltip={
+                shapeReason('push') ?? 'Push the current branch without rewriting remote history.'
+              }
+              size="sm"
+              variant="secondary"
+            >
+              {busyAction === 'Push' ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <Upload className="size-3.5" />
+              )}
+              Push
+            </Button>
+          </div>
+          <span className="toolbar-divider" aria-hidden="true" />
+          <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
+            <Button
+              disabled={
+                !snapshot || isBusy || operationActive || Boolean(shapeReason('createBranch'))
+              }
+              tooltip={
+                shapeReason('createBranch') ??
+                'Create a local branch from an existing branch and switch to it. Records its stack parent; nothing is pushed.'
+              }
+              onClick={openBranchDialog}
+              size="sm"
+            >
+              <Plus className="size-3.5" />
+              New branch
+            </Button>
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger
+                render={
+                  <Button
+                    aria-label="More Git actions"
+                    tooltip="More actions: preview merge, force push with lease, stash, or browse history."
+                    size="icon-sm"
+                    variant="secondary"
+                    disabled={!snapshot || isBusy}
+                  >
+                    <MoreHorizontal className="size-4" />
+                  </Button>
+                }
+              />
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
+                  <DropdownMenu.Item
+                    disabled={operationActive || !currentBranch || Boolean(shapeReason('merge'))}
+                    onClick={() => openWorkflow({ kind: 'merge' })}
+                  >
+                    Merge into current branch…
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    disabled={
+                      operationActive ||
+                      !currentBranch ||
+                      currentBranch === snapshot?.defaultBranch ||
+                      Boolean(shapeReason('forcePush'))
+                    }
+                    onClick={() => openWorkflow({ kind: 'forcePush' })}
+                  >
+                    Force push with lease…
+                  </DropdownMenu.Item>
+                  <DropdownMenu.Item
+                    disabled={
+                      operationActive ||
+                      !snapshot?.files.length ||
+                      snapshot.limits.filesTruncated ||
+                      Boolean(shapeReason('stash'))
+                    }
+                    onClick={() => openWorkflow({ kind: 'stash' })}
+                  >
+                    Stash changes…
+                  </DropdownMenu.Item>
+                  {shapeReason('merge') ||
+                  shapeReason('forcePush') ||
+                  shapeReason('stash') ||
+                  snapshot?.limits.filesTruncated ? (
+                    <p className="workflow-note" role="status">
+                      {shapeReason('merge') ??
+                        shapeReason('forcePush') ??
+                        shapeReason('stash') ??
+                        'Stash unavailable while the changed-file listing is incomplete.'}
+                    </p>
+                  ) : null}
+                  <DropdownMenu.Separator className="workflow-menu-separator" />
+                  <DropdownMenu.Item onClick={() => setWorkspaceView('history')}>
+                    Browse commit history
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          </div>
         </div>
-      </div>
+      ) : null}
       <div className="toolbar-spacer" />
       <Button
         className="toolbar-control"
@@ -2892,6 +2895,10 @@ function App() {
         }
         onCreate={openPrDialog}
         onRequest={openWorkflow}
+        onReviewNumber={(number) => {
+          setReviewNumber(number)
+          setWorkspaceView('review')
+        }}
         pullRequests={visiblePullRequests}
         snapshot={snapshot}
       />
@@ -2990,11 +2997,13 @@ function App() {
     if (workspaceView === 'review')
       return (
         <ReviewView
-          authority={authority}
+          key={JSON.stringify([authority, snapshot.path, snapshot.remoteUrl])}
+          authority={JSON.stringify([authority, snapshot.path, snapshot.remoteUrl])}
           commands={reviewCommands}
           desktop={desktop ?? undefined}
           number={reviewNumber ?? selectedPullRequest?.number ?? null}
           onSelectNumber={setReviewNumber}
+          onManageNumber={(number) => openWorkflow({ kind: 'pr', number })}
           pullRequests={visiblePullRequests}
         />
       )
@@ -3013,6 +3022,10 @@ function App() {
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}
+          onReviewNumber={(number) => {
+            setReviewNumber(number)
+            setWorkspaceView('review')
+          }}
           onSelect={(branch) => setSelectedBranchRef(branch.ref)}
           search={search}
           onCreate={openBranchDialog}

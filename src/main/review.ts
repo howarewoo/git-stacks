@@ -13,6 +13,7 @@ import type {
   ReviewLineRef,
   ReviewSide,
   ReviewStackRail,
+  ReviewReviewerSummary,
 } from '../shared/review'
 import {
   adjacentStackLayer,
@@ -283,6 +284,106 @@ function stackRail(stacks: NativeStack[], number: number): ReviewStackRail {
   }
 }
 
+async function readReviewerSummary(
+  remote: ParsedRemote,
+  number: number,
+  headOid: string | undefined,
+  signal?: AbortSignal,
+): Promise<ReviewReviewerSummary> {
+  try {
+    const result = await reviewTransport(remote).graphql<unknown>(
+      `query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            headRefOid
+            reviewRequests(first: 100) {
+              pageInfo { hasNextPage }
+              nodes { requestedReviewer {
+                ... on User { login }
+                ... on Team { slug }
+              } }
+            }
+            latestReviews(first: 100) {
+              pageInfo { hasNextPage }
+              nodes { author { login } state commit { oid } }
+            }
+          }
+        }
+      }`,
+      { owner: remote.owner, name: remote.name, number },
+      { signal },
+    )
+    if (signal?.aborted) throw new Error('Review read cancelled')
+    const repository = isRecord(result) ? result.repository : null
+    const node = isRecord(repository) ? repository.pullRequest : null
+    if (!isRecord(node) || !headOid || node.headRefOid !== headOid) {
+      throw new Error('Reviewer metadata does not match the selected pull request head.')
+    }
+    const requests = node.reviewRequests
+    const latest = node.latestReviews
+    if (
+      !isRecord(requests) ||
+      !Array.isArray(requests.nodes) ||
+      !isRecord(latest) ||
+      !Array.isArray(latest.nodes) ||
+      !isRecord(requests.pageInfo) ||
+      typeof requests.pageInfo.hasNextPage !== 'boolean' ||
+      !isRecord(latest.pageInfo) ||
+      typeof latest.pageInfo.hasNextPage !== 'boolean'
+    )
+      throw new Error('GitHub did not return complete reviewer metadata.')
+    let partial = requests.pageInfo.hasNextPage || latest.pageInfo.hasNextPage
+    const requested: ReviewReviewerSummary['requested'] = []
+    const reviews: ReviewReviewerSummary['reviews'] = []
+    for (const entry of requests.nodes) {
+      const reviewer = isRecord(entry) ? entry.requestedReviewer : null
+      if (isRecord(reviewer) && typeof reviewer.login === 'string' && reviewer.login) {
+        requested.push({ kind: 'user', name: reviewer.login })
+      } else if (isRecord(reviewer) && typeof reviewer.slug === 'string' && reviewer.slug) {
+        requested.push({ kind: 'team', name: reviewer.slug })
+      } else partial = true
+    }
+    for (const entry of latest.nodes) {
+      const author = isRecord(entry) ? entry.author : null
+      if (
+        !isRecord(entry) ||
+        !isRecord(author) ||
+        typeof author.login !== 'string' ||
+        !author.login ||
+        typeof entry.state !== 'string' ||
+        !['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING'].includes(
+          entry.state,
+        )
+      ) {
+        partial = true
+        continue
+      }
+      const commit = isRecord(entry.commit) ? entry.commit : null
+      reviews.push({
+        login: author.login,
+        state: entry.state as ReviewReviewerSummary['reviews'][number]['state'],
+        headOid: commit && typeof commit.oid === 'string' ? commit.oid : null,
+      })
+    }
+    return {
+      state: partial ? 'partial' : 'available',
+      requested,
+      reviews,
+      message: partial
+        ? 'Reviewer metadata is incomplete; only the first 100 requests and latest reviews are shown.'
+        : '',
+    }
+  } catch (error) {
+    if (signal?.aborted || isCancelledRead(error)) throw error
+    return {
+      state: 'unavailable',
+      requested: [],
+      reviews: [],
+      message: `Reviewer metadata unavailable: ${errorDetail(error)}`,
+    }
+  }
+}
+
 /**
  * The headline read: pull request metadata plus the native stack it belongs to.
  *
@@ -305,13 +406,14 @@ export async function readReviewHeadline(
       `Review needs a GitHub origin remote; this repository's origin is on ${remote.host}.`,
     )
   }
+  const reviewers = await readReviewerSummary(remote, number, pullRequest.headOid, signal)
   try {
     const stacks = await listPullRequestStacks(remote.owner, remote.name, {
       host,
       pullRequest: number,
       signal,
     })
-    return { pullRequest, rail: stackRail(stacks, number) }
+    return { pullRequest, rail: stackRail(stacks, number), reviewers }
   } catch (error) {
     if (isCancelledRead(error)) throw error
     const position = pullRequest.stack
@@ -319,6 +421,7 @@ export async function readReviewHeadline(
       : 'The native stack layers could not be listed'
     return {
       pullRequest,
+      reviewers,
       rail: {
         state: 'unavailable',
         stack: null,

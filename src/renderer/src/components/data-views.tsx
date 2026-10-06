@@ -484,6 +484,7 @@ export function PullRequestListView({
   pullRequests,
   busy,
   onRequest,
+  onReviewNumber,
   onCreate,
   canCreate,
   createTooltip,
@@ -492,6 +493,7 @@ export function PullRequestListView({
   pullRequests: PullRequest[]
   busy: boolean
   onRequest: (request: WorkflowRequest) => void
+  onReviewNumber: (number: number) => void
   onCreate: () => void
   canCreate: boolean
   createTooltip: React.ReactNode
@@ -534,33 +536,45 @@ export function PullRequestListView({
       {pullRequests.length > 0 ? (
         <div className="pr-list">
           {prWindow.visible.map((pr) => (
-            <PullRequestHoverCard pr={pr} key={pr.number}>
+            <div className="pr-workspace-row" key={pr.number}>
+              <PullRequestHoverCard pr={pr} key={pr.number}>
+                <Button
+                  className="pr-row"
+                  variant="unstyled"
+                  onClick={() => onReviewNumber(pr.number)}
+                  disabled={busy}
+                  type="button"
+                  aria-label={`Open pull request #${pr.number} ${pr.title}, ${lifecycleLabel(pr)}`}
+                >
+                  <span className="pr-number">#{pr.number}</span>
+                  <span className="pr-copy">
+                    <strong>{pr.title}</strong>
+                    <small>
+                      {pr.head} <span aria-hidden="true">→</span> {pr.base}
+                    </small>
+                  </span>
+                  <span className="pr-badges">
+                    <Badge variant={lifecycleVariant(pr)}>{lifecycleLabel(pr)}</Badge>
+                    <Badge variant={checksVariant(pr.checks)}>
+                      <ShieldCheck className="size-3" />
+                      {checkLabel(pr.checks)}
+                    </Badge>
+                    <Badge variant={reviewVariant(pr)}>{reviewLabel(pr)}</Badge>
+                  </span>
+                  <ChevronRight className="size-4" />
+                </Button>
+              </PullRequestHoverCard>
               <Button
-                className="pr-row"
-                variant="unstyled"
-                onClick={() => onRequest({ kind: 'pr', number: pr.number })}
+                key={`manage-${pr.number}`}
+                variant="ghost"
+                size="sm"
                 disabled={busy}
-                type="button"
-                aria-label={`Open pull request #${pr.number} ${pr.title}, ${lifecycleLabel(pr)}`}
+                onClick={() => onRequest({ kind: 'pr', number: pr.number })}
+                aria-label={`Manage pull request #${pr.number}`}
               >
-                <span className="pr-number">#{pr.number}</span>
-                <span className="pr-copy">
-                  <strong>{pr.title}</strong>
-                  <small>
-                    {pr.head} <span aria-hidden="true">→</span> {pr.base}
-                  </small>
-                </span>
-                <span className="pr-badges">
-                  <Badge variant={lifecycleVariant(pr)}>{lifecycleLabel(pr)}</Badge>
-                  <Badge variant={checksVariant(pr.checks)}>
-                    <ShieldCheck className="size-3" />
-                    {checkLabel(pr.checks)}
-                  </Badge>
-                  <Badge variant={reviewVariant(pr)}>{reviewLabel(pr)}</Badge>
-                </span>
-                <ChevronRight className="size-4" />
+                Manage #{pr.number}
               </Button>
-            </PullRequestHoverCard>
+            </div>
           ))}
           <ListWindowMore
             pageSize={LIST_PAGE_SIZE}

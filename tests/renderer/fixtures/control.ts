@@ -342,8 +342,16 @@ export function installFixtureControl(options: {
    * and it still carries the rows that host read.
    */
   const admittedAnswer = <T>(call: FixtureCall, produce: () => T): Promise<T> => {
-    const admitted = produce()
-    return answer(call, () => admitted)
+    let settled: () => T
+    try {
+      const admitted = produce()
+      settled = () => admitted
+    } catch (error) {
+      settled = () => {
+        throw error
+      }
+    }
+    return answer(call, settled)
   }
 
   /**
@@ -969,7 +977,7 @@ export function installFixtureControl(options: {
     },
     reviewHeadline: (number) => {
       record('reviewHeadline', [number])
-      return answer('reviewHeadline', () => {
+      return admittedAnswer('reviewHeadline', () => {
         const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         // A pull request carries only its own position; the layer list comes
@@ -987,6 +995,20 @@ export function installFixtureControl(options: {
             body: `${found.title}\n\nDeterministic fixture body for pull request #${number}.`,
           },
           rail: reviewRail(found, membership),
+          reviewers: {
+            state: found.reviewDecision ? 'available' : 'unavailable',
+            requested:
+              found.reviewDecision === 'REVIEW_REQUIRED'
+                ? [{ kind: 'user', name: 'fixture-reviewer' }]
+                : [],
+            reviews:
+              found.reviewDecision === 'APPROVED'
+                ? [{ login: 'fixture-reviewer', state: 'APPROVED', headOid: found.headOid ?? null }]
+                : [],
+            message: found.reviewDecision
+              ? ''
+              : 'Reviewer metadata is unavailable in this fixture.',
+          },
         }
         return value
       })

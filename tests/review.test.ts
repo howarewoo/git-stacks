@@ -59,6 +59,7 @@ import {
   readReviewFiles,
   resolveReviewAnchor,
   ReviewRevisionMovedError,
+  readReviewHeadline,
 } from '../src/main/review'
 import {
   adjacentReviewFileIndex,
@@ -796,6 +797,89 @@ async function reviewWorkspace(
   git('remote', 'add', 'origin', origin)
   return { repo, dispose: () => rm(root, { recursive: true, force: true }) }
 }
+
+test('headline reviewer reads distinguish complete, bounded, refused, and moved-head data', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const headOid = 'a'.repeat(40)
+  const connection = (nodes: unknown[], hasNextPage = false) => ({
+    nodes,
+    pageInfo: { hasNextPage },
+  })
+  const reviewers = {
+    headRefOid: headOid,
+    reviewRequests: connection([
+      { requestedReviewer: { login: 'ada' } },
+      { requestedReviewer: { slug: 'maintainers' } },
+    ]),
+    latestReviews: connection([
+      { author: { login: 'grace' }, state: 'APPROVED', commit: { oid: 'b'.repeat(40) } },
+    ]),
+  }
+  for (const scenario of [
+    { node: reviewers, expected: 'available' },
+    { node: { ...reviewers, reviewRequests: connection([], true) }, expected: 'partial' },
+    {
+      node: { ...reviewers, latestReviews: connection([{ author: null, state: 'APPROVED' }]) },
+      expected: 'partial',
+    },
+    {
+      node: {
+        ...reviewers,
+        latestReviews: connection([{ author: { login: 'grace' }, state: ['APPROVED'] }]),
+      },
+      expected: 'partial',
+    },
+    { node: { ...reviewers, headRefOid: 'c'.repeat(40) }, expected: 'unavailable' },
+    { node: null, expected: 'unavailable' },
+  ] as const) {
+    const { transport } = scriptedTransport([{ head: headOid, base: 'b'.repeat(40) }], [])
+    transport.paginate = async <T>() => [] as T[]
+    transport.graphql = async <T>(query: string, variables: Record<string, unknown>) => {
+      assert.equal(variables.owner, 'acme')
+      assert.equal(variables.name, 'widgets')
+      assert.equal(variables.number, 7)
+      if (query.includes('latestReviews')) {
+        assert.match(query, /reviewRequests\(first: 100\)/u)
+        assert.match(query, /latestReviews\(first: 100\)/u)
+        if (!scenario.node) throw new Error('Cannot query field latestReviews')
+        return { repository: { pullRequest: scenario.node } } as T
+      }
+      return {
+        repository: {
+          pullRequest: {
+            number: 7,
+            title: 'Review me',
+            url: 'https://github.com/acme/widgets/pull/7',
+            headRefName: 'feature',
+            headRefOid: headOid,
+            baseRefName: 'main',
+            isDraft: false,
+            state: 'OPEN',
+            body: 'Existing description',
+          },
+        },
+      } as T
+    }
+    setGitHubTransport(transport)
+    const headline = await readReviewHeadline(workspace.repo, 7)
+    assert.equal(headline.pullRequest.body, 'Existing description')
+    assert.equal(headline.reviewers.state, scenario.expected)
+    if (scenario.expected === 'available') {
+      assert.deepEqual(headline.reviewers.requested, [
+        { kind: 'user', name: 'ada' },
+        { kind: 'team', name: 'maintainers' },
+      ])
+      assert.equal(headline.reviewers.reviews[0].headOid, 'b'.repeat(40))
+      assert.equal(headline.reviewers.message, '')
+    } else assert.ok(headline.reviewers.message)
+    if (scenario.expected === 'unavailable') {
+      assert.deepEqual(headline.reviewers.requested, [])
+      assert.deepEqual(headline.reviewers.reviews, [])
+    }
+  }
+})
 
 test('a file set read while nothing moved is returned, tagged with the head it came from', async (t) => {
   const workspace = await reviewWorkspace()
