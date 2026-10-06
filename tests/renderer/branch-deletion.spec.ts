@@ -149,6 +149,54 @@ test.describe('Local branch deletion', () => {
     ).toBeDisabled()
   })
 
+  test('child warning resolves captured parent refs and excludes remote or unrelated children', async ({
+    page,
+  }) => {
+    const parents = await openSelection(page)
+    await page.evaluate(async (parents) => {
+      const snapshot = await window.desktop.refresh()
+      const remoteParent = {
+        ...parents[0],
+        name: `origin/${parents[0].name}`,
+        ref: `refs/remotes/origin/${parents[0].name}`,
+        remote: true,
+      }
+      const children = [
+        { name: 'short-parent', parent: parents[0].name, remote: false },
+        { name: 'qualified-parent', parent: remoteParent.name, remote: false },
+        { name: 'other-selected-parent', parent: parents[1].name, remote: false },
+        { name: 'unselected-parent', parent: parents[2].name, remote: false },
+        { name: 'missing-parent', parent: 'unavailable-parent', remote: false },
+        { name: 'remote-child', parent: parents[0].name, remote: true },
+      ]
+      window.fixture.pushSnapshot({
+        ...snapshot,
+        branches: [
+          ...snapshot.branches,
+          ...parents.map((branch) =>
+            branch.ref === parents[0].ref
+              ? { ...branch, upstream: remoteParent.name, upstreamRef: remoteParent.ref }
+              : branch,
+          ),
+          remoteParent,
+          ...children.map(({ name, parent, remote }) => ({
+            ...parents[0],
+            name: remote ? `origin/${name}` : name,
+            ref: remote ? `refs/remotes/origin/${name}` : `refs/heads/${name}`,
+            remote,
+            parent,
+          })),
+        ],
+      })
+    }, parents)
+    await settle(page)
+    await selectBranch(page, parents[0].name).check()
+    await selectBranch(page, parents[1].name).check()
+    await page.getByRole('button', { name: 'Delete selected (2)', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Delete local branches?', exact: true })
+    await expect(dialog.locator('.workflow-note')).toContainText(/\b3 local child branches\b/)
+  })
+
   test('merged-only failure stays in the confirmation with the same targets', async ({ page }) => {
     const branches = await openSelection(page)
     await selectBranch(page, branches[0].name).check()

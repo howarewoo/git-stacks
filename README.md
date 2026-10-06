@@ -252,6 +252,8 @@ refresh and make a fresh selection instead of deleting unseen work.
 
 All selected refs are deleted together in one Git reference transaction.
 Remote branches, pull requests, and child-branch parent records are unchanged.
+The child warning counts local branches whose recorded parent resolves to a
+selected ref; remote child branches are not included.
 Branch configuration is removed after deletion; if that cleanup fails, the error
 explicitly reports that the branches were already deleted.
 

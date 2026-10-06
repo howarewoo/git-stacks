@@ -492,11 +492,13 @@ function App() {
     repoPath: string
   } | null>(null)
   const deletingRemote = deleteTarget?.branches[0]?.remote === true
+  const deleteCount = deleteTarget?.branches.length ?? 0
+  const deleteNoun = deleteCount > 1 ? 'branches' : 'branch'
   const deleteActionType: GitAction['type'] = deletingRemote
-    ? deleteTarget?.branches.length === 1
+    ? deleteCount === 1
       ? 'deleteRemoteBranch'
       : 'deleteRemoteBranches'
-    : deleteTarget?.branches.length === 1
+    : deleteCount === 1
       ? 'deleteBranch'
       : 'deleteBranches'
   const deleteOpenerRef = React.useRef<HTMLElement | null>(null)
@@ -1575,13 +1577,7 @@ function App() {
           : { type: 'deleteBranches', branches, force: value.force }
       const success = await runAction(
         action,
-        remote
-          ? branches.length === 1
-            ? 'Delete remote branch'
-            : 'Delete remote branches'
-          : branches.length === 1
-            ? 'Delete branch'
-            : 'Delete branches',
+        `Delete ${remote ? 'remote ' : ''}${branches.length === 1 ? 'branch' : 'branches'}`,
       )
       if (success) {
         setDeleteTarget(null)
@@ -1899,16 +1895,16 @@ function App() {
     setActionError(null)
     setConflictPath(path)
   }
-  const deleteChildren = deleteTarget
-    ? allBranches.filter(
-        (branch) =>
-          !branch.remote &&
-          branch.parent &&
-          deleteTarget.branches.some(
-            (target) => branchByName.get(branch.parent!)?.ref === target.ref,
-          ),
-      )
-    : []
+  let deleteChildCount = 0
+  if (deleteTarget && !deletingRemote) {
+    const deletedRefs = new Set<string>()
+    for (const target of deleteTarget.branches) deletedRefs.add(target.ref)
+    for (const branch of allBranches) {
+      if (branch.remote || !branch.parent) continue
+      const parent = branchByName.get(branch.parent)
+      if (parent && deletedRefs.has(parent.ref)) deleteChildCount += 1
+    }
+  }
 
   const openBranchDialog = React.useCallback(() => {
     if (!snapshot) return
@@ -4103,20 +4099,14 @@ function App() {
         >
           <DialogHeader>
             <DialogTitle>
-              {deletingRemote
-                ? deleteTarget && deleteTarget.branches.length > 1
-                  ? 'Delete remote branches?'
-                  : 'Delete remote branch?'
-                : deleteTarget && deleteTarget.branches.length > 1
-                  ? 'Delete local branches?'
-                  : 'Delete local branch?'}
+              {`Delete ${deletingRemote ? 'remote' : 'local'} ${deleteNoun}?`}
             </DialogTitle>
             <DialogDescription>
               Delete{' '}
               <strong>
                 {deleteTarget?.branches.length === 1
                   ? deleteTarget.branches[0].name
-                  : `${deleteTarget?.branches.length ?? 0} selected ${deletingRemote ? 'remote' : 'local'} branches`}
+                  : `${deleteCount} selected ${deletingRemote ? 'remote' : 'local'} branches`}
               </strong>{' '}
               {deletingRemote
                 ? 'from the remote repository. Local branches remain. Open pull requests may close, and collaborators will need to prune their fetched refs.'
@@ -4138,15 +4128,15 @@ function App() {
               {deletingRemote ? (
                 <WarningNote>
                   Remote-only commits may become unreachable. This cannot be undone from the app.
-                  {deleteTarget && deleteTarget.branches.length > 1
+                  {deleteCount > 1
                     ? ' All selected branches must belong to one configured remote; deletion requires atomic push support.'
                     : null}
                   {' Changed tips stop deletion instead of deleting unseen work.'}
                 </WarningNote>
               ) : (
                 <p className="workflow-note">
-                  {deleteChildren.length > 0
-                    ? `${deleteChildren.length} local child branches use these parents. Deletion does not retarget those branches.`
+                  {deleteChildCount > 0
+                    ? `${deleteChildCount} local child branches use these parents. Deletion does not retarget those branches.`
                     : 'No local branches record these branches as their parents.'}
                 </p>
               )}
@@ -4217,13 +4207,7 @@ function App() {
                   }
                 >
                   <Trash2 aria-hidden="true" className="size-3.5" />
-                  {deletingRemote
-                    ? deleteTarget && deleteTarget.branches.length > 1
-                      ? `Delete ${deleteTarget.branches.length} remote branches`
-                      : 'Delete remote branch'
-                    : deleteTarget && deleteTarget.branches.length > 1
-                      ? `Delete ${deleteTarget.branches.length} branches`
-                      : 'Delete branch'}
+                  {`Delete ${deleteCount > 1 ? `${deleteCount} ` : ''}${deletingRemote ? 'remote ' : ''}${deleteNoun}`}
                 </Button>
               </WorkflowActions>
             </WorkflowFrame>
