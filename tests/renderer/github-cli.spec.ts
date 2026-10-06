@@ -207,6 +207,7 @@ test.describe('Required GitHub CLI status', () => {
     // and somebody else's comment, all read as this account.
     await expect(page.locator('.review-headline').getByText(FIXTURE_PR_TITLE)).toBeVisible()
     await expect(page.getByText('src/main/review.ts', { exact: true }).first()).toBeVisible()
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     await expect(
       page.getByText('Should this be re-read when the base moves, or is the head enough?'),
     ).toBeVisible()
