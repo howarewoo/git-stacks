@@ -1291,6 +1291,21 @@ test('a request GitHub rejected proves the mutation did not apply and is not lis
     'merge',
   )
   assert.equal(unknownRemoteOutcome(new Error('fatal: not a git repository')), null)
+  const remoteDelete: GitAction = {
+    type: 'deleteRemoteBranches',
+    branches: [{ ref: 'refs/remotes/origin/feature', expectedOid: 'a'.repeat(40) }],
+  }
+  const reason = 'fatal: unable to access remote: Connection timed out'
+  const pending = ledger.recordFailure(remoteDelete, new Error(reason))
+  assert.equal(pending?.kind, 'delete')
+  assert.equal(pending?.reason, reason)
+  assert.equal(
+    ledger.recordFailure(
+      remoteDelete,
+      new Error('fatal: the receiving end does not support --atomic push'),
+    ),
+    null,
+  )
 })
 
 test('only actions that change remote state are treated as high impact', () => {

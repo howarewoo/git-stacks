@@ -334,25 +334,19 @@ export function DialogSpecimen() {
         <DialogFrame
           composition="destructive"
           title="Delete remote branch"
-          description="The action names its target, states the real remote tip, and keeps the loss of work explicit."
+          description="Confirm the captured remote ref and tip. No branch-name typing is required."
         >
           <OperationContext
-            title="main"
+            title="origin/cleanup"
             description="Delete this branch from its remote repository. Open PRs may close. Local branches and child relationships are not changed. A changed remote tip stops deletion."
             facts={[
-              { label: 'Remote ref', value: 'refs/heads/main', code: true },
+              { label: 'Remote ref', value: 'refs/remotes/origin/cleanup', code: true },
               { label: 'Expected remote tip', value: '111111111111', code: true },
             ]}
           />
           <WarningNote>
             Remote-only commits may become unreachable. This cannot be undone from the app.
           </WarningNote>
-          <TypedConfirmation
-            id="specimen-delete"
-            value="main"
-            target="main"
-            onChange={() => undefined}
-          />
           <WorkflowActions>
             <Button variant="secondary">Cancel</Button>
             <Button variant="danger">

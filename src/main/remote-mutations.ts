@@ -39,6 +39,7 @@ export function classifyRemoteMutation(action: GitAction): RemoteMutationKind | 
     case 'forcePush':
       return 'force-push'
     case 'deleteRemoteBranch':
+    case 'deleteRemoteBranches':
     case 'unstackNativeStack':
       return 'delete'
     case 'createPr':

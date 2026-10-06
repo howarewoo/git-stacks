@@ -947,6 +947,7 @@ export type GitAction =
   | { type: 'switch'; ref: string; carry?: boolean }
   | { type: 'createBranch'; name: string; parent: string }
   | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
+  | { type: 'deleteBranches'; branches: { ref: string; expectedOid: string }[]; force: boolean }
   | { type: 'stage' | 'unstage'; paths: string[] }
   | {
       type: 'commit'
@@ -964,6 +965,7 @@ export type GitAction =
   | { type: 'createPr'; title: string; body: string; base: string; draft: boolean }
   | { type: 'renameBranch'; ref: string; name: string }
   | { type: 'deleteRemoteBranch'; ref: string; expectedOid: string }
+  | { type: 'deleteRemoteBranches'; branches: { ref: string; expectedOid: string }[] }
   | { type: 'setUpstream'; ref: string; upstream: string | null }
   | { type: 'merge'; ref: string; expectedHead: string; expectedHeadRef: string }
   | {

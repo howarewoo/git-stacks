@@ -72,7 +72,7 @@ import {
 
 export type RunAction = (action: GitAction, label: string) => Promise<boolean>
 export type WorkflowRequest =
-  | { kind: 'rename' | 'parent' | 'upstream' | 'deleteRemote'; branch: Branch }
+  | { kind: 'rename' | 'parent' | 'upstream'; branch: Branch }
   | { kind: 'pull' | 'merge' | 'stash' | 'forcePush' }
   | { kind: 'commitAction'; commit: Commit; mode: 'cherryPick' | 'revert' }
   | { kind: 'stack'; branch: string; operation: StackKind }
@@ -199,7 +199,7 @@ function initialWorkflowName(request: WorkflowRequest, snapshot: RepositorySnaps
 
 function workflowComposition(request: WorkflowRequest): WorkflowComposition {
   if (request.kind === 'confirm') return request.destructive ? 'destructive' : 'form'
-  if (request.kind === 'forcePush' || request.kind === 'deleteRemote') return 'destructive'
+  if (request.kind === 'forcePush') return 'destructive'
   if (request.kind === 'stack') return request.operation === 'merge' ? 'destructive' : 'reviewed'
   // Removing a layer deletes a local branch and can close its pull request; the other two
   // surgeries only rewrite the order.
@@ -220,8 +220,6 @@ function requestActionType(request: WorkflowRequest): GitAction['type'] {
       return 'setParent'
     case 'upstream':
       return 'setUpstream'
-    case 'deleteRemote':
-      return 'deleteRemoteBranch'
     case 'commitAction':
       return request.mode
     case 'stack':
@@ -1100,7 +1098,6 @@ export function WorkflowDialog({
             : (
                 {
                   rename: 'Rename local branch',
-                  deleteRemote: 'Delete remote branch',
                   parent: 'Set stack parent',
                   upstream: 'Set upstream',
                   pull: 'Pull changes',
@@ -1121,31 +1118,29 @@ export function WorkflowDialog({
         ? request.description
         : request.kind === 'rename'
           ? 'Rename the local branch and update its recorded children. Remote branch names and PRs stay unchanged.'
-          : request.kind === 'deleteRemote'
-            ? 'Delete this branch from its remote repository. Open PRs may close. Local branches and child relationships are not changed. A changed remote tip stops deletion.'
-            : request.kind === 'parent'
-              ? 'Record the intended parent without rewriting commits. Preview Restack next to move this branch and its descendants.'
-              : request.kind === 'upstream'
-                ? 'Choose the remote branch used by Pull and Push. This does not change the stack parent.'
-                : request.kind === 'pull'
-                  ? `Integrate the upstream of ${captured.current.branch ?? 'the current branch'}. Fast-forward only never creates or rewrites commits.`
-                  : request.kind === 'merge'
-                    ? `Merge a selected branch into ${captured.current.branch ?? 'the current branch'}. Git stops if conflicts need attention.`
-                    : request.kind === 'stash'
-                      ? 'Save work without creating a commit. Ignored files are not included.'
-                      : request.kind === 'forcePush'
-                        ? 'Replace remote history only if its tip still matches this preview. Someone else’s newer push will be rejected.'
-                        : request.kind === 'commitAction'
-                          ? `${request.commit.subject} · ${request.commit.oid.slice(0, 10)} → ${captured.current.branch ?? 'current branch'}`
-                          : request.kind === 'pr'
-                            ? 'Manage this pull request, or open GitHub for the full review discussion.'
-                            : request.kind === 'stack' && request.operation === 'restack'
-                              ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
-                              : request.kind === 'stack' && request.operation === 'publish'
-                                ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
-                                : request.kind === 'stack' && request.operation === 'sync'
-                                  ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
-                                  : 'GitHub merges the reviewed pull requests itself, bottom-to-top, and this dialog follows the result. Local branches are never retargeted or deleted for you; restack and publish the rest afterwards.'
+          : request.kind === 'parent'
+            ? 'Record the intended parent without rewriting commits. Preview Restack next to move this branch and its descendants.'
+            : request.kind === 'upstream'
+              ? 'Choose the remote branch used by Pull and Push. This does not change the stack parent.'
+              : request.kind === 'pull'
+                ? `Integrate the upstream of ${captured.current.branch ?? 'the current branch'}. Fast-forward only never creates or rewrites commits.`
+                : request.kind === 'merge'
+                  ? `Merge a selected branch into ${captured.current.branch ?? 'the current branch'}. Git stops if conflicts need attention.`
+                  : request.kind === 'stash'
+                    ? 'Save work without creating a commit. Ignored files are not included.'
+                    : request.kind === 'forcePush'
+                      ? 'Replace remote history only if its tip still matches this preview. Someone else’s newer push will be rejected.'
+                      : request.kind === 'commitAction'
+                        ? `${request.commit.subject} · ${request.commit.oid.slice(0, 10)} → ${captured.current.branch ?? 'current branch'}`
+                        : request.kind === 'pr'
+                          ? 'Manage this pull request, or open GitHub for the full review discussion.'
+                          : request.kind === 'stack' && request.operation === 'restack'
+                            ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
+                            : request.kind === 'stack' && request.operation === 'publish'
+                              ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
+                              : request.kind === 'stack' && request.operation === 'sync'
+                                ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
+                                : 'GitHub merges the reviewed pull requests itself, bottom-to-top, and this dialog follows the result. Local branches are never retargeted or deleted for you; restack and publish the rest afterwards.'
 
   const readProgress = async () => {
     if (request.kind !== 'stack' || request.operation !== 'publish') return
@@ -1209,13 +1204,11 @@ export function WorkflowDialog({
   const confirmationTargetFor = (values: WorkflowFormValues): string | null =>
     request.kind === 'forcePush'
       ? (push?.branch ?? null)
-      : request.kind === 'deleteRemote'
-        ? request.branch.name
-        : request.kind === 'stack' && values.allowForce
-          ? request.branch
-          : request.kind === 'surgery' && values.allowForce
-            ? (surgery?.forcePushes[0] ?? null)
-            : null
+      : request.kind === 'stack' && values.allowForce
+        ? request.branch
+        : request.kind === 'surgery' && values.allowForce
+          ? (surgery?.forcePushes[0] ?? null)
+          : null
 
   /**
    * The exact action payload a set of form values describes, or `null` while the
@@ -1277,8 +1270,6 @@ export function WorkflowDialog({
     if (request.kind === 'pr')
       return { kind: 'pr', number: request.number, title: prTitle, body, draft: prDraft }
     if (request.kind === 'forcePush') return { kind: 'forcePush', push, confirmation }
-    if (request.kind === 'deleteRemote')
-      return { kind: 'deleteRemote', branch: request.branch, confirmation }
     if (request.kind === 'rename') return { kind: 'rename', branch: request.branch, name }
     if (request.kind === 'parent') return { kind: 'parent', branch: request.branch, name }
     if (request.kind === 'upstream') return { kind: 'upstream', branch: request.branch, name }
@@ -1356,9 +1347,7 @@ export function WorkflowDialog({
       confirmationTarget: confirmationTargetFor(values),
       confirmation: values.confirmation,
       allowForce: values.allowForce,
-      expectedOidMissing:
-        (request.kind === 'deleteRemote' && !request.branch.oid) ||
-        (request.kind === 'forcePush' && !push),
+      expectedOidMissing: request.kind === 'forcePush' && !push,
       requiresName:
         ['rename', 'parent', 'merge'].includes(request.kind) ||
         (request.kind === 'surgery' && request.request.kind === 'insert'),
@@ -1431,40 +1420,31 @@ export function WorkflowDialog({
       : []
 
   const contextFacts: ContextFact[] =
-    request.kind === 'deleteRemote'
+    request.kind === 'forcePush' && push
       ? [
-          { label: 'Remote ref', value: request.branch.ref, code: true },
           {
-            label: 'Expected remote tip',
-            value: request.branch.oid?.slice(0, 12) ?? 'Unavailable — fetch and try again',
+            label: 'Destination',
+            value: `${push.remote}/${push.destination.replace(/^refs\/heads\//, '')}`,
             code: true,
           },
+          {
+            label: 'Expected remote tip',
+            value: push.remoteOid?.slice(0, 12) ?? 'New branch',
+            code: true,
+          },
+          { label: 'Local tip', value: push.localOid.slice(0, 12), code: true },
         ]
-      : request.kind === 'forcePush' && push
+      : request.kind === 'merge' && captured.current.branch
         ? [
-            {
-              label: 'Destination',
-              value: `${push.remote}/${push.destination.replace(/^refs\/heads\//, '')}`,
-              code: true,
-            },
-            {
-              label: 'Expected remote tip',
-              value: push.remoteOid?.slice(0, 12) ?? 'New branch',
-              code: true,
-            },
-            { label: 'Local tip', value: push.localOid.slice(0, 12), code: true },
+            { label: 'Target branch', value: captured.current.branch },
+            { label: 'Current tip', value: captured.current.head ?? 'Unavailable', code: true },
           ]
-        : request.kind === 'merge' && captured.current.branch
+        : request.kind === 'rename' && 'branch' in request
           ? [
-              { label: 'Target branch', value: captured.current.branch },
-              { label: 'Current tip', value: captured.current.head ?? 'Unavailable', code: true },
+              { label: 'Local ref', value: request.branch.ref, code: true },
+              { label: 'Current name', value: request.branch.name },
             ]
-          : request.kind === 'rename' && 'branch' in request
-            ? [
-                { label: 'Local ref', value: request.branch.ref, code: true },
-                { label: 'Current name', value: request.branch.name },
-              ]
-            : []
+          : []
 
   const syncOffer = request.kind === 'stack' ? (preview?.sync ?? null) : null
 
@@ -1548,27 +1528,6 @@ export function WorkflowDialog({
                     </Field>
                   )}
                 </form.Field>
-              ) : null}
-              {request.kind === 'deleteRemote' ? (
-                <>
-                  <WarningNote>
-                    Remote-only commits may become unreachable. This cannot be undone from the app.
-                  </WarningNote>
-                  <form.Field name="confirmation">
-                    {(field) => (
-                      <TypedConfirmation
-                        id="workflow-confirm"
-                        value={field.state.value}
-                        target={request.branch.name}
-                        onChange={(value) => {
-                          markEdited()
-                          field.handleChange(value)
-                        }}
-                        disabled={locked}
-                      />
-                    )}
-                  </form.Field>
-                </>
               ) : null}
               {request.kind === 'parent' || request.kind === 'merge' ? (
                 <>
