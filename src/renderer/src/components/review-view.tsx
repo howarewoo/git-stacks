@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowUpRight,
   ChevronDown,
@@ -17,7 +18,6 @@ import type {
   ReviewComparison,
   ReviewDiffMode,
   ReviewFile,
-  ReviewFileSet,
   ReviewHeadline,
   ReviewStackRail,
   ReviewViewedRecord,
@@ -48,27 +48,19 @@ import { SegmentedControl } from './ui/segmented-control'
 import { EmptyState, InlineAlert } from './ui/surface'
 import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pull-request-state'
 import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
-import { createRequestGate } from '../lib/request-gate'
 import { cn } from '../lib/utils'
 import { claimsRovingKey, rovingAction, rovingTabIndex, rovingTarget } from '../lib/tree-navigation'
-import { ReviewConversation, type ReviewSelection } from './review-conversation'
+import {
+  ReviewConversation,
+  ReviewQueryIdentity,
+  type ReviewSelection,
+} from './review-conversation'
 import { sameReviewComparison } from '../../../shared/review'
-import { withReviewDraft } from '../../../shared/review-threads'
-import type {
-  ReviewDraft,
-  ReviewDraftRecord,
-  ReviewDraftResolution,
-  ReviewThreadRead,
-} from '../../../shared/review-threads'
+import type { ReviewDraft, ReviewDraftRecord } from '../../../shared/review-threads'
 import { ReviewDiff } from './review-diff'
-import type {
-  ReviewHistory,
-  ReviewHistoryDiff,
-  ReviewSnapshot,
-} from '../../../shared/review-snapshots'
+import type { ReviewHistory } from '../../../shared/review-snapshots'
 import { reviewHistoryUnchangedPaths, reviewSnapshotLabel } from '../../../shared/review-snapshots'
 import { PullRequestChecksPanel } from './check-details'
-import type { PullRequestChecksReport } from '../../../shared/pull-request-checks'
 
 /**
  * The four review commands the shell's global shortcuts dispatch. They are
@@ -120,86 +112,198 @@ export function ReviewView({
   onManageNumber: (number: number) => void
   commands: React.MutableRefObject<ReviewCommands | null>
 }) {
-  const [headline, setHeadline] = React.useState<ReviewHeadline | null>(null)
-  const [files, setFiles] = React.useState<ReviewFileSet | null>(null)
-  const [commits, setCommits] = React.useState<ReviewCommitSet | null>(null)
-  const [viewed, setViewed] = React.useState<ReviewViewedRecord | null>(null)
+  const queryClient = useQueryClient()
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null)
   const [mode, setMode] = React.useState<ReviewDiffMode>('unified')
-  const [threadRead, setThreadRead] = React.useState<ReviewThreadRead | null>(null)
-  const [threadState, setThreadState] = React.useState<Stage>('idle')
-  const [threadError, setThreadError] = React.useState<string | null>(null)
-  const [draftRecord, setDraftRecord] = React.useState<ReviewDraftRecord | null>(null)
-  const [resolutions, setResolutions] = React.useState<ReviewDraftResolution[]>([])
   const [selection, setSelection] = React.useState<ReviewSelection | null>(null)
   const [hideWhitespace, setHideWhitespace] = React.useState(false)
   const [search, setSearch] = React.useState('')
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<string>>(new Set())
-  const [headlineState, setHeadlineState] = React.useState<Stage>('idle')
-  const [filesState, setFilesState] = React.useState<Stage>('idle')
-  const [commitsState, setCommitsState] = React.useState<Stage>('idle')
-  const [error, setError] = React.useState<string | null>(null)
+  const [mutationError, setError] = React.useState<string | null>(null)
   const [reloadToken, setReloadToken] = React.useState(0)
-  const [history, setHistory] = React.useState<ReviewHistory | null>(null)
-  const [historyState, setHistoryState] = React.useState<Stage>('idle')
   const [activeSnapshotOid, setActiveSnapshotOid] = React.useState<string | null>(null)
-  const [historyDiff, setHistoryDiff] = React.useState<ReviewHistoryDiff | null>(null)
-  const [historyDiffState, setHistoryDiffState] = React.useState<Stage>('idle')
   const [hideUnchanged, setHideUnchanged] = React.useState(true)
-  const [clearingHistory, setClearingHistory] = React.useState(false)
   const [pane, setPane] = React.useState<'code' | 'about' | 'checks' | 'commits' | 'conversation'>(
     'code',
   )
-  const [checks, setChecks] = React.useState<PullRequestChecksReport | null>(null)
-  const [checksLoading, setChecksLoading] = React.useState(false)
-  const [checksError, setChecksError] = React.useState<string | null>(null)
   const [checksReload, setChecksReload] = React.useState(0)
   const [checksWatching, setChecksWatching] = React.useState(false)
-  const [rerunningRunId, setRerunningRunId] = React.useState<number | null>(null)
-  const checksGate = React.useRef(createRequestGate())
-  const rerunGate = React.useRef(createRequestGate())
-
-  const headlineGate = React.useRef(createRequestGate())
-  const filesGate = React.useRef(createRequestGate())
-  const commitsGate = React.useRef(createRequestGate())
-  const threadsGate = React.useRef(createRequestGate())
-  /**
-   * How many times a draft has been edited in this view. The journal read is
-   * asynchronous and this is not, so a read that began before an edit is
-   * answering for an older state of the drafts; the counter is how that read
-   * learns it is no longer the newest thing to have happened to them.
-   */
+  const identity = JSON.stringify([authority, number])
+  // The shell's authority includes repository path and remote, as well as CLI credentials.
+  const identityRef = React.useRef(identity)
+  identityRef.current = identity
+  const writeLocks = React.useRef(new Set<string>())
+  const rootKey = ['review', authority, number, reloadToken] as const
+  const headlineQuery = useQuery({
+    queryKey: [...rootKey, 'headline'],
+    enabled: number !== null && Boolean(desktop?.reviewHeadline),
+    queryFn: ({ signal }) => {
+      signal.addEventListener('abort', () => void desktop?.cancel?.('review-headline'), {
+        once: true,
+      })
+      return desktop!.reviewHeadline!(number!, 'review-headline')
+    },
+    structuralSharing: false,
+    // A refresh retires reads, not the same pull request's composition or writes.
+    placeholderData: (previous, query) =>
+      query?.queryKey[1] === authority && query.queryKey[2] === number ? previous : undefined,
+  })
+  const headline = headlineQuery.data ?? null
+  const revision = [headline?.pullRequest.headOid, headline?.pullRequest.base]
+  const filesQuery = useQuery({
+    queryKey: [...rootKey, 'files', ...revision],
+    enabled: Boolean(headline && desktop?.reviewFiles),
+    queryFn: ({ signal }) => {
+      signal.addEventListener('abort', () => void desktop?.cancel?.('review-files'), { once: true })
+      return desktop!.reviewFiles!(number!, 'review-files')
+    },
+    placeholderData: (previous, query) =>
+      query?.queryKey[1] === authority && query.queryKey[2] === number ? previous : undefined,
+  })
+  const commitsQuery = useQuery({
+    queryKey: [...rootKey, 'commits', ...revision],
+    enabled: Boolean(headline && desktop?.reviewCommits),
+    queryFn: ({ signal }) => {
+      signal.addEventListener('abort', () => void desktop?.cancel?.('review-commits'), {
+        once: true,
+      })
+      return desktop!.reviewCommits!(number!, 'review-commits')
+    },
+  })
+  const historyQuery = useQuery({
+    queryKey: [...rootKey, 'history', ...revision],
+    enabled: Boolean(headline && desktop?.reviewHistory),
+    queryFn: ({ signal }) => {
+      signal.addEventListener('abort', () => void desktop?.cancel?.('review-history'), {
+        once: true,
+      })
+      return desktop!.reviewHistory!(number!, 'review-history')
+    },
+  })
+  const historyDiffQuery = useQuery({
+    queryKey: [...rootKey, 'history-diff', ...revision, activeSnapshotOid],
+    enabled: Boolean(headline && activeSnapshotOid && desktop?.reviewHistoryDiff),
+    queryFn: ({ signal }) => {
+      signal.addEventListener('abort', () => void desktop?.cancel?.('review-history-diff'), {
+        once: true,
+      })
+      return desktop!.reviewHistoryDiff!(number!, activeSnapshotOid!, 'review-history-diff')
+    },
+  })
+  const threadsQuery = useQuery({
+    queryKey: [...rootKey, 'threads', ...revision],
+    enabled: Boolean(headline && desktop?.reviewThreads),
+    queryFn: ({ signal }) => {
+      signal.addEventListener('abort', () => void desktop?.cancel?.('review-threads'), {
+        once: true,
+      })
+      return desktop!.reviewThreads!(number!, 'review-threads')
+    },
+  })
+  const draftsKey = ['review', authority, number, 'drafts'] as const
   const draftEdits = React.useRef(0)
-  const historyGate = React.useRef(createRequestGate())
-  const historyDiffGate = React.useRef(createRequestGate())
-
-  React.useEffect(() => {
-    setChecks(null)
-    setChecksError(null)
-    const claim = checksGate.current
-    claim.reset()
-    if (!headline || !desktop?.pullRequestChecks) return
-    const ticket = claim.claim()
-    setChecksLoading(true)
-    void desktop
-      .pullRequestChecks(headline.pullRequest.number, {
-        headSha: headline.pullRequest.headOid ?? null,
-        base: headline.pullRequest.base,
+  const pendingDraftWrites = React.useRef(0)
+  const draftsQuery = useQuery({
+    queryKey: draftsKey,
+    enabled: Boolean(headline && desktop?.reviewDrafts),
+    queryFn: async ({ signal }) => {
+      // A refresh must not replace an edit whose journal write is still pending.
+      signal.throwIfAborted()
+      const editsAtStart = draftEdits.current
+      const writeAtStart = pendingDraftWrites.current > 0
+      const record = await desktop!.reviewDrafts!(number!)
+      if (writeAtStart || pendingDraftWrites.current > 0 || editsAtStart !== draftEdits.current) {
+        const current = queryClient.getQueryData<ReviewDraftRecord | null>(draftsKey)
+        if (current !== undefined) return current
+      }
+      return record
+    },
+  })
+  const viewedKey = [...rootKey, 'viewed', ...revision]
+  const viewedQuery = useQuery({
+    queryKey: viewedKey,
+    enabled: Boolean(headline && desktop?.reviewViewed),
+    queryFn: ({ signal }) => {
+      signal.throwIfAborted()
+      return desktop!.reviewViewed!(number!)
+    },
+  })
+  const files = filesQuery.data ?? null
+  const commits = commitsQuery.data ?? null
+  const history = historyQuery.data ?? null
+  const historyDiff = historyDiffQuery.data ?? null
+  const threadRead = threadsQuery.data ?? null
+  const draftRecord = draftsQuery.data ?? null
+  const viewed = viewedQuery.data ?? null
+  const draftVersion = React.useRef({ record: draftRecord, generation: 0 })
+  if (draftVersion.current.record !== draftRecord) {
+    draftVersion.current = { record: draftRecord, generation: draftVersion.current.generation + 1 }
+  }
+  const resolutionsQuery = useQuery({
+    queryKey: [...rootKey, 'draft-resolutions', files?.comparison, draftVersion.current.generation],
+    enabled: Boolean(
+      headline && files && draftRecord?.drafts.length && desktop?.reviewResolveDrafts,
+    ),
+    queryFn: ({ signal }) => {
+      signal.throwIfAborted()
+      return desktop!.reviewResolveDrafts!(number!, draftRecord!.drafts)
+    },
+  })
+  const resolutions = resolutionsQuery.data ?? []
+  const checksKey = [...rootKey, 'checks', ...revision, checksReload]
+  const checksQuery = useQuery({
+    queryKey: checksKey,
+    enabled: Boolean(headline && desktop?.pullRequestChecks),
+    queryFn: ({ signal }) => {
+      signal.throwIfAborted()
+      return desktop!.pullRequestChecks!(number!, {
+        headSha: headline!.pullRequest.headOid ?? null,
+        base: headline!.pullRequest.base,
         force: checksReload > 0,
       })
-      .then((report) => {
-        if (claim.current(ticket)) setChecks(report)
-      })
-      .catch((cause) => {
-        if (claim.current(ticket)) setChecksError(readableError(cause))
-      })
-      .finally(() => {
-        if (claim.current(ticket)) setChecksLoading(false)
-      })
-    return () => {
-      claim.reset()
-    }
-  }, [authority, desktop, headline, checksReload])
+    },
+  })
+  const checks = checksQuery.data ?? null
+  const checksLoading = checksQuery.isFetching
+  const [rerunError, setRerunError] = React.useState<string | null>(null)
+  const checksError = rerunError ?? (checksQuery.error ? readableError(checksQuery.error) : null)
+  const stage = (query: { isFetching: boolean; isError: boolean; data: unknown }): Stage =>
+    query.isFetching
+      ? 'loading'
+      : query.isError
+        ? 'failed'
+        : query.data !== undefined
+          ? 'ready'
+          : 'idle'
+  const headlineState = stage(headlineQuery)
+  const filesState = stage(filesQuery)
+  const commitsState = stage(commitsQuery)
+  const historyState = stage(historyQuery)
+  const historyDiffState = stage(historyDiffQuery)
+  const threadState = stage(threadsQuery)
+  const threadError = threadsQuery.error ? readableError(threadsQuery.error) : null
+  const readError = headlineQuery.error ?? filesQuery.error ?? historyDiffQuery.error
+  const error = mutationError ?? (readError ? readableError(readError) : null)
+  const openExternalMutation = useMutation({
+    mutationKey: ['review', authority, number, 'open-external'],
+    mutationFn: (url: string) => desktop!.openExternal(url),
+    retry: false,
+  })
+
+  React.useEffect(() => {
+    setSelection(null)
+    setSelectedPath(null)
+    setActiveSnapshotOid(null)
+    setChecksWatching(false)
+    setError(null)
+    setRerunError(null)
+    writeLocks.current.clear()
+    draftEdits.current += 1
+  }, [identity])
+  React.useEffect(() => {
+    // Numeric addresses are meaningful only in the comparison they were picked.
+    setSelection(null)
+  }, [files?.comparison.headOid, files?.comparison.baseOid, files?.comparison.baseRef])
   React.useEffect(() => {
     if (!checksWatching || pane !== 'checks') return
     const timer = setInterval(() => setChecksReload((value) => value + 1), 10_000)
@@ -207,330 +311,97 @@ export function ReviewView({
   }, [checksWatching, pane])
 
   React.useEffect(() => {
-    const claim = rerunGate.current
-    claim.reset()
-    setRerunningRunId(null)
-    return () => {
-      claim.reset()
-    }
-  }, [authority, headline])
+    if (reloadToken > 0) void queryClient.invalidateQueries({ queryKey: draftsKey, exact: true })
+  }, [authority, number, reloadToken, queryClient])
 
+  const rerunMutation = useMutation({
+    mutationKey: [...rootKey, 'rerun', ...revision],
+    mutationFn: (runId: number) => desktop!.rerunPullRequestCheck!(number!, runId),
+    retry: false,
+  })
+  const rerunningRunId = rerunMutation.isPending ? (rerunMutation.variables ?? null) : null
   const rerunCheck = async (runId: number | null) => {
-    if (!headline || !desktop?.rerunPullRequestCheck || runId === null) return
-    const claim = rerunGate.current
-    const ticket = claim.claim()
-    setRerunningRunId(runId)
+    if (
+      !headline ||
+      !desktop?.rerunPullRequestCheck ||
+      runId === null ||
+      writeLocks.current.has('rerun')
+    )
+      return
+    const owner = identity
+    writeLocks.current.add('rerun')
+    setRerunError(null)
     try {
-      const report = await desktop.rerunPullRequestCheck(headline.pullRequest.number, runId)
-      if (claim.current(ticket)) setChecks(report)
+      await queryClient.cancelQueries({ queryKey: checksKey, exact: true })
+      const report = await rerunMutation.mutateAsync(runId)
+      if (identityRef.current === owner) queryClient.setQueryData(checksKey, report)
     } catch (cause) {
-      if (claim.current(ticket)) setChecksError(readableError(cause))
+      if (identityRef.current === owner) setRerunError(readableError(cause))
     } finally {
-      if (claim.current(ticket)) setRerunningRunId(null)
+      if (identityRef.current === owner) writeLocks.current.delete('rerun')
     }
   }
-  // Progressive loading: the headline answers first, and only then are the files
-  // and commits requested. Each stage carries its own request id so leaving for
-  // another pull request cancels the read that is now obsolete. The CLI
-  // authority is a dependency for the same reason: one authority's pull request
-  // number can be another account's pull request, so the number on its own
-  // cannot say the read on screen is still this view's.
-  React.useEffect(() => {
-    const claim = headlineGate.current
-    claim.reset()
-    setHeadline(null)
-    setError(null)
-    setThreadRead(null)
-    setThreadError(null)
-    setThreadState('idle')
-    setDraftRecord(null)
-    setSelection(null)
-    setViewed(null)
-    setResolutions([])
-    setFilesState('idle')
-    setCommitsState('idle')
-    setChecksWatching(false)
-    setRerunningRunId(null)
-    setFiles(null)
-    setCommits(null)
-    setSelectedPath(null)
-    setHistory(null)
-    setActiveSnapshotOid(null)
-    setHistoryDiff(null)
-    setClearingHistory(false)
-    if (desktop?.reviewHeadline === undefined || number === null) {
-      setHeadlineState('idle')
-      return
-    }
-    setHeadlineState('loading')
-    const ticket = claim.claim()
-    void desktop
-      .reviewHeadline(number, 'review-headline')
-      .then((value) => {
-        if (!claim.current(ticket)) return
-        setHeadline(value)
-        setHeadlineState('ready')
-      })
-      .catch((cause) => {
-        if (!claim.current(ticket)) return
-        setError(readableError(cause))
-        setHeadlineState('failed')
-      })
-    return () => {
-      claim.reset()
-      void desktop.cancel?.('review-headline')
-    }
-  }, [authority, desktop, number, reloadToken])
-
-  // The comment authorities retire with the credential that read them, on the
-  // authority's own change rather than when a number happens to move: the
-  // threads, the viewed paths, and the drafts journalled beside them were all
-  // read as this authority, and pending words belong to the conversation they
-  // were written into. Nothing is deleted — the journal read brings them back
-  // under whichever authority owns them next — so a reviewer's own unsent
-  // words survive the switch on disk even though they leave this screen.
-  const authorityRef = React.useRef(authority)
-  React.useEffect(() => {
-    if (authorityRef.current === authority) return
-    authorityRef.current = authority
-    threadsGate.current.reset()
-    setThreadRead(null)
-    setThreadState('idle')
-    setViewed(null)
-    setDraftRecord(null)
-    setResolutions([])
-    setSelection(null)
-    // A draft composed against the retired pull request must not silence the
-    // journal read that would restore it.
-    draftEdits.current += 1
-    return () => {
-      void desktop?.cancel?.('review-threads')
-    }
-  }, [authority, desktop])
-
-  React.useEffect(() => {
-    if (!headline || desktop?.reviewFiles === undefined) return
-    const claim = filesGate.current
-    claim.reset()
-    setFilesState('loading')
-    const ticket = claim.claim()
-    void desktop
-      .reviewFiles?.(headline.pullRequest.number, 'review-files')
-      .then((value) => {
-        if (!claim.current(ticket)) return
-        setFiles(value)
-        setFilesState('ready')
-        setSelectedPath(value.files[0]?.path ?? null)
-      })
-      .catch((cause) => {
-        if (!claim.current(ticket)) return
-        setError(readableError(cause))
-        setFilesState('failed')
-      })
-    return () => {
-      claim.reset()
-      void desktop.cancel?.('review-files')
-    }
-  }, [desktop, headline, reloadToken])
-
-  React.useEffect(() => {
-    if (!headline || desktop?.reviewHistory === undefined) return
-    const claim = historyGate.current
-    claim.reset()
-    setHistoryState('loading')
-    const ticket = claim.claim()
-    void desktop
-      .reviewHistory?.(headline.pullRequest.number, 'review-history')
-      .then((value) => {
-        if (!claim.current(ticket)) return
-        setHistory(value)
-        setHistoryState('ready')
-      })
-      .catch(() => {
-        if (!claim.current(ticket)) return
-        setHistory(null)
-        setHistoryState('failed')
-      })
-    return () => {
-      claim.reset()
-      void desktop.cancel?.('review-history')
-    }
-  }, [desktop, headline, reloadToken])
-
-  React.useEffect(() => {
-    const claim = historyDiffGate.current
-    claim.reset()
-    setHistoryDiff(null)
-    if (!headline || !activeSnapshotOid || desktop?.reviewHistoryDiff === undefined) {
-      setHistoryDiffState('idle')
-      return
-    }
-    setHistoryDiffState('loading')
-    const ticket = claim.claim()
-    void desktop
-      .reviewHistoryDiff?.(headline.pullRequest.number, activeSnapshotOid, 'review-history-diff')
-      .then((value) => {
-        if (!claim.current(ticket)) return
-        setHistoryDiff(value)
-        setHistoryDiffState('ready')
-      })
-      .catch((cause) => {
-        if (!claim.current(ticket)) return
-        setHistoryDiff(null)
-        setHistoryDiffState('failed')
-        setError(readableError(cause))
-      })
-    return () => {
-      claim.reset()
-      void desktop.cancel?.('review-history-diff')
-    }
-  }, [activeSnapshotOid, desktop, headline, reloadToken])
-
-  const handleClearHistory = React.useCallback(async () => {
-    if (!headline || !desktop?.reviewClearHistory) return
-    const claim = historyGate.current
-    claim.reset()
-    const ticket = claim.claim()
-    setClearingHistory(true)
+  const clearHistoryMutation = useMutation({
+    mutationKey: [...rootKey, 'clear-history'],
+    mutationFn: () => desktop!.reviewClearHistory!(number!),
+    retry: false,
+  })
+  const clearingHistory = clearHistoryMutation.isPending
+  const handleClearHistory = async () => {
+    if (!headline || !desktop?.reviewClearHistory || writeLocks.current.has('history')) return
+    const owner = identity
+    writeLocks.current.add('history')
     try {
-      const reset = await desktop.reviewClearHistory(headline.pullRequest.number)
-      if (!claim.current(ticket)) return
-      setHistory(reset)
+      await queryClient.cancelQueries({ queryKey: [...rootKey, 'history'] })
+      const reset = await clearHistoryMutation.mutateAsync()
+      if (identityRef.current !== owner) return
+      queryClient.setQueryData([...rootKey, 'history', ...revision], reset)
       setActiveSnapshotOid(null)
-      setHistoryDiff(null)
     } catch (cause) {
-      if (claim.current(ticket)) setError(readableError(cause))
+      if (identityRef.current === owner) setError(readableError(cause))
     } finally {
-      if (claim.current(ticket)) setClearingHistory(false)
+      if (identityRef.current === owner) writeLocks.current.delete('history')
     }
-  }, [desktop, headline])
-
-  // The conversation is a fifth independent read with its own request id, so
-  // moving to another pull request cancels the thread read that is now obsolete
-  // instead of letting it answer for a pull request nobody is looking at.
-  React.useEffect(() => {
-    if (!headline || desktop?.reviewThreads === undefined) return
-    const claim = threadsGate.current
-    claim.reset()
-    setThreadState('loading')
-    setThreadError(null)
-    const ticket = claim.claim()
-    void desktop
-      .reviewThreads?.(headline.pullRequest.number, 'review-threads')
-      .then((value) => {
-        if (!claim.current(ticket)) return
-        setThreadRead(value)
-        setThreadState('ready')
-      })
-      .catch((cause) => {
-        if (!claim.current(ticket)) return
-        setThreadRead(null)
-        setThreadError(readableError(cause))
-        setThreadState('failed')
-      })
-    return () => {
-      claim.reset()
-      void desktop.cancel?.('review-threads')
+  }
+  const saveDraftsMutation = useMutation({
+    mutationKey: [...rootKey, 'save-drafts', files?.comparison],
+    mutationFn: (record: ReviewDraftRecord) => desktop!.reviewSetDrafts!(record),
+    retry: false,
+  })
+  const saveDrafts = (drafts: ReviewDraft[]) => {
+    if (!headline || !files) return
+    const record: ReviewDraftRecord = {
+      number: headline.pullRequest.number,
+      repo: '',
+      viewer: '',
+      comparison: files.comparison,
+      drafts,
+      updatedAt: new Date().toISOString(),
     }
-  }, [desktop, headline, reloadToken])
-
-  // Pending comments are the reviewer's unsent words. They are read from the
-  // repository's own journal, so leaving for another workspace and coming back
-  // finds them exactly as they were left.
-  //
-  // The read is asynchronous and the diff it waits for is not: lines can be
-  // selected and commented on as soon as the files are on screen, which can be
-  // before the journal has answered. That answer describes the drafts as they
-  // were when the read began, so applying it afterwards would replace words
-  // the reviewer has just typed with the older snapshot, and put that snapshot
-  // back on disk at the next edit. An edit therefore outranks any read already
-  // in flight: a read that began before an edit is dropped rather than allowed
-  // to overwrite it.
-  React.useEffect(() => {
-    if (!headline || desktop?.reviewDrafts === undefined) return
-    let live = true
-    const editsAtReadStart = draftEdits.current
-    setDraftRecord(null)
-    setResolutions([])
-    void desktop
-      .reviewDrafts?.(headline.pullRequest.number)
-      .then((record) => {
-        if (!live || draftEdits.current !== editsAtReadStart) return
-        setDraftRecord(record)
+    const owner = identity
+    draftEdits.current += 1
+    void queryClient.cancelQueries({ queryKey: draftsKey, exact: true })
+    queryClient.setQueryData(draftsKey, record)
+    if (!desktop?.reviewSetDrafts) return
+    pendingDraftWrites.current += 1
+    void saveDraftsMutation
+      .mutateAsync(record)
+      .then((saved) => {
+        // A later local edit outranks the acknowledgement of an earlier one.
+        if (identityRef.current === owner && queryClient.getQueryData(draftsKey) === record) {
+          queryClient.setQueryData(draftsKey, saved)
+        }
       })
       .catch(() => {
-        if (!live || draftEdits.current !== editsAtReadStart) return
-        setDraftRecord(null)
+        if (identityRef.current === owner)
+          setError(
+            'The pending comments could not be saved for this repository, so they will not survive leaving this workspace.',
+          )
       })
-    return () => {
-      live = false
-    }
-  }, [desktop, headline, reloadToken])
-
-  // Every draft is re-resolved against the head currently on screen, so a
-  // force-push marks the comments it invalidated before anybody submits. The
-  // words are never discarded for being stale.
-  React.useEffect(() => {
-    if (!headline || !files || desktop?.reviewResolveDrafts === undefined) return
-    const drafts =
-      draftRecord && draftRecord.number === headline.pullRequest.number ? draftRecord.drafts : []
-    if (drafts.length === 0) {
-      setResolutions([])
-      return
-    }
-    let live = true
-    void desktop
-      .reviewResolveDrafts?.(headline.pullRequest.number, drafts)
-      .then((value) => {
-        if (live) setResolutions(value)
+      .finally(() => {
+        pendingDraftWrites.current -= 1
       })
-      .catch(() => {
-        // An unreadable revalidation leaves the drafts unclassified rather than
-        // claiming they are fine; submit revalidates again and refuses.
-        if (live) setResolutions([])
-      })
-    return () => {
-      live = false
-    }
-  }, [desktop, draftRecord, files, headline, reloadToken])
-
-  /**
-   * A draft edit is journalled immediately and bound to the head its lines were
-   * read at. A write that fails is surfaced rather than swallowed: unsent words
-   * a reviewer believes are saved would be lost silently.
-   */
-  const saveDrafts = React.useCallback(
-    (drafts: ReviewDraft[]) => {
-      // A draft's line numbers are an address in one comparison. With the files
-      // not yet read there is no comparison to bind them to, so nothing is
-      // journalled rather than journalled against an identity nobody can check.
-      if (!headline || !files) return
-      // The repository and the account are left empty on purpose: the main
-      // process stamps both from Git and GitHub, which are the only sources that
-      // can be trusted to name them. A renderer-supplied owner would let a
-      // record be filed under somebody else's account.
-      const record: ReviewDraftRecord = {
-        number: headline.pullRequest.number,
-        repo: '',
-        viewer: '',
-        comparison: files.comparison,
-        drafts,
-        updatedAt: new Date().toISOString(),
-      }
-      // The record is installed optimistically, so what the reviewer sees is
-      // what they just typed rather than the last thing read back from disk.
-      // That makes this the newest fact about the drafts, which is what an
-      // in-flight journal read is measured against.
-      draftEdits.current += 1
-      setDraftRecord(record)
-      void desktop?.reviewSetDrafts?.(record)?.catch(() => {
-        setError(
-          'The pending comments could not be saved for this repository, so they will not survive leaving this workspace.',
-        )
-      })
-    },
-    [desktop, files, headline],
-  )
+  }
 
   /**
    * Whether the threads on screen were read at the same revision as the diff.
@@ -568,44 +439,11 @@ export function ReviewView({
     [selectLines, threadsDisagree],
   )
 
-  React.useEffect(() => {
-    if (!headline || desktop?.reviewCommits === undefined) return
-    const claim = commitsGate.current
-    claim.reset()
-    setCommitsState('loading')
-    const ticket = claim.claim()
-    void desktop
-      .reviewCommits?.(headline.pullRequest.number, 'review-commits')
-      .then((value) => {
-        if (!claim.current(ticket)) return
-        setCommits(value)
-        setCommitsState('ready')
-      })
-      .catch(() => {
-        if (!claim.current(ticket)) return
-        setCommitsState('failed')
-      })
-    return () => {
-      claim.reset()
-      void desktop.cancel?.('review-commits')
-    }
-  }, [desktop, headline, reloadToken])
-
-  React.useEffect(() => {
-    if (!headline || desktop?.reviewViewed === undefined) return
-    let live = true
-    void desktop
-      .reviewViewed?.(headline.pullRequest.number)
-      .then((record) => {
-        if (live) setViewed(record)
-      })
-      .catch(() => {
-        if (live) setViewed(null)
-      })
-    return () => {
-      live = false
-    }
-  }, [desktop, headline, reloadToken])
+  const viewedMutation = useMutation({
+    mutationKey: [...rootKey, 'save-viewed', files?.comparison],
+    mutationFn: (record: ReviewViewedRecord) => desktop!.reviewSetViewed!(record),
+    retry: false,
+  })
 
   const isComparing = activeSnapshotOid !== null
   const activeSnapshot = history?.snapshots.find((s) => s.headOid === activeSnapshotOid) ?? null
@@ -645,10 +483,14 @@ export function ReviewView({
   )
 
   React.useEffect(() => {
-    if (filePaths.length > 0 && (!selectedPath || !filePaths.includes(selectedPath))) {
-      setSelectedPath(filePaths[0])
+    if (
+      eligibleFiles.length > 0 &&
+      (!selectedPath || !eligibleFiles.some((file) => file.path === selectedPath))
+    ) {
+      // Tree rows are sorted for navigation; the default follows the server's file order.
+      setSelectedPath(eligibleFiles[0].path)
     }
-  }, [filePaths, selectedPath])
+  }, [eligibleFiles, selectedPath])
 
   const markViewed = React.useCallback(
     (path: string) => {
@@ -657,20 +499,29 @@ export function ReviewView({
       // head alone: a base retarget changes what every file means, and a mark
       // carried across it would claim a review of changes nobody looked at.
       const next = withViewedFile(
-        viewed,
+        queryClient.getQueryData<ReviewViewedRecord | null>(viewedKey) ?? viewed,
         headline.pullRequest.number,
         files.comparison,
         path,
         new Date().toISOString(),
       )
-      setViewed(next)
-      void desktop?.reviewSetViewed?.(next)?.catch(() => {
-        // The mark is a local reading aid. Losing it must not interrupt review,
-        // and the failure stays visible in the header rather than being hidden.
-        setError('The viewed-file record could not be saved for this repository.')
-      })
+      const owner = identity
+      void queryClient.cancelQueries({ queryKey: viewedKey, exact: true })
+      queryClient.setQueryData(viewedKey, next)
+      if (desktop?.reviewSetViewed)
+        void viewedMutation
+          .mutateAsync(next)
+          .then((saved) => {
+            if (identityRef.current === owner && queryClient.getQueryData(viewedKey) === next) {
+              queryClient.setQueryData(viewedKey, saved)
+            }
+          })
+          .catch(() => {
+            if (identityRef.current === owner)
+              setError('The viewed-file record could not be saved for this repository.')
+          })
     },
-    [desktop, files, headline, viewed],
+    [desktop, files, headline, viewed, identity, queryClient, viewedKey, viewedMutation],
   )
 
   const step = React.useCallback(
@@ -801,7 +652,9 @@ export function ReviewView({
               <Button
                 size="sm"
                 variant="secondary"
-                onClick={() => void desktop?.openExternal(headline.pullRequest.url)}
+                onClick={() => {
+                  if (desktop) openExternalMutation.mutate(headline.pullRequest.url)
+                }}
               >
                 <ExternalLink className="size-3.5" />
                 Open on GitHub
@@ -1226,7 +1079,9 @@ export function ReviewView({
                   onToggleWatch={() => setChecksWatching((value) => !value)}
                   onRefresh={() => setChecksReload((value) => value + 1)}
                   onRerun={(check) => void rerunCheck(check.workflowRunId)}
-                  onOpenDetails={(url) => void desktop?.openExternal(url)}
+                  onOpenDetails={(url) => {
+                    if (desktop) openExternalMutation.mutate(url)
+                  }}
                   rerunningRunId={rerunningRunId}
                 />
               </section>
@@ -1274,28 +1129,31 @@ export function ReviewView({
                   </InlineAlert>
                 ) : null}
 
-                <ReviewConversation
-                  desktop={desktop}
-                  number={headline.pullRequest.number}
-                  files={files}
-                  read={threadRead}
-                  readError={threadError}
-                  readState={
-                    threadState === 'ready'
-                      ? 'ready'
-                      : threadState === 'failed'
-                        ? 'failed'
-                        : 'loading'
-                  }
-                  drafts={draftRecord}
-                  resolutions={resolutions}
-                  selection={selection}
-                  onClearSelection={() => setSelection(null)}
-                  onDraftChange={saveDrafts}
-                  onReload={() => setReloadToken((value) => value + 1)}
-                  onSelect={selectThreadLine}
-                  frozenReason={frozenReason}
-                />
+                <ReviewQueryIdentity.Provider value={['review', authority, number]}>
+                  <ReviewConversation
+                    key={identity}
+                    desktop={desktop}
+                    number={headline.pullRequest.number}
+                    files={files}
+                    read={threadRead}
+                    readError={threadError}
+                    readState={
+                      threadState === 'ready'
+                        ? 'ready'
+                        : threadState === 'failed'
+                          ? 'failed'
+                          : 'loading'
+                    }
+                    getDrafts={() => queryClient.getQueryData<ReviewDraftRecord>(draftsKey) ?? null}
+                    resolutions={resolutions}
+                    selection={selection}
+                    onClearSelection={() => setSelection(null)}
+                    onDraftChange={saveDrafts}
+                    onReload={() => setReloadToken((value) => value + 1)}
+                    onSelect={selectThreadLine}
+                    frozenReason={frozenReason}
+                  />
+                </ReviewQueryIdentity.Provider>
               </div>
             </aside>
           </div>

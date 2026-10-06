@@ -184,6 +184,7 @@ export function WorkflowRecoverySpecimen({ mode }: { mode: string }) {
         stackApi={stackApi}
         request={{ kind: 'stack', branch: 'feature/checkout', operation: 'publish' }}
         snapshot={snapshot}
+        authority="recovery-specimen"
         busy={false}
         actionError={null}
         onClearActionError={noop}

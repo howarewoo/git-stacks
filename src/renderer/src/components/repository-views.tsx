@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useQuery } from '@tanstack/react-query'
 import {
   ChevronRight,
   GitBranch,
@@ -12,7 +13,7 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import type { Branch, Commit, FileView, RepositorySnapshot } from '../../../shared/types'
+import type { Branch, RepositorySnapshot } from '../../../shared/types'
 import { DIFF_PAGE_SIZE, LIST_PAGE_SIZE } from '../../../shared/performance'
 import { useListWindow, useRovingListFocus } from '../lib/list-window'
 import { createRequestGate } from '../lib/request-gate'
@@ -299,41 +300,32 @@ export function FileInspector({
   /** Opens the file in the editor configured in Settings. */
   onOpenInEditor?: (relativePath: string) => void
 }) {
-  const [file, setFile] = React.useState<FileView | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState<string | null>(null)
+  const [revision, setRevision] = React.useState(0)
+  const freshness = React.useRef({ snapshot, generation: 0 })
+  if (freshness.current.snapshot !== snapshot) {
+    freshness.current = { snapshot, generation: freshness.current.generation + 1 }
+  }
+  const fileQuery = useQuery({
+    queryKey: ['repository-file', snapshot.path, path, freshness.current.generation, revision],
+    queryFn: ({ signal }) => {
+      signal.addEventListener('abort', () => void window.desktop.cancel(`file:${path}`), {
+        once: true,
+      })
+      return window.desktop.fileView(path)
+    },
+  })
+  const file = fileQuery.data ?? null
+  const loading = fileQuery.isFetching
+  const error = fileQuery.error ? workflowError(fileQuery.error) : null
   const [tab, setTab] = React.useState<'working' | 'staged' | 'resolve'>('working')
   const [pending, setPending] = React.useState<'discard' | null>(null)
-  const [revision, setRevision] = React.useState(0)
   React.useEffect(() => {
-    let active = true
-    setLoading(true)
-    setError(null)
     setPending(null)
-    window.desktop
-      .fileView(path)
-      .then((next) => {
-        if (!active) return
-        setFile(next)
-        setTab(
-          next.conflicted
-            ? 'resolve'
-            : next.unstagedDiff || !next.stagedDiff
-              ? 'working'
-              : 'staged',
-        )
-      })
-      .catch((value) => {
-        if (active) setError(workflowError(value))
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
-    return () => {
-      active = false
-      void window.desktop.cancel(`file:${path}`)
-    }
-  }, [path, snapshot, revision])
+    if (!file) return
+    setTab(
+      file.conflicted ? 'resolve' : file.unstagedDiff || !file.stagedDiff ? 'working' : 'staged',
+    )
+  }, [file])
 
   const discard = async () => {
     if (!file || file.submodule || busy || loading) return
@@ -564,74 +556,66 @@ export function HistoryView({
   const [ref, setRef] = React.useState(
     snapshot.currentBranch ? `refs/heads/${snapshot.currentBranch}` : 'HEAD',
   )
-  const [commits, setCommits] = React.useState<Commit[]>([])
-  const [hasMore, setHasMore] = React.useState(false)
   const [offset, setOffset] = React.useState(0)
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState<string | null>(null)
-  const [selected, setSelected] = React.useState<Commit | null>(null)
-  const [diff, setDiff] = React.useState<{ text: string; truncated: boolean } | null>(null)
-  const [diffLoading, setDiffLoading] = React.useState(false)
-  const [diffError, setDiffError] = React.useState<string | null>(null)
+  const [selection, setSelection] = React.useState<{ scope: string; oid: string } | null>(null)
   const [revision, setRevision] = React.useState(0)
+  const selectionScope = JSON.stringify([snapshot.path, snapshot.headOid, ref, offset, revision])
   // Two independent streams: the page of commits, and the diff of the selected
   // commit. Each gate retires its own superseded work, and each request is
   // cancelled in the main process rather than left to finish into a dead view.
   const historyGate = React.useRef(createRequestGate()).current
   const diffGate = React.useRef(createRequestGate()).current
-  React.useEffect(() => {
-    const claim = historyGate.claim()
-    const requestId = `history:${ref}`
-    setLoading(true)
-    setError(null)
-    setSelected(null)
-    setCommits([])
-    window.desktop
-      .history(ref, offset, requestId)
-      .then((page) => {
-        if (!historyGate.current(claim)) return
-        setCommits(page.commits)
-        setHasMore(page.hasMore)
-        setSelected(page.commits[0] ?? null)
-      })
-      .catch((value) => {
-        if (historyGate.current(claim)) setError(workflowError(value))
-      })
-      .finally(() => {
-        if (historyGate.current(claim)) setLoading(false)
-      })
-    return () => {
-      historyGate.reset()
-      void window.desktop.cancel(requestId)
-    }
-  }, [historyGate, snapshot.path, snapshot.headOid, ref, offset, revision])
+  const historyQuery = useQuery({
+    queryKey: ['repository-history', snapshot.path, snapshot.headOid, ref, offset, revision],
+    queryFn: async ({ signal }) => {
+      const claim = historyGate.claim()
+      const requestId = `history:${ref}`
+      signal.addEventListener(
+        'abort',
+        () => {
+          historyGate.reset()
+          void window.desktop.cancel(requestId)
+        },
+        { once: true },
+      )
+      const page = await window.desktop.history(ref, offset, requestId)
+      if (!historyGate.current(claim)) throw new Error('History request superseded.')
+      return page
+    },
+  })
+  const commits = historyQuery.data?.commits ?? []
+  const hasMore = historyQuery.data?.hasMore ?? false
+  const loading = historyQuery.isFetching
+  const error = historyQuery.error ? workflowError(historyQuery.error) : null
+  const selected =
+    (selection?.scope === selectionScope
+      ? commits.find((commit) => commit.oid === selection.oid)
+      : null) ??
+    commits[0] ??
+    null
   const selectedOid = selected?.oid
-  React.useEffect(() => {
-    const claim = diffGate.claim()
-    setDiff(null)
-    setDiffError(null)
-    if (!selectedOid) {
-      setDiffLoading(false)
-      return
-    }
-    const requestId = `commit-diff:${selectedOid}`
-    setDiffLoading(true)
-    window.desktop
-      .commitDiff(selectedOid, requestId)
-      .then((value) => {
-        if (diffGate.current(claim)) setDiff(value)
-      })
-      .catch((value) => {
-        if (diffGate.current(claim)) setDiffError(workflowError(value))
-      })
-      .finally(() => {
-        if (diffGate.current(claim)) setDiffLoading(false)
-      })
-    return () => {
-      diffGate.reset()
-      void window.desktop.cancel(requestId)
-    }
-  }, [diffGate, snapshot.path, selectedOid])
+  const diffQuery = useQuery({
+    queryKey: ['repository-commit-diff', snapshot.path, selectedOid],
+    enabled: Boolean(selectedOid),
+    queryFn: async ({ signal }) => {
+      const claim = diffGate.claim()
+      const requestId = `commit-diff:${selectedOid}`
+      signal.addEventListener(
+        'abort',
+        () => {
+          diffGate.reset()
+          void window.desktop.cancel(requestId)
+        },
+        { once: true },
+      )
+      const value = await window.desktop.commitDiff(selectedOid!, requestId)
+      if (!diffGate.current(claim)) throw new Error('Commit diff request superseded.')
+      return value
+    },
+  })
+  const diff = selectedOid ? (diffQuery.data ?? null) : null
+  const diffLoading = diffQuery.isFetching
+  const diffError = diffQuery.error ? workflowError(diffQuery.error) : null
   const loadMore = () => {
     if (loading || diffLoading || busy || commits.length === 0) return
     setOffset((value) => value + commits.length)
@@ -724,7 +708,7 @@ export function HistoryView({
                 className={`history-row ${selected?.oid === commit.oid ? 'history-row-selected' : ''}`}
                 variant="unstyled"
                 disabled={diffLoading}
-                onClick={() => setSelected(commit)}
+                onClick={() => setSelection({ scope: selectionScope, oid: commit.oid })}
                 onFocus={() => setActiveCommitIndex(commitIndex)}
                 onKeyDown={(event) => {
                   // Only unmodified keys are claimed; a chord belongs to the global
@@ -879,6 +863,7 @@ export function StackView({
   actionError,
   onClearActionError,
   snapshot,
+  authority,
   busy,
   runAction,
   onRequest,
@@ -888,6 +873,7 @@ export function StackView({
   onCreate,
 }: CommonProps & {
   actionError: string | null
+  authority: string
   onClearActionError: () => void
   onSelect: (branch: Branch) => void
   search: string
@@ -967,6 +953,7 @@ export function StackView({
       </div>
       <ReconciliationPanel
         snapshot={snapshot}
+        authority={authority}
         busy={busy}
         runAction={runAction}
         actionError={actionError}

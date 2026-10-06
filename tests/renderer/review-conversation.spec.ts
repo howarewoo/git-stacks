@@ -106,6 +106,57 @@ test.describe('Leaving a review', () => {
     ])
   })
 
+  test('sequential typing keeps every draft character through leaving and returning', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: RANGE_FIRST }).click()
+    await addPendingComment(page, 'Comment on src/main/review.ts:1 (head)', '')
+    const editor = page.getByRole('textbox', { name: 'Comment on src/main/review.ts:1 (head)' })
+    const body = 'Keep every character in this unsent draft.'
+    await editor.pressSequentially(body, { delay: 10 })
+    await expect(editor).toHaveValue(body)
+    await switchDestination(page, 'history')
+    await switchDestination(page, 'review')
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+    await expect(editor).toHaveValue(body)
+    expect(await submissions(page)).toEqual([])
+  })
+
+  for (const changed of ['headOid', 'baseOid', 'baseRef'] as const) {
+    test(`a refreshed ${changed} retires the selected lines before composing`, async ({ page }) => {
+      await selectRange(page)
+      await page.evaluate((field) => {
+        const original = window.desktop.reviewFiles!
+        window.desktop.reviewFiles = async (...args) => {
+          const files = await original(...args)
+          return { ...files, comparison: { ...files.comparison, [field]: `changed-${field}` } }
+        }
+      }, changed)
+      await page.getByRole('button', { name: 'Reload review data from GitHub' }).click()
+      await expect(page.locator('.review-comparison-alert')).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Add pending comment' })).toHaveCount(0)
+      await expect(page.locator('.review-draft')).toHaveCount(0)
+      expect(await submissions(page)).toEqual([])
+    })
+  }
+
+  test('delivered comments stay retired when submission finishes after leaving Review', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: RANGE_FIRST }).click()
+    await addPendingComment(page, 'Comment on src/main/review.ts:1 (head)', 'Send before leaving.')
+    await page.evaluate(() => window.fixture.hold('reviewSubmit'))
+    await page.getByRole('button', { name: 'Submit 1 comment as one review' }).click()
+    await expect.poll(async () => (await submissions(page)).length).toBe(1)
+    await switchDestination(page, 'history')
+    await page.evaluate(() => window.fixture.release('reviewSubmit'))
+    await switchDestination(page, 'review')
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+    await expect(page.locator('.review-draft')).toHaveCount(0)
+    expect((await submissions(page))[0]?.drafts[0]?.body).toBe('Send before leaving.')
+    expect(await submissions(page)).toHaveLength(1)
+  })
+
   test('several pending comments become one review rather than one request each', async ({
     page,
   }) => {
@@ -156,8 +207,13 @@ test.describe('Leaving a review', () => {
       const original = bridge.reviewSubmit
       if (!original) throw new Error('the review submit bridge is not installed')
       bridge.reviewSubmit = async (number, submission) => {
-        const result = await original(number, submission)
-        return { ...result, delivered: [submission.drafts[0]?.id] }
+        window.fixture.answerNext('reviewSubmit', {
+          id: 'recovered',
+          state: 'COMMENTED',
+          url: null,
+          delivered: [submission.drafts[0]?.id],
+        })
+        return original(number, submission)
       }
     })
     await page.getByRole('button', { name: 'Submit 2 comments as one review' }).click()

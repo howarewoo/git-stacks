@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { openGallery, releaseDoubleCalls, settle } from './helpers/gallery'
+import { openGallery, publishCliStatus, releaseDoubleCalls, settle } from './helpers/gallery'
 
 /**
  * The merge dialog, driven as a person drives it: open the merge preview, send the
@@ -40,6 +40,28 @@ test.describe('Merge reads after a run', () => {
     // reachable the whole time.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
+  })
+
+  test('an idle merge dialog reads the replacement account without submitting another merge', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-authenticated' })
+    await page.getByRole('treeitem', { name: /^feature\/checkout-tests,/ }).click()
+    await page.getByRole('button', { name: 'Preview PR merge', exact: true }).first().click()
+    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
+    await publishCliStatus(page, {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'replacement',
+      version: '2.62.0',
+      identity: 'cli:github.com:replacement:1',
+      message: null,
+    })
+    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
+    await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Refresh what GitHub reports' })).toBeEnabled()
+    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 
   test('a refused merge stays failed on reopen, with the reason GitHub gave', async ({ page }) => {

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ExternalLink, LoaderCircle, TriangleAlert } from 'lucide-react'
 import type {
   ConflictChoice,
@@ -174,6 +175,7 @@ function RegionCard({
  */
 export function ConflictResolver({
   path,
+  repositoryPath,
   busy,
   conflictPresent,
   actionError,
@@ -181,15 +183,14 @@ export function ConflictResolver({
   onClose,
 }: {
   path: string
+  repositoryPath: string
   conflictPresent: boolean
   busy: boolean
   actionError: string | null
   runAction: RunAction
   onClose: () => void
 }) {
-  const [file, setFile] = React.useState<ConflictFile | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState<string | null>(null)
+  const queryClient = useQueryClient()
   const [stale, setStale] = React.useState(false)
   const [choices, setChoices] = React.useState<Record<number, ConflictRegionChoice>>({})
   const [edited, setEdited] = React.useState<string | null>(null)
@@ -197,37 +198,56 @@ export function ConflictResolver({
   const [closeNotice, setCloseNotice] = React.useState<string | null>(null)
   const [modeNotice, setModeNotice] = React.useState(false)
   const [handoffNotice, setHandoffNotice] = React.useState(false)
+  const identity = JSON.stringify([repositoryPath, path, attempt])
+  const currentIdentity = React.useRef(identity)
+  currentIdentity.current = identity
+  React.useEffect(() => {
+    currentIdentity.current = identity
+    return () => {
+      currentIdentity.current = ''
+    }
+  }, [identity])
+  const conflictQuery = useQuery({
+    queryKey: ['repository-conflict', repositoryPath, path, attempt],
+    queryFn: async ({ signal }) => {
+      const result = await window.desktop.conflictView(path)
+      signal.throwIfAborted()
+      return result
+    },
+  })
+  const file = conflictQuery.data ?? null
+  const loading = conflictQuery.isFetching
+  const error = conflictQuery.error ? workflowError(conflictQuery.error) : null
+  const recheck = async (captured: ConflictFile) => {
+    const capturedIdentity = identity
+    try {
+      const fresh = await queryClient.fetchQuery({
+        queryKey: [
+          'repository-conflict-recheck',
+          repositoryPath,
+          path,
+          captured.fingerprint,
+          Date.now(),
+        ],
+        queryFn: () => window.desktop.conflictView(path),
+        staleTime: 0,
+      })
+      if (currentIdentity.current === capturedIdentity)
+        setStale(fresh.fingerprint !== captured.fingerprint)
+    } catch {
+      if (currentIdentity.current === capturedIdentity) setStale(true)
+    }
+  }
 
   React.useEffect(() => {
-    let active = true
-    setLoading(true)
-    setError(null)
+    if (!file) return
     setStale(false)
     setEdited(null)
     setCloseNotice(null)
     setModeNotice(false)
     setHandoffNotice(false)
-    window.desktop
-      .conflictView(path)
-      .then((next) => {
-        if (!active) return
-        setFile(next)
-        setChoices(
-          Object.fromEntries(next.regions.map((region) => [region.index, 'current' as const])),
-        )
-      })
-      .catch((value) => {
-        if (!active) return
-        setFile(null)
-        setError(workflowError(value))
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
-    return () => {
-      active = false
-    }
-  }, [path, attempt])
+    setChoices(Object.fromEntries(file.regions.map((region) => [region.index, 'current' as const])))
+  }, [file])
 
   const segments = React.useMemo(
     () => (file?.worktree && !file.truncated ? parseConflictSegments(file.worktree) : []),
@@ -269,6 +289,7 @@ export function ConflictResolver({
 
   const apply = async (resolution: ConflictResolution) => {
     if (!file || busy || loading || outdated) return
+    const capturedIdentity = identity
     const succeeded = await runAction(
       {
         type: 'resolveConflict',
@@ -278,6 +299,7 @@ export function ConflictResolver({
       },
       'Resolve and stage conflict',
     )
+    if (currentIdentity.current !== capturedIdentity) return
     if (succeeded) {
       onClose()
       return
@@ -285,12 +307,7 @@ export function ConflictResolver({
     // A refused resolution means the worktree or index moved under the open
     // resolver. Re-read the identity and ask for an explicit reload rather than
     // retrying against content that is no longer the one on screen.
-    try {
-      const fresh = await window.desktop.conflictView(path)
-      setStale(fresh.fingerprint !== file.fingerprint)
-    } catch {
-      setStale(true)
-    }
+    await recheck(file)
   }
 
   const openMergeTool = async (discardDraft = false) => {
@@ -299,20 +316,17 @@ export function ConflictResolver({
       setHandoffNotice(true)
       return
     }
+    const capturedIdentity = identity
     const succeeded = await runAction(
       { type: 'conflictMergeTool', path: file.path, fingerprint: file.fingerprint },
       'Open external merge tool',
     )
+    if (currentIdentity.current !== capturedIdentity) return
     if (succeeded) {
       setHandoffNotice(false)
       setAttempt((value) => value + 1)
     } else {
-      try {
-        const fresh = await window.desktop.conflictView(path)
-        setStale(fresh.fingerprint !== file.fingerprint)
-      } catch {
-        setStale(true)
-      }
+      await recheck(file)
     }
   }
 

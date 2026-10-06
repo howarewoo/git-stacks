@@ -1114,13 +1114,24 @@ export function installFixtureControl(options: {
       heldDrafts.set(draftRecord.number, draftRecord)
       return answer('reviewSetDrafts', () => draftRecord as ReviewDraftRecord)
     },
-    reviewSubmit: (number, submission) => {
+    reviewSubmit: async (number, submission) => {
       record('reviewSubmit', [number, submission])
-      return answer('reviewSubmit', () => ({
+      const result = await answer('reviewSubmit', () => ({
         id: `review-${number}`,
         state: REVIEW_SUBMIT_STATES[submission.event],
         url: `https://github.com/acme/widgets/pull/${number}#pullrequestreview-1`,
+        delivered: submission.drafts.map((draft) => draft.id),
       }))
+      // Main retires the delivered identities even if the view has unmounted.
+      const delivered = new Set(result.delivered)
+      const record_ = heldDrafts.get(number)
+      if (record_) {
+        heldDrafts.set(number, {
+          ...record_,
+          drafts: record_.drafts.filter((draft) => !delivered.has(draft.id)),
+        })
+      }
+      return result
     },
     reviewReply: (number, threadId) => {
       record('reviewReply', [number, threadId])

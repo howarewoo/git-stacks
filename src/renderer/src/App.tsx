@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
+import { CancelledError, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { DropdownMenu } from './components/ui/dropdown-menu'
 import {
   AlertCircle,
@@ -41,14 +42,10 @@ import type {
   Branch,
   DesktopAPI,
   GitAction,
-  GitEnvironmentStatus,
   GitRuntimeStatus,
   GitHubCliState,
   GitHubCliStatus,
-  LinkedIssue,
-  OnboardingFailure,
   PullRequest,
-  RecentRepository,
   RepositoryCloneResult,
   RepositorySnapshot,
   RemoteFreshness,
@@ -59,6 +56,7 @@ import { LIST_PAGE_SIZE } from '../../shared/performance'
 import { ListWindowMore } from './components/list-window'
 import { useListWindow, useRovingListFocus } from './lib/list-window'
 import { createRequestGate, type RequestClaim } from './lib/request-gate'
+import { useSettingsMutation } from './lib/settings-query'
 import { cliAuthority, withoutReplacedCredential } from './credential-identity'
 import { Badge } from './components/ui/badge'
 import { Button, IconButton } from './components/ui/button'
@@ -122,7 +120,6 @@ import type {
   PullRequestInboxFilterDraft,
   PullRequestInboxItem,
   PullRequestInboxReport,
-  PullRequestInboxSavedFilter,
 } from '../../shared/pr-inbox'
 import { checkLabel, checksVariant } from './lib/pull-request-state'
 import type {
@@ -172,9 +169,14 @@ import {
   readLegacyShortcuts,
   type ShortcutId,
 } from '../../shared/shortcuts'
-import type { AppSettings, SettingsLock } from '../../shared/settings'
+import type { AppSettings, SettingsPatch, SettingsSnapshot } from '../../shared/settings'
 import { resolveStackNavigation, type StackRelation } from './lib/stack-navigation'
 type BranchFilter = 'all' | 'local' | 'remote' | 'prs'
+type NotificationOperation =
+  | { kind: 'read'; id: string }
+  | { kind: 'done'; id: string }
+  | { kind: 'subscribe'; id: string; action: 'unsubscribe' | 'ignore' }
+  | { kind: 'removeCredential' }
 
 type BranchTreeInfo = {
   /** Visual lane depth used for connector geometry only. */
@@ -467,8 +469,52 @@ function branchDeleteReason(branch: Branch, defaultBranch: string | null): strin
 function App() {
   const desktop: DesktopAPI | null =
     typeof window !== 'undefined' && window.desktop ? window.desktop : null
-  const [snapshot, setSnapshot] = React.useState<RepositorySnapshot | null>(null)
-  const [recentRepositories, setRecentRepositories] = React.useState<RecentRepository[]>([])
+  const queryClient = useQueryClient()
+  const fallbackShortcuts = React.useMemo(() => defaultShortcutBindings(), [])
+  const settingsQuery = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => desktop!.settings!(),
+    enabled: Boolean(desktop?.settings),
+  })
+  const settings = settingsQuery.data?.settings ?? null
+  const settingsLocks = settingsQuery.data?.locks ?? []
+  const shortcutBindings = settings?.shortcuts ?? fallbackShortcuts
+  const host = settings ? canonicalHostName(settings.github.host) : GITHUB_DEFAULT_HOST
+  const cliKey = React.useMemo(() => ['github-cli', host] as const, [host])
+  const cliKeyRef = React.useRef(cliKey)
+  cliKeyRef.current = cliKey
+  const setCliStatus = React.useCallback(
+    (status: GitHubCliStatus) => {
+      const key = ['github-cli', canonicalHostName(status.host)]
+      void queryClient.cancelQueries({ queryKey: ['github-cli'] })
+      queryClient.setQueryData(key, status)
+    },
+    [queryClient],
+  )
+  const cliQuery = useQuery<GitHubCliStatus | null>({ queryKey: cliKey, enabled: false })
+  const cliStatus = cliQuery.data ?? null
+  const [repositoryIdentity, setRepositoryIdentity] = React.useState<{
+    path: string | null
+    generation: number
+  }>({ path: null, generation: 0 })
+  const repositoryKey = React.useMemo(
+    () => ['repository-snapshot', repositoryIdentity.path, repositoryIdentity.generation] as const,
+    [repositoryIdentity],
+  )
+  const repositoryKeyRef = React.useRef(repositoryKey)
+  repositoryKeyRef.current = repositoryKey
+  const snapshotQuery = useQuery<RepositorySnapshot | null>({
+    queryKey: repositoryKey,
+    enabled: false,
+    structuralSharing: false,
+  })
+  const snapshot = snapshotQuery.data ?? null
+  const recentRepositoriesQuery = useQuery({
+    queryKey: ['recent-repositories'],
+    queryFn: () => desktop!.recentRepositories(),
+    enabled: Boolean(desktop),
+  })
+  const recentRepositories = recentRepositoriesQuery.data ?? []
   const [selectedBranchRef, setSelectedBranchRef] = React.useState<string | null>(null)
   const [branchSelection, setBranchSelection] = React.useState<{
     repoPath: string
@@ -479,10 +525,97 @@ function App() {
   const [workspaceView, setWorkspaceView] = React.useState<WorkspaceView>('branches')
   const [branchFilter, setBranchFilter] = React.useState<BranchFilter>('all')
   const [search, setSearch] = React.useState('')
-  const [bootLoading, setBootLoading] = React.useState(true)
-  const [opening, setOpening] = React.useState(false)
-  const [refreshing, setRefreshing] = React.useState(false)
-  const [busyAction, setBusyAction] = React.useState<string | null>(null)
+  const bootLoading = Boolean(desktop && recentRepositoriesQuery.isPending)
+  const repositoryOpenMutation = useMutation({
+    mutationFn: async ({
+      path,
+      mode,
+      landing,
+      claim,
+    }: {
+      path?: string
+      mode: 'recent' | 'add'
+      landing?: { reviewNumber: number }
+      claim: RequestClaim
+    }) => {
+      setError(null)
+      setActionError(null)
+      setNotice(null)
+      try {
+        const next =
+          mode === 'add'
+            ? await desktop!.addRepository?.(path ?? '')
+            : await desktop!.openRepository(path)
+        if (next && openingRef.current === claim) {
+          setSnapshotAndSelection(
+            repositoryGate.current(claim) ? next : withoutReplacedCredential(next),
+          )
+          setDeleteTarget(null)
+          setWorkflow(null)
+          setInspectedPath(null)
+          commitForm.reset()
+          if (landing) setReviewNumber(landing.reviewNumber)
+          setWorkspaceView(landing ? 'review' : 'branches')
+        }
+        await recentRepositoriesQuery.refetch()
+      } catch (value) {
+        if (openingRef.current === claim) setError(readableError(value))
+      } finally {
+        if (openingRef.current === claim) openingRef.current = null
+      }
+    },
+  })
+  const opening = repositoryOpenMutation.isPending
+  const refreshing = snapshotQuery.isFetching
+  const actionMutation = useMutation({
+    mutationFn: async ({ action, label }: { action: GitAction; label: string }) => {
+      setActionError(null)
+      setNotice(null)
+      try {
+        const result = await desktop!.runAction(action)
+        if (result.message) setNotice(result.message)
+        const next = await refreshSnapshot()
+        if (action.type === 'switch' && next?.currentBranch)
+          setSelectedBranchRef(`refs/heads/${next.currentBranch}`)
+        if (action.type === 'renameBranch') setSelectedBranchRef(`refs/heads/${action.name}`)
+        if (
+          action.type === 'commit' ||
+          action.type === 'switch' ||
+          action.type === 'createBranch'
+        ) {
+          commitForm.reset()
+        }
+        return true
+      } catch (value) {
+        const failure = { form: readableError(value), fields: {} }
+        if (action.type === 'createBranch') newBranchForm.setErrorMap({ onSubmit: failure })
+        if (action.type === 'createPr') prForm.setErrorMap({ onSubmit: failure })
+        if (
+          action.type === 'deleteBranch' ||
+          action.type === 'deleteBranches' ||
+          action.type === 'deleteRemoteBranch' ||
+          action.type === 'deleteRemoteBranches'
+        ) {
+          deleteForm.setErrorMap({ onSubmit: failure })
+        }
+        setActionError(`${label} failed: ${readableError(value)}`)
+        const next = await refreshSnapshot()
+        if (
+          next?.operation ||
+          next?.stackOperation ||
+          next?.files.some((file) => file.conflicted)
+        ) {
+          setWorkspaceView('changes')
+          setInspectedPath(next.files.find((file) => file.conflicted)?.path ?? null)
+          setWorkflow(null)
+        }
+        return false
+      } finally {
+        busyRef.current = null
+      }
+    },
+  })
+  const busyAction = actionMutation.isPending ? (actionMutation.variables?.label ?? null) : null
   const [error, setError] = React.useState<string | null>(null)
   const [actionError, setActionError] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
@@ -515,15 +648,28 @@ function App() {
     request: WorkflowRequest
   } | null>(null)
   const [gitRuntimeOpen, setGitRuntimeOpen] = React.useState(false)
-  const [gitRuntimeStatus, setGitRuntimeStatus] = React.useState<GitRuntimeStatus | null>(null)
-  const [gitRuntimeBusy, setGitRuntimeBusy] = React.useState(false)
+  const gitRuntimeQuery = useQuery<GitRuntimeStatus>({
+    queryKey: ['git-runtime'],
+    queryFn: () => desktop!.gitRuntimeStatus(),
+    enabled: false,
+  })
+  const gitRuntimeStatus = gitRuntimeQuery.data ?? null
+  const runtimeMutation = useMutation({
+    mutationFn: (useSystemGit: boolean) => desktop!.setSystemGit(useSystemGit),
+    onSuccess: (status) => queryClient.setQueryData(['git-runtime'], status),
+  })
+  const gitRuntimeBusy = runtimeMutation.isPending
   const [cliStatusOpen, setCliStatusOpen] = React.useState(false)
-  const [cliStatus, setCliStatus] = React.useState<GitHubCliStatus | null>(null)
-  const [cliRefreshing, setCliRefreshing] = React.useState(false)
+  const cliRefreshing = cliQuery.isFetching
   const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
-  const [gitEnvironment, setGitEnvironment] = React.useState<GitEnvironmentStatus | null>(null)
-  const [gitEnvironmentFailure, setGitEnvironmentFailure] =
-    React.useState<OnboardingFailure | null>(null)
+  const environmentQuery = useQuery({
+    queryKey: ['git-environment', 'onboarding'],
+    queryFn: () => desktop!.gitEnvironment!('onboarding:environment'),
+    enabled: Boolean(desktop?.gitEnvironment),
+  })
+  const gitEnvironment = environmentQuery.data?.ok ? environmentQuery.data.value : null
+  const gitEnvironmentFailure =
+    environmentQuery.data && !environmentQuery.data.ok ? environmentQuery.data.failure : null
   // Counts every CLI status read this window has asked for. A refresh that
   // answers after a later one, or after a host or account change retired the
   // identity, must not paint the state it was asked about over the current one.
@@ -540,11 +686,30 @@ function App() {
 
   const [paletteOpen, setPaletteOpen] = React.useState(false)
   const [shortcutSettingsOpen, setShortcutSettingsOpen] = React.useState(false)
-  const [shortcutBindings, setShortcutBindings] = React.useState<Record<ShortcutId, string>>(() =>
-    defaultShortcutBindings(),
+  const settingsMutation = useSettingsMutation(
+    ({ patch }: { patch: SettingsPatch; notificationOwner?: { request: number; host: string } }) =>
+      desktop!.updateSettings!(patch),
+    ({ notificationOwner }) =>
+      !notificationOwner || notificationClaim(notificationOwner.request, notificationOwner.host),
   )
-  const [settings, setSettings] = React.useState<AppSettings | null>(null)
-  const [settingsLocks, setSettingsLocks] = React.useState<readonly SettingsLock[]>([])
+  const setSettings = React.useCallback(
+    (next: AppSettings) => {
+      void queryClient.cancelQueries({ queryKey: ['settings'] })
+      queryClient.setQueryData<SettingsSnapshot>(['settings'], (current) =>
+        current ? { ...current, settings: next } : current,
+      )
+    },
+    [queryClient],
+  )
+  const setShortcutBindings = React.useCallback(
+    (bindings: Record<ShortcutId, string>) => {
+      void queryClient.cancelQueries({ queryKey: ['settings'] })
+      queryClient.setQueryData<SettingsSnapshot>(['settings'], (current) =>
+        current ? { ...current, settings: { ...current.settings, shortcuts: bindings } } : current,
+      )
+    },
+    [queryClient],
+  )
   /**
    * Writes a shortcut change and adopts only what main confirmed. A refused
    * write — a policy lock, an invalid chord — must leave the running app on
@@ -554,17 +719,14 @@ function App() {
     async (bindings: Record<ShortcutId, string>) => {
       if (!desktop?.updateSettings) return
       try {
-        const snapshot = await desktop.updateSettings({ shortcuts: bindings })
-        setSettings(snapshot.settings)
-        setShortcutBindings(snapshot.settings.shortcuts)
+        await settingsMutation.mutateAsync({ patch: { shortcuts: bindings } })
       } catch (value) {
         setError(readableError(value))
         // Re-read so the editor shows what is stored rather than what was tried.
-        const current = await desktop?.settings?.().catch(() => null)
-        if (current) setShortcutBindings(current.settings.shortcuts)
+        await settingsQuery.refetch()
       }
     },
-    [desktop],
+    [desktop, settingsMutation, settingsQuery],
   )
   const shortcutLockReason =
     settingsLocks.find((lock) => lock.key === 'shortcuts')?.reason ?? undefined
@@ -610,27 +772,69 @@ function App() {
   // refresh, or the snapshot either returns. Switching repositories resets it
   // so no result computed for the previous repository is ever applied.
   const repositoryGate = React.useRef(createRequestGate()).current
-  const [remoteStatus, setRemoteStatus] = React.useState<RemoteFreshness | null>(null)
+  const freshnessKey = React.useMemo(
+    () => ['remote-freshness', repositoryIdentity.path, repositoryIdentity.generation] as const,
+    [repositoryIdentity],
+  )
+  const freshnessKeyRef = React.useRef(freshnessKey)
+  freshnessKeyRef.current = freshnessKey
+  const freshnessQuery = useQuery<RemoteFreshness | null>({
+    queryKey: freshnessKey,
+    queryFn: async () => (await desktop!.remoteStatus?.()) ?? null,
+    enabled: Boolean(desktop),
+  })
+  const remoteStatus = freshnessQuery.data ?? null
+  const setRemoteStatus = React.useCallback(
+    (next: React.SetStateAction<RemoteFreshness | null>) => {
+      const key = freshnessKeyRef.current
+      void queryClient.cancelQueries({ queryKey: key, exact: true })
+      queryClient.setQueryData<RemoteFreshness | null>(key, (current) =>
+        typeof next === 'function' ? next(current ?? null) : next,
+      )
+    },
+    [queryClient],
+  )
+  const dismissPendingMutation = useMutation({
+    mutationFn: async (id: string) => desktop!.dismissPendingMutation?.(id),
+  })
   // The PR Inbox is its own destination with its own read: it spans every
   // registered repository rather than the one on screen, and it is the only
   // surface that answers "what is waiting on me?" across all of them.
-  const [inboxReport, setInboxReport] = React.useState<PullRequestInboxReport | null>(null)
-  const [inboxSavedFilters, setInboxSavedFilters] = React.useState<PullRequestInboxSavedFilter[]>(
-    [],
+  const inboxKey = React.useMemo(
+    () => ['pull-request-inbox', host, repositoryIdentity.generation] as const,
+    [host, repositoryIdentity.generation],
   )
-  const [inboxLoading, setInboxLoading] = React.useState(false)
-  const [inboxRefreshing, setInboxRefreshing] = React.useState(false)
-  const [inboxSavingFilters, setInboxSavingFilters] = React.useState(false)
+  const inboxKeyRef = React.useRef(inboxKey)
+  inboxKeyRef.current = inboxKey
+  const inboxQuery = useQuery<PullRequestInboxReport | null>({
+    queryKey: inboxKey,
+    enabled: false,
+  })
+  const inboxReport = inboxQuery.data ?? null
+  const filtersQuery = useQuery({
+    queryKey: ['pull-request-inbox-filters'],
+    queryFn: async () => (await desktop!.pullRequestInboxFilters?.()) ?? [],
+    enabled: Boolean(desktop),
+  })
+  const inboxSavedFilters = filtersQuery.isFetching ? [] : (filtersQuery.data ?? [])
+  const inboxLoading = inboxQuery.isFetching
+  const inboxRefreshing = inboxQuery.isFetching
+  const filtersMutation = useMutation({
+    mutationFn: (drafts: PullRequestInboxFilterDraft[]) =>
+      desktop!.savePullRequestInboxFilters!(drafts),
+    onSuccess: async (saved) => {
+      await queryClient.cancelQueries({ queryKey: ['pull-request-inbox-filters'] })
+      queryClient.setQueryData(['pull-request-inbox-filters'], saved)
+    },
+  })
+  const inboxSavingFilters = filtersMutation.isPending
   // The lock is a ref so a second mutation in the same event is refused before
   // the render that shows the controls as waiting has happened.
   const savingInboxFiltersRef = React.useRef(false)
   // Whether the stored list has been read. The save controls wait for it: each
   // one replaces the whole list, so a save taken against the list as it has not
   // been read yet would send back an empty list and store it.
-  const [inboxFiltersReady, setInboxFiltersReady] = React.useState(false)
-  // Advances with every read and every accepted write, so an initialization
-  // answer that arrives after a save cannot put the list it read back.
-  const inboxFiltersGeneration = React.useRef(0)
+  const inboxFiltersReady = !filtersQuery.isPending && !filtersQuery.isFetching
   const [inboxError, setInboxError] = React.useState<string | null>(null)
   // The account the rows on screen were read for. A ref, not a state: it is
   // read and written in the same event that retires those rows, and dropping the
@@ -639,73 +843,68 @@ function App() {
   const inboxGate = React.useRef(createRequestGate()).current
   // A background snapshot only applies to the repository the window still shows.
   const snapshotPathRef = React.useRef<string | null>(null)
-  const setSnapshotAndSelection = React.useCallback((next: RepositorySnapshot) => {
-    setBranchSelection((current) => {
-      if (current?.repoPath !== next.path) return null
-      const refs = new Set(
-        next.branches
-          .filter(
-            (branch) =>
-              current.refs.has(branch.ref) && !branchDeleteReason(branch, next.defaultBranch),
-          )
-          .map((branch) => branch.ref),
+  const setSnapshotAndSelection = React.useCallback(
+    (next: RepositorySnapshot) => {
+      setBranchSelection((current) => {
+        if (current?.repoPath !== next.path) return null
+        const refs = new Set(
+          next.branches
+            .filter(
+              (branch) =>
+                current.refs.has(branch.ref) && !branchDeleteReason(branch, next.defaultBranch),
+            )
+            .map((branch) => branch.ref),
+        )
+        return { ...current, refs }
+      })
+      const previous = repositoryKeyRef.current
+      const key = ['repository-snapshot', next.path, previous[2]] as const
+      void queryClient.cancelQueries({ queryKey: key, exact: true })
+      queryClient.setQueryData(key, next)
+      repositoryKeyRef.current = key
+      if (previous[1] !== next.path) {
+        setRepositoryIdentity({ path: next.path, generation: previous[2] })
+      }
+      snapshotPathRef.current = next.path
+      // A snapshot the main process produced already knows its own freshness.
+      const previousFreshness = queryClient.getQueryData<RemoteFreshness | null>(
+        freshnessKeyRef.current,
       )
-      return { ...current, refs }
-    })
-    setSnapshot(next)
-    snapshotPathRef.current = next.path
-    // A snapshot the main process produced already knows its own freshness.
-    setRemoteStatus((current) => next.remote ?? current)
-    setSelectedBranchRef((current) => {
-      if (current && next.branches.some((branch) => branch.ref === current)) return current
-      if (next.currentBranch) return `refs/heads/${next.currentBranch}`
-      return next.branches[0]?.ref ?? null
-    })
-  }, [])
+      freshnessKeyRef.current = ['remote-freshness', next.path, previous[2]]
+      setRemoteStatus(next.remote ?? previousFreshness ?? null)
+      setSelectedBranchRef((current) => {
+        if (current && next.branches.some((branch) => branch.ref === current)) return current
+        if (next.currentBranch) return `refs/heads/${next.currentBranch}`
+        return next.branches[0]?.ref ?? null
+      })
+    },
+    [queryClient, setRemoteStatus],
+  )
 
   const refreshSnapshot = React.useCallback(async (): Promise<RepositorySnapshot | null> => {
     if (!desktop) return null
     const claim = repositoryGate.claim()
-    setRefreshing(true)
+    await queryClient.cancelQueries({ queryKey: repositoryKeyRef.current, exact: true })
     try {
-      const next = await desktop.refresh()
+      const next = await queryClient.fetchQuery({
+        queryKey: repositoryKeyRef.current,
+        structuralSharing: false,
+        queryFn: async () => {
+          const result = await desktop.refresh()
+          if (!repositoryGate.current(claim)) throw new CancelledError()
+          return result
+        },
+        staleTime: 0,
+      })
       if (!repositoryGate.current(claim)) return null
       setSnapshotAndSelection(next)
       return next
     } catch (value) {
-      if (repositoryGate.current(claim)) setError(readableError(value))
+      if (repositoryGate.current(claim) && !(value instanceof CancelledError))
+        setError(readableError(value))
       return null
-    } finally {
-      if (repositoryGate.current(claim)) setRefreshing(false)
     }
-  }, [desktop, repositoryGate, setSnapshotAndSelection])
-
-  React.useEffect(() => {
-    let cancelled = false
-    if (!desktop) {
-      setBootLoading(false)
-      return () => {
-        cancelled = true
-      }
-    }
-
-    setBootLoading(true)
-    desktop
-      .recentRepositories()
-      .then((repositories) => {
-        if (!cancelled) setRecentRepositories(repositories)
-      })
-      .catch((value) => {
-        if (!cancelled) setError(readableError(value))
-      })
-      .finally(() => {
-        if (!cancelled) setBootLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [desktop])
+  }, [desktop, queryClient, repositoryGate, setSnapshotAndSelection])
 
   // The main process pushes what its watcher and refresh timers find: local Git
   // made outside this window, a newer pull-request state, or a change in how
@@ -717,31 +916,32 @@ function App() {
       setSnapshotAndSelection(next)
     })
     const offIssues = desktop.onBackgroundIssues?.((issues) => {
-      setSnapshot((current) => (current ? { ...current, issues } : current))
+      void queryClient.cancelQueries({ queryKey: repositoryKeyRef.current, exact: true })
+      queryClient.setQueryData<RepositorySnapshot | null>(repositoryKeyRef.current, (current) =>
+        current ? { ...current, issues } : current,
+      )
     })
     const offStatus = desktop.onRemoteStatus?.((freshness) => setRemoteStatus(freshness))
-    desktop
-      .remoteStatus?.()
-      .then((freshness) => setRemoteStatus(freshness))
-      .catch(() => {})
     return () => {
       offSnapshot?.()
       offIssues?.()
       offStatus?.()
     }
-  }, [desktop, setSnapshotAndSelection])
+  }, [desktop, queryClient, setSnapshotAndSelection, setRemoteStatus])
 
   // Focus and visibility decide how often GitHub is read; the main process
   // cannot observe either on its own.
+  const activityMutation = useMutation({
+    mutationFn: (activity: { focused: boolean; visible: boolean }) =>
+      desktop!.reportActivity!(activity),
+  })
   React.useEffect(() => {
     if (!desktop?.reportActivity) return
     const report = () => {
-      desktop
-        ?.reportActivity?.({
-          focused: document.hasFocus(),
-          visible: document.visibilityState === 'visible',
-        })
-        .catch(() => {})
+      activityMutation.mutate({
+        focused: document.hasFocus(),
+        visible: document.visibilityState === 'visible',
+      })
     }
     window.addEventListener('focus', report)
     window.addEventListener('blur', report)
@@ -752,28 +952,14 @@ function App() {
       window.removeEventListener('blur', report)
       document.removeEventListener('visibilitychange', report)
     }
-  }, [desktop])
+  }, [desktop, activityMutation.mutate])
 
   // Settings are read once at startup so the window opens in the appearance and
   // with the shortcuts the user last chose. Main owns the file.
   React.useEffect(() => {
-    if (!desktop?.settings) return
-    let cancelled = false
-    desktop
-      .settings()
-      .then((snapshot) => {
-        if (cancelled) return
-        setSettings(snapshot.settings)
-        setSettingsLocks(snapshot.locks)
-        setShortcutBindings(snapshot.settings.shortcuts)
-      })
-      .catch((value) => {
-        if (!cancelled) setError(readableError(value))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [desktop])
+    const failure = settingsQuery.error ?? recentRepositoriesQuery.error
+    if (failure) setError(readableError(failure))
+  }, [settingsQuery.error, recentRepositoriesQuery.error])
 
   // The build before this one kept shortcuts in web storage. Those bindings
   // belong to the user, so they are offered for import once, before anything
@@ -791,25 +977,17 @@ function App() {
     const legacy = readLegacyShortcuts()
     if (!legacy) return
     legacyImportOffered.current = true
-    let cancelled = false
-    desktop
-      .updateSettings({ legacyShortcutImport: legacy })
-      .then((snapshot) => {
+    settingsMutation
+      .mutateAsync({ patch: { legacyShortcutImport: legacy } })
+      .then(() => {
         clearLegacyShortcuts()
-        if (cancelled) return
-        setSettings(snapshot.settings)
-        setSettingsLocks(snapshot.locks)
-        setShortcutBindings(snapshot.settings.shortcuts)
       })
       .catch(() => {
         // A migration that could not be written is left undone rather than
         // marked done, so the stored copy is kept for the next window.
         legacyImportOffered.current = false
       })
-    return () => {
-      cancelled = true
-    }
-  }, [desktop, settings])
+  }, [desktop, settings, settingsMutation.mutateAsync])
 
   // The theme attribute is the only place the preference takes effect: the
   // generated token sheet switches on it, and "system" defers to the operating
@@ -847,43 +1025,9 @@ function App() {
       repositoryGate.reset()
       const claim = repositoryGate.claim()
       openingRef.current = claim
-      setOpening(true)
-      setError(null)
-      setActionError(null)
-      setNotice(null)
-      try {
-        const next =
-          mode === 'add'
-            ? await desktop.addRepository?.(path ?? '')
-            : await desktop.openRepository(path)
-        if (next && openingRef.current === claim) {
-          setSnapshotAndSelection(
-            repositoryGate.current(claim) ? next : withoutReplacedCredential(next),
-          )
-          setDeleteTarget(null)
-          setWorkflow(null)
-          setInspectedPath(null)
-          commitForm.reset()
-          // Opening a repository reads it; it never changes what is checked out.
-          // Landing straight in Review is how a queue row reaches the workspace
-          // for its own repository without a checkout or a branch switch.
-          if (landing) setReviewNumber(landing.reviewNumber)
-          setWorkspaceView(landing ? 'review' : 'branches')
-        }
-        const repositories = await desktop.recentRepositories().catch(() => null)
-        if (repositories) setRecentRepositories(repositories)
-      } catch (value) {
-        if (openingRef.current === claim) setError(readableError(value))
-      } finally {
-        // The switch keeps its lock until main settles and the window adopts
-        // the completed repository, including across credential retirement.
-        if (openingRef.current === claim) {
-          openingRef.current = null
-          setOpening(false)
-        }
-      }
+      return repositoryOpenMutation.mutateAsync({ path, mode, landing, claim })
     },
-    [desktop, repositoryGate, setSnapshotAndSelection],
+    [desktop, repositoryGate, repositoryOpenMutation.mutateAsync],
   )
 
   /**
@@ -900,28 +1044,28 @@ function App() {
       // for: the rows it produces belong to that host, and a later change of host
       // has to retire them for that host and no other.
       const inboxRowsHost = notificationHostRef.current
-      setInboxLoading(true)
-      setInboxRefreshing(true)
+      const key = inboxKeyRef.current
       setInboxError(null)
       try {
-        const report = await desktop.pullRequestInbox?.(request)
-        if (!report) return
-        if (!inboxGate.current(claim)) return
-        inboxRowsHostRef.current = inboxRowsHost
-        setInboxReport(report)
+        await queryClient.cancelQueries({ queryKey: key, exact: true })
+        await queryClient.fetchQuery({
+          queryKey: key,
+          staleTime: 0,
+          queryFn: async () => {
+            const report = await desktop.pullRequestInbox?.(request)
+            if (!inboxGate.current(claim)) throw new CancelledError()
+            inboxRowsHostRef.current = inboxRowsHost
+            return report ?? null
+          },
+        })
       } catch (value) {
-        if (!inboxGate.current(claim)) return
+        if (!inboxGate.current(claim) || value instanceof CancelledError) return
         // A read that could not answer is reported, never emptied: the last
         // confirmed rows stay on screen behind the reason.
         setInboxError(readableError(value))
-      } finally {
-        if (inboxGate.current(claim)) {
-          setInboxLoading(false)
-          setInboxRefreshing(false)
-        }
       }
     },
-    [desktop, inboxGate],
+    [desktop, inboxGate, queryClient],
   )
 
   // Leaves the Inbox: ends the read the destination started, so the main process
@@ -929,13 +1073,9 @@ function App() {
   // retires the answer so it cannot repaint the destination when it lands.
   const leaveInbox = React.useCallback(() => {
     inboxGate.reset()
-    // The flags belong to the read this destination started, so they end with
-    // it. Leaving mid-read and coming back would otherwise find Refresh
-    // disabled for a read that is no longer running.
-    setInboxLoading(false)
-    setInboxRefreshing(false)
+    void queryClient.cancelQueries({ queryKey: inboxKeyRef.current, exact: true })
     void desktop?.cancel?.(INBOX_REQUEST_ID)?.catch(() => undefined)
-  }, [desktop, inboxGate])
+  }, [desktop, inboxGate, queryClient])
 
   // The queue reads on open and on the stored cadence. It never reads while the
   // window is hidden, so a background app is not spending rate budget.
@@ -980,43 +1120,16 @@ function App() {
       // stored list, not the main process's write queue.
       if (savingInboxFiltersRef.current) return
       savingInboxFiltersRef.current = true
-      setInboxSavingFilters(true)
       try {
-        const saved = await desktop.savePullRequestInboxFilters?.(drafts)
-        // The stored list has moved past the read the initialization answer
-        // belongs to, so that answer must not be able to put this one back.
-        if (saved) inboxFiltersGeneration.current += 1
-        if (saved) setInboxSavedFilters(saved)
+        await filtersMutation.mutateAsync(drafts)
       } catch (value) {
         setInboxError(readableError(value))
       } finally {
         savingInboxFiltersRef.current = false
-        setInboxSavingFilters(false)
       }
     },
-    [desktop],
+    [desktop, filtersMutation.mutateAsync],
   )
-
-  React.useEffect(() => {
-    if (!desktop) return
-    let live = true
-    const generation = ++inboxFiltersGeneration.current
-    const settle = (filters?: readonly PullRequestInboxSavedFilter[] | null) => {
-      if (live && generation === inboxFiltersGeneration.current) {
-        setInboxSavedFilters(filters ? [...filters] : [])
-      }
-    }
-    void desktop
-      .pullRequestInboxFilters?.()
-      .then((filters) => settle(filters))
-      .catch(() => settle([]))
-      .finally(() => {
-        if (live && generation === inboxFiltersGeneration.current) setInboxFiltersReady(true)
-      })
-    return () => {
-      live = false
-    }
-  }, [desktop])
 
   const isBusy = Boolean(busyAction || opening || refreshing)
   const operationActive = Boolean(snapshot?.operation || snapshot?.stackOperation)
@@ -1024,40 +1137,39 @@ function App() {
   const openGitRuntime = React.useCallback(() => {
     if (!desktop || isBusy || operationActive) return
     setGitRuntimeOpen(true)
-    desktop
-      .gitRuntimeStatus()
-      .then(setGitRuntimeStatus)
-      .catch((value) => setError(readableError(value)))
-  }, [desktop, isBusy, operationActive])
+    void gitRuntimeQuery.refetch().then((result) => {
+      if (result.error) setError(readableError(result.error))
+    })
+  }, [desktop, isBusy, operationActive, gitRuntimeQuery.refetch])
 
   const selectGitRuntime = React.useCallback(
     async (useSystemGit: boolean) => {
       if (!desktop || isBusy || operationActive) return
-      setGitRuntimeBusy(true)
       try {
-        setGitRuntimeStatus(await desktop.setSystemGit(useSystemGit))
+        await runtimeMutation.mutateAsync(useSystemGit)
       } catch (value) {
         setError(readableError(value))
-      } finally {
-        setGitRuntimeBusy(false)
       }
     },
-    [desktop, isBusy, operationActive],
+    [desktop, isBusy, operationActive, runtimeMutation.mutateAsync],
   )
 
   // Main resolves the editor from settings and checks the path is inside the
   // open repository, so the window sends only a path it is already showing.
+  const editorMutation = useMutation({
+    mutationFn: (relativePath: string) => desktop!.openInEditor!(relativePath),
+  })
   const openInEditor = React.useCallback(
     async (relativePath: string) => {
       if (!desktop?.openInEditor) return
       try {
-        const result = await desktop.openInEditor(relativePath)
+        const result = await editorMutation.mutateAsync(relativePath)
         setNotice(result.reason)
       } catch (value) {
         setError(readableError(value))
       }
     },
-    [desktop],
+    [desktop, editorMutation.mutateAsync],
   )
 
   // The identity the rows on screen belong to: the host this window reads for
@@ -1091,15 +1203,20 @@ function App() {
    */
   const retireGitHubAuthority = React.useCallback(() => {
     leaveInbox()
-    setInboxReport(null)
+    queryClient.setQueryData(inboxKeyRef.current, null)
     setInboxError(null)
     repositoryGate.reset()
     // Keep an outstanding local switch locked until its completion is adopted.
     // Its gate is stale, so only the returned local Git facts can land.
-    setRefreshing(false)
-    setSnapshot((current) => (current === null ? current : withoutReplacedCredential(current)))
+    const previousKey = repositoryKeyRef.current
+    void queryClient.cancelQueries({ queryKey: previousKey, exact: true })
+    const current = queryClient.getQueryData<RepositorySnapshot | null>(previousKey)
+    const nextKey = ['repository-snapshot', previousKey[1], previousKey[2] + 1] as const
+    queryClient.setQueryData(nextKey, current ? withoutReplacedCredential(current) : null)
+    repositoryKeyRef.current = nextKey
+    setRepositoryIdentity({ path: nextKey[1], generation: nextKey[2] })
     setReviewNumber(null)
-  }, [leaveInbox, repositoryGate])
+  }, [leaveInbox, queryClient, repositoryGate])
 
   const retireInboxIdentity = React.useCallback(
     (status: GitHubCliStatus | null, host: string) => {
@@ -1143,7 +1260,7 @@ function App() {
       }
       inboxIdentityRef.current = identity
     },
-    [retireGitHubAuthority],
+    [retireGitHubAuthority, setCliStatus],
   )
 
   /**
@@ -1159,7 +1276,7 @@ function App() {
       retireInboxIdentity(status, host)
       setCliStatus(status)
     },
-    [retireInboxIdentity],
+    [retireInboxIdentity, setCliStatus],
   )
 
   // A real read of what the CLI is doing. The main process runs the bounded,
@@ -1173,17 +1290,30 @@ function App() {
   const readCliStatus = React.useCallback(async () => {
     if (!desktop?.githubCliStatus) return
     const request = ++cliStatusRequest.current
-    setCliRefreshing(true)
     try {
-      const status = await desktop.githubCliStatus()
-      // Only the newest read paints, and only for the host being read now.
+      const key = cliKeyRef.current
+      await queryClient.cancelQueries({ queryKey: key, exact: true })
+      const status = await queryClient.fetchQuery({
+        queryKey: key,
+        staleTime: 0,
+        queryFn: async () => {
+          const next = await desktop.githubCliStatus!()
+          if (
+            request !== cliStatusRequest.current ||
+            (inboxHostRef.current !== null &&
+              canonicalHostName(next.host) !== canonicalHostName(inboxHostRef.current))
+          ) {
+            throw new CancelledError()
+          }
+          return next
+        },
+      })
       if (request === cliStatusRequest.current) applyCliStatus(status)
     } catch (value) {
-      if (request === cliStatusRequest.current) setError(readableError(value))
-    } finally {
-      if (request === cliStatusRequest.current) setCliRefreshing(false)
+      if (request === cliStatusRequest.current && !(value instanceof CancelledError))
+        setError(readableError(value))
     }
-  }, [applyCliStatus, desktop])
+  }, [applyCliStatus, desktop, queryClient])
 
   const openCliStatus = React.useCallback(() => {
     if (!desktop || isBusy || operationActive) return
@@ -1206,16 +1336,16 @@ function App() {
     // replaced, established nothing and retires nothing.
     if (previous === established) return
     cliStatusHost.current = established
-    // The first host this window learns of is the one the mount read is already
-    // asking about. Retiring that read would leave the window reading nothing
-    // at all until a push or an explicit refresh, which is worse than letting
-    // the answer it asked for land.
-    if (previous === null) return
+    if (previous === null) {
+      // The first settings answer can move the observer from the startup host.
+      // Read that key explicitly if the mount probe has not established it.
+      if (!queryClient.getQueryData(cliKeyRef.current)) void readCliStatus()
+      return
+    }
     cliStatusRequest.current += 1
-    setCliRefreshing(false)
     retireInboxIdentity(null, host)
     void readCliStatus()
-  }, [readCliStatus, retireInboxIdentity, settings?.github.host])
+  }, [queryClient, readCliStatus, retireInboxIdentity, settings?.github.host])
 
   // The CLI session changes outside this window — a sign-in, a switch, a logout,
   // a revocation — so the status is pushed rather than polled, and the first
@@ -1225,7 +1355,6 @@ function App() {
     if (!desktop) return
     const stop = desktop.onGitHubCliStatus?.((status) => {
       cliStatusRequest.current += 1
-      setCliRefreshing(false)
       applyCliStatus(status)
     })
     void readCliStatus()
@@ -1250,8 +1379,9 @@ function App() {
   // repository operation, must not borrow the sign-in's panel, and a write that
   // GitHub refused must stay on the inbox even while the credential dialog is
   // closed over it.
-  const [notificationInbox, setNotificationInbox] = React.useState<NotificationInbox | null>(null)
-  const [notificationBusy, setNotificationBusy] = React.useState(false)
+  // Credential handoff is deliberately outside mutation storage.
+  const [credentialBusy, setCredentialBusy] = React.useState(false)
+  const notificationLock = React.useRef(false)
   /** Belongs to the consent dialog, and is dismissed with it. */
   const [notificationDialogError, setNotificationDialogError] = React.useState<string | null>(null)
   /** Belongs to the inbox, and is only cleared by answering it with a new action. */
@@ -1272,6 +1402,25 @@ function App() {
   React.useEffect(() => {
     notificationHostRef.current = notificationHost
   }, [notificationHost])
+  const notificationKey = React.useMemo(
+    () => ['notification-inbox', notificationHost] as const,
+    [notificationHost],
+  )
+  const notificationKeyRef = React.useRef(notificationKey)
+  notificationKeyRef.current = notificationKey
+  const notificationQuery = useQuery<NotificationInbox | null>({
+    queryKey: notificationKey,
+    enabled: false,
+  })
+  const notificationInbox = notificationQuery.data ?? null
+  const setNotificationInbox = React.useCallback(
+    (next: NotificationInbox | null) => {
+      const key = notificationKeyRef.current
+      void queryClient.cancelQueries({ queryKey: key, exact: true })
+      queryClient.setQueryData(key, next)
+    },
+    [queryClient],
+  )
 
   /**
    * Whether a reply still belongs to the window that asked for it.
@@ -1303,19 +1452,32 @@ function App() {
     })
     setNotificationInbox(null)
     setNotificationActionError(null)
-    setNotificationBusy(false)
+    setCredentialBusy(false)
+    notificationLock.current = false
     setNotificationDialogOpen(false)
     setNotificationDialogError(null)
-    desktop
-      .notifications?.()
-      .then((value) => {
-        if (notificationClaim(request, host) && inboxForHost(value, host)) {
-          setNotificationInbox(value)
-        }
+    void queryClient
+      .fetchQuery({
+        queryKey: notificationKey,
+        staleTime: 0,
+        queryFn: async () => {
+          const value = await desktop.notifications?.()
+          if (!notificationClaim(request, host) || (value && !inboxForHost(value, host))) {
+            throw new CancelledError()
+          }
+          return value ?? null
+        },
       })
       .catch(() => undefined)
     return stop
-  }, [desktop, notificationClaim, notificationHost])
+  }, [
+    desktop,
+    notificationClaim,
+    notificationHost,
+    notificationKey,
+    queryClient,
+    setNotificationInbox,
+  ])
 
   /**
    * One notification call at a time. The bridge method is looked up rather than
@@ -1333,24 +1495,65 @@ function App() {
     [desktop],
   )
 
-  const runNotification = React.useCallback(
-    async (action: () => Promise<NotificationInbox>) => {
-      if (!desktop || notificationBusy) return
-      const request = ++notificationRequest.current
-      const host = notificationHostRef.current
-      setNotificationBusy(true)
-      setNotificationActionError(null)
-      try {
-        const next = await action()
-        if (notificationClaim(request, host) && inboxForHost(next, host)) setNotificationInbox(next)
-      } catch (value) {
-        if (notificationClaim(request, host))
-          setNotificationActionError(unknownOutcomeError(readableError(value)))
-      } finally {
-        if (notificationClaim(request, host)) setNotificationBusy(false)
+  const notificationMutation = useMutation({
+    mutationFn: async (operation: NotificationOperation) => {
+      switch (operation.kind) {
+        case 'read':
+          return notificationCall<NotificationInbox>('markNotificationRead', operation.id)
+        case 'done':
+          return notificationCall<NotificationInbox>('markNotificationDone', operation.id)
+        case 'subscribe':
+          return notificationCall<NotificationInbox>(
+            'setNotificationSubscription',
+            operation.id,
+            operation.action,
+          )
+        case 'removeCredential':
+          await notificationCall('removeNotificationCredential')
+          return notificationCall<NotificationInbox>('notifications')
       }
     },
-    [desktop, notificationBusy, notificationClaim],
+  })
+  const notificationBusy =
+    credentialBusy || notificationMutation.isPending || notificationQuery.isFetching
+  const runNotification = React.useCallback(
+    async (operation: NotificationOperation | { kind: 'refresh' }) => {
+      if (!desktop || notificationLock.current) return
+      notificationLock.current = true
+      const request = ++notificationRequest.current
+      const host = notificationHostRef.current
+      setNotificationActionError(null)
+      try {
+        const next =
+          operation.kind === 'refresh'
+            ? await queryClient.fetchQuery({
+                queryKey: notificationKeyRef.current,
+                staleTime: 0,
+                queryFn: async () => {
+                  const value = await notificationCall<NotificationInbox>('refreshNotifications')
+                  if (!notificationClaim(request, host) || !inboxForHost(value, host)) {
+                    throw new CancelledError()
+                  }
+                  return value
+                },
+              })
+            : await notificationMutation.mutateAsync(operation)
+        if (notificationClaim(request, host) && inboxForHost(next, host)) setNotificationInbox(next)
+      } catch (value) {
+        if (notificationClaim(request, host) && !(value instanceof CancelledError))
+          setNotificationActionError(unknownOutcomeError(readableError(value)))
+      } finally {
+        if (notificationClaim(request, host)) notificationLock.current = false
+      }
+    },
+    [
+      desktop,
+      notificationCall,
+      notificationClaim,
+      notificationMutation.mutateAsync,
+      queryClient,
+      setNotificationInbox,
+    ],
   )
 
   /**
@@ -1359,12 +1562,28 @@ function App() {
    * is handed over once, together with the acknowledgement the consent text
    * asked for, and never read back.
    */
+  const readNotificationSnapshot = React.useCallback(
+    (request: number, host: string | null) =>
+      queryClient.fetchQuery({
+        queryKey: notificationKeyRef.current,
+        staleTime: 0,
+        queryFn: async () => {
+          const value = await notificationCall<NotificationInbox>('notifications')
+          if (!notificationClaim(request, host) || !inboxForHost(value, host)) {
+            throw new CancelledError()
+          }
+          return value
+        },
+      }),
+    [notificationCall, notificationClaim, queryClient],
+  )
   const saveNotificationCredential = React.useCallback(
     async (token: string, accepted: boolean, consentedHost: string) => {
-      if (!desktop) return
+      if (!desktop || notificationLock.current) return
+      notificationLock.current = true
       const request = ++notificationRequest.current
       const host = canonicalHostName(consentedHost)
-      setNotificationBusy(true)
+      setCredentialBusy(true)
       setNotificationDialogError(null)
       // The token was typed against the host this dialog named and the
       // acknowledgement was given for it, so the host travels with it and every
@@ -1374,30 +1593,41 @@ function App() {
       // already in flight cannot be called back, which is why the check sits
       // between the steps and why main validates the same host again.
       try {
-        await desktop.updateSettings?.({ notifications: { enabled: true } })
+        await settingsMutation.mutateAsync({
+          patch: { notifications: { enabled: true } },
+          notificationOwner: { request, host },
+        })
         if (!notificationClaim(request, host)) return
         await notificationCall('saveNotificationCredential', token, accepted, consentedHost)
         if (!notificationClaim(request, host)) return
-        const next = await notificationCall<NotificationInbox>('notifications')
+        const next = await readNotificationSnapshot(request, host)
         if (notificationClaim(request, host) && inboxForHost(next, host)) {
           setNotificationInbox(next)
           setNotificationDialogOpen(false)
         }
       } catch (value) {
-        if (notificationClaim(request, host)) setNotificationDialogError(readableError(value))
+        if (notificationClaim(request, host) && !(value instanceof CancelledError))
+          setNotificationDialogError(readableError(value))
       } finally {
-        if (notificationClaim(request, host)) setNotificationBusy(false)
+        if (notificationClaim(request, host)) {
+          notificationLock.current = false
+          setCredentialBusy(false)
+        }
       }
     },
-    [desktop, notificationCall, notificationClaim],
+    [
+      desktop,
+      notificationCall,
+      notificationClaim,
+      readNotificationSnapshot,
+      setNotificationInbox,
+      settingsMutation.mutateAsync,
+    ],
   )
 
   const removeNotificationCredential = React.useCallback(() => {
-    void runNotification(async () => {
-      await notificationCall('removeNotificationCredential')
-      return notificationCall<NotificationInbox>('notifications')
-    })
-  }, [notificationCall, runNotification])
+    void runNotification({ kind: 'removeCredential' })
+  }, [runNotification])
 
   const openDiscovery = React.useCallback(() => {
     if (!desktop || isBusy || operationActive) return
@@ -1412,46 +1642,38 @@ function App() {
       const claim = repositoryGate.claim()
       setError(null)
       try {
-        const next = await desktop?.refresh()
+        const next = await queryClient.fetchQuery({
+          queryKey: ['repository-snapshot', result.path, repositoryKeyRef.current[2]],
+          staleTime: 0,
+          queryFn: async () => {
+            const value = await desktop!.refresh()
+            if (!repositoryGate.current(claim)) throw new CancelledError()
+            return value
+          },
+        })
         if (next && repositoryGate.current(claim)) {
           setSnapshotAndSelection(next)
           setWorkspaceView('branches')
         }
-        const repositories = await desktop?.recentRepositories().catch(() => null)
-        if (repositories) setRecentRepositories(repositories)
+        await recentRepositoriesQuery.refetch()
         setNotice(
           result.empty
             ? `Cloned ${result.name}. It has no commits yet — create a branch to add the first one.`
             : `Cloned ${result.name} into ${result.path}.`,
         )
       } catch (value) {
-        if (repositoryGate.current(claim)) setError(readableError(value))
+        if (repositoryGate.current(claim) && !(value instanceof CancelledError))
+          setError(readableError(value))
       }
     },
-    [desktop, repositoryGate, setSnapshotAndSelection],
+    [
+      desktop,
+      queryClient,
+      repositoryGate,
+      setSnapshotAndSelection,
+      recentRepositoriesQuery.refetch,
+    ],
   )
-
-  // Onboarding reads this machine's Git facts once; they never change while the
-  // window shows them, and nothing here writes a Git setting.
-  React.useEffect(() => {
-    if (!desktop?.gitEnvironment) return
-    let cancelled = false
-    desktop
-      .gitEnvironment('onboarding:environment')
-      .then((outcome) => {
-        if (cancelled) return
-        if (outcome.ok) {
-          setGitEnvironment(outcome.value)
-          setGitEnvironmentFailure(null)
-        } else {
-          setGitEnvironmentFailure(outcome.failure)
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
-    }
-  }, [desktop])
 
   // A folder dropped on the window is added as it was found, and only while no
   // repository is open: switching away from a workspace by accident is worse
@@ -1624,55 +1846,9 @@ function App() {
     async (action: GitAction, label: string): Promise<boolean> => {
       if (!desktop || !snapshot || busyRef.current) return false
       busyRef.current = label
-      setBusyAction(label)
-      setActionError(null)
-      setNotice(null)
-      try {
-        const result = await desktop.runAction(action)
-        if (result.message) setNotice(result.message)
-        const next = await refreshSnapshot()
-        if (action.type === 'switch' && next?.currentBranch)
-          setSelectedBranchRef(`refs/heads/${next.currentBranch}`)
-        if (action.type === 'renameBranch') setSelectedBranchRef(`refs/heads/${action.name}`)
-        if (
-          action.type === 'commit' ||
-          action.type === 'switch' ||
-          action.type === 'createBranch'
-        ) {
-          commitForm.reset()
-        }
-        return true
-      } catch (value) {
-        // Each form keeps its own failure inline, beside the shared status bar.
-        // The field map is empty because a failed action is no single field's fault.
-        const failure = { form: readableError(value), fields: {} }
-        if (action.type === 'createBranch') newBranchForm.setErrorMap({ onSubmit: failure })
-        if (action.type === 'createPr') prForm.setErrorMap({ onSubmit: failure })
-        if (
-          action.type === 'deleteBranch' ||
-          action.type === 'deleteBranches' ||
-          action.type === 'deleteRemoteBranch' ||
-          action.type === 'deleteRemoteBranches'
-        )
-          deleteForm.setErrorMap({ onSubmit: failure })
-        setActionError(`${label} failed: ${readableError(value)}`)
-        const next = await refreshSnapshot()
-        if (
-          next?.operation ||
-          next?.stackOperation ||
-          next?.files.some((file) => file.conflicted)
-        ) {
-          setWorkspaceView('changes')
-          setInspectedPath(next.files.find((file) => file.conflicted)?.path ?? null)
-          setWorkflow(null)
-        }
-        return false
-      } finally {
-        busyRef.current = null
-        setBusyAction(null)
-      }
+      return actionMutation.mutateAsync({ action, label })
     },
-    [commitForm, deleteForm, desktop, newBranchForm, prForm, refreshSnapshot, snapshot],
+    [actionMutation.mutateAsync, desktop, snapshot],
   )
 
   const selectedBranch = React.useMemo(() => {
@@ -1693,70 +1869,100 @@ function App() {
   // snapshot can only produce a missing branch: this is the branch's own pull
   // request, not a second lookup.
   const selectedPullRequest = selectedBranch?.pr ?? null
-  const [selectedPrIssueLinks, setSelectedPrIssueLinks] = React.useState<LinkedIssue[]>([])
-  const [selectedPrIssueLinksLoading, setSelectedPrIssueLinksLoading] = React.useState(false)
-
+  const issueLinksQuery = useQuery({
+    queryKey: [
+      'pull-request-issue-links',
+      snapshot?.path ?? null,
+      authority,
+      selectedPullRequest?.number ?? null,
+    ],
+    queryFn: async () => {
+      const result = await desktop!.pullRequestIssueLinks?.(selectedPullRequest!.number)
+      return result?.links ?? []
+    },
+    enabled: false,
+  })
+  const selectedPrIssueLinks = issueLinksQuery.data ?? []
+  const selectedPrIssueLinksLoading = issueLinksQuery.isFetching
   React.useEffect(() => {
-    if (!selectedPullRequest) {
-      setSelectedPrIssueLinks([])
-      setSelectedPrIssueLinksLoading(false)
-      return
-    }
-    let active = true
-    setSelectedPrIssueLinksLoading(true)
-    desktop
-      ?.pullRequestIssueLinks?.(selectedPullRequest.number)
-      .then((res) => {
-        if (!active) return
-        setSelectedPrIssueLinks(res?.links ?? [])
-        setSelectedPrIssueLinksLoading(false)
-      })
-      .catch(() => {
-        if (!active) return
-        setSelectedPrIssueLinks([])
-        setSelectedPrIssueLinksLoading(false)
-      })
+    if (!desktop || !selectedPullRequest) return
+    const key = [
+      'pull-request-issue-links',
+      snapshot?.path ?? null,
+      authority,
+      selectedPullRequest.number,
+    ]
+    void queryClient.cancelQueries({ queryKey: key, exact: true })
+    void issueLinksQuery.refetch()
     return () => {
-      active = false
+      void queryClient.cancelQueries({ queryKey: key, exact: true })
     }
-  }, [selectedPullRequest?.number, snapshot])
+  }, [
+    authority,
+    desktop,
+    issueLinksQuery.refetch,
+    queryClient,
+    selectedPullRequest?.number,
+    snapshot,
+  ])
 
   // The checks report is per pull request and carries its own freshness, so it is
   // never folded into the repository snapshot: a remembered report has to be able to
   // say it was not re-read without making the whole snapshot look stale.
-  const [checksReport, setChecksReport] = React.useState<PullRequestChecksReport | null>(null)
-  const [checksLoading, setChecksLoading] = React.useState(false)
   const [checksWatching, setChecksWatching] = React.useState(false)
-  const [rerunningRunId, setRerunningRunId] = React.useState<number | null>(null)
   const checksGate = React.useRef(createRequestGate()).current
   const checksNumber = selectedPullRequest?.number ?? null
   const checksRepository = snapshot?.path ?? null
-  // The head commit and base travel with the read, so the loader reads them from a ref:
-  // depending on the snapshot itself would re-read every pull request's checks on each
-  // ordinary repository refresh, which is not what refreshing the list asked for.
-  const pullRequestsRef = React.useRef(snapshot?.pullRequests)
-  pullRequestsRef.current = snapshot?.pullRequests
+  const checksPr = snapshot?.pullRequests.find((pr) => pr.number === checksNumber)
+  const checksKey = React.useMemo(
+    () =>
+      [
+        'pull-request-checks',
+        checksRepository,
+        authority,
+        checksNumber,
+        checksPr?.headOid ?? null,
+        checksPr?.base ?? null,
+      ] as const,
+    [checksRepository, authority, checksNumber, checksPr?.headOid, checksPr?.base],
+  )
+  const checksQuery = useQuery<PullRequestChecksReport | null>({
+    queryKey: checksKey,
+    enabled: false,
+  })
+  const checksReport = checksQuery.data ?? null
+  const checksLoading = checksQuery.isFetching
+  const rerunMutation = useMutation({
+    mutationFn: (runId: number) => desktop!.rerunPullRequestCheck!(checksNumber ?? 0, runId),
+  })
+  const rerunningRunId = rerunMutation.isPending ? (rerunMutation.variables ?? null) : null
+  const rerunLock = React.useRef(false)
 
   const loadChecks = React.useCallback(
     async (number: number, force: boolean): Promise<void> => {
       if (!desktop?.pullRequestChecks) return
-      const pr = pullRequestsRef.current?.find((entry) => entry.number === number) ?? null
       const claim = checksGate.claim()
-      setChecksLoading(true)
       try {
-        const report = await desktop.pullRequestChecks(number, {
-          headSha: pr?.headOid ?? null,
-          base: pr?.base ?? null,
-          force,
+        await queryClient.cancelQueries({ queryKey: checksKey, exact: true })
+        await queryClient.fetchQuery({
+          queryKey: checksKey,
+          staleTime: 0,
+          queryFn: async () => {
+            const report = await desktop.pullRequestChecks!(number, {
+              headSha: checksKey[4],
+              base: checksKey[5],
+              force,
+            })
+            if (!checksGate.current(claim)) throw new CancelledError()
+            return report
+          },
         })
-        if (checksGate.current(claim)) setChecksReport(report)
       } catch (value) {
-        if (checksGate.current(claim)) setError(readableError(value))
-      } finally {
-        if (checksGate.current(claim)) setChecksLoading(false)
+        if (checksGate.current(claim) && !(value instanceof CancelledError))
+          setError(readableError(value))
       }
     },
-    [checksGate, desktop],
+    [checksGate, checksKey, desktop, queryClient],
   )
 
   // Changing what is selected retires the previous report: a checks drill-down for
@@ -1766,9 +1972,12 @@ function App() {
   // account's pull request entirely.
   React.useEffect(() => {
     checksGate.reset()
-    setChecksReport(null)
+    void queryClient.cancelQueries({ queryKey: checksKey, exact: true })
+    queryClient.setQueryData(checksKey, null)
+  }, [checksGate, checksKey, queryClient])
+  React.useEffect(() => {
     setChecksWatching(false)
-  }, [authority, checksGate, checksNumber, checksRepository])
+  }, [authority, checksNumber, checksRepository])
 
   React.useEffect(() => {
     if (checksNumber === null) return
@@ -1785,26 +1994,38 @@ function App() {
 
   const rerunCheck = React.useCallback(
     async (check: PullRequestCheckDetail): Promise<void> => {
-      if (!desktop?.rerunPullRequestCheck || check.workflowRunId === null) return
+      if (!desktop?.rerunPullRequestCheck || check.workflowRunId === null || rerunLock.current)
+        return
+      rerunLock.current = true
       const claim = checksGate.claim()
-      setRerunningRunId(check.workflowRunId)
       try {
-        const report = await desktop.rerunPullRequestCheck(checksNumber ?? 0, check.workflowRunId)
-        if (checksGate.current(claim)) setChecksReport(report)
+        await queryClient.cancelQueries({ queryKey: checksKey, exact: true })
+        const report = await rerunMutation.mutateAsync(check.workflowRunId)
+        if (checksGate.current(claim)) queryClient.setQueryData(checksKey, report)
       } catch (value) {
         if (checksGate.current(claim)) setError(readableError(value))
       } finally {
-        setRerunningRunId(null)
+        rerunLock.current = false
       }
     },
-    [checksGate, checksNumber, desktop],
+    [checksGate, checksKey, desktop, queryClient, rerunMutation.mutateAsync],
   )
 
+  const externalMutation = useMutation({
+    mutationFn: (url: string) => desktop!.openExternal(url),
+  })
+  const openExternal = React.useCallback(
+    (url: string) => {
+      if (!desktop) return
+      void externalMutation.mutateAsync(url).catch((value) => setError(readableError(value)))
+    },
+    [desktop, externalMutation.mutateAsync],
+  )
   const openCheckDetails = React.useCallback(
     (url: string): void => {
-      desktop?.openExternal(url).catch((value) => setError(readableError(value)))
+      openExternal(url)
     },
-    [desktop],
+    [openExternal],
   )
 
   // The inspector badge follows the detailed report once it is loaded, so the badge
@@ -2076,7 +2297,7 @@ function App() {
           break
         case 'openPrUrl':
           if (desktop) {
-            desktop.openExternal(intent.url).catch((err) => setError(readableError(err)))
+            openExternal(intent.url)
           }
           break
         case 'selectBranch':
@@ -2124,6 +2345,7 @@ function App() {
     },
     [
       desktop,
+      openExternal,
       openBranchDialog,
       openDeleteDialog,
       openPrDialog,
@@ -2311,7 +2533,7 @@ function App() {
       if (matchesChord(event, shortcutBindings['stack.openPr'], isMac)) {
         event.preventDefault()
         if (selectedBranch?.pr) {
-          desktop?.openExternal(selectedBranch.pr.url).catch((err) => setError(readableError(err)))
+          openExternal(selectedBranch.pr.url)
         } else if (selectedBranch?.current && snapshot?.github.available && !isBusy) {
           openPrDialog()
         }
@@ -2330,6 +2552,7 @@ function App() {
     isBusy,
     isMac,
     newBranchOpen,
+    openExternal,
     openPrDialog,
     openWorkflow,
     operationActive,
@@ -2889,9 +3112,7 @@ function App() {
                             aria-label={`Open pull request #${pullRequest.number} on GitHub`}
                             onClick={(event) => {
                               event.preventDefault()
-                              desktop
-                                ?.openExternal(pullRequest.url)
-                                .catch((value) => setError(readableError(value)))
+                              openExternal(pullRequest.url)
                             }}
                           >
                             #{pullRequest.number}
@@ -3064,19 +3285,13 @@ function App() {
         inbox={notificationInbox}
         onDismissError={() => setNotificationActionError(null)}
         onMarkAllRead={() => {
-          void runNotification(() =>
-            notificationCall<NotificationInbox>('markNotificationRead', 'all'),
-          )
+          void runNotification({ kind: 'read', id: 'all' })
         }}
         onMarkDone={(threadId) => {
-          void runNotification(() =>
-            notificationCall<NotificationInbox>('markNotificationDone', threadId),
-          )
+          void runNotification({ kind: 'done', id: threadId })
         }}
         onMarkRead={(threadId) => {
-          void runNotification(() =>
-            notificationCall<NotificationInbox>('markNotificationRead', threadId),
-          )
+          void runNotification({ kind: 'read', id: threadId })
         }}
         onOpenCredential={() => {
           setNotificationDialogError(null)
@@ -3084,16 +3299,14 @@ function App() {
         }}
         onOpenThread={(thread) => {
           if (!thread.url) return
-          desktop.openExternal(thread.url).catch((value) => setError(readableError(value)))
+          openExternal(thread.url)
         }}
         onRefresh={() => {
-          void runNotification(() => notificationCall<NotificationInbox>('refreshNotifications'))
+          void runNotification({ kind: 'refresh' })
         }}
         onRemoveCredential={removeNotificationCredential}
         onSubscribe={(thread, action) => {
-          void runNotification(() =>
-            notificationCall<NotificationInbox>('setNotificationSubscription', thread.id, action),
-          )
+          void runNotification({ kind: 'subscribe', id: thread.id, action })
         }}
       />
     )
@@ -3132,6 +3345,7 @@ function App() {
           actionError={actionError}
           onClearActionError={() => setActionError(null)}
           snapshot={snapshot}
+          authority={authority}
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}
@@ -3560,7 +3774,7 @@ function App() {
                               type="button"
                               className="truncate font-medium text-[var(--gs-semantic-text-primary)] hover:underline text-left bg-transparent border-none p-0 cursor-pointer"
                               title={issue.title}
-                              onClick={() => issue.url && desktop?.openExternal(issue.url)}
+                              onClick={() => issue.url && externalMutation.mutate(issue.url)}
                               variant="unstyled"
                             >
                               #{issue.number} {issue.title}
@@ -3576,11 +3790,7 @@ function App() {
                   ) : null}
                 </div>
                 <Button
-                  onClick={() =>
-                    desktop
-                      ?.openExternal(selectedPullRequest.url)
-                      .catch((value) => setError(readableError(value)))
-                  }
+                  onClick={() => openExternal(selectedPullRequest.url)}
                   size="sm"
                   variant="secondary"
                   tooltip="Open this pull request in the browser. Read-only; no local or remote changes."
@@ -3960,7 +4170,7 @@ function App() {
             <IconButton
               label={`Dismiss ${pending.label}`}
               onClick={() => {
-                void desktop?.dismissPendingMutation?.(pending.id)
+                dismissPendingMutation.mutate(pending.id)
                 setRemoteStatus((current) =>
                   current
                     ? {
@@ -4006,6 +4216,7 @@ function App() {
           key={workflow.id}
           request={workflow.request}
           snapshot={snapshot}
+          authority={authority}
           busy={isBusy}
           actionError={actionError}
           onClearActionError={() => setActionError(null)}
@@ -4064,7 +4275,8 @@ function App() {
       />
       {conflictPath && snapshot ? (
         <ConflictResolver
-          key={conflictPath}
+          key={`${snapshot.path}:${conflictPath}`}
+          repositoryPath={snapshot.path}
           busy={isBusy}
           actionError={actionError}
           path={conflictPath}

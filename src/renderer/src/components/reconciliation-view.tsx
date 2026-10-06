@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useForm, useSelector } from '@tanstack/react-form'
 import {
   AlertTriangle,
@@ -327,6 +328,9 @@ function StackRow({
   blocked: boolean
   onReview: () => void
 }) {
+  const openExternal = useMutation({
+    mutationFn: (url: string) => window.desktop.openExternal(url),
+  })
   return (
     <li className="gs-reconciliation-stack grid gap-2 rounded-[var(--gs-semantic-radius-panel)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -379,7 +383,7 @@ function StackRow({
             size="sm"
             variant="ghost"
             tooltip="Open this stack on GitHub"
-            onClick={() => window.desktop.openExternal(stack.stackUrl!)}
+            onClick={() => openExternal.mutate(stack.stackUrl!)}
           >
             Open on GitHub
           </Button>
@@ -396,12 +400,14 @@ function StackRow({
  */
 export function ReconciliationPanel({
   snapshot,
+  authority,
   busy,
   runAction,
   actionError,
   onClearActionError,
 }: {
   snapshot: RepositorySnapshot
+  authority: string
   busy: boolean
   runAction: RunAction
   actionError: string | null
@@ -409,64 +415,54 @@ export function ReconciliationPanel({
 }) {
   const report = snapshot.reconciliation
   const [openKey, setOpenKey] = React.useState<string | null>(null)
-  const [preview, setPreview] = React.useState<ReconciliationPreview | null>(null)
-  const [previewError, setPreviewError] = React.useState<string | null>(null)
+  const [revision, setRevision] = React.useState(0)
   const [fallbackError, setFallbackError] = React.useState<string | null>(null)
-  const [loading, setLoading] = React.useState(false)
   const request = React.useRef(0)
-  React.useEffect(
-    () => () => {
-      request.current++
+  const previewQuery = useQuery({
+    queryKey: ['repository-reconciliation-preview', snapshot.path, authority, openKey, revision],
+    enabled: Boolean(report && openKey),
+    queryFn: async ({ signal }) => {
+      if (!window.desktop?.reconciliationPreview) {
+        throw new Error('This build cannot read reconciliation previews.')
+      }
+      const result = await window.desktop.reconciliationPreview(openKey!)
+      signal.throwIfAborted()
+      return result
     },
-    [],
-  )
+  })
+  const preview = report && openKey ? (previewQuery.data ?? null) : null
+  const previewError = previewQuery.error ? workflowError(previewQuery.error) : null
+  const loading = previewQuery.isFetching
+  React.useEffect(() => {
+    request.current++
+    return () => {
+      request.current++
+    }
+  }, [snapshot.path, authority, openKey, revision])
   React.useEffect(() => {
     if (report) return
     // A retired credential takes the preview as well as the report. Invalidate
     // its outstanding read before a new account can repopulate reconciliation.
     request.current++
     setOpenKey(null)
-    setPreview(null)
-    setPreviewError(null)
     setFallbackError(null)
-    setLoading(false)
   }, [report])
 
-  const load = React.useCallback(
-    async (stackKey: string) => {
-      const generation = ++request.current
-      setPreview(null)
-      setLoading(true)
-      setPreviewError(null)
-      setFallbackError(null)
-      onClearActionError()
-      try {
-        if (!window.desktop?.reconciliationPreview) {
-          throw new Error('This build cannot read reconciliation previews.')
-        }
-        const result = await window.desktop.reconciliationPreview(stackKey)
-        if (generation === request.current) setPreview(result)
-      } catch (error) {
-        if (generation === request.current) setPreviewError(workflowError(error))
-      } finally {
-        if (generation === request.current) setLoading(false)
-      }
-    },
-    [onClearActionError],
-  )
+  const load = () => {
+    request.current++
+    setRevision((value) => value + 1)
+    setFallbackError(null)
+    onClearActionError()
+  }
 
   const review = (stackKey: string) => {
     setOpenKey(stackKey)
-    setPreview(null)
-    void load(stackKey)
+    load()
   }
 
   const close = () => {
     request.current++
-    setLoading(false)
     setOpenKey(null)
-    setPreview(null)
-    setPreviewError(null)
     setFallbackError(null)
   }
 
@@ -532,7 +528,7 @@ export function ReconciliationPanel({
           busy={busy}
           actionError={actionError ?? fallbackError}
           onCancel={close}
-          onReload={() => void load(openKey)}
+          onReload={load}
           onRun={run}
         />
       ) : null}

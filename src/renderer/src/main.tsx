@@ -1,5 +1,7 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { createRendererQueryClient } from './lib/query-client'
 import App from './App'
 import { WorkflowRecoverySpecimen } from './design-system/WorkflowRecoverySpecimen'
 import { TooltipProvider } from './components/ui/tooltip'
@@ -13,6 +15,7 @@ const recoverySpecimen = window.location.hash.startsWith('#/design-system-recove
 const recoveryMode =
   new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('mode') ?? 'saved'
 
+const queryClient = createRendererQueryClient()
 const root = document.getElementById('root')
 
 if (!root) {
@@ -21,10 +24,12 @@ if (!root) {
 
 createRoot(root).render(
   <React.StrictMode>
-    <TooltipProvider delay={450} timeout={150}>
-      <RepositoryHoverCardProvider>
-        {recoverySpecimen ? <WorkflowRecoverySpecimen mode={recoveryMode} /> : <App />}
-      </RepositoryHoverCardProvider>
-    </TooltipProvider>
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider delay={450} timeout={150}>
+        <RepositoryHoverCardProvider>
+          {recoverySpecimen ? <WorkflowRecoverySpecimen mode={recoveryMode} /> : <App />}
+        </RepositoryHoverCardProvider>
+      </TooltipProvider>
+    </QueryClientProvider>
   </React.StrictMode>,
 )
