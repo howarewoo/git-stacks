@@ -68,6 +68,7 @@ export const SCENARIO_NAMES = [
   'stash-index-shift',
   // PR Inbox
   'pr-inbox-queue',
+  'pr-inbox-structured',
   'pr-inbox-same-number',
   'pr-inbox-no-repository',
   'pr-inbox-empty',

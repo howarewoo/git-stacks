@@ -47,6 +47,35 @@ function rows(page: Page): Locator {
   return page.locator('.pr-inbox-item')
 }
 
+/** A focused fact/control must be reachable through every clipping ancestor. */
+async function assertReachableInboxElement(element: Locator): Promise<void> {
+  await element.scrollIntoViewIfNeeded()
+  const bounds = await element.evaluate((target) => {
+    const rect = target.getBoundingClientRect()
+    const visible = { left: 0, top: 0, right: innerWidth, bottom: innerHeight }
+    for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent)
+      const box = parent.getBoundingClientRect()
+      if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) {
+        visible.left = Math.max(visible.left, box.left + parent.clientLeft)
+        visible.right = Math.min(visible.right, box.left + parent.clientLeft + parent.clientWidth)
+      }
+      if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) {
+        visible.top = Math.max(visible.top, box.top + parent.clientTop)
+        visible.bottom = Math.min(visible.bottom, box.top + parent.clientTop + parent.clientHeight)
+      }
+    }
+    return {
+      rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      visible,
+    }
+  })
+  expect(bounds.rect.left).toBeGreaterThanOrEqual(bounds.visible.left - 1)
+  expect(bounds.rect.right).toBeLessThanOrEqual(bounds.visible.right + 1)
+  expect(bounds.rect.top).toBeGreaterThanOrEqual(bounds.visible.top - 1)
+  expect(bounds.rect.bottom).toBeLessThanOrEqual(bounds.visible.bottom + 1)
+}
+
 test.describe('PR Inbox queue', () => {
   test.beforeEach(async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-queue' })
@@ -841,4 +870,222 @@ test.describe('PR Inbox identity', () => {
     ).toHaveCount(0)
     await expect(page.getByRole('alert')).toHaveCount(0)
   })
+})
+
+test.describe('structured Inbox saved views', () => {
+  test.beforeEach(async ({ page }) => {
+    await openGallery(page, { scenario: 'pr-inbox-structured' })
+    await switchDestination(page, 'prInbox')
+  })
+
+  test('multi-repository author/reviewer/review/check/size criteria and sort survive reopening', async ({
+    page,
+  }) => {
+    await page.getByText('Structured criteria · AND across fields, OR within each field').click()
+    await page.getByRole('checkbox', { name: 'howarewoo/git-stacks', exact: true }).check()
+    await page
+      .getByRole('checkbox', { name: 'howarewoo/design-system-specimens', exact: true })
+      .check()
+    await page.getByRole('textbox', { name: 'Authors (comma separated)' }).fill('grace')
+    await page.getByRole('textbox', { name: 'Requested reviewers (comma separated)' }).fill('ada')
+    await page.getByRole('checkbox', { name: 'review required', exact: true }).check()
+    await page.getByRole('checkbox', { name: 'passing', exact: true }).check()
+    await page.getByRole('checkbox', { name: 'failing', exact: true }).check()
+    await page.getByRole('spinbutton', { name: 'Minimum changed lines' }).fill('100')
+    await page.getByRole('spinbutton', { name: 'Maximum changed lines' }).fill('250')
+    await page.getByRole('combobox', { name: 'Sort', exact: true }).click()
+    await page.getByRole('option', { name: 'Largest change', exact: true }).click()
+    await expect(rows(page)).toHaveCount(2)
+    const identities = await rows(page)
+      .getByRole('button')
+      .evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label')))
+    await page.getByRole('textbox', { name: 'Save this filter' }).fill('Two repositories')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(
+      groupRail(page).getByRole('button', { name: 'Two repositories', exact: true }),
+    ).toBeVisible()
+    await switchGalleryRoute(page, 'index')
+    await switchGalleryRoute(page, 'app')
+    await switchDestination(page, 'prInbox')
+    await groupRail(page).getByRole('button', { name: 'Two repositories', exact: true }).click()
+    await expect(
+      page.getByRole('checkbox', { name: 'howarewoo/git-stacks', exact: true }),
+    ).toBeChecked()
+    await expect(
+      page.getByRole('checkbox', { name: 'howarewoo/design-system-specimens', exact: true }),
+    ).toBeChecked()
+    await expect(page.getByRole('textbox', { name: 'Authors (comma separated)' })).toHaveValue(
+      'grace',
+    )
+    await expect(
+      page.getByRole('textbox', { name: 'Requested reviewers (comma separated)' }),
+    ).toHaveValue('ada')
+    await expect(page.getByRole('checkbox', { name: 'review required', exact: true })).toBeChecked()
+    await expect(page.getByRole('checkbox', { name: 'passing', exact: true })).toBeChecked()
+    await expect(page.getByRole('checkbox', { name: 'failing', exact: true })).toBeChecked()
+    await expect(page.getByRole('spinbutton', { name: 'Minimum changed lines' })).toHaveValue('100')
+    await expect(page.getByRole('spinbutton', { name: 'Maximum changed lines' })).toHaveValue('250')
+    await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toContainText(
+      'Largest change',
+    )
+    expect(
+      await rows(page)
+        .getByRole('button')
+        .evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label'))),
+    ).toEqual(identities)
+    await page.getByRole('button', { name: 'Clear filters', exact: true }).click()
+    await expect(rows(page)).toHaveCount(2)
+    await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toContainText(
+      'Recently updated',
+    )
+    await expect(page.getByText('No structured criteria', { exact: true })).toBeVisible()
+  })
+
+  test('saved repository casing restores checked and can be removed without clearing other criteria', async ({
+    page,
+  }) => {
+    await switchGalleryRoute(page, 'index')
+    await answerNextDoubleCall(page, 'pullRequestInboxFilters', [
+      {
+        id: 'mixed-case',
+        name: 'Mixed case repository',
+        group: 'review-requested',
+        search: '',
+        criteria: { repositories: ['HOWAREWOO/git-stacks'], authors: ['grace'] },
+        sort: 'size-desc',
+      },
+    ])
+    await switchGalleryRoute(page, 'app')
+    await switchDestination(page, 'prInbox')
+    await groupRail(page)
+      .getByRole('button', { name: 'Mixed case repository', exact: true })
+      .click()
+    const repository = page.getByRole('checkbox', { name: 'howarewoo/git-stacks', exact: true })
+    await expect(repository).toBeChecked()
+    await expect(rows(page)).toHaveCount(1)
+    await repository.uncheck()
+    await expect(repository).not.toBeChecked()
+    await expect(rows(page)).toHaveCount(2)
+    await expect(page.getByRole('textbox', { name: 'Authors (comma separated)' })).toHaveValue(
+      'grace',
+    )
+    await expect(page.getByRole('combobox', { name: 'Sort', exact: true })).toContainText(
+      'Largest change',
+    )
+    await repository.check()
+    await expect(rows(page)).toHaveCount(1)
+    await repository.uncheck()
+    await expect(rows(page)).toHaveCount(2)
+  })
+
+  test('unavailable criteria exclusions are explained while zero and truncated counts remain distinct', async ({
+    page,
+  }) => {
+    await expect(rows(page).filter({ hasText: 'Keep repository identity stable' })).toContainText(
+      'Unresolved threads 3+ (truncated)',
+    )
+    await expect(rows(page).filter({ hasText: 'Add a GitHub-derived PR Inbox' })).toContainText(
+      'Unresolved threads 0',
+    )
+    await changeScenario(page, 'pr-inbox-partial')
+    await page.getByRole('button', { name: 'Refresh the PR Inbox' }).click()
+    await page.getByText('Structured criteria · AND across fields, OR within each field').click()
+    await page.getByRole('spinbutton', { name: 'Minimum changed lines' }).fill('0')
+    await expect(rows(page)).toHaveCount(1)
+    await expect(page.getByText(/1 excluded because required facts are unavailable/u)).toBeVisible()
+    await page.getByRole('button', { name: 'Clear filters', exact: true }).click()
+    await expect(rows(page)).toHaveCount(2)
+    await expect(rows(page).filter({ hasText: 'Charge every native-stack page' })).toContainText(
+      'Lines unsupported',
+    )
+  })
+
+  test('same-number cross-repository rows preserve read-only Review navigation', async ({
+    page,
+  }) => {
+    await rows(page)
+      .filter({ hasText: 'Keep repository identity stable' })
+      .getByRole('button')
+      .click()
+    await expect(
+      page.getByText('#81 Keep repository identity stable', { exact: false }).first(),
+    ).toBeVisible()
+    const calls = await getDoubleCalls(page)
+    expect(
+      calls.filter((entry) => entry.call === 'openRepository').map((entry) => entry.args[0]),
+    ).toContain('/Users/ada/Code/design-system-specimens')
+    expect(calls.filter((entry) => entry.call === 'runAction')).toHaveLength(0)
+  })
+
+  for (const viewport of [
+    { width: 1000, height: 700 },
+    { width: 1440, height: 940 },
+    { width: 1920, height: 1080 },
+    { width: 720, height: 470 },
+  ]) {
+    test(`long-title structured queue is accessible at ${viewport.width}x${viewport.height}`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport)
+      await expect(rows(page)).toHaveCount(2)
+      await assertNoAxeViolations(page, `structured Inbox ${viewport.width}x${viewport.height}`)
+      const longRow = rows(page).filter({ hasText: 'Keep repository identity stable' })
+      for (const expanded of [false, true]) {
+        const details = page.locator('.pr-inbox-criteria')
+        if (
+          (await details.evaluate((element) => (element as HTMLDetailsElement).open)) !== expanded
+        ) {
+          await details.locator('summary').click()
+        }
+        await longRow.getByRole('button').focus()
+        const content = await longRow.evaluate((element) => {
+          const title = element.querySelector('.pr-copy strong') as HTMLElement
+          const range = document.createRange()
+          range.selectNodeContents(title)
+          const text = range.getBoundingClientRect()
+          const titleBox = title.getBoundingClientRect()
+          const parts = [...element.querySelectorAll('.pr-copy, .pr-inbox-facts, .pr-badges')].map(
+            (part) => part.getBoundingClientRect(),
+          )
+          const overlap = parts.some((a, index) =>
+            parts
+              .slice(index + 1)
+              .some(
+                (b) =>
+                  Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 &&
+                  Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1,
+              ),
+          )
+          return {
+            titleClipped:
+              title.scrollWidth > title.clientWidth + 1 ||
+              title.scrollHeight > title.clientHeight + 1 ||
+              text.width > titleBox.width + 1 ||
+              text.height > titleBox.height + 1,
+            overlap,
+          }
+        })
+        expect(content.titleClipped).toBe(false)
+        expect(content.overlap).toBe(false)
+        await assertReachableInboxElement(longRow.locator('.pr-inbox-facts'))
+        await assertReachableInboxElement(longRow.locator('.pr-badges'))
+        await assertReachableInboxElement(page.getByRole('searchbox', { name: 'Search the queue' }))
+        await assertReachableInboxElement(page.getByRole('combobox', { name: 'Sort', exact: true }))
+        await assertReachableInboxElement(
+          page.getByRole('button', { name: 'Clear filters', exact: true }),
+        )
+        if (expanded) {
+          await assertReachableInboxElement(
+            page.getByRole('checkbox', { name: 'howarewoo/git-stacks', exact: true }),
+          )
+          await assertReachableInboxElement(
+            page.getByRole('spinbutton', { name: 'Maximum changed lines' }),
+          )
+        }
+      }
+      await rows(page).first().getByRole('button').focus()
+      await page.keyboard.press('ArrowDown')
+      await expect(rows(page).nth(1).getByRole('button')).toBeFocused()
+    })
+  }
 })

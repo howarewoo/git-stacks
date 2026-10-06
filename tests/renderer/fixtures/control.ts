@@ -1728,7 +1728,8 @@ export function installFixtureControl(options: {
             name: parsed.name,
             group: parsed.group,
             search: parsed.search,
-            repository: parsed.repository,
+            criteria: parsed.criteria,
+            sort: parsed.sort,
           })
         }
         inboxFilters = parsePullRequestInboxSavedFilters(next)

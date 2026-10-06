@@ -850,7 +850,7 @@ function inboxRow(
     reviewRequested: [],
     reviewDecision: null,
     lastTurnLogin: null,
-    updatedAt: UPDATED,
+    updatedAt: number === 81 ? '2026-02-04T10:00:00.000Z' : UPDATED,
     mergedAt: null,
     metadata: inboxMetadata(INBOX_HOST_REVIEW_FIELDS),
     ...signals,
@@ -869,9 +869,20 @@ function inboxRow(
     checks,
     author: facts.author,
     reviewRequested: facts.reviewRequested,
+    reviewRequestsComplete: true,
     reviewDecision: facts.reviewDecision,
     lastTurnLogin: facts.lastTurnLogin,
     metadata: facts.metadata,
+    changeSize:
+      facts.metadata === 'degraded'
+        ? { state: 'unsupported' }
+        : { state: 'known', value: number === 81 ? 120 : number === 77 ? 240 : 0 },
+    unresolvedThreads:
+      facts.metadata === 'degraded'
+        ? { state: 'unsupported' }
+        : number === 77
+          ? { state: 'truncated', value: 3 }
+          : { state: 'known', value: 0 },
     updatedAt: facts.updatedAt,
     mergedAt: facts.mergedAt,
     groups: pullRequestInboxGroups(facts, { viewer, now: INBOX_NOW }),
@@ -1176,6 +1187,40 @@ const inboxNarrowedRead: PullRequestInboxRepositoryReport =
     : (inboxRead[1] as PullRequestInboxRepositoryReport)
 
 const inboxQueue = inboxReport(inboxRead, inboxRows)
+const inboxLongTitle =
+  'Keep repository identity stable while restoring a saved triage view across multiple registered repositories with long descriptive pull request titles and bounded optional metadata'
+const inboxStructuredRows = inboxRows.map((row) =>
+  row.number === 77
+    ? {
+        ...row,
+        number: 81,
+        title: inboxLongTitle,
+        url: 'https://github.com/howarewoo/design-system-specimens/pull/81',
+      }
+    : row,
+)
+const inboxStructuredSpecimen = {
+  ...specimensSnapshot,
+  pullRequests: specimensSnapshot.pullRequests.map((pr) => ({
+    ...pr,
+    number: 81,
+    title: inboxLongTitle,
+    url: 'https://github.com/howarewoo/design-system-specimens/pull/81',
+  })),
+  branches: specimensSnapshot.branches.map((branch) =>
+    branch.pr
+      ? {
+          ...branch,
+          pr: {
+            ...branch.pr,
+            number: 81,
+            title: inboxLongTitle,
+            url: 'https://github.com/howarewoo/design-system-specimens/pull/81',
+          },
+        }
+      : branch,
+  ),
+}
 const inboxEmpty = inboxReport(
   [inboxRead[0]].filter((entry): entry is PullRequestInboxRepositoryReport => entry !== undefined),
   [],
@@ -1969,6 +2014,15 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshotsByPath: inboxSnapshots,
     inbox: inboxQueue,
   },
+  'pr-inbox-structured': {
+    name: 'pr-inbox-structured',
+    summary:
+      'Structured triage, long titles, same-number cross-repository identities and truthful counts.',
+    snapshot: inboxPrimarySnapshot,
+    recentRepositories,
+    snapshotsByPath: { ...inboxSnapshots, [SPECIMENS_PATH]: inboxStructuredSpecimen },
+    inbox: inboxReport(inboxRead, inboxStructuredRows),
+  },
   'pr-inbox-same-number': {
     name: 'pr-inbox-same-number',
     summary: 'Two repositories both have PR #81, with distinct heads and review facts.',
@@ -2021,12 +2075,20 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: inboxPrimarySnapshot,
     recentRepositories,
     snapshotsByPath: inboxSnapshots,
-    inbox: inboxReport(inboxRead, inboxRows, {
-      state: 'offline',
-      confirmedAt: EARLIER,
-      checkedAt: UPDATED,
-      detail: 'GitHub could not be reached: howarewoo/git-stacks (GitHub unreachable).',
-    }),
+    inbox: inboxReport(
+      inboxRead,
+      inboxRows.map((row) => ({
+        ...row,
+        changeSize: { state: 'stale' as const },
+        unresolvedThreads: { state: 'stale' as const },
+      })),
+      {
+        state: 'offline',
+        confirmedAt: EARLIER,
+        checkedAt: UPDATED,
+        detail: 'GitHub could not be reached: howarewoo/git-stacks (GitHub unreachable).',
+      },
+    ),
   },
   'pr-inbox-retired': {
     name: 'pr-inbox-retired',
