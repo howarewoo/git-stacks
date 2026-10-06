@@ -48,6 +48,7 @@ import {
 import type { GitHubCapabilityState } from '../../../src/shared/host'
 import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
+import { reviewRail, stackMember } from './review'
 
 /**
  * Deterministic snapshot data for every gallery scenario. Repository shapes are reused from
@@ -227,6 +228,47 @@ const reviewStackPullRequests: PullRequest[] = [
 const reviewStackBranches: Branch[] = reviewStackPullRequests.map((pr) =>
   local({ name: pr.head, parent: pr.base, parentTip: oid(`local:${pr.base}`), pr }),
 )
+
+const longReviewStackPullRequests: PullRequest[] = Array.from({ length: 40 }, (_, index) => ({
+  ...reviewStackPullRequests[index % 3],
+  number: 101 + index,
+  title:
+    index === 35
+      ? 'Keep the selected late layer reachable while reviewing a deliberately long title with repository transport, cancellation, and independently unknown readiness metadata'
+      : `Layer ${index + 1}: bounded native review context`,
+  url: `https://github.com/howarewoo/git-stacks/pull/${101 + index}`,
+  head: `feature/long-review-${index + 1}`,
+  base: index === 0 ? 'main' : `feature/long-review-${index}`,
+  headOid: oid(`long-review-${index + 1}`),
+  state: index === 0 ? 'MERGED' : index === 1 ? 'CLOSED' : 'OPEN',
+  stack: {
+    stackNumber: 42,
+    position: index + 1,
+    size: 40,
+    base: 'main',
+    open: true,
+    url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+  },
+}))
+
+const longReviewStackBranches = longReviewStackPullRequests.map((pr) =>
+  local({ name: pr.head, parent: pr.base, parentTip: oid(`local:${pr.base}`), pr }),
+)
+
+function nativeReviewFixture(pullRequests: PullRequest[]) {
+  const rail = reviewRail(
+    pullRequests[0],
+    pullRequests.map((pr) => ({
+      ...stackMember(pr.stack?.position ?? 1, pr.number, pr.stack?.size ?? pullRequests.length),
+      head: pr.head,
+      headSha: pr.headOid,
+      base: pr.base,
+      state: pr.state,
+      draft: pr.draft,
+    })),
+  )
+  return rail.stack ? [rail.stack] : []
+}
 
 /** Repository with the connected branch set; scenarios override only what they exercise. */
 function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnapshot {
@@ -1545,6 +1587,106 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       branches: [mainBranch, ...reviewStackBranches],
       currentBranch: 'feature/review-42',
       pullRequests: reviewStackPullRequests,
+      nativeStacks: nativeReviewFixture(reviewStackPullRequests),
+    }),
+    recentRepositories,
+  },
+  'review-long-stack': {
+    name: 'review-long-stack',
+    summary:
+      'Forty authoritative native layers including merged, closed, draft and long-title members.',
+    snapshot: repository({
+      branches: [mainBranch, ...longReviewStackBranches],
+      currentBranch: 'feature/long-review-36',
+      pullRequests: longReviewStackPullRequests,
+      nativeStacks: nativeReviewFixture(longReviewStackPullRequests),
+    }),
+    recentRepositories,
+  },
+  'review-stack-partial': {
+    name: 'review-stack-partial',
+    summary: 'Three loaded members of a submitted stack that reports forty layers.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests.map((pr) => ({
+        ...pr,
+        stack: pr.stack ? { ...pr.stack, size: 40 } : null,
+      })),
+    }),
+    recentRepositories,
+  },
+  'review-stack-error': {
+    name: 'review-stack-error',
+    summary: 'Review remains readable when the native membership resource is unavailable.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewStackUnavailable: true,
+  },
+  'review-stack-stale': {
+    name: 'review-stack-stale',
+    summary: 'Authoritative membership retained while summary metadata belongs to an older head.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+      nativeStacks: nativeReviewFixture(reviewStackPullRequests),
+    }),
+    recentRepositories,
+    reviewStackFactsState: 'stale',
+  },
+  'review-stack-metadata-unavailable': {
+    name: 'review-stack-metadata-unavailable',
+    summary: 'Native membership is available but optional checks and review summaries are refused.',
+    snapshot: repository({
+      branches: [mainBranch, ...reviewStackBranches],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+    }),
+    recentRepositories,
+    reviewStackFactsState: 'unavailable',
+  },
+  'review-stack-disagreement': {
+    name: 'review-stack-disagreement',
+    summary:
+      'Local recorded parents disagree with submitted native order; blockers name the read-model source.',
+    snapshot: repository({
+      branches: [
+        mainBranch,
+        ...reviewStackBranches.map((branch, index) => ({
+          ...branch,
+          parentSource: index === 1 ? ('inferred' as const) : ('recorded' as const),
+          needsRestack: index === 0,
+          parentBehind: index === 0 ? 2 : index === 1 ? null : 0,
+        })),
+      ],
+      currentBranch: 'feature/review-42',
+      pullRequests: reviewStackPullRequests,
+      nativeStacks: nativeReviewFixture(reviewStackPullRequests),
+      reconciliation: {
+        available: true,
+        message: 'Submitted membership differs from local recorded parents.',
+        blockers: [],
+        evidence: null,
+        stacks: [
+          {
+            key: 'native:42',
+            base: 'main',
+            stackNumber: 42,
+            stackUrl: 'https://github.com/howarewoo/git-stacks/stacks/42',
+            state: 'reordered',
+            summary: 'Local parent order disagrees with the submitted order.',
+            submittedOrder: ['feature/review-41', 'feature/review-42', 'feature/review-43'],
+            members: [],
+            repairs: [],
+            blockers: ['Recorded parent order must be reconciled before publishing.'],
+          },
+        ],
+      },
     }),
     recentRepositories,
   },

@@ -80,6 +80,12 @@ export const SCENARIO_NAMES = [
   // Review
   'review-force-pushed',
   'review-stacked',
+  'review-long-stack',
+  'review-stack-partial',
+  'review-stack-error',
+  'review-stack-stale',
+  'review-stack-metadata-unavailable',
+  'review-stack-disagreement',
   'review-unstacked',
   'review-read-only',
   'review-own-pull-request',

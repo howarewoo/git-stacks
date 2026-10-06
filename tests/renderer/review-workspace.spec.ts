@@ -30,9 +30,22 @@ const longFile = textFile(
 async function openLongReview(
   page: Parameters<typeof openGallery>[0],
   viewport: { width: number; height: number },
+  scenario: 'review-stacked' | 'review-long-stack' = 'review-stacked',
 ) {
-  await openGallery(page, { scenario: 'review-stacked', viewport })
-  await answerNextDoubleCall(page, 'reviewFiles', { ...reviewFileSet(42, head), files: [longFile] })
+  await openGallery(page, { scenario, viewport })
+  const number = scenario === 'review-long-stack' ? 136 : 42
+  const currentHead =
+    scenario === 'review-long-stack'
+      ? await page.evaluate(async () => {
+          const read = window.desktop.reviewHeadline
+          if (!read) throw new Error('Review headline fixture capability is unavailable.')
+          return (await read(136)).pullRequest.headOid
+        })
+      : head
+  await answerNextDoubleCall(page, 'reviewFiles', {
+    ...reviewFileSet(number, currentHead ?? head),
+    files: [longFile],
+  })
   await switchDestination(page, 'review')
   await settle(page)
 }
@@ -67,6 +80,40 @@ for (const size of [
         })
       expect(count).toBeGreaterThanOrEqual(size.rows)
       expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toEqual([])
+    })
+  }
+}
+
+for (const size of [
+  { width: 1440, height: 940, rows: 15 },
+  { width: 1000, height: 700, rows: 8 },
+]) {
+  for (const mode of ['Unified', 'Split']) {
+    test(`collapsed long native rail preserves ${size.rows} fully intersecting ${mode} code rows at ${size.width}×${size.height}`, async ({
+      page,
+    }) => {
+      await openLongReview(page, size, 'review-long-stack')
+      await expect(page.locator('.review-stack-disclosure')).not.toHaveAttribute('open')
+      await page.getByRole('button', { name: mode, exact: true }).click()
+      const count = await page
+        .locator(mode === 'Unified' ? '.review-unified' : '.review-split')
+        .evaluate((region) => {
+          const bounds = region.getBoundingClientRect()
+          let top = Math.max(0, bounds.top)
+          let bottom = Math.min(window.innerHeight, bounds.bottom)
+          for (let ancestor = region.parentElement; ancestor; ancestor = ancestor.parentElement) {
+            if (/(auto|scroll|hidden|clip)/u.test(getComputedStyle(ancestor).overflowY)) {
+              const box = ancestor.getBoundingClientRect()
+              top = Math.max(top, box.top + ancestor.clientTop)
+              bottom = Math.min(bottom, box.top + ancestor.clientTop + ancestor.clientHeight)
+            }
+          }
+          return [...region.querySelectorAll('.review-line, .review-split-row')].filter((row) => {
+            const rect = row.getBoundingClientRect()
+            return rect.height > 0 && rect.top >= top && rect.bottom <= bottom
+          }).length
+        })
+      expect(count).toBeGreaterThanOrEqual(size.rows)
     })
   }
 }

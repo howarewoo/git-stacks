@@ -240,7 +240,7 @@ export function reviewRail(
     base: ordered[0].base,
     open: true,
     createdAt: '2026-09-20T10:00:00Z',
-    size: ordered.length,
+    size: Math.max(ordered.length, ...ordered.map((member) => member.total)),
     pullRequests: ordered,
     status: 'valid',
   }

@@ -2935,7 +2935,7 @@ textarea.conflict-content {
   padding: 0 18px 18px;
 }
 .stack-member {
-  padding: 18px 0;
+  padding: 8px 0;
   border-bottom: 1px solid var(--line);
 }
 .stack-member:last-child {
@@ -2989,9 +2989,9 @@ textarea.conflict-content {
 }
 .stack-pr-row {
   display: flex;
-  align-items: flex-start;
-  flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
 }
 .stack-pr-row > button:first-child {
   height: auto;
@@ -3000,6 +3000,47 @@ textarea.conflict-content {
   white-space: normal;
   text-align: left;
   justify-content: flex-start;
+}
+
+.stack-layer-details,
+.stack-submitted-order {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.stack-layer-details summary,
+.stack-submitted-order summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.stack-submitted-order {
+  flex: 0 0 auto;
+  max-height: 180px;
+  overflow: auto;
+  padding: 4px 18px;
+}
+
+.stack-submitted-order li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.stack-submitted-order li > button {
+  height: auto;
+  min-width: 0;
+  max-width: 100%;
+  flex-shrink: 1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  justify-content: flex-start;
+}
+
+.review-stack-fact-note {
+  flex-basis: 100%;
 }
 
 .shell-fixture-content {
@@ -3369,6 +3410,34 @@ textarea.conflict-content {
   color: var(--gs-semantic-text-primary);
 }
 
+.review-headline-title-disclosure {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.review-headline-title-disclosure summary {
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-headline-title-disclosure summary:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 2px;
+}
+
+.review-headline-title-disclosure[open] {
+  flex-basis: 100%;
+}
+
+.review-headline-title-disclosure p {
+  margin: 4px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
 .review-headline-refs {
   display: flex;
   flex-wrap: wrap;
@@ -3410,6 +3479,96 @@ textarea.conflict-content {
 .review-rail-note {
   color: var(--gs-semantic-text-muted);
   font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-stack-disclosure {
+  min-width: 0;
+  flex: 1 1 220px;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+
+.review-stack-disclosure[open] {
+  flex-basis: 100%;
+  order: 3;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.review-stack-evidence {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.review-stack-evidence ul {
+  margin: 4px 0;
+  padding-inline-start: 20px;
+}
+
+.review-stack-disclosure summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.review-stack-disclosure summary:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 2px;
+}
+
+.review-stack-members {
+  max-height: 160px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 0 4px;
+  list-style: none;
+}
+
+.review-stack-members li {
+  border-inline-start: 1px solid var(--gs-semantic-border-essential);
+  padding-inline-start: 8px;
+}
+
+.review-stack-member {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  text-align: start;
+}
+
+.review-stack-member:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: -2px;
+}
+
+.review-stack-member[aria-current="page"] {
+  background: var(--gs-semantic-selection-background);
+}
+
+.review-stack-member:hover {
+  background: var(--gs-semantic-surface-hover);
+}
+
+.review-stack-identity {
+  display: flex;
+  flex: 1 1 320px;
+  min-width: 0;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+
+.review-stack-facts {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
 }
 
 /* The snapshot history strip provides the shortcut to compare against
@@ -4038,7 +4197,7 @@ textarea.conflict-content {
   }
 
   .review-rail {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     overflow-x: auto;
     padding: 4px 8px;
   }
@@ -4046,6 +4205,12 @@ textarea.conflict-content {
   .review-rail > * {
     flex-shrink: 0;
     white-space: nowrap;
+  }
+
+  .review-rail > .review-stack-disclosure {
+    flex-shrink: 1;
+    white-space: normal;
+    min-width: 0;
   }
 }
 
