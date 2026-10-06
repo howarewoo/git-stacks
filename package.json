@@ -7,6 +7,7 @@
   "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
+    "postinstall": "node node_modules/electron/install.js",
     "dev": "npm run build:promotion-helper && electron-vite dev",
     "start": "npm run build:promotion-helper && electron-vite preview",
     "build": "npm run typecheck && npm run build:promotion-helper && electron-vite build",

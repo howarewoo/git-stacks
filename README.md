@@ -65,6 +65,9 @@ npm run bench:performance  # large-repository benchmarks
 npm run build:promotion-helper  # build the atomic no-replace rename helper
 ```
 
+The root `postinstall` hook runs `node node_modules/electron/install.js`,
+including after `pnpm install`, to ensure Electron's binary is installed.
+
 `npm run dev`, `npm run build`, `npm test`, `npm run package`, and `npm run
 dist` all build the clone promotion helper first, so a C compiler must be
 available on the build machine (`cc`, `gcc`, `clang`, or `cl`; set `CC` to
