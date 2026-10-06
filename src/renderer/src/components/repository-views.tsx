@@ -882,6 +882,7 @@ export function StackView({
   busy,
   runAction,
   onRequest,
+  onReviewNumber,
   onSelect,
   search,
   onCreate,
@@ -891,6 +892,7 @@ export function StackView({
   onSelect: (branch: Branch) => void
   search: string
   onCreate: () => void
+  onReviewNumber: (number: number) => void
 }) {
   const [selection, setSelection] = React.useState<string | null>(null)
   const { byName, groups } = React.useMemo(() => {
@@ -970,6 +972,47 @@ export function StackView({
         actionError={actionError}
         onClearActionError={onClearActionError}
       />
+      {snapshot.nativeStacks?.length ? (
+        <details className="stack-submitted-order">
+          <summary>Submitted native membership & order</summary>
+          {snapshot.nativeStacks.map((stack) => (
+            <section key={stack.id} aria-label={`Submitted stack ${stack.number}`}>
+              <h3>
+                Stack #{stack.number} · {stack.pullRequests.length} of {stack.size} layers
+              </h3>
+              <ol>
+                {[...stack.pullRequests]
+                  .sort((a, b) => a.position - b.position)
+                  .map((member) => (
+                    <li key={`${member.position}-${member.number}`}>
+                      <Button
+                        variant="link"
+                        size="sm"
+                        onClick={() => onReviewNumber(member.number)}
+                      >
+                        {member.position}. #{member.number}{' '}
+                        {snapshot.pullRequests.find((pr) => pr.number === member.number)?.title ??
+                          member.head}
+                      </Button>
+                      <Badge
+                        variant={
+                          member.state === 'MERGED'
+                            ? 'merged'
+                            : member.state === 'CLOSED'
+                              ? 'danger'
+                              : 'secondary'
+                        }
+                      >
+                        {member.state.toLowerCase()}
+                      </Badge>
+                      {member.draft ? <Badge variant="secondary">Draft</Badge> : null}
+                    </li>
+                  ))}
+              </ol>
+            </section>
+          ))}
+        </details>
+      ) : null}
       {!root ? (
         <div className="empty-state">
           <Layers className="empty-icon" />
@@ -1071,6 +1114,9 @@ export function StackView({
               Local parent management and restacking remain available.
             </p>
           ) : null}
+          <p className="workflow-note">
+            Local branches · children above parents. Local order is not submitted native order.
+          </p>
           <div
             aria-label="Stack branches, children above parents"
             className="stack-members"
@@ -1135,34 +1181,38 @@ export function StackView({
                     <Badge variant="secondary">Parent comparison unavailable</Badge>
                   ) : null}
                 </div>
-                <div className="stack-member-meta">
-                  <span>
-                    Parent: <strong>{branch.parent ?? 'Not set'}</strong>
-                  </span>
-                  <span>
-                    {branch.parentSource === 'recorded'
-                      ? 'Recorded parent'
-                      : branch.parentSource === 'stack'
-                        ? 'GitHub native stack'
-                        : branch.parentSource === 'pullRequest'
-                          ? 'From PR base'
-                          : 'Inferred — confirm before publishing'}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={
-                      blocked || Boolean(actionBlockReason(snapshot.capabilities, 'setParent'))
-                    }
-                    tooltip={
-                      actionBlockReason(snapshot.capabilities, 'setParent') ??
-                      'Record the intended parent locally without rewriting commits. Preview Restack next to move this branch and descendants.'
-                    }
-                    onClick={() => onRequest({ kind: 'parent', branch })}
-                  >
-                    Set parent…
-                  </Button>
-                </div>
+                <details className="stack-layer-details">
+                  <summary>Branch & parent details</summary>
+                  <p className="workflow-note">Full branch: {branch.name}</p>
+                  <div className="stack-member-meta">
+                    <span>
+                      Parent: <strong>{branch.parent ?? 'Not set'}</strong>
+                    </span>
+                    <span>
+                      {branch.parentSource === 'recorded'
+                        ? 'Recorded parent'
+                        : branch.parentSource === 'stack'
+                          ? 'GitHub native stack'
+                          : branch.parentSource === 'pullRequest'
+                            ? 'From PR base'
+                            : 'Inferred — confirm before publishing'}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={
+                        blocked || Boolean(actionBlockReason(snapshot.capabilities, 'setParent'))
+                      }
+                      tooltip={
+                        actionBlockReason(snapshot.capabilities, 'setParent') ??
+                        'Record the intended parent locally without rewriting commits. Preview Restack next to move this branch and descendants.'
+                      }
+                      onClick={() => onRequest({ kind: 'parent', branch })}
+                    >
+                      Set parent…
+                    </Button>
+                  </div>
+                </details>
                 {branch.pr ? (
                   <div className="stack-pr-row">
                     <PullRequestHoverCard pr={branch.pr}>
@@ -1170,7 +1220,7 @@ export function StackView({
                         size="sm"
                         variant="link"
                         disabled={busy}
-                        onClick={() => onRequest({ kind: 'pr', number: branch.pr!.number })}
+                        onClick={() => onReviewNumber(branch.pr!.number)}
                       >
                         #{branch.pr.number} {branch.pr.title}
                       </Button>
@@ -1182,9 +1232,18 @@ export function StackView({
                           {branch.pr.stack.size})
                         </Badge>
                       ) : null}
-                      <Badge variant={branch.pr.state === 'MERGED' ? 'accent' : 'secondary'}>
-                        {branch.pr.draft ? 'draft' : branch.pr.state.toLowerCase()}
+                      <Badge
+                        variant={
+                          branch.pr.state === 'MERGED'
+                            ? 'merged'
+                            : branch.pr.state === 'CLOSED'
+                              ? 'danger'
+                              : 'secondary'
+                        }
+                      >
+                        {branch.pr.state.toLowerCase()}
                       </Badge>
+                      {branch.pr.draft ? <Badge variant="secondary">Draft</Badge> : null}
                       <Badge
                         variant={
                           branch.pr.checks === 'failing'
@@ -1197,8 +1256,11 @@ export function StackView({
                         {branch.pr.checks === 'none' ? 'No checks' : `Checks ${branch.pr.checks}`}
                       </Badge>
                       <span className="workflow-note">
-                        {branch.pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() ||
-                          'No review decision'}
+                        {['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'].includes(
+                          branch.pr.reviewDecision ?? '',
+                        )
+                          ? `Review ${branch.pr.reviewDecision!.replaceAll('_', ' ').toLowerCase()}`
+                          : 'Review unknown'}
                       </span>
                     </div>
                     {branch.pr.state === 'OPEN' && branch.pr.base === snapshot.defaultBranch ? (
@@ -1220,14 +1282,17 @@ export function StackView({
                         <GitMerge className="size-3.5" />
                         Preview merge
                       </Button>
-                    ) : branch.pr.state === 'MERGED' ? (
-                      <p className="workflow-note">
-                        Merged parent: restack remaining branches, then publish their updated bases.
-                      </p>
                     ) : (
-                      <p className="workflow-note">
-                        Merge the parent PR first, then restack and publish this branch.
-                      </p>
+                      <details className="stack-layer-details">
+                        <summary>Landing context</summary>
+                        <p className="workflow-note">
+                          {branch.pr.state === 'MERGED'
+                            ? 'Merged layer. Restack requirements are reported from local parent comparisons, not lifecycle alone.'
+                            : branch.pr.state === 'CLOSED'
+                              ? 'Closed layer; lifecycle alone does not imply a restack.'
+                              : `PR base: ${branch.pr.base}. Landing readiness is evaluated in the captured merge preview.`}
+                        </p>
+                      </details>
                     )}
                   </div>
                 ) : (

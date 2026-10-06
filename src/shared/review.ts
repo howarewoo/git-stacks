@@ -213,6 +213,18 @@ export interface ReviewAnchorResolution {
   reason: string
 }
 
+/** Bounded readonly facts, independently unknown when the host omitted them. */
+export interface ReviewStackMemberFacts {
+  number: number
+  state: 'available' | 'partial' | 'stale' | 'unavailable'
+  title: string | null
+  lifecycle: 'OPEN' | 'CLOSED' | 'MERGED' | null
+  draft: boolean | null
+  checks: 'passing' | 'failing' | 'pending' | 'none' | 'unknown'
+  review: 'approved' | 'changes-requested' | 'required' | 'none' | 'unknown'
+  message: string
+}
+
 /**
  * Which layers of the pull request's native stack sit directly above and below it.
  * `null` on either side is a real boundary of the stack, not missing data.
@@ -224,11 +236,26 @@ export interface ReviewStackRail {
   next: PullRequestStackMember | null
   /** Empty only when the rail is complete; otherwise the reason it is not. */
   message: string
+  /** Missing entries were outside the metadata budget, not absent from the stack. */
+  facts?: ReviewStackMemberFacts[]
+}
+
+export interface ReviewReviewerSummary {
+  state: 'available' | 'partial' | 'unavailable'
+  requested: Array<{ kind: 'user' | 'team'; name: string }>
+  reviews: Array<{
+    login: string
+    state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING'
+    headOid: string | null
+  }>
+  /** Explains missing or bounded data; empty only when both lists are complete. */
+  message: string
 }
 
 export interface ReviewHeadline {
   pullRequest: PullRequest & { body: string }
   rail: ReviewStackRail
+  reviewers: ReviewReviewerSummary
 }
 
 /**

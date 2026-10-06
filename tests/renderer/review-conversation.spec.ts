@@ -20,10 +20,12 @@ const RANGE_SECOND = 'Comment on src/main/review.ts line 2 on the head'
 async function selectRange(page: Page): Promise<void> {
   await page.getByRole('button', { name: RANGE_FIRST }).click()
   await page.getByRole('button', { name: RANGE_LAST }).click({ modifiers: ['Shift'] })
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
   await expect(page.locator('.review-conversation')).toContainText('src/main/review.ts:1–4')
 }
 
 async function addPendingComment(page: Page, label: string, body: string): Promise<void> {
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
   await page.getByRole('button', { name: 'Add pending comment' }).click()
   await page.getByRole('textbox', { name: label }).fill(body)
 }
@@ -289,6 +291,7 @@ test.describe('Leaving a review', () => {
     await switchDestination(page, 'history')
     await switchDestination(page, 'review')
     await settle(page)
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
 
     // The words came back, and nothing was sent: leaving a workspace is not a
     // decision to publish what was written in it.
@@ -332,6 +335,7 @@ test.describe('Leaving a review', () => {
     // The review is usable with the journal read still out: the diff is what is
     // on screen, and a line can be picked before the journal has answered.
     await page.getByRole('button', { name: RANGE_FIRST }).click()
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Add pending comment' })).toBeVisible()
     await addPendingComment(
       page,
@@ -404,6 +408,7 @@ test.describe('Anchors that no longer name their line', () => {
     await switchDestination(page, 'history')
     await switchDestination(page, 'review')
     await settle(page)
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
 
     const draft = page.locator('.review-draft')
     await expect(draft).toContainText('outdated')
@@ -432,6 +437,7 @@ test.describe('Viewer permissions', () => {
     await openGallery(page, { scenario: 'review-read-only' })
     await switchDestination(page, 'review')
     await settle(page)
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
 
     const submit = page.locator('.review-submit')
     await expect(submit).toContainText('You do not have write access to this repository.')
@@ -442,6 +448,7 @@ test.describe('Viewer permissions', () => {
     await openGallery(page, { scenario: 'review-own-pull-request' })
     await switchDestination(page, 'review')
     await settle(page)
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
 
     await page.getByRole('radio', { name: 'Approve' }).check()
     await expect(page.locator('.review-submit')).toContainText(
@@ -458,6 +465,7 @@ test.describe('Threads', () => {
   test('a reply names its thread and its body, and the conversation is re-read afterwards', async ({
     page,
   }) => {
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     await page.evaluate(() => {
       const desktop = window.desktop
       const reply = desktop.reviewReply?.bind(desktop)
@@ -502,6 +510,7 @@ test.describe('Threads', () => {
   test('resolved and outdated threads are shown as such, and resolving is reversible', async ({
     page,
   }) => {
+    await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     const first = page.locator('.review-thread').first()
     await expect(first).toContainText('open')
     await first.getByRole('button', { name: 'Resolve', exact: true }).click()

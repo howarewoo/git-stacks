@@ -1414,6 +1414,7 @@ harness. There is no second copy of a budget anywhere.
 | `COMMIT_DIFF_BUDGET_MS`  | 3000 ms       | `bench:performance` → `commit-diff`        |
 | `INTERACTION_BUDGET_MS`  | 250 ms        | `bench:performance` → `interaction`        |
 | `LIST_PAGE_SIZE`         | 200 rows      | every repository-sized list                |
+| `REVIEW_STACK_METADATA_LIMIT` | 32 members | one cancellable Review headline metadata batch |
 | `DIFF_PAGE_SIZE`         | 1000 lines    | `DiffView`                                 |
 | `MAX_STATUS_BYTES`       | 8 MiB         | `listStatus`, cut on NUL record boundaries |
 | `MAX_HISTORY_BYTES`      | 1 MiB         | `getHistory`, cut on NUL record boundaries |
@@ -1627,6 +1628,21 @@ reason rather than as the current state. `Refresh checks` forces a re-read,
 `Watch checks` re-reads on an interval while the panel is open, and `Rerun`
 appears only where the read proves the account may run workflows. The fixture
 records `pullRequestChecks` and `rerunPullRequestCheck` in `window.fixture.calls`.
+
+Review layout and navigation coverage lives in `review-workspace.spec.ts` and
+`review-navigation.spec.ts`, alongside the existing diff, conversation, and
+snapshot suites. Exercise `review-stacked`, `pr-inbox-queue`,
+`pr-inbox-same-number`, and `pull-requests-checks-detail` in the real gallery.
+For layout evidence use a long text diff, collapsed secondary context, unified
+and split modes at 1000×700, 1440×940, 1920×1080, and the 720×470 CSS viewport
+equivalent of 200% zoom. Count complete code rows inside the local diff viewport:
+minimum eight and default fifteen, not merely a nonzero region height. Hold or
+refuse reads to verify selection retirement and explicit unknown metadata.
+Set a unique `GALLERY_PORT` and cap Playwright workers on loaded hosts:
+
+```sh
+GALLERY_PORT=5237 npm run test:ui -- tests/renderer/review-workspace.spec.ts tests/renderer/review-navigation.spec.ts tests/renderer/review-diff.spec.ts tests/renderer/review-conversation.spec.ts tests/renderer/review-snapshots.spec.ts --workers=1
+```
 
 Ordinary scenarios keep the row's check state when its drill-down is opened or
 refreshed. A `none` state produces an empty report, not a synthetic passing run.
@@ -2373,19 +2389,30 @@ it and the original tips stay recoverable.
 
 ## Review workspace
 
-Open **Review** from the workspace navigation, the command palette, or the
-**Review changes** button on a branch's pull request. The workspace reads one pull
-request from GitHub without checking out its branch: the headline, its changed
-files, its commits, and its stack position are four separate reads, each with its
-own cancellation id. The headline answers first; a stage that has not arrived yet
-shows a loading state rather than an empty list.
+Open a repository **Pull requests** row, a **PR Inbox** row, a stack PR link,
+the inspector's **Review changes** action, or a palette review command to reach
+the same selected **Review** workspace. No branch is checked out. **Manage**
+remains an explicit secondary control; **PR actions** contains management and
+**Open on GitHub**. Local Git commands remain in the palette and local-work
+destinations rather than competing with code in Review.
 
-The workspace fills its pane like the other destinations, and each of its three
-regions is bounded and scrolls inside itself, so a large pull request cannot
-stretch the page. The diff renders a two-hundred row window and labels itself
-with how many rows of how many are mounted; **Show 200 more diff rows** grows
-that window. At 200% zoom the three regions stack, each capped, and the pane
-scrolls as it does for every other workspace.
+**Code** owns the body by default. **Description & reviewers**, **Checks**,
+**Commits**, and **Conversation** open the existing context surfaces beside code
+at wide widths and switch the body at constrained widths. **Code** reopens the
+diff with its selected file, layout, whitespace choice, comparison, line range,
+scroll, and unsent draft text preserved. Each reading region scrolls locally,
+including at 200% desktop zoom. The diff renders a two-hundred row window and
+labels how many rows are mounted; **Show 200 more diff rows** grows that window.
+
+The headline arrives before files, commits, threads, and detailed checks. Each
+read has its own loading/failure state and belongs to the selected repository,
+host, credential authority, PR, and revision. Late answers from retired
+selections cannot populate a replacement workspace. Reviewer requests and
+latest reviews are bounded to the first 100 of each; partial or unavailable
+metadata is labelled. Earlier-head reviews are not current-head approvals.
+Description is rendered as plain text. **Comparison** discloses observed
+snapshots; historical mode always explains the submission freeze even when
+that disclosure is closed.
 
 The file tree groups changed files by directory, shows each file's status, size,
 and generated/binary/too-large state, and searches both the new path and the path
@@ -2413,8 +2440,34 @@ bounded and the rows keep the same identity across pages.
 **Next/previous file** and **next/previous layer** are remappable in Shortcut
 settings and dispatched by the app shell through a ref the view publishes, so the
 view never registers a competing key listener. Layer navigation reads the native
-stack only: choosing an adjacent layer changes what is being read and never
-dispatches a checkout.
+stack only: choosing an adjacent or nonadjacent layer changes what is being read
+and never dispatches a checkout or remote mutation.
+
+The collapsed stack summary names the viewed layer and the reported stack size.
+Opening it reveals all returned native members in submitted order, initially
+scrolled to the viewed layer. All returned member rows stay mounted inside the
+local scroller, without repository-list paging state. The member list has one Tab
+stop, initialized to that layer; unmodified arrows and Home/End move focus within
+the list, and Enter/Space opens the focused PR. Full titles, lifecycle, draft,
+checks, and review facts reflow inside the bounded disclosure. The PR headline
+also discloses its full title without growing the default code header.
+
+Native membership is independent of optional layer metadata. One bounded,
+cancellable main-process GraphQL batch reads at most 32 members, including the
+viewed layer, without dropping any submitted members. Unloaded or malformed
+checks/review facts remain unknown; a head disagreement with known native
+membership or the viewed PR is stale. Native lifecycle and draft facts remain
+visible when optional enrichment omits those fields. Partial membership reports
+its loaded count; adjacent shortcuts never skip an omitted native position.
+Unavailable membership is not presented as an empty stack.
+
+**Blockers & relationship sources** shows actual local parent comparisons and
+reconciliation evidence, not a restack inference from failing checks or a merged
+label. In Stacks, submitted native order is disclosed separately from local
+children-above-parents order, including repositories with no local feature
+branches. Local rows keep branch and parent provenance behind details.
+Inspection does not prepare or execute Restack, Publish, repair, or Merge; those
+actions retain their existing captured previews and confirmation gates.
 
 Opening a file records it as viewed locally, bound to the whole comparison it was
 read at: the head commit, the base commit, and the base branch name. A force-push
@@ -2462,13 +2515,16 @@ instead of presenting it as the revision on screen.
 
 ### Leaving a review
 
-The conversation column carries the whole review loop: what has been said on
+The conversation pane carries the whole review loop: what has been said on
 GitHub, what is still unsent, and the one decision that submits it.
 
 A line number in the diff is the control that starts a comment, so a draft is
 created by choosing the lines rather than by typing a path and a number. Holding
 shift extends the range to a multi-line comment, which becomes GitHub's
 `start_line`/`side` pair.
+Code stays open while endpoints are selected. Open **Conversation** to add the
+selection as a pending comment; opening the composer is explicit so it cannot
+hide the second endpoint at constrained widths.
 
 Drafts are local. They are journalled to the repository's own storage under the
 app's data directory — GitHub has no "pending comments" resource to hold them —

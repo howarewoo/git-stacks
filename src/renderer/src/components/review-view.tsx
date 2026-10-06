@@ -32,7 +32,12 @@ import {
   visibleReviewFileRows,
   withViewedFile,
 } from '../../../shared/review'
-import type { DesktopAPI, PullRequest, PullRequestStackMember } from '../../../shared/types'
+import type {
+  DesktopAPI,
+  PullRequest,
+  PullRequestStackMember,
+  RepositorySnapshot,
+} from '../../../shared/types'
 import { LIST_PAGE_SIZE } from '../../../shared/performance'
 import { Badge } from './ui/badge'
 import { Select } from './ui/select'
@@ -45,6 +50,7 @@ import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pu
 import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import { createRequestGate } from '../lib/request-gate'
 import { cn } from '../lib/utils'
+import { claimsRovingKey, rovingAction, rovingTabIndex, rovingTarget } from '../lib/tree-navigation'
 import { ReviewConversation, type ReviewSelection } from './review-conversation'
 import { sameReviewComparison } from '../../../shared/review'
 import { withReviewDraft } from '../../../shared/review-threads'
@@ -61,6 +67,8 @@ import type {
   ReviewSnapshot,
 } from '../../../shared/review-snapshots'
 import { reviewHistoryUnchangedPaths, reviewSnapshotLabel } from '../../../shared/review-snapshots'
+import { PullRequestChecksPanel } from './check-details'
+import type { PullRequestChecksReport } from '../../../shared/pull-request-checks'
 
 /**
  * The four review commands the shell's global shortcuts dispatch. They are
@@ -87,8 +95,10 @@ export function ReviewView({
   authority,
   desktop,
   pullRequests,
+  stackContext,
   number,
   onSelectNumber,
+  onManageNumber,
   commands,
 }: {
   /**
@@ -104,8 +114,10 @@ export function ReviewView({
   authority: string
   desktop: DesktopAPI | undefined
   pullRequests: readonly PullRequest[]
+  stackContext: Pick<RepositorySnapshot, 'branches' | 'reconciliation'>
   number: number | null
   onSelectNumber: (number: number) => void
+  onManageNumber: (number: number) => void
   commands: React.MutableRefObject<ReviewCommands | null>
 }) {
   const [headline, setHeadline] = React.useState<ReviewHeadline | null>(null)
@@ -135,6 +147,17 @@ export function ReviewView({
   const [historyDiffState, setHistoryDiffState] = React.useState<Stage>('idle')
   const [hideUnchanged, setHideUnchanged] = React.useState(true)
   const [clearingHistory, setClearingHistory] = React.useState(false)
+  const [pane, setPane] = React.useState<'code' | 'about' | 'checks' | 'commits' | 'conversation'>(
+    'code',
+  )
+  const [checks, setChecks] = React.useState<PullRequestChecksReport | null>(null)
+  const [checksLoading, setChecksLoading] = React.useState(false)
+  const [checksError, setChecksError] = React.useState<string | null>(null)
+  const [checksReload, setChecksReload] = React.useState(0)
+  const [checksWatching, setChecksWatching] = React.useState(false)
+  const [rerunningRunId, setRerunningRunId] = React.useState<number | null>(null)
+  const checksGate = React.useRef(createRequestGate())
+  const rerunGate = React.useRef(createRequestGate())
 
   const headlineGate = React.useRef(createRequestGate())
   const filesGate = React.useRef(createRequestGate())
@@ -150,6 +173,62 @@ export function ReviewView({
   const historyGate = React.useRef(createRequestGate())
   const historyDiffGate = React.useRef(createRequestGate())
 
+  React.useEffect(() => {
+    setChecks(null)
+    setChecksError(null)
+    const claim = checksGate.current
+    claim.reset()
+    if (!headline || !desktop?.pullRequestChecks) return
+    const ticket = claim.claim()
+    setChecksLoading(true)
+    void desktop
+      .pullRequestChecks(headline.pullRequest.number, {
+        headSha: headline.pullRequest.headOid ?? null,
+        base: headline.pullRequest.base,
+        force: checksReload > 0,
+      })
+      .then((report) => {
+        if (claim.current(ticket)) setChecks(report)
+      })
+      .catch((cause) => {
+        if (claim.current(ticket)) setChecksError(readableError(cause))
+      })
+      .finally(() => {
+        if (claim.current(ticket)) setChecksLoading(false)
+      })
+    return () => {
+      claim.reset()
+    }
+  }, [authority, desktop, headline, checksReload])
+  React.useEffect(() => {
+    if (!checksWatching || pane !== 'checks') return
+    const timer = setInterval(() => setChecksReload((value) => value + 1), 10_000)
+    return () => clearInterval(timer)
+  }, [checksWatching, pane])
+
+  React.useEffect(() => {
+    const claim = rerunGate.current
+    claim.reset()
+    setRerunningRunId(null)
+    return () => {
+      claim.reset()
+    }
+  }, [authority, headline])
+
+  const rerunCheck = async (runId: number | null) => {
+    if (!headline || !desktop?.rerunPullRequestCheck || runId === null) return
+    const claim = rerunGate.current
+    const ticket = claim.claim()
+    setRerunningRunId(runId)
+    try {
+      const report = await desktop.rerunPullRequestCheck(headline.pullRequest.number, runId)
+      if (claim.current(ticket)) setChecks(report)
+    } catch (cause) {
+      if (claim.current(ticket)) setChecksError(readableError(cause))
+    } finally {
+      if (claim.current(ticket)) setRerunningRunId(null)
+    }
+  }
   // Progressive loading: the headline answers first, and only then are the files
   // and commits requested. Each stage carries its own request id so leaving for
   // another pull request cancels the read that is now obsolete. The CLI
@@ -160,6 +239,18 @@ export function ReviewView({
     const claim = headlineGate.current
     claim.reset()
     setHeadline(null)
+    setError(null)
+    setThreadRead(null)
+    setThreadError(null)
+    setThreadState('idle')
+    setDraftRecord(null)
+    setSelection(null)
+    setViewed(null)
+    setResolutions([])
+    setFilesState('idle')
+    setCommitsState('idle')
+    setChecksWatching(false)
+    setRerunningRunId(null)
     setFiles(null)
     setCommits(null)
     setSelectedPath(null)
@@ -186,6 +277,7 @@ export function ReviewView({
         setHeadlineState('failed')
       })
     return () => {
+      claim.reset()
       void desktop.cancel?.('review-headline')
     }
   }, [authority, desktop, number, reloadToken])
@@ -236,6 +328,7 @@ export function ReviewView({
         setFilesState('failed')
       })
     return () => {
+      claim.reset()
       void desktop.cancel?.('review-files')
     }
   }, [desktop, headline, reloadToken])
@@ -336,6 +429,7 @@ export function ReviewView({
         setThreadState('failed')
       })
     return () => {
+      claim.reset()
       void desktop.cancel?.('review-threads')
     }
   }, [desktop, headline, reloadToken])
@@ -453,6 +547,10 @@ export function ReviewView({
     files !== null &&
     threadRead !== null &&
     !sameReviewComparison(files.comparison, threadRead.threads.comparison)
+  const headlineCurrent =
+    files !== null &&
+    Boolean(headline?.pullRequest.headOid) &&
+    headline?.pullRequest.headOid === files.comparison.headOid
 
   // Composition follows the diff the reviewer is reading, and a thread from a
   // different revision is not allowed to steer it.
@@ -465,6 +563,7 @@ export function ReviewView({
     (next: ReviewSelection) => {
       if (threadsDisagree) return
       selectLines(next)
+      setPane('code')
     },
     [selectLines, threadsDisagree],
   )
@@ -487,6 +586,7 @@ export function ReviewView({
         setCommitsState('failed')
       })
     return () => {
+      claim.reset()
       void desktop.cancel?.('review-commits')
     }
   }, [desktop, headline, reloadToken])
@@ -664,14 +764,14 @@ export function ReviewView({
     <div className="review-view">
       <div className="list-toolbar review-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1
+            className={headline ? 'sr-only' : undefined}
+            id={WORKSPACE_VIEW_HEADING_ID}
+            tabIndex={-1}
+          >
             Review
           </h1>
-          <span className="list-subtitle">
-            {headline
-              ? `#${headline.pullRequest.number} ${headline.pullRequest.title}`
-              : 'No pull request selected'}
-          </span>
+          {!headline ? <span className="list-subtitle">No pull request selected</span> : null}
         </div>
         {headline ? (
           <>
@@ -696,14 +796,24 @@ export function ReviewView({
             >
               <RefreshCw className="size-4" />
             </IconButton>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => void desktop?.openExternal(headline.pullRequest.url)}
-            >
-              <ExternalLink className="size-3.5" />
-              Open on GitHub
-            </Button>
+            <details className="review-actions">
+              <summary>PR actions</summary>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => void desktop?.openExternal(headline.pullRequest.url)}
+              >
+                <ExternalLink className="size-3.5" />
+                Open on GitHub
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => onManageNumber(headline.pullRequest.number)}
+              >
+                Manage pull request
+              </Button>
+            </details>
           </>
         ) : null}
       </div>
@@ -759,23 +869,61 @@ export function ReviewView({
             rail={headline.rail}
             number={headline.pullRequest.number}
             onSelect={onSelectNumber}
+            context={stackContext}
           />
 
-          <ReviewHistoryBar
-            history={history}
-            state={historyState}
-            currentHeadOid={files?.comparison.headOid ?? headline.pullRequest.headOid ?? null}
-            activeSnapshotOid={activeSnapshotOid}
-            hideUnchanged={hideUnchanged}
-            unchangedCount={unchangedPaths.length}
-            truncated={historyDiff?.truncated ?? false}
-            clearing={clearingHistory}
-            onSelectSnapshot={(oid) => setActiveSnapshotOid(oid)}
-            onToggleHideUnchanged={(checked) => setHideUnchanged(checked)}
-            onClearHistory={handleClearHistory}
-          />
+          <div className="review-pane-switch" role="group" aria-label="Review contextual panes">
+            {(['code', 'about', 'checks', 'commits', 'conversation'] as const).map((value) => (
+              <Button
+                key={value}
+                size="sm"
+                variant={pane === value ? 'secondary' : 'ghost'}
+                aria-pressed={pane === value}
+                onClick={() => setPane(value)}
+              >
+                {value === 'code'
+                  ? 'Code'
+                  : value === 'about'
+                    ? 'Description & reviewers'
+                    : value === 'checks'
+                      ? 'Checks'
+                      : value === 'commits'
+                        ? 'Commits'
+                        : 'Conversation'}
+              </Button>
+            ))}
+          </div>
+          <details className="review-history-disclosure">
+            <summary>
+              Comparison ·{' '}
+              {isComparing
+                ? `Historical ${shortOid(activeSnapshotOid)}`
+                : `Current head ${shortOid(files?.comparison.headOid ?? headline.pullRequest.headOid ?? null)}`}
+            </summary>
+            <ReviewHistoryBar
+              history={history}
+              state={historyState}
+              currentHeadOid={files?.comparison.headOid ?? headline.pullRequest.headOid ?? null}
+              activeSnapshotOid={activeSnapshotOid}
+              hideUnchanged={hideUnchanged}
+              unchangedCount={unchangedPaths.length}
+              truncated={historyDiff?.truncated ?? false}
+              clearing={clearingHistory}
+              onSelectSnapshot={(oid) => setActiveSnapshotOid(oid)}
+              onToggleHideUnchanged={(checked) => setHideUnchanged(checked)}
+              onClearHistory={handleClearHistory}
+            />
+          </details>
+          {isComparing ? (
+            <p className="review-history-warning" role="status">
+              {frozenReason}
+            </p>
+          ) : null}
 
-          <div className="review-body">
+          <div
+            className={cn('review-body', pane !== 'code' && 'review-body-context')}
+            data-pane={pane}
+          >
             <section className="review-tree" aria-label="Changed files">
               <div className="review-tree-header">
                 <strong>Files</strong>
@@ -993,66 +1141,163 @@ export function ReviewView({
               )}
             </section>
 
-            <ReviewCommits
-              commits={commits}
-              state={commitsState}
-              number={headline.pullRequest.number}
-            />
+            <aside
+              className="review-context"
+              aria-label="Pull request context"
+              hidden={pane === 'code'}
+            >
+              <section hidden={pane !== 'about'} className="review-about">
+                <h2>Description</h2>
+                <p className="review-description">
+                  {headline.pullRequest.body || 'No description was provided.'}
+                </p>
+                <h2>Readiness</h2>
+                {!headlineCurrent ? (
+                  <InlineAlert tone="warning">
+                    Readiness and reviewer context describe headline head{' '}
+                    {shortOid(headline.pullRequest.headOid ?? null)}, not the displayed diff.
+                    Current-head readiness and reviewer absence are unknown; reload to reconcile the
+                    reads.
+                  </InlineAlert>
+                ) : null}
+                <p>
+                  GitHub merge state:{' '}
+                  {headline.pullRequest.mergeState?.toLowerCase().replaceAll('_', ' ') || 'unknown'}
+                  . Review decision:{' '}
+                  {headline.pullRequest.reviewDecision?.toLowerCase().replaceAll('_', ' ') ||
+                    'unknown'}
+                  .
+                </p>
+                <h2>Reviewers</h2>
+                <p>
+                  {headline.reviewers.message ||
+                    (headline.reviewers.requested.length === 0 &&
+                    headline.reviewers.reviews.length === 0
+                      ? headlineCurrent
+                        ? 'GitHub reported no requested reviewers or latest reviews at the displayed head.'
+                        : 'GitHub reported no requested reviewers or latest reviews at the headline head; reviewer absence at the displayed head is unknown.'
+                      : 'Reviewer context as of the headline read.')}
+                </p>
+                {headline.reviewers.requested.length > 0 ? (
+                  <ul>
+                    {headline.reviewers.requested.map((reviewer) => (
+                      <li key={`${reviewer.kind}:${reviewer.name}`}>
+                        {reviewer.name} · {reviewer.kind} · requested
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {headline.reviewers.reviews.length > 0 ? (
+                  <ul>
+                    {headline.reviewers.reviews.map((review, index) => (
+                      <li key={`${review.login}:${index}`}>
+                        {review.login} · {review.state.toLowerCase().replaceAll('_', ' ')}
+                        {review.headOid && review.headOid === files?.comparison.headOid
+                          ? ' · current head'
+                          : ' · earlier or unknown head'}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </section>
+              <section hidden={pane !== 'checks'}>
+                {checksError ? <InlineAlert tone="warning">{checksError}</InlineAlert> : null}
+                <PullRequestChecksPanel
+                  report={
+                    checks &&
+                    files &&
+                    (checks.headSha !== files.comparison.headOid ||
+                      checks.base !== files.comparison.baseRef)
+                      ? {
+                          ...checks,
+                          freshness: 'stale',
+                          staleReason:
+                            'Checks describe a different head or base from the displayed diff. Reload to read the current comparison.',
+                          permissions: {
+                            ...checks.permissions,
+                            canRerun: false,
+                            reason: 'Reload checks at the displayed head before rerunning.',
+                          },
+                        }
+                      : checks
+                  }
+                  loading={checksLoading}
+                  watching={checksWatching}
+                  onToggleWatch={() => setChecksWatching((value) => !value)}
+                  onRefresh={() => setChecksReload((value) => value + 1)}
+                  onRerun={(check) => void rerunCheck(check.workflowRunId)}
+                  onOpenDetails={(url) => void desktop?.openExternal(url)}
+                  rerunningRunId={rerunningRunId}
+                />
+              </section>
+              <div hidden={pane !== 'commits'}>
+                <ReviewCommits
+                  commits={commits}
+                  state={commitsState}
+                  number={headline.pullRequest.number}
+                />
+              </div>
+              <div hidden={pane !== 'conversation'}>
+                {threadsDisagree ? (
+                  <InlineAlert className="review-comparison-alert" role="status" tone="warning">
+                    The conversation was read at{' '}
+                    {shortOid(threadRead?.threads.comparison.headOid ?? null)}, but the diff on
+                    screen is {shortOid(files?.comparison.headOid ?? null)}. Reload to read both at
+                    the same revision; until then a thread's line cannot be shown or commented on.
+                    <Button
+                      className="review-comparison-reload"
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => setReloadToken((value) => value + 1)}
+                    >
+                      Reload
+                    </Button>
+                  </InlineAlert>
+                ) : null}
 
-            {threadsDisagree ? (
-              <InlineAlert className="review-comparison-alert" role="status" tone="warning">
-                The conversation was read at{' '}
-                {shortOid(threadRead?.threads.comparison.headOid ?? null)}, but the diff on screen
-                is {shortOid(files?.comparison.headOid ?? null)}. Reload to read both at the same
-                revision; until then a thread's line cannot be shown or commented on.
-                <Button
-                  className="review-comparison-reload"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => setReloadToken((value) => value + 1)}
-                >
-                  Reload
-                </Button>
-              </InlineAlert>
-            ) : null}
+                {isComparing &&
+                historyDiff?.state === 'files' &&
+                files?.comparison.headOid &&
+                historyDiff.to.headOid !== files.comparison.headOid ? (
+                  <InlineAlert className="review-comparison-alert" role="status" tone="warning">
+                    The pull request moved to {shortOid(files.comparison.headOid)} after this
+                    comparison was taken against {shortOid(historyDiff.to.headOid)}. Reload to
+                    compare against the latest head.
+                    <Button
+                      className="review-comparison-reload"
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => setReloadToken((value) => value + 1)}
+                    >
+                      Reload
+                    </Button>
+                  </InlineAlert>
+                ) : null}
 
-            {isComparing &&
-            historyDiff?.state === 'files' &&
-            files?.comparison.headOid &&
-            historyDiff.to.headOid !== files.comparison.headOid ? (
-              <InlineAlert className="review-comparison-alert" role="status" tone="warning">
-                The pull request moved to {shortOid(files.comparison.headOid)} after this comparison
-                was taken against {shortOid(historyDiff.to.headOid)}. Reload to compare against the
-                latest head.
-                <Button
-                  className="review-comparison-reload"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => setReloadToken((value) => value + 1)}
-                >
-                  Reload
-                </Button>
-              </InlineAlert>
-            ) : null}
-
-            <ReviewConversation
-              desktop={desktop}
-              number={headline.pullRequest.number}
-              files={files}
-              read={threadRead}
-              readError={threadError}
-              readState={
-                threadState === 'ready' ? 'ready' : threadState === 'failed' ? 'failed' : 'loading'
-              }
-              drafts={draftRecord}
-              resolutions={resolutions}
-              selection={selection}
-              onClearSelection={() => setSelection(null)}
-              onDraftChange={saveDrafts}
-              onReload={() => setReloadToken((value) => value + 1)}
-              onSelect={selectThreadLine}
-              frozenReason={frozenReason}
-            />
+                <ReviewConversation
+                  desktop={desktop}
+                  number={headline.pullRequest.number}
+                  files={files}
+                  read={threadRead}
+                  readError={threadError}
+                  readState={
+                    threadState === 'ready'
+                      ? 'ready'
+                      : threadState === 'failed'
+                        ? 'failed'
+                        : 'loading'
+                  }
+                  drafts={draftRecord}
+                  resolutions={resolutions}
+                  selection={selection}
+                  onClearSelection={() => setSelection(null)}
+                  onDraftChange={saveDrafts}
+                  onReload={() => setReloadToken((value) => value + 1)}
+                  onSelect={selectThreadLine}
+                  frozenReason={frozenReason}
+                />
+              </div>
+            </aside>
           </div>
         </>
       ) : null}
@@ -1078,9 +1323,16 @@ function ReviewHeadlineBlock({
   return (
     <header className="review-headline">
       <div className="review-headline-title">
-        <strong>
-          #{pr.number} {pr.title}
-        </strong>
+        <details className="review-headline-title-disclosure">
+          <summary>
+            <strong>
+              #{pr.number} {pr.title}
+            </strong>
+          </summary>
+          <p>
+            #{pr.number} {pr.title}
+          </p>
+        </details>
         <div className="pr-detail-meta">
           <Badge variant={pr.state === 'OPEN' ? 'success' : 'secondary'}>
             {pr.state.toLowerCase()}
@@ -1111,22 +1363,38 @@ function ReviewHeadlineBlock({
 }
 
 /**
- * The stack rail.
- *
- * It shows where this pull request sits in its native stack and offers the layers
- * directly above and below. Choosing one only changes what is being reviewed: it
- * dispatches no Git action, so the checked-out branch is untouched by moving
- * through a stack.
+ * Read-only native membership navigation. The full ordered rail is disclosed
+ * locally so a long submitted stack never takes the default code viewport.
  */
 function ReviewRail({
   rail,
   number,
   onSelect,
+  context,
 }: {
   rail: ReviewStackRail
   number: number
   onSelect: (number: number) => void
+  context: Pick<RepositorySnapshot, 'branches' | 'reconciliation'>
 }) {
+  const members = React.useMemo(
+    () => [...(rail.stack?.pullRequests ?? [])].sort((a, b) => a.position - b.position),
+    [rail.stack],
+  )
+  const navigable = React.useMemo(
+    () => members.filter((member) => Number.isSafeInteger(member.number) && member.number > 0),
+    [members],
+  )
+  const memberListRef = React.useRef<HTMLOListElement>(null)
+  const [activeMemberIndex, setActiveMemberIndex] = React.useState(0)
+  React.useEffect(() => {
+    setActiveMemberIndex(
+      Math.max(
+        0,
+        navigable.findIndex((member) => member.number === number),
+      ),
+    )
+  }, [navigable, number])
   if (rail.state === 'unavailable') {
     return (
       <div className="review-rail" role="group" aria-label="Native stack layers">
@@ -1137,32 +1405,223 @@ function ReviewRail({
     )
   }
   if (rail.state === 'not-stacked' || !rail.stack) {
+    const local = context.branches.find((branch) => !branch.remote && branch.pr?.number === number)
     return (
       <div className="review-rail" role="group" aria-label="Native stack layers">
         <p className="review-rail-note">
           <Layers aria-hidden="true" className="size-3.5" />
           {rail.message}
         </p>
+        {local?.parent ? (
+          <details className="review-stack-disclosure">
+            <summary>Local-only relationship · not submitted native membership</summary>
+            <p className="review-rail-note">
+              {local.name} → {local.parent}. Source:{' '}
+              {local.parentSource === 'recorded'
+                ? 'recorded local parent'
+                : local.parentSource === 'pullRequest'
+                  ? 'PR base'
+                  : local.parentSource === 'stack'
+                    ? 'previous native stack observation'
+                    : 'inferred ancestry — not confirmed'}
+              .
+            </p>
+          </details>
+        ) : null}
       </div>
     )
   }
+  const selected = members.find((member) => member.number === number)
+  const partial = members.length < rail.stack.size
+  const reconciliation = context.reconciliation?.stacks.find(
+    (entry) => entry.stackNumber === rail.stack?.number,
+  )
+  const localEvidence = members.flatMap((member) => {
+    const branch = context.branches.find(
+      (entry) =>
+        !entry.remote && entry.pr?.number === member.number && entry.pr.head === member.head,
+    )
+    if (!branch) return []
+    if (member.headSha && branch.pr?.headOid && member.headSha !== branch.pr.headOid) {
+      return [
+        `#${member.number}: local metadata for ${branch.name} names a different head than submitted native membership; local blocker attribution is stale.`,
+      ]
+    }
+    if (branch.needsRestack || (branch.parentBehind ?? 0) > 0) {
+      return [
+        `#${member.number}: local branch ${branch.name} requires restack (local parent comparison${branch.parentBehind ? `: ${branch.parentBehind} parent commits behind` : ''}).`,
+      ]
+    }
+    if (branch.parent && branch.parentBehind === null) {
+      return [
+        `#${member.number}: local parent comparison for ${branch.name} is unavailable; this is not evidence of a restack requirement.`,
+      ]
+    }
+    return []
+  })
   return (
     <nav className="review-rail" aria-label="Native stack layers">
-      <span className="review-rail-position">
-        Layer {rail.stack.pullRequests.find((member) => member.number === number)?.position ?? '?'}{' '}
-        of {rail.stack.size} in stack #{rail.stack.number}
-      </span>
+      <details
+        className="review-stack-disclosure"
+        onToggle={(event) => {
+          if (!event.currentTarget.open) return
+          const list = event.currentTarget.querySelector<HTMLOListElement>('.review-stack-members')
+          const current = list?.querySelector<HTMLElement>('[aria-current="page"]')
+          if (list && current)
+            list.scrollTop += current.getBoundingClientRect().top - list.getBoundingClientRect().top
+        }}
+      >
+        <summary>
+          Layer {selected?.position ?? '?'} of {rail.stack.size} · Stack #{rail.stack.number}
+          {partial ? ` · Partial membership (${members.length} loaded)` : ' · All layers'}
+        </summary>
+        <ol
+          ref={memberListRef}
+          className="review-stack-members"
+          aria-label="Submitted native order"
+        >
+          {members.map((member) => {
+            const facts = rail.facts?.find((entry) => entry.number === member.number)
+            const fresh = facts?.state === 'available' || facts?.state === 'partial'
+            const lifecycle = (fresh ? facts.lifecycle : null) ?? member.state
+            const draft = (fresh ? facts.draft : null) ?? member.draft
+            const memberIndex = navigable.indexOf(member)
+            return (
+              <li key={`${member.position}-${member.number}`}>
+                <Button
+                  disabled={!Number.isSafeInteger(member.number) || member.number <= 0}
+                  variant="unstyled"
+                  className="review-stack-member"
+                  aria-current={member.number === number ? 'page' : undefined}
+                  onClick={() => onSelect(member.number)}
+                  tabIndex={memberIndex < 0 ? -1 : rovingTabIndex(memberIndex, activeMemberIndex)}
+                  onFocus={(event) => {
+                    setActiveMemberIndex(memberIndex)
+                    event.currentTarget.scrollIntoView({ block: 'nearest' })
+                  }}
+                  onKeyDown={(event) => {
+                    if (!claimsRovingKey(event)) return
+                    const action = rovingAction(event.key)
+                    if (!action) return
+                    const target = rovingTarget(action, memberIndex, navigable.length)
+                    if (target === null) return
+                    event.preventDefault()
+                    memberListRef.current
+                      ?.querySelectorAll<HTMLButtonElement>('.review-stack-member:not(:disabled)')
+                      [target]?.focus()
+                  }}
+                >
+                  <span className="review-stack-identity">
+                    <strong>
+                      {member.position}. #{member.number}
+                    </strong>
+                    <span>{facts?.title ?? `Title unavailable · ${member.head}`}</span>
+                  </span>
+                  <span className="review-stack-facts">
+                    <Badge
+                      variant={
+                        lifecycle === 'MERGED'
+                          ? 'merged'
+                          : lifecycle === 'CLOSED'
+                            ? 'danger'
+                            : 'secondary'
+                      }
+                    >
+                      {lifecycle?.toLowerCase() ?? 'Lifecycle unknown'}
+                    </Badge>
+                    {draft === null ? (
+                      <span>Draft unknown</span>
+                    ) : draft ? (
+                      <Badge variant="secondary">Draft</Badge>
+                    ) : null}
+                    <span>
+                      {facts?.checks === 'none'
+                        ? 'No checks'
+                        : `Checks ${facts?.checks ?? 'unknown'}`}
+                    </span>
+                    <span>
+                      {facts?.review === 'none'
+                        ? 'No review decision'
+                        : `Review ${(facts?.review ?? 'unknown').replaceAll('-', ' ')}`}
+                    </span>
+                    {facts?.state !== 'available' ? (
+                      <span>{facts?.state ?? 'Metadata not loaded'}</span>
+                    ) : null}
+                    {facts?.message ? (
+                      <span className="review-stack-fact-note">{facts.message}</span>
+                    ) : null}
+                    {member.number === number ? <Badge variant="accent">Viewing</Badge> : null}
+                  </span>
+                </Button>
+              </li>
+            )
+          })}
+        </ol>
+        {rail.message ? <p className="review-rail-note">{rail.message}</p> : null}
+        <details className="review-stack-evidence">
+          <summary>Blockers & relationship sources</summary>
+          <p className="review-rail-note">
+            Submitted order comes from GitHub native membership. Inspection does not prepare or
+            repair the stack.
+          </p>
+          {localEvidence.length ? (
+            <ul>
+              {localEvidence.map((detail) => (
+                <li key={detail}>{detail}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="review-rail-note">
+              No local restack requirement reported for these matched branches.
+            </p>
+          )}
+          {reconciliation ? (
+            <>
+              <p className="review-rail-note">
+                Reconciliation source: {reconciliation.state} · {reconciliation.summary}
+              </p>
+              <p className="review-rail-note">
+                Submitted order: {reconciliation.submittedOrder.join(' → ') || 'Unavailable'}
+              </p>
+              {reconciliation.blockers.length ? (
+                <ul>
+                  {reconciliation.blockers.map((detail) => (
+                    <li key={detail}>{detail}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {reconciliation.members
+                .filter((entry) => entry.detail)
+                .map((entry) => (
+                  <p className="review-rail-note" key={entry.branch}>
+                    {entry.branch}: {entry.detail}
+                  </p>
+                ))}
+            </>
+          ) : (
+            <p className="review-rail-note">
+              No matching reconciliation report is available; no reconciliation blocker is inferred.
+            </p>
+          )}
+        </details>
+      </details>
       <LayerButton
         direction="previous"
         member={rail.previous}
         onSelect={onSelect}
-        boundary="This is the bottom layer of the stack."
+        boundary={
+          partial
+            ? 'The preceding member was not returned.'
+            : 'This is the bottom layer of the stack.'
+        }
       />
       <LayerButton
         direction="next"
         member={rail.next}
         onSelect={onSelect}
-        boundary="This is the top layer of the stack."
+        boundary={
+          partial ? 'The following member was not returned.' : 'This is the top layer of the stack.'
+        }
       />
     </nav>
   )
@@ -1193,7 +1652,7 @@ function LayerButton({
       ) : (
         <ChevronRight aria-hidden="true" className="size-3.5" />
       )}
-      {member ? `${label}: #${member.number} ${member.head}` : `${label}: none`}
+      {member ? `${label}: #${member.number}` : `${label}: none`}
     </Button>
   )
 }

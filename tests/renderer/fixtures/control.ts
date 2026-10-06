@@ -1,4 +1,5 @@
 import type { UpdateStatus } from '../../../src/shared/update'
+import { REVIEW_STACK_METADATA_LIMIT } from '../../../src/shared/performance'
 import type {
   ActionResult,
   ConflictFile,
@@ -342,8 +343,16 @@ export function installFixtureControl(options: {
    * and it still carries the rows that host read.
    */
   const admittedAnswer = <T>(call: FixtureCall, produce: () => T): Promise<T> => {
-    const admitted = produce()
-    return answer(call, () => admitted)
+    let settled: () => T
+    try {
+      const admitted = produce()
+      settled = () => admitted
+    } catch (error) {
+      settled = () => {
+        throw error
+      }
+    }
+    return answer(call, settled)
   }
 
   /**
@@ -969,24 +978,91 @@ export function installFixtureControl(options: {
     },
     reviewHeadline: (number) => {
       record('reviewHeadline', [number])
-      return answer('reviewHeadline', () => {
+      return admittedAnswer('reviewHeadline', () => {
         const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         // A pull request carries only its own position; the layer list comes
         // from every pull request in the snapshot that names the same stack.
-        const membership = found.stack
-          ? (active?.pullRequests
-              .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
-              .map((pr) =>
-                stackMember(pr.stack?.position ?? 1, pr.number, found.stack?.size ?? 1),
-              ) ?? null)
-          : null
+        const membership =
+          found.stack && !scenario.reviewStackUnavailable
+            ? (active?.pullRequests
+                .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
+                .map((pr) => ({
+                  ...stackMember(pr.stack?.position ?? 1, pr.number, found.stack?.size ?? 1),
+                  head: pr.head,
+                  headSha: pr.headOid,
+                  base: pr.base,
+                  state: pr.state,
+                  draft: pr.draft,
+                })) ?? null)
+            : scenario.reviewStackUnavailable
+              ? null
+              : []
         const value: ReviewHeadline = {
           pullRequest: {
             ...found,
             body: `${found.title}\n\nDeterministic fixture body for pull request #${number}.`,
           },
-          rail: reviewRail(found, membership),
+          rail: {
+            ...reviewRail(found, membership),
+            message: scenario.reviewStackUnavailable
+              ? 'GitHub did not return stack membership for this pull request.'
+              : membership && membership.length > REVIEW_STACK_METADATA_LIMIT
+                ? `Layer metadata is bounded to ${REVIEW_STACK_METADATA_LIMIT} members, including the viewed layer; submitted membership is unchanged.`
+                : found.stack
+                  ? ''
+                  : 'This pull request is not part of a native stack.',
+            facts: active?.pullRequests
+              .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
+              .filter(
+                (pr, index) =>
+                  index <
+                    (found.stack &&
+                    membership &&
+                    membership.length > REVIEW_STACK_METADATA_LIMIT &&
+                    found.stack.position > REVIEW_STACK_METADATA_LIMIT
+                      ? REVIEW_STACK_METADATA_LIMIT - 1
+                      : REVIEW_STACK_METADATA_LIMIT) || pr.number === found.number,
+              )
+              .map((pr) => ({
+                number: pr.number,
+                state:
+                  scenario.reviewStackFactsState ??
+                  (pr.reviewDecision ? ('available' as const) : ('partial' as const)),
+                title: pr.title,
+                lifecycle: pr.state,
+                draft: pr.draft,
+                checks: scenario.reviewStackFactsState ? ('unknown' as const) : pr.checks,
+                review: scenario.reviewStackFactsState
+                  ? ('unknown' as const)
+                  : pr.reviewDecision === 'APPROVED'
+                    ? ('approved' as const)
+                    : pr.reviewDecision === 'REVIEW_REQUIRED'
+                      ? ('required' as const)
+                      : pr.reviewDecision === 'CHANGES_REQUESTED'
+                        ? ('changes-requested' as const)
+                        : ('unknown' as const),
+                message: scenario.reviewStackFactsState
+                  ? `Layer metadata ${scenario.reviewStackFactsState}; readiness is unknown.`
+                  : pr.reviewDecision
+                    ? ''
+                    : 'Review decision unavailable from GitHub.',
+              })),
+          },
+          reviewers: {
+            state: found.reviewDecision ? 'available' : 'unavailable',
+            requested:
+              found.reviewDecision === 'REVIEW_REQUIRED'
+                ? [{ kind: 'user', name: 'fixture-reviewer' }]
+                : [],
+            reviews:
+              found.reviewDecision === 'APPROVED'
+                ? [{ login: 'fixture-reviewer', state: 'APPROVED', headOid: found.headOid ?? null }]
+                : [],
+            message: found.reviewDecision
+              ? ''
+              : 'Reviewer metadata is unavailable in this fixture.',
+          },
         }
         return value
       })

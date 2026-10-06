@@ -228,7 +228,8 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await switchDestination(page, 'pullRequests')
 
       await page.getByRole('button', { name: /#42 Migrate changes/ }).click()
-      await expect(page.getByRole('dialog')).toBeVisible()
+      await expect(page.locator('.review-headline')).toContainText('#42 Migrate changes')
+      await expect(page.getByRole('dialog')).toHaveCount(0)
 
       const actions = await getDispatchedActions(page)
       expect(actions).toEqual([])

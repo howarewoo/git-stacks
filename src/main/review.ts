@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { REVIEW_STACK_METADATA_LIMIT } from '../shared/performance'
 
 import type {
   ReviewAnchorResolution,
@@ -13,9 +14,10 @@ import type {
   ReviewLineRef,
   ReviewSide,
   ReviewStackRail,
+  ReviewStackMemberFacts,
+  ReviewReviewerSummary,
 } from '../shared/review'
 import {
-  adjacentStackLayer,
   isWhitespaceOnlyChange,
   looksGenerated,
   reviewChangeBlocks,
@@ -274,12 +276,244 @@ function stackRail(stacks: NativeStack[], number: number): ReviewStackRail {
       message: 'This pull request is not part of a native GitHub stack.',
     }
   }
+  const selected = stack.pullRequests.find((member) => member.number === number)!
   return {
     state: 'member',
     stack,
-    previous: adjacentStackLayer(stack.pullRequests, number, -1),
-    next: adjacentStackLayer(stack.pullRequests, number, 1),
-    message: '',
+    previous:
+      stack.pullRequests.find((member) => member.position === selected.position - 1) ?? null,
+    next: stack.pullRequests.find((member) => member.position === selected.position + 1) ?? null,
+    message:
+      stack.pullRequests.length < stack.size
+        ? 'Native membership is partial; omitted positions are not stack boundaries.'
+        : '',
+  }
+}
+
+async function readReviewerSummary(
+  remote: ParsedRemote,
+  number: number,
+  headOid: string | undefined,
+  signal?: AbortSignal,
+): Promise<ReviewReviewerSummary> {
+  try {
+    const result = await reviewTransport(remote).graphql<unknown>(
+      `query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            headRefOid
+            reviewRequests(first: 100) {
+              pageInfo { hasNextPage }
+              nodes { requestedReviewer {
+                ... on User { login }
+                ... on Team { slug }
+              } }
+            }
+            latestReviews(first: 100) {
+              pageInfo { hasNextPage }
+              nodes { author { login } state commit { oid } }
+            }
+          }
+        }
+      }`,
+      { owner: remote.owner, name: remote.name, number },
+      { signal },
+    )
+    if (signal?.aborted) throw new Error('Review read cancelled')
+    const repository = isRecord(result) ? result.repository : null
+    const node = isRecord(repository) ? repository.pullRequest : null
+    if (!isRecord(node) || !headOid || node.headRefOid !== headOid) {
+      throw new Error('Reviewer metadata does not match the selected pull request head.')
+    }
+    const requests = node.reviewRequests
+    const latest = node.latestReviews
+    if (
+      !isRecord(requests) ||
+      !Array.isArray(requests.nodes) ||
+      !isRecord(latest) ||
+      !Array.isArray(latest.nodes) ||
+      !isRecord(requests.pageInfo) ||
+      typeof requests.pageInfo.hasNextPage !== 'boolean' ||
+      !isRecord(latest.pageInfo) ||
+      typeof latest.pageInfo.hasNextPage !== 'boolean'
+    )
+      throw new Error('GitHub did not return complete reviewer metadata.')
+    let partial = requests.pageInfo.hasNextPage || latest.pageInfo.hasNextPage
+    const requested: ReviewReviewerSummary['requested'] = []
+    const reviews: ReviewReviewerSummary['reviews'] = []
+    for (const entry of requests.nodes) {
+      const reviewer = isRecord(entry) ? entry.requestedReviewer : null
+      if (isRecord(reviewer) && typeof reviewer.login === 'string' && reviewer.login) {
+        requested.push({ kind: 'user', name: reviewer.login })
+      } else if (isRecord(reviewer) && typeof reviewer.slug === 'string' && reviewer.slug) {
+        requested.push({ kind: 'team', name: reviewer.slug })
+      } else partial = true
+    }
+    for (const entry of latest.nodes) {
+      const author = isRecord(entry) ? entry.author : null
+      if (
+        !isRecord(entry) ||
+        !isRecord(author) ||
+        typeof author.login !== 'string' ||
+        !author.login ||
+        typeof entry.state !== 'string' ||
+        !['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING'].includes(
+          entry.state,
+        )
+      ) {
+        partial = true
+        continue
+      }
+      const commit = isRecord(entry.commit) ? entry.commit : null
+      reviews.push({
+        login: author.login,
+        state: entry.state as ReviewReviewerSummary['reviews'][number]['state'],
+        headOid: commit && typeof commit.oid === 'string' ? commit.oid : null,
+      })
+    }
+    return {
+      state: partial ? 'partial' : 'available',
+      requested,
+      reviews,
+      message: partial
+        ? 'Reviewer metadata is incomplete; only the first 100 requests and latest reviews are shown.'
+        : '',
+    }
+  } catch (error) {
+    if (signal?.aborted || isCancelledRead(error)) throw error
+    return {
+      state: 'unavailable',
+      requested: [],
+      reviews: [],
+      message: `Reviewer metadata unavailable: ${errorDetail(error)}`,
+    }
+  }
+}
+
+/**
+ * One bounded batch, not a read per layer. Membership remains authoritative even
+ * when this optional summary is refused or the stack exceeds the summary budget.
+ */
+async function readStackFacts(
+  remote: ParsedRemote,
+  rail: ReviewStackRail,
+  number: number,
+  selectedHead: string | undefined,
+  signal?: AbortSignal,
+): Promise<ReviewStackRail> {
+  if (!rail.stack) return rail
+  const budget = REVIEW_STACK_METADATA_LIMIT
+  const ordered = rail.stack.pullRequests
+    .filter((member) => Number.isSafeInteger(member.number) && member.number > 0)
+    .sort((a, b) => a.position - b.position)
+  const selected = ordered.find((member) => member.number === number)
+  const members = ordered.slice(0, budget)
+  if (selected && !members.includes(selected)) members[members.length - 1] = selected
+  if (members.length === 0)
+    return {
+      ...rail,
+      message: 'Native membership contains no accessible PR identities; metadata was not read.',
+    }
+  const unknown = (
+    member: NativeStack['pullRequests'][number],
+    message: string,
+  ): ReviewStackMemberFacts => ({
+    number: member.number,
+    state: 'unavailable',
+    title: null,
+    lifecycle: null,
+    draft: null,
+    checks: 'unknown',
+    review: 'unknown',
+    message,
+  })
+  try {
+    const fields = members
+      .map(
+        (member, index) => `layer${index}: pullRequest(number: ${member.number}) {
+      title headRefOid state isDraft reviewDecision
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+    }`,
+      )
+      .join('\n')
+    const result = await reviewTransport(remote).graphql<unknown>(
+      `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${fields} } }`,
+      { owner: remote.owner, name: remote.name },
+      { signal },
+    )
+    if (signal?.aborted)
+      throw new GitHubTransportError({ kind: 'cancelled', detail: 'Review read cancelled' })
+    const repository = isRecord(result) && isRecord(result.repository) ? result.repository : null
+    const facts = members.map((member, index): ReviewStackMemberFacts => {
+      const node = repository?.[`layer${index}`]
+      if (!isRecord(node)) return unknown(member, 'Layer metadata unavailable from GitHub.')
+      const expectedHead = member.number === number ? selectedHead : member.headSha
+      const nativeHead = member.headSha
+      if (
+        typeof node.headRefOid === 'string' &&
+        node.headRefOid &&
+        ((expectedHead && node.headRefOid !== expectedHead) ||
+          (nativeHead && node.headRefOid !== nativeHead))
+      ) {
+        return {
+          ...unknown(member, 'Layer metadata head differs from authoritative membership.'),
+          state: 'stale',
+        }
+      }
+      const title = typeof node.title === 'string' && node.title ? node.title : null
+      const lifecycle =
+        node.state === 'OPEN' || node.state === 'CLOSED' || node.state === 'MERGED'
+          ? node.state
+          : null
+      const draft = typeof node.isDraft === 'boolean' ? node.isDraft : null
+      let checks: ReviewStackMemberFacts['checks'] = 'unknown'
+      let review: ReviewStackMemberFacts['review'] = 'unknown'
+      if (expectedHead && node.headRefOid === expectedHead) {
+        const commits = isRecord(node.commits) ? node.commits : null
+        const entries = commits && Array.isArray(commits.nodes) ? commits.nodes : null
+        const entry = entries?.length === 1 && isRecord(entries[0]) ? entries[0] : null
+        const commit = entry && isRecord(entry.commit) ? entry.commit : null
+        const rollup = commit?.statusCheckRollup
+        if (rollup === null) checks = 'none'
+        else if (isRecord(rollup)) {
+          if (rollup.state === 'SUCCESS') checks = 'passing'
+          else if (rollup.state === 'FAILURE' || rollup.state === 'ERROR') checks = 'failing'
+          else if (rollup.state === 'PENDING' || rollup.state === 'EXPECTED') checks = 'pending'
+        }
+        if (node.reviewDecision === null) review = 'none'
+        else if (node.reviewDecision === 'APPROVED') review = 'approved'
+        else if (node.reviewDecision === 'CHANGES_REQUESTED') review = 'changes-requested'
+        else if (node.reviewDecision === 'REVIEW_REQUIRED') review = 'required'
+      }
+      const partial =
+        !title || !lifecycle || draft === null || checks === 'unknown' || review === 'unknown'
+      return {
+        number: member.number,
+        state: partial ? 'partial' : 'available',
+        title,
+        lifecycle,
+        draft,
+        checks,
+        review,
+        message: partial ? 'Missing or unpinned layer facts remain unknown.' : '',
+      }
+    })
+    return {
+      ...rail,
+      facts,
+      message:
+        members.length < ordered.length
+          ? `Layer metadata is bounded to ${budget} members, including the viewed layer; submitted membership is unchanged.`
+          : rail.message,
+    }
+  } catch (error) {
+    if (signal?.aborted || isCancelledRead(error)) throw error
+    return {
+      ...rail,
+      facts: members.map((member) =>
+        unknown(member, `Layer metadata unavailable: ${errorDetail(error)}`),
+      ),
+    }
   }
 }
 
@@ -305,13 +539,23 @@ export async function readReviewHeadline(
       `Review needs a GitHub origin remote; this repository's origin is on ${remote.host}.`,
     )
   }
+  const reviewers = await readReviewerSummary(remote, number, pullRequest.headOid, signal)
   try {
     const stacks = await listPullRequestStacks(remote.owner, remote.name, {
       host,
       pullRequest: number,
       signal,
     })
-    return { pullRequest, rail: stackRail(stacks, number) }
+    let membership = stackRail(stacks, number)
+    if (membership.state === 'not-stacked' && pullRequest.stack) {
+      membership = {
+        ...membership,
+        state: 'unavailable',
+        message: `Stack #${pullRequest.stack.stackNumber} membership was reported for this PR, but its ordered members were not returned.`,
+      }
+    }
+    const rail = await readStackFacts(remote, membership, number, pullRequest.headOid, signal)
+    return { pullRequest, rail, reviewers }
   } catch (error) {
     if (isCancelledRead(error)) throw error
     const position = pullRequest.stack
@@ -319,6 +563,7 @@ export async function readReviewHeadline(
       : 'The native stack layers could not be listed'
     return {
       pullRequest,
+      reviewers,
       rail: {
         state: 'unavailable',
         stack: null,

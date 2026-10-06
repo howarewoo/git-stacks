@@ -421,11 +421,16 @@ Adopt-order previews capture the exact resolved parent ref and commit used for t
 
 ### Review workspace
 
-The Review workspace is one page in four regions: a headline, a stack rail, and then the changed-file tree, the diff, and the commit list side by side. The body is one grid, so the regions never trade size by wrapping or by hiding: a long commit list cannot push the patch out of reach and a long patch cannot squeeze the tree away.
+Review is the single read destination for repository PR rows, Inbox rows, stack PR links, inspector Review actions, and palette navigation. Management is explicit and secondary. Reading never checks out a branch or dispatches a Git or remote mutation; captured previews and confirmation gates remain separate actions.
 
-The grid reads the width of the workspace itself, not the window, because a repository sidebar already takes part of the window. Too narrow for three columns, the commit list moves beneath the diff; narrower still, the three stack. Nothing is dropped at either step.
+Code owns the body by default. Description and readonly reviewer/readiness context, complete check details, commits, and conversation are keyboard-reachable contextual panes. Wide workspaces show selected context beside code; constrained workspaces switch the body rather than divide its height into thin strips. Context stays mounted so toggling it preserves file, layout, whitespace, comparison, line range, local scroll position, and unsent text. Returning to Code is always an explicit visible control.
 
-The workspace fills its pane exactly as every other workspace does, which is what gives the regions a definite share to divide: without that, a large file set stretches the pane to the height of its content and the patch ends up below a screenful of file rows. Each region is then bounded and scrolls inside itself, so a region that has outgrown its share never becomes the page's height. Where the three stack, each is content-sized up to a cap of its own, so none claims the workspace and the pane scrolls as it does everywhere else. Bounded is a property of the _reading_ surface: a seventeen-megabyte file set is a two-hundred row window, and the region label says so. The workspace reads the pull request from GitHub; it never reads the working tree, never checks out a branch, and never changes anything on GitHub. Moving between stack layers changes only what is being read.
+Use one compact PR headline with a keyboard-accessible full-title disclosure, a collapsed full-stack disclosure, and a collapsed comparison disclosure whose summary names the current or historical endpoint. Historical submission warnings remain outside the disclosure. Review quiets persistent local-Git controls while preserving the palette and local-work destinations. At desktop zoom, the shell, navigation, and reading regions stay bounded with local scrolling; expanding context never makes code a one-line strip.
+In short viewports, the workbench itself scrolls locally to expose the reading
+area without shrinking it to a strip. Its header and contextual controls remain
+reachable by scrolling or keyboard focus; the document does not grow.
+
+All displayed data and actions belong to the repository, host, credential authority, PR, and comparison being viewed. Changing that identity retires in-flight reads and removes the old answers before replacements arrive. Missing or partial checks/reviewers remain explicitly unknown or incomplete. A review on a prior or unknown head is labelled as such, never presented as current-head approval. Description is plain sanitized text, never interpreted as HTML.
 
 Pull-request files, commits, and the stack are separate reads that each claim their own request id, so moving to another pull request cancels the read that is now obsolete instead of letting it answer for a pull request nobody is looking at. The headline answers first, then files and commits; a stage that has not arrived renders a loading state and never an empty state that reads as "nothing to review".
 
@@ -443,18 +448,23 @@ Unified and split are two presentations of one set of lines. The whitespace togg
 
 Duplicate same-side anchors always remain unresolved, even when only one copy retains the old neighbourhood. Context distinguishes exact from moved only after uniqueness is established.
 
-The rail states the pull request's position in its native stack and offers the two adjacent layers. The top and bottom of a stack are boundaries, not missing data. When GitHub returns no membership, or the stacks preview is unavailable, the rail says which of those it is instead of implying an empty stack.
+The rail states the viewed pull request's position and exposes every returned native member in submitted order, with connected rows, direct readonly selection, and retained adjacent-layer commands. Its bounded disclosure opens at the viewed member, which is the initial single Tab stop; unmodified arrows and Home/End move focus and reveal rows, and Enter/Space opens that PR. Long titles and independent lifecycle, draft, checks, and review facts reflow locally. Known native lifecycle and draft values survive missing optional enrichment fields.
+
+Membership and metadata are separate claims. A partial membership names its loaded count against the reported stack size; bounded metadata never truncates the submitted order. Missing or unpinned readiness remains unknown, and metadata whose head disagrees with either known native membership or the viewed PR is stale. Stack endpoints are boundaries, not missing data. No membership, unavailable membership, local-only relationships, and stale or unavailable metadata have distinct explanations.
+
+Blocker disclosure identifies actual local parent comparisons and reconciliation evidence. Red checks, merged labels, inferred ancestry, and unavailable comparisons do not establish a restack requirement. In Stacks, repository-wide submitted membership remains reachable without local feature branches and distinct from local children-above-parents order. Compact local rows disclose full branch names, parent provenance, and landing details; Restack, Publish, repair, and Merge continue through their existing captured previews.
 
 Viewed files are a local reading aid bound to the **whole comparison** they were recorded at: the head object, the base object, and the base branch name. A force-push changes the head and a push to the base branch changes the base, so either drops the marks rather than carrying them onto a diff nobody looked at. A retarget is a third case: it can leave both object ids untouched, so the branch name is carried too, and a rename reads the same way. Retargeting is a routine action, not a rare race, and a mark carried across it would claim review of changes nobody opened; the cost is re-opening a few files. GitHub is not asked to store them, and the app never claims to have synced a state GitHub does not expose.
 
-**Leaving a review.** The conversation column holds the three states a review is
-in at once — what GitHub already holds, what the reviewer has written but not
-sent, and the single decision that sends it — because splitting them across
-panes would make the pending state the hardest one to notice, which is exactly
-the state that is lost if it is missed. A line number is the affordance that
+**Leaving a review.** The conversation pane holds GitHub's submitted threads,
+unsent comments, and the single decision that sends them together. It remains
+mounted while another contextual pane is selected, so hiding it never discards
+the reviewer's words. A line number is the affordance that
 starts a comment: the reviewer points at the lines they mean, and a held
 modifier extends the range to a multi-line comment. Nothing asks for a path and
 a number that the reviewer would have to read off the screen.
+Code stays available while both range endpoints are selected. Opening
+Conversation to compose is explicit; selection alone never hides code.
 
 Pending comments are local by necessity, not by preference: GitHub has no
 pending-comment resource, so they are journalled in the app's own storage and

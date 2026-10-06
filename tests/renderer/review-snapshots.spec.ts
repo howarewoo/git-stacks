@@ -6,6 +6,7 @@ test.beforeEach(async ({ page }) => {
   await openGallery(page, { scenario: 'review-stacked' })
   await switchDestination(page, 'review')
   await settle(page)
+  await page.locator('.review-history-disclosure summary').click()
 })
 
 test.describe('Review snapshot history and comparison', () => {

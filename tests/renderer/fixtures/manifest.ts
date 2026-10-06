@@ -69,6 +69,7 @@ export const SCENARIO_NAMES = [
   // PR Inbox
   'pr-inbox-queue',
   'pr-inbox-structured',
+  'pr-inbox-same-number',
   'pr-inbox-no-repository',
   'pr-inbox-empty',
   'pr-inbox-partial',
@@ -80,6 +81,12 @@ export const SCENARIO_NAMES = [
   // Review
   'review-force-pushed',
   'review-stacked',
+  'review-long-stack',
+  'review-stack-partial',
+  'review-stack-error',
+  'review-stack-stale',
+  'review-stack-metadata-unavailable',
+  'review-stack-disagreement',
   'review-unstacked',
   'review-read-only',
   'review-own-pull-request',
