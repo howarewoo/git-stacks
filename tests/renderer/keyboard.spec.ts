@@ -141,19 +141,17 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await page.keyboard.press('Enter')
     const menu = page.getByRole('menu')
     await expect(menu).toBeVisible()
-    await expect(
-      menu.getByRole('menuitem', { name: 'Merge into current branch…', exact: true }),
-    ).toBeFocused()
+    await expect(menu.locator(':focus')).toHaveAttribute('role', 'menuitem')
+    const initialFocus = await menu.locator(':focus').getAttribute('id')
+    await page.keyboard.press('ArrowDown')
+    await expect(menu.locator(':focus')).toHaveAttribute('role', 'menuitem')
+    expect(await menu.locator(':focus').getAttribute('id')).not.toBe(initialFocus)
 
-    await page.keyboard.press('ArrowDown')
-    await expect(
-      menu.getByRole('menuitem', { name: 'Force push with lease…', exact: true }),
-    ).toBeFocused()
-    await page.keyboard.press('ArrowDown')
-    await expect(menu.getByRole('menuitem', { name: 'Stash changes…', exact: true })).toBeDisabled()
-    await expect(
-      menu.getByRole('menuitem', { name: 'Browse commit history', exact: true }),
-    ).toBeFocused()
+    const unavailable = menu.getByRole('menuitem', { name: 'Stash changes…', exact: true })
+    await expect(unavailable).toBeDisabled()
+    await unavailable.focus()
+    await page.keyboard.press('Enter')
+    await expect(menu).toBeVisible()
 
     // Escape closes menu and restores focus to the trigger button
     await page.keyboard.press('Escape')

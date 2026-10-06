@@ -578,38 +578,43 @@ export function installFixtureControl(options: {
       return admittedAnswer('notificationSettings', () => settingsSnapshot())
     },
     updateSettings: (patch) => {
-      // Each shape of settings write is a call of its own, because each one is
-      // a different step of a different transition: holding the write that
-      // turns this module on must not hold the host a Settings change makes,
-      // or the cutover that has to happen while that write is outstanding
-      // would itself be waiting behind it.
+      // Keep notification-only writes independently holdable for authority-race tests.
+      // Record ordinary settings writes with their complete patch.
+      const groups = Object.keys(patch)
       const call: FixtureCall =
-        patch.github?.host !== undefined
-          ? 'notificationSettingsHost'
-          : patch.notifications?.enabled !== undefined
+        groups.length !== 1
+          ? 'updateSettings'
+          : groups[0] === 'notifications' && patch.notifications?.enabled !== undefined
             ? 'notificationSettingsEnable'
-            : 'notificationSettings'
-      record(call, [])
+            : groups[0] === 'github' && patch.github?.host !== undefined
+              ? 'notificationSettingsHost'
+              : 'updateSettings'
+      record(call, [patch])
       // The write lands when it is made and only the answer is ever delayed.
       // That is what keeps a held write honest: it is applied to the host that
       // was selected when it was made, never to whichever host the window has
       // been pointed at by the time it is released.
       const host = notificationSettings.github.host
-      if (patch.github?.host !== undefined) {
-        // Selecting a host retires the center the window was holding and
-        // opens the new host's. Nothing is pushed for the window to adopt:
-        // arriving at the new host's inbox is the window's own work, and a
-        // push that happened to carry it would prove nothing.
-        notificationSettings.github = { host: patch.github.host }
-      }
       if (patch.notifications?.enabled !== undefined) {
-        notificationSettings.notifications = { enabled: patch.notifications.enabled }
+        // Turning the module on settles the inbox it was holding, and that is
+        // pushed to the window rather than left for it to ask about.
+        notificationSettings.notifications = {
+          ...notificationSettings.notifications,
+          ...patch.notifications,
+        }
         const settled = settle(hostInboxes.get(host) ?? { ...disabledNotifications(), host }, {
           enabled: patch.notifications.enabled,
         })
         notificationListener?.(settled)
         publish(host, settled)
       }
+      // Match the whole-settings merge. Host changes do not publish another host's inbox.
+      notificationSettings.github = { ...notificationSettings.github, ...patch.github }
+      notificationSettings.git = { ...notificationSettings.git, ...patch.git }
+      notificationSettings.appearance = { ...notificationSettings.appearance, ...patch.appearance }
+      notificationSettings.privacy = { ...notificationSettings.privacy, ...patch.privacy }
+      notificationSettings.updates = { ...notificationSettings.updates, ...patch.updates }
+      notificationSettings.shortcuts = { ...notificationSettings.shortcuts, ...patch.shortcuts }
       // The stored value is the one main wrote when it was asked, so a release
       // that lands after a host change still answers with the host this write
       // was made for rather than with whatever is stored now.

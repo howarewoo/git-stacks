@@ -35,7 +35,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
     await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused()
     await expect(
       page
-        .locator('[data-radix-popper-content-wrapper]')
+        .locator('[data-slot="hover-card-content"]')
         .filter({ has: page.getByText(branchName, { exact: true }) }),
     ).toHaveCount(0)
   })

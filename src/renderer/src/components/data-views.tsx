@@ -141,7 +141,7 @@ export function ChangesView({
   onCommitMessageChange: (value: string) => void
   commitAmend: boolean
   onCommitAmendChange: (value: boolean) => void
-  onSubmitCommit: (event: React.FormEvent<HTMLFormElement>) => void
+  onSubmitCommit: () => void
   onStash: () => void
   onResolveConflict: (path: string) => void
   actionError: string | null
@@ -170,8 +170,9 @@ export function ChangesView({
       >
         {file.conflicted ? '!' : `${statusLetter(file.index)}${statusLetter(file.worktree)}`}
       </span>
-      <button
+      <Button
         className="file-copy"
+        variant="unstyled"
         title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
         type="button"
         onClick={() => onInspect(file.path)}
@@ -189,7 +190,7 @@ export function ChangesView({
         <span className="file-inspect" aria-hidden="true">
           {file.conflicted ? 'Resolve' : 'Inspect'}
         </span>
-      </button>
+      </Button>
       <Checkbox
         data-staging={fileStagingState(file)}
         aria-label={`${action === 'stage' ? 'Stage' : 'Unstage'} ${file.path}`}
@@ -206,7 +207,7 @@ export function ChangesView({
                 ? "Stage this file's working-tree changes for the next commit. Local index only."
                 : 'Remove this file from the index; its working-tree edits remain. Nothing is discarded.'))
         }
-        onChange={() =>
+        onCheckedChange={() =>
           runAction(
             { type: action, paths: changePaths([file]) },
             action === 'stage' ? 'Stage file' : 'Unstage file',
@@ -387,7 +388,14 @@ export function ChangesView({
           onOpenInEditor={onOpenInEditor}
         />
       ) : null}
-      <form className="commit-panel" onSubmit={onSubmitCommit}>
+      <form
+        className="commit-panel"
+        onSubmit={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          onSubmitCommit()
+        }}
+      >
         <div className="commit-panel-heading">
           <GitCommitHorizontal className="size-4" />
           <div>
@@ -418,7 +426,7 @@ export function ChangesView({
             snapshot.currentBranch === snapshot.defaultBranch ||
             Boolean(actionBlockReason(snapshot.capabilities, 'commit'))
           }
-          onChange={(event) => onCommitAmendChange(event.target.checked)}
+          onCheckedChange={onCommitAmendChange}
           description={actionBlockReason(snapshot.capabilities, 'commit') ?? undefined}
         />
         <div className="commit-form-row">
@@ -527,8 +535,9 @@ export function PullRequestListView({
         <div className="pr-list">
           {prWindow.visible.map((pr) => (
             <PullRequestHoverCard pr={pr} key={pr.number}>
-              <button
+              <Button
                 className="pr-row"
+                variant="unstyled"
                 onClick={() => onRequest({ kind: 'pr', number: pr.number })}
                 disabled={busy}
                 type="button"
@@ -550,7 +559,7 @@ export function PullRequestListView({
                   <Badge variant={reviewVariant(pr)}>{reviewLabel(pr)}</Badge>
                 </span>
                 <ChevronRight className="size-4" />
-              </button>
+              </Button>
             </PullRequestHoverCard>
           ))}
           <ListWindowMore

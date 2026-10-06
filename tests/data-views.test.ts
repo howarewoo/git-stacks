@@ -55,13 +55,18 @@ function changes(
       onCommitMessageChange: () => undefined,
       onInspect: () => undefined,
       onStash: () => undefined,
-      onSubmitCommit: (event: React.FormEvent<HTMLFormElement>) => event.preventDefault(),
+      onSubmitCommit: () => undefined,
       operationActive: false,
       runAction: noopRunAction,
       snapshot,
       ...overrides,
     }),
   )
+}
+
+/** The amend control itself, whatever element carries its id. */
+function amendControl(markup: string): string {
+  return /<[a-z]+\b[^>]*\bid="commit-amend"[^>]*>/u.exec(markup)?.[0] ?? ''
 }
 
 test('change groups separate staged, unstaged, untracked, renamed, and conflicted files', () => {
@@ -189,10 +194,16 @@ test('the commit form keeps the message, gates on staged files, and reviews an a
 
   const onDefault = changes(changesSnapshots.onDefaultBranch, '', { commitAmend: true })
   assert.match(onDefault, /\(protected on default branch\)/)
+  assert.match(amendControl(onDefault), /role="checkbox"/u, 'amend is offered as a checkbox')
   assert.match(
-    onDefault,
-    /<input[^>]*id="commit-amend"[^>]*disabled/,
+    amendControl(onDefault),
+    /\sdisabled(?=[\s=/>])/u,
     'amend cannot be switched on from the default branch',
+  )
+  assert.doesNotMatch(
+    amendControl(amendable),
+    /\sdisabled(?=[\s=/>])/u,
+    'the same control stays available away from the default branch',
   )
 })
 

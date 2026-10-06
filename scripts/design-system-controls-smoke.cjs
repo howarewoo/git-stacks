@@ -80,7 +80,7 @@ async function main() {
   )
   await waitFor(
     'the mixed checkbox state',
-    `document.querySelector('#specimen-mixed')?.indeterminate === true`,
+    `[...document.querySelectorAll('[role="checkbox"]')].some((box) => box.getAttribute('aria-checked') === 'mixed')`,
   )
 
   await runInPage(`
@@ -108,6 +108,13 @@ async function main() {
     trigger.focus()
   `)
   await waitFor('the tooltip to open', `document.querySelector('[role="tooltip"]')`, 2000)
+  assert.equal(
+    await evaluateInPage(
+      `document.activeElement?.getAttribute('aria-describedby')?.split(/\\s+/).some((id) => document.getElementById(id)?.getAttribute('role') === 'tooltip')`,
+    ),
+    true,
+    'the visible tooltip should describe its keyboard-focused trigger',
+  )
   press('Escape')
   await waitFor('the tooltip to close', `!document.querySelector('[role="tooltip"]')`)
   assert.equal(
@@ -183,7 +190,10 @@ async function main() {
 
   await window.loadURL('about:blank')
   await window.loadURL(`${pathToFileURL(rendererPath).href}#/design-system-controls`)
-  await waitFor('the controls gallery', `document.querySelector('#specimen-mixed')`)
+  await waitFor(
+    'the controls gallery',
+    `[...document.querySelectorAll('[role="checkbox"]')].some((box) => box.getAttribute('aria-checked') === 'mixed')`,
+  )
 
   await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
     features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
@@ -308,7 +318,7 @@ async function recoverySmoke() {
   )
   assert.equal(
     await evaluateInPage(
-      `document.querySelector('[role="dialog"] input[type="checkbox"]:not(:disabled)') === null`,
+      `document.querySelector('[role="dialog"] [role="checkbox"]:not(:disabled)') === null`,
     ),
     true,
     'a recovered submission should offer no editable consent checkbox',

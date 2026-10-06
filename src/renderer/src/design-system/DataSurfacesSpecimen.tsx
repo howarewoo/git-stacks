@@ -14,6 +14,7 @@ import type { WorkflowRequest } from '../components/workflow-dialog'
 import { changesSnapshots, pullRequestSnapshots, stashSnapshots } from './data-fixtures'
 import { RepositoryHoverCardProvider } from '../components/repository-hover-cards'
 import { TooltipProvider } from '../components/ui/tooltip'
+import { Input } from '../components/ui/input'
 
 type Dispatch = { label: string; payload: unknown }
 
@@ -71,7 +72,7 @@ export function DataSurfacesSpecimen() {
           : changesSnapshot
 
   return (
-    <TooltipProvider delayDuration={450} skipDelayDuration={150}>
+    <TooltipProvider delay={450} timeout={150}>
       <RepositoryHoverCardProvider>
         <div className="specimen-shell">
           <header className="specimen-header">
@@ -90,7 +91,8 @@ export function DataSurfacesSpecimen() {
             <div className="specimen-controls">
               <label className="specimen-field">
                 Search
-                <input
+                <Input
+                  unstyled
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Filter the visible rows"
@@ -141,8 +143,7 @@ export function DataSurfacesSpecimen() {
                 onInspect={setInspectedPath}
                 onResolveConflict={() => undefined}
                 onStash={() => openWorkflow({ kind: 'stash' })}
-                onSubmitCommit={(event) => {
-                  event.preventDefault()
+                onSubmitCommit={() => {
                   record(commitAmend ? 'Review amend' : 'Commit staged changes', {
                     message: commitMessage,
                     amend: commitAmend,

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useForm, useSelector } from '@tanstack/react-form'
 import { ChevronRight, Filter, Inbox, RefreshCw, Search, ShieldCheck, Trash2 } from 'lucide-react'
 import {
   PULL_REQUEST_INBOX_DEFAULT_FILTER,
@@ -168,7 +169,31 @@ export function PullRequestInboxView({
   const [filter, setFilter] = React.useState<PullRequestInboxFilter>(
     PULL_REQUEST_INBOX_DEFAULT_FILTER,
   )
-  const [saveName, setSaveName] = React.useState('')
+  const saveFilterForm = useForm({
+    defaultValues: { name: '' },
+    validators: {
+      onSubmit: ({ value }) => (value.name.trim() ? undefined : 'Name the filter.'),
+    },
+    onSubmit: ({ value, formApi }) => {
+      const name = value.name.trim()
+      if (filtersSettling) return
+      // Reusing a name replaces that filter while preserving its stored identity.
+      const existing = savedFilters.find((entry) => entry.name === name)
+      onSaveFilters([
+        ...draftsWithout(existing),
+        {
+          ...(existing ? { id: existing.id } : {}),
+          name,
+          group: filter.group,
+          search: filter.search,
+          repository: filter.repository,
+        },
+      ])
+      formApi.reset()
+    },
+  })
+  const saveName = useSelector(saveFilterForm.store, (state) => state.values.name)
+  const saveSubmitting = useSelector(saveFilterForm.store, (state) => state.isSubmitting)
   const [activeIndex, setActiveIndex] = React.useState(0)
   const listRef = React.useRef<HTMLDivElement>(null)
   const now = Date.now()
@@ -223,27 +248,6 @@ export function PullRequestInboxView({
   const draftsWithout = (drop?: { id: string }): PullRequestInboxFilterDraft[] =>
     savedFilters.filter((entry) => entry.id !== drop?.id).map((entry) => ({ ...entry }))
 
-  const saveCurrentFilter = () => {
-    const name = saveName.trim()
-    if (!name || filtersSettling) return
-    // Saving under a name that already exists replaces that filter rather than
-    // leaving two identically named entries, and it keeps the identity the
-    // person already had. A new filter sends no id: the main process assigns
-    // one and hands the stored list back.
-    const existing = savedFilters.find((entry) => entry.name === name)
-    onSaveFilters([
-      ...draftsWithout(existing),
-      {
-        ...(existing ? { id: existing.id } : {}),
-        name,
-        group: filter.group,
-        search: filter.search,
-        repository: filter.repository,
-      },
-    ])
-    setSaveName('')
-  }
-
   const removeSavedFilter = (id: string) => {
     if (filtersSettling) return
     onSaveFilters(draftsWithout({ id }))
@@ -278,17 +282,18 @@ export function PullRequestInboxView({
           {PULL_REQUEST_INBOX_GROUPS.map((group) => {
             const active = group.id === filter.group
             return (
-              <button
+              <Button
                 aria-current={active ? 'true' : undefined}
                 className={cn('inbox-group', active && 'inbox-group-active')}
                 key={group.id}
                 onClick={() => setFilter({ ...filter, group: group.id })}
                 title={group.rule}
                 type="button"
+                variant="unstyled"
               >
                 <span className="inbox-group-label">{group.label}</span>
                 <span className="nav-count">{counts[group.id]}</span>
-              </button>
+              </Button>
             )
           })}
           {savedFilters.length > 0 ? (
@@ -296,8 +301,9 @@ export function PullRequestInboxView({
               <span className="nav-label pr-inbox-rail-section">Saved filters</span>
               {savedFilters.map((saved) => (
                 <div className="inbox-saved" key={saved.id}>
-                  <button
+                  <Button
                     className="inbox-group inbox-group-saved"
+                    variant="unstyled"
                     onClick={() =>
                       setFilter({
                         group: saved.group,
@@ -311,7 +317,7 @@ export function PullRequestInboxView({
                     type="button"
                   >
                     <span className="inbox-group-label">{saved.name}</span>
-                  </button>
+                  </Button>
                   <Button
                     aria-label={`Remove saved filter ${saved.name}`}
                     disabled={filtersSettling}
@@ -340,47 +346,48 @@ export function PullRequestInboxView({
             <Field id="pr-inbox-repository" label="Repository">
               <Select
                 controlSize="compact"
-                onChange={(event) =>
-                  setFilter({ ...filter, repository: event.target.value || null })
-                }
+                onValueChange={(value) => setFilter({ ...filter, repository: value || null })}
                 value={filter.repository ?? ''}
-              >
-                <option value="">All registered repositories</option>
-                {repositories.map((repository) => (
-                  <option key={repository} value={repository}>
-                    {repository}
-                  </option>
-                ))}
-              </Select>
+                options={[
+                  { value: '', label: 'All registered repositories' },
+                  ...repositories.map((repository) => ({ value: repository, label: repository })),
+                ]}
+              />
             </Field>
-            <div className="pr-inbox-save">
+            <form
+              className="pr-inbox-save"
+              onSubmit={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                void saveFilterForm.handleSubmit()
+              }}
+            >
               {/* The label names the input itself, so clicking it focuses the
                   name field and assistive technology reads the two together. */}
-              <Field id="pr-inbox-save" label="Save this filter">
-                <Input
-                  disabled={filtersSettling}
-                  onChange={(event) => setSaveName(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault()
-                      saveCurrentFilter()
-                    }
-                  }}
-                  placeholder="Filter name"
-                  type="text"
-                  value={saveName}
-                />
-              </Field>
+              <saveFilterForm.Field name="name">
+                {(field) => (
+                  <Field id="pr-inbox-save" label="Save this filter">
+                    <Input
+                      disabled={filtersSettling || saveSubmitting}
+                      onChange={(event) => field.handleChange(event.target.value)}
+                      onBlur={field.handleBlur}
+                      placeholder="Filter name"
+                      type="text"
+                      value={field.state.value}
+                    />
+                  </Field>
+                )}
+              </saveFilterForm.Field>
               <Button
-                disabled={filtersSettling || !saveName.trim()}
-                onClick={saveCurrentFilter}
+                disabled={filtersSettling || saveSubmitting || !saveName.trim()}
+                type="submit"
                 size="sm"
                 variant="secondary"
               >
                 <Filter className="size-3.5" />
                 Save
               </Button>
-            </div>
+            </form>
           </div>
           {activeGroup ? (
             <p className="pr-inbox-rule">
@@ -424,9 +431,10 @@ export function PullRequestInboxView({
                     key={`${item.host}/${item.repository}#${item.number}`}
                     role="listitem"
                   >
-                    <button
+                    <Button
                       aria-label={rowLabel(item, now)}
                       className="pr-row"
+                      variant="unstyled"
                       disabled={activating}
                       onClick={() => onOpen(item)}
                       onFocus={() => setActiveIndex(index)}
@@ -473,7 +481,7 @@ export function PullRequestInboxView({
                         </Badge>
                       </span>
                       <ChevronRight className="size-4" />
-                    </button>
+                    </Button>
                   </div>
                 )
               })}

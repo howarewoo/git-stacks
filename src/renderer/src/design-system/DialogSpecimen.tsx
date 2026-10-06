@@ -188,10 +188,13 @@ export function DialogSpecimen() {
             <Input defaultValue="feature/checkout" />
           </Field>
           <Field id="specimen-branch-parent" label="Parent branch" required>
-            <Select defaultValue="main">
-              <option value="main">main</option>
-              <option value="feature/checkout">feature/checkout</option>
-            </Select>
+            <Select
+              defaultValue="main"
+              options={[
+                { value: 'main', label: 'main' },
+                { value: 'feature/checkout', label: 'feature/checkout' },
+              ]}
+            />
           </Field>
           <WorkflowActions>
             <Button variant="secondary">Cancel</Button>

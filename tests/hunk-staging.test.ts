@@ -1047,6 +1047,7 @@ interface ControlProps {
   disabled?: boolean
   onClick?: () => unknown
   onChange?: (event: unknown) => unknown
+  onCheckedChange?: (checked: boolean) => unknown
   onKeyDown?: (event: { key: string; preventDefault: () => void }) => void
 }
 
@@ -1100,24 +1101,38 @@ test('moving keyboard focus between hunks never stages anything', () => {
   }
   assert.equal(hunkKeyAction('ArrowLeft', 0, 2), null, 'an unmapped key is left to the browser')
 
-  const rendered = hunkMarkup(side)
-  assert.equal(
-    rendered.match(/tabindex="0"/gu)?.length,
-    1,
-    'one hunk is in the tab order at a time',
+  const hunkSections = [
+    ...markup(React.createElement(HunkList, listProps({ side, focused: 0 }))).matchAll(
+      /<section\b[^>]*aria-label="Hunk \d+ of \d+[^"]*"[^>]*>/gu,
+    ),
+  ].map((match) => match[0])
+  assert.equal(hunkSections.length, 2, 'both hunks render as labelled groups')
+  assert.deepEqual(
+    hunkSections
+      .filter((section) => /\stabindex="0"(?=[\s/>])/u.test(section))
+      .map((section) => /aria-label="(Hunk \d+ of \d+)/u.exec(section)?.[1]),
+    ['Hunk 1 of 2'],
+    'only the focused hunk is in the tab order',
   )
-  assert.match(rendered, /aria-label="Hunk 2 of 2, lines 41–42 become 41–42"/u)
-  assert.equal(
-    rendered.match(/tabindex="-1"/gu)?.length,
-    1,
+  assert.deepEqual(
+    hunkSections
+      .filter((section) => /\stabindex="-1"(?=[\s/>])/u.test(section))
+      .map((section) => /aria-label="(Hunk \d+ of \d+)/u.exec(section)?.[1]),
+    ['Hunk 2 of 2'],
     'the hunk that is not focused stays out of the tab order',
   )
-  assert.ok(!rendered.includes('file-row-selected'), 'visual focus is never presented as staging')
+  assert.match(hunkSections[1]!, /aria-label="Hunk 2 of 2, lines 41–42 become 41–42"/u)
+  assert.ok(
+    !hunkSections.some((section) => section.includes('file-row-selected')),
+    'visual focus is never presented as staging',
+  )
 
   const secondFocused = markup(React.createElement(HunkList, listProps({ side, focused: 1 })))
-  assert.match(
-    secondFocused,
-    /<section[^>]*tabindex="0"[^>]*aria-label="Hunk 2 of 2/u,
+  assert.deepEqual(
+    [...secondFocused.matchAll(/<section\b[^>]*aria-label="(Hunk \d+ of \d+)[^"]*"[^>]*>/gu)]
+      .filter((match) => /\stabindex="0"(?=[\s/>])/u.test(match[0]))
+      .map((match) => match[1]),
+    ['Hunk 2 of 2'],
     'focus moves with the roving tabindex',
   )
   assert.notEqual(first.id, second.id)
@@ -1252,7 +1267,7 @@ test('file staging reads as three states, independent of the file row', async ()
     onCommitMessageChange: () => undefined,
     onInspect: (path: string | null) => inspected.push(path),
     onStash: () => undefined,
-    onSubmitCommit: (event: React.FormEvent<HTMLFormElement>) => event.preventDefault(),
+    onSubmitCommit: () => undefined,
     onResolveConflict: () => undefined,
     operationActive: false,
     runAction: async (action: GitAction) => {
@@ -1271,9 +1286,9 @@ test('file staging reads as three states, independent of the file row', async ()
   const inspector = findLabeled(view, `Inspect ${partial.path}`)
   assert.ok(stagingControl && inspector, 'staging and inspection are separate controls')
   assert.notEqual(stagingControl, inspector)
-  const onChange = stagingControl && controlProps(stagingControl).onChange
-  assert.equal(typeof onChange, 'function')
-  await onChange?.({ target: { checked: true } })
+  const onCheckedChange = stagingControl && controlProps(stagingControl).onCheckedChange
+  assert.equal(typeof onCheckedChange, 'function')
+  await onCheckedChange?.(true)
   controlProps(inspector).onClick?.()
   assert.deepEqual(actions, [{ type: 'unstage', paths: [partial.path] }])
   assert.deepEqual(inspected, [partial.path], 'the row still only inspects')

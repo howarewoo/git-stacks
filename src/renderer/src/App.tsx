@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useForm, useSelector } from '@tanstack/react-form'
 import { DropdownMenu } from './components/ui/dropdown-menu'
 import {
   AlertCircle,
@@ -186,6 +187,21 @@ function readableError(value: unknown): string {
   if (value instanceof Error && value.message) return value.message
   if (typeof value === 'string' && value) return value
   return 'The operation failed. Check the repository and try again.'
+}
+
+/**
+ * These dialogs report one problem at a time, so the inline status line reads
+ * the first field error and then the form-level submit error, which is where a
+ * failed Git action is recorded.
+ */
+function firstFieldMessage(
+  ...errorLists: ReadonlyArray<readonly unknown[] | undefined>
+): string | null {
+  for (const list of errorLists) {
+    const message = list?.[0]
+    if (typeof message === 'string' && message) return message
+  }
+  return null
 }
 
 /**
@@ -452,29 +468,14 @@ function App() {
   const [actionError, setActionError] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
   const [newBranchOpen, setNewBranchOpen] = React.useState(false)
-  const [newBranchName, setNewBranchName] = React.useState('')
-  const [newBranchParent, setNewBranchParent] = React.useState('')
-  const [newBranchEdited, setNewBranchEdited] = React.useState(false)
-  const [newBranchError, setNewBranchError] = React.useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<{
     branch: Branch
     repoPath: string
   } | null>(null)
-  const [deleteForce, setDeleteForce] = React.useState(false)
-  const [deleteConfirmation, setDeleteConfirmation] = React.useState('')
-  const [deleteBranchError, setDeleteBranchError] = React.useState<string | null>(null)
   const [prOpen, setPrOpen] = React.useState(false)
-  const [prTitle, setPrTitle] = React.useState('')
   const [deleteCloseNotice, setDeleteCloseNotice] = React.useState<string | null>(null)
   const [newBranchNotice, setNewBranchNotice] = React.useState<string | null>(null)
   const [prNotice, setPrNotice] = React.useState<string | null>(null)
-  const [prBody, setPrBody] = React.useState('')
-  const [prBase, setPrBase] = React.useState('')
-  const [prDraft, setPrDraft] = React.useState(false)
-  const [prEdited, setPrEdited] = React.useState(false)
-  const [prError, setPrError] = React.useState<string | null>(null)
-  const [commitMessage, setCommitMessage] = React.useState('')
-  const [commitAmend, setCommitAmend] = React.useState(false)
   const [inspectedPath, setInspectedPath] = React.useState<string | null>(null)
   const [reviewNumber, setReviewNumber] = React.useState<number | null>(null)
   const [conflictPath, setConflictPath] = React.useState<string | null>(null)
@@ -820,8 +821,7 @@ function App() {
           setDeleteTarget(null)
           setWorkflow(null)
           setInspectedPath(null)
-          setCommitAmend(false)
-          setCommitMessage('')
+          commitForm.reset()
           // Opening a repository reads it; it never changes what is checked out.
           // Landing straight in Review is how a queue row reaches the workspace
           // for its own repository without a checkout or a branch switch.
@@ -1425,6 +1425,163 @@ function App() {
 
   const cliLabel = CLI_LABELS[cliStatus?.state ?? 'checking']
   const cliConnected = cliStatus?.state === 'authenticated'
+  /**
+   * What a dialog opens on. The form re-reads `defaultValues` on every render,
+   * so the seed and `reset` are always written together: a seed alone is
+   * dropped once a field has been touched, and a reset alone is replaced by the
+   * literal defaults on the next render.
+   */
+  const [newBranchDefaults, setNewBranchDefaults] = React.useState({ name: '', parent: '' })
+  const newBranchForm = useForm({
+    defaultValues: newBranchDefaults,
+    validators: {
+      onSubmit: ({ value }) => {
+        const name = value.name.trim()
+        const fields: { name?: string; parent?: string } = {}
+        if (!name) fields.name = 'Enter a branch name.'
+        if (!value.parent.trim()) fields.parent = 'Choose a parent branch.'
+        if (name && snapshot?.branches.some((branch) => branch.name === name)) {
+          fields.name = 'A branch with that name already exists.'
+        }
+        return Object.keys(fields).length > 0 ? { fields } : undefined
+      },
+    },
+    onSubmit: async ({ value }) => {
+      const name = value.name.trim()
+      const success = await runAction(
+        { type: 'createBranch', name, parent: value.parent.trim() },
+        'Create branch',
+      )
+      if (success) {
+        setSelectedBranchRef(`refs/heads/${name}`)
+        setNewBranchOpen(false)
+      }
+    },
+  })
+  const newBranchName = useSelector(newBranchForm.store, (state) => state.values.name)
+  const newBranchParent = useSelector(newBranchForm.store, (state) => state.values.parent)
+  const newBranchDirty = useSelector(newBranchForm.store, (state) => state.isDirty)
+  const newBranchSubmitting = useSelector(newBranchForm.store, (state) => state.isSubmitting)
+  const newBranchError = useSelector(newBranchForm.store, (state) =>
+    firstFieldMessage(state.fieldMeta.name?.errors, state.fieldMeta.parent?.errors, state.errors),
+  )
+
+  const [prDefaults, setPrDefaults] = React.useState({
+    title: '',
+    base: '',
+    body: '',
+    draft: false,
+  })
+  const prForm = useForm({
+    defaultValues: prDefaults,
+    validators: {
+      onSubmit: ({ value }) => {
+        const fields: { title?: string; base?: string } = {}
+        if (!value.title.trim()) fields.title = 'Enter a pull request title.'
+        if (!value.base.trim()) fields.base = 'Choose a base branch.'
+        return Object.keys(fields).length > 0 ? { fields } : undefined
+      },
+    },
+    onSubmit: async ({ value }) => {
+      const success = await runAction(
+        {
+          type: 'createPr',
+          title: value.title.trim(),
+          body: value.body,
+          base: value.base.trim(),
+          draft: value.draft,
+        },
+        'Create pull request',
+      )
+      if (success) setPrOpen(false)
+    },
+  })
+  const prBase = useSelector(prForm.store, (state) => state.values.base)
+  const prDirty = useSelector(prForm.store, (state) => state.isDirty)
+  const prSubmitting = useSelector(prForm.store, (state) => state.isSubmitting)
+  const prError = useSelector(prForm.store, (state) =>
+    firstFieldMessage(state.fieldMeta.title?.errors, state.fieldMeta.base?.errors, state.errors),
+  )
+
+  const deleteForm = useForm({
+    defaultValues: { force: false, confirmation: '' },
+    validators: {
+      onSubmit: ({ value }) => {
+        const target = deleteTarget
+        if (!target) return undefined
+        if (snapshot?.path !== target.repoPath) {
+          return 'The repository changed. Close this dialog and select the branch again.'
+        }
+        if (value.force && value.confirmation !== target.branch.name) {
+          return {
+            fields: {
+              confirmation: 'Type the exact branch name to confirm deletion of unmerged work.',
+            },
+          }
+        }
+        if (!target.branch.oid) {
+          return 'The branch tip is unknown. Close this dialog and select it again.'
+        }
+        return undefined
+      },
+    },
+    onSubmit: async ({ value }) => {
+      const target = deleteTarget
+      const expectedOid = target?.branch.oid
+      if (!target || !expectedOid) return
+      const success = await runAction(
+        { type: 'deleteBranch', ref: target.branch.ref, force: value.force, expectedOid },
+        'Delete branch',
+      )
+      if (success) setDeleteTarget(null)
+    },
+  })
+  const deleteForce = useSelector(deleteForm.store, (state) => state.values.force)
+  const deleteConfirmation = useSelector(deleteForm.store, (state) => state.values.confirmation)
+  // A force box that was ticked and cleared again left nothing behind, so it is
+  // as clean to dismiss as one that was never touched.
+  const deleteDirty = useSelector(
+    deleteForm.store,
+    (state) => state.values.force || state.values.confirmation !== '',
+  )
+  const deleteSubmitting = useSelector(deleteForm.store, (state) => state.isSubmitting)
+  const deleteBranchError = useSelector(deleteForm.store, (state) =>
+    // The confirmation is only asked for, and only read, while force is ticked.
+    firstFieldMessage(
+      state.values.force ? state.fieldMeta.confirmation?.errors : undefined,
+      state.errors,
+    ),
+  )
+
+  const commitForm = useForm({
+    defaultValues: { message: '', amend: false },
+    onSubmit: async ({ value }) => {
+      const message = value.message.trim()
+      if (!snapshot || !message || (!value.amend && stagedFiles.length === 0)) return
+      const action: GitAction = {
+        type: 'commit',
+        message,
+        amend: value.amend,
+        expectedHead: snapshot.headOid,
+        expectedHeadRef: snapshot.currentBranch ? `refs/heads/${snapshot.currentBranch}` : 'HEAD',
+      }
+      if (value.amend) {
+        openWorkflow({
+          kind: 'confirm',
+          action,
+          title: 'Amend the last commit?',
+          description: `Replace the last commit on ${currentBranch} with the entered message and staged changes. Its commit ID will change. Restack dependent branches and use force-with-lease if already published.`,
+          label: 'Amend commit',
+          destructive: true,
+        })
+      } else {
+        await runAction(action, 'Commit staged changes')
+      }
+    },
+  })
+  const commitMessage = useSelector(commitForm.store, (state) => state.values.message)
+  const commitAmend = useSelector(commitForm.store, (state) => state.values.amend)
+
   const runAction = React.useCallback(
     async (action: GitAction, label: string): Promise<boolean> => {
       if (!desktop || !snapshot || busyRef.current) return false
@@ -1444,14 +1601,16 @@ function App() {
           action.type === 'switch' ||
           action.type === 'createBranch'
         ) {
-          setCommitAmend(false)
-          setCommitMessage('')
+          commitForm.reset()
         }
         return true
       } catch (value) {
-        if (action.type === 'createBranch') setNewBranchError(readableError(value))
-        if (action.type === 'createPr') setPrError(readableError(value))
-        if (action.type === 'deleteBranch') setDeleteBranchError(readableError(value))
+        // Each form keeps its own failure inline, beside the shared status bar.
+        // The field map is empty because a failed action is no single field's fault.
+        const failure = { form: readableError(value), fields: {} }
+        if (action.type === 'createBranch') newBranchForm.setErrorMap({ onSubmit: failure })
+        if (action.type === 'createPr') prForm.setErrorMap({ onSubmit: failure })
+        if (action.type === 'deleteBranch') deleteForm.setErrorMap({ onSubmit: failure })
         setActionError(`${label} failed: ${readableError(value)}`)
         const next = await refreshSnapshot()
         if (
@@ -1469,7 +1628,7 @@ function App() {
         setBusyAction(null)
       }
     },
-    [desktop, refreshSnapshot, snapshot],
+    [commitForm, deleteForm, desktop, newBranchForm, prForm, refreshSnapshot, snapshot],
   )
 
   const selectedBranch = React.useMemo(() => {
@@ -1703,27 +1862,29 @@ function App() {
 
   const openBranchDialog = React.useCallback(() => {
     if (!snapshot) return
-    setNewBranchName('')
-    setNewBranchParent(
-      snapshot.currentBranch ?? snapshot.defaultBranch ?? snapshot.branches[0]?.name ?? '',
-    )
-    setNewBranchEdited(false)
-    setNewBranchError(null)
+    const defaults = {
+      name: '',
+      parent: snapshot.currentBranch ?? snapshot.defaultBranch ?? snapshot.branches[0]?.name ?? '',
+    }
+    setNewBranchDefaults(defaults)
+    newBranchForm.reset(defaults)
     setNewBranchNotice(null)
     setNewBranchOpen(true)
-  }, [snapshot])
+  }, [newBranchForm, snapshot])
 
   const openPrDialog = React.useCallback(() => {
     if (!snapshot || !selectedBranch?.current || selectedBranch.remote) return
-    setPrTitle(selectedBranch.subject || `Open ${selectedBranch.name}`)
-    setPrBody('')
-    setPrBase(selectedBranch.parent ?? snapshot.defaultBranch)
-    setPrDraft(false)
-    setPrEdited(false)
-    setPrError(null)
+    const defaults = {
+      title: selectedBranch.subject || `Open ${selectedBranch.name}`,
+      base: selectedBranch.parent ?? snapshot.defaultBranch,
+      body: '',
+      draft: false,
+    }
+    setPrDefaults(defaults)
+    prForm.reset(defaults)
     setPrNotice(null)
     setPrOpen(true)
-  }, [selectedBranch, snapshot])
+  }, [prForm, selectedBranch, snapshot])
 
   const openDeleteDialog = () => {
     if (
@@ -1737,108 +1898,11 @@ function App() {
     )
       return
     setDeleteTarget({ branch: selectedBranch, repoPath: snapshot.path })
-    setDeleteForce(false)
-    setDeleteConfirmation('')
-    setDeleteBranchError(null)
+    deleteForm.reset()
     setDeleteCloseNotice(null)
     setActionError(null)
   }
 
-  const submitDeleteBranch = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!deleteTarget || isBusy) return
-    if (snapshot?.path !== deleteTarget.repoPath) {
-      setDeleteBranchError('The repository changed. Close this dialog and select the branch again.')
-      return
-    }
-    if (deleteForce && deleteConfirmation !== deleteTarget.branch.name) {
-      setDeleteBranchError('Type the exact branch name to confirm deletion of unmerged work.')
-      return
-    }
-    const expectedOid = deleteTarget.branch.oid
-    if (!expectedOid) {
-      setDeleteBranchError('The branch tip is unknown. Close this dialog and select it again.')
-      return
-    }
-    setDeleteBranchError(null)
-    const success = await runAction(
-      {
-        type: 'deleteBranch',
-        ref: deleteTarget.branch.ref,
-        force: deleteForce,
-        expectedOid,
-      },
-      'Delete branch',
-    )
-    if (success) setDeleteTarget(null)
-  }
-
-  const submitBranch = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const name = newBranchName.trim()
-    const parent = newBranchParent.trim()
-    if (!name) {
-      setNewBranchError('Enter a branch name.')
-      return
-    }
-    if (!parent) {
-      setNewBranchError('Choose a parent branch.')
-      return
-    }
-    if (snapshot?.branches.some((branch) => branch.name === name)) {
-      setNewBranchError('A branch with that name already exists.')
-      return
-    }
-    const success = await runAction({ type: 'createBranch', name, parent }, 'Create branch')
-    if (success) {
-      setSelectedBranchRef(`refs/heads/${name}`)
-      setNewBranchOpen(false)
-    }
-  }
-
-  const submitPr = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const title = prTitle.trim()
-    const base = prBase.trim()
-    if (!title) {
-      setPrError('Enter a pull request title.')
-      return
-    }
-    if (!base) {
-      setPrError('Choose a base branch.')
-      return
-    }
-    const success = await runAction(
-      { type: 'createPr', title, body: prBody, base, draft: prDraft },
-      'Create pull request',
-    )
-    if (success) setPrOpen(false)
-  }
-
-  const submitCommit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const message = commitMessage.trim()
-    if (!snapshot || !message || (!commitAmend && stagedFiles.length === 0)) return
-    const action: GitAction = {
-      type: 'commit',
-      message,
-      amend: commitAmend,
-      expectedHead: snapshot.headOid,
-      expectedHeadRef: snapshot.currentBranch ? `refs/heads/${snapshot.currentBranch}` : 'HEAD',
-    }
-    if (commitAmend) {
-      openWorkflow({
-        kind: 'confirm',
-        action,
-        title: 'Amend the last commit?',
-        description: `Replace the last commit on ${currentBranch} with the entered message and staged changes. Its commit ID will change. Restack dependent branches and use force-with-lease if already published.`,
-        label: 'Amend commit',
-        destructive: true,
-      })
-    } else {
-      await runAction(action, 'Commit staged changes')
-    }
-  }
   const requestCheckoutBranch = React.useCallback(
     async (ref: string, name: string) => {
       if (!snapshot || isBusy || operationActive) return
@@ -2261,19 +2325,20 @@ function App() {
           ) : recentRepositories.length > 0 ? (
             <div className="recent-list">
               {recentRepositories.map((repository) => (
-                <button
+                <Button
                   className="recent-item"
                   disabled={isBusy}
                   key={repository.path}
                   onClick={() => openRepository(repository.path)}
                   type="button"
+                  variant="unstyled"
                 >
                   <FolderOpen className="size-3.5" />
                   <span>
                     <strong>{repository.name}</strong>
                     <small title={repository.path}>{repository.path}</small>
                   </span>
-                </button>
+                </Button>
               ))}
             </div>
           ) : (
@@ -2299,26 +2364,28 @@ function App() {
               cliConnected ? 'connection-dot-live' : 'connection-dot-offline',
             )}
           />
-          <button
+          <Button
             className="version-label version-label-action"
             disabled={!desktop || isBusy || operationActive}
             onClick={openCliStatus}
             title="GitHub CLI status"
             type="button"
+            variant="unstyled"
           >
             {cliLabel}
-          </button>
+          </Button>
         </div>
         <div className="sidebar-footer-actions">
-          <button
+          <Button
             className="version-label version-label-action"
             disabled={!desktop || isBusy || operationActive}
             onClick={openGitRuntime}
             title="Git runtime diagnostics"
             type="button"
+            variant="unstyled"
           >
             Git runtime
-          </button>
+          </Button>
           <span className="version-label">Git Stacks</span>
         </div>
       </div>
@@ -2393,22 +2460,24 @@ function App() {
             New branch
           </Button>
           <DropdownMenu.Root>
-            <DropdownMenu.Trigger asChild>
-              <Button
-                aria-label="More Git actions"
-                tooltip="More actions: preview merge, force push with lease, stash, or browse history."
-                size="icon-sm"
-                variant="secondary"
-                disabled={!snapshot || isBusy}
-              >
-                <MoreHorizontal className="size-4" />
-              </Button>
-            </DropdownMenu.Trigger>
+            <DropdownMenu.Trigger
+              render={
+                <Button
+                  aria-label="More Git actions"
+                  tooltip="More actions: preview merge, force push with lease, stash, or browse history."
+                  size="icon-sm"
+                  variant="secondary"
+                  disabled={!snapshot || isBusy}
+                >
+                  <MoreHorizontal className="size-4" />
+                </Button>
+              }
+            />
             <DropdownMenu.Portal>
               <DropdownMenu.Content className="workflow-menu" align="start" sideOffset={6}>
                 <DropdownMenu.Item
                   disabled={operationActive || !currentBranch || Boolean(shapeReason('merge'))}
-                  onSelect={() => openWorkflow({ kind: 'merge' })}
+                  onClick={() => openWorkflow({ kind: 'merge' })}
                 >
                   Merge into current branch…
                 </DropdownMenu.Item>
@@ -2419,7 +2488,7 @@ function App() {
                     currentBranch === snapshot?.defaultBranch ||
                     Boolean(shapeReason('forcePush'))
                   }
-                  onSelect={() => openWorkflow({ kind: 'forcePush' })}
+                  onClick={() => openWorkflow({ kind: 'forcePush' })}
                 >
                   Force push with lease…
                 </DropdownMenu.Item>
@@ -2430,7 +2499,7 @@ function App() {
                     snapshot.limits.filesTruncated ||
                     Boolean(shapeReason('stash'))
                   }
-                  onSelect={() => openWorkflow({ kind: 'stash' })}
+                  onClick={() => openWorkflow({ kind: 'stash' })}
                 >
                   Stash changes…
                 </DropdownMenu.Item>
@@ -2446,7 +2515,7 @@ function App() {
                   </p>
                 ) : null}
                 <DropdownMenu.Separator className="workflow-menu-separator" />
-                <DropdownMenu.Item onSelect={() => setWorkspaceView('history')}>
+                <DropdownMenu.Item onClick={() => setWorkspaceView('history')}>
                   Browse commit history
                 </DropdownMenu.Item>
               </DropdownMenu.Content>
@@ -2728,18 +2797,25 @@ function App() {
                       </Badge>
                     ) : null}
                     <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span aria-hidden="true" className="ahead-behind relative z-[2] rounded-sm">
-                          <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
-                            <ArrowUp className="size-3" />
-                            {branch.ahead}
+                      <TooltipTrigger
+                        render={
+                          <span
+                            aria-hidden="true"
+                            className="ahead-behind relative z-[2] rounded-sm"
+                          >
+                            <span className={branch.ahead > 0 ? 'metric-positive' : 'metric-muted'}>
+                              <ArrowUp className="size-3" />
+                              {branch.ahead}
+                            </span>
+                            <span
+                              className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}
+                            >
+                              <ArrowDown className="size-3" />
+                              {branch.behind}
+                            </span>
                           </span>
-                          <span className={branch.behind > 0 ? 'metric-negative' : 'metric-muted'}>
-                            <ArrowDown className="size-3" />
-                            {branch.behind}
-                          </span>
-                        </span>
-                      </TooltipTrigger>
+                        }
+                      />
                       <TooltipContent>
                         {branch.upstream
                           ? `${branch.ahead} commits ahead and ${branch.behind} behind ${branch.upstream}`
@@ -2777,8 +2853,8 @@ function App() {
         commitMessage={commitMessage}
         groups={changeState}
         inspectedPath={inspectedPath}
-        onCommitAmendChange={setCommitAmend}
-        onCommitMessageChange={setCommitMessage}
+        onCommitAmendChange={(amend) => commitForm.setFieldValue('amend', amend)}
+        onCommitMessageChange={(message) => commitForm.setFieldValue('message', message)}
         onInspect={(path) => {
           setActionError(null)
           setInspectedPath(path)
@@ -2786,7 +2862,7 @@ function App() {
         onOpenInEditor={openInEditor}
         onResolveConflict={openConflictResolver}
         onStash={() => openWorkflow({ kind: 'stash' })}
-        onSubmitCommit={submitCommit}
+        onSubmitCommit={() => void commitForm.handleSubmit()}
         operationActive={operationActive}
         runAction={runAction}
         snapshot={snapshot}
@@ -3262,14 +3338,15 @@ function App() {
                             <Badge variant={issue.relation === 'closing' ? 'accent' : 'outline'}>
                               {issue.relation === 'closing' ? 'closes on merge' : 'related'}
                             </Badge>
-                            <button
+                            <Button
                               type="button"
                               className="truncate font-medium text-[var(--gs-semantic-text-primary)] hover:underline text-left bg-transparent border-none p-0 cursor-pointer"
                               title={issue.title}
                               onClick={() => issue.url && desktop?.openExternal(issue.url)}
+                              variant="unstyled"
                             >
                               #{issue.number} {issue.title}
-                            </button>
+                            </Button>
                           </div>
                         </div>
                       ))}
@@ -3548,12 +3625,13 @@ function App() {
               <h2>Recent repositories</h2>
             </div>
             {recentRepositories.map((repository) => (
-              <button
+              <Button
                 className="onboarding-recent"
                 disabled={opening}
                 key={repository.path}
                 onClick={() => void openRepository(repository.path)}
                 type="button"
+                variant="unstyled"
               >
                 <FolderGit2 aria-hidden="true" className="size-4" />
                 <span>
@@ -3561,7 +3639,7 @@ function App() {
                   <small>{repository.path}</small>
                 </span>
                 <ChevronRight aria-hidden="true" className="size-4" />
-              </button>
+              </Button>
             ))}
           </div>
         ) : null}
@@ -3767,38 +3845,36 @@ function App() {
       ) : null}
       <Dialog
         open={deleteTarget !== null}
-        onOpenChange={(open) => {
+        onOpenChange={(open, details) => {
           if (open) return
           const intent = closeIntent({
-            busy: isBusy,
-            dirty: deleteForce || Boolean(deleteConfirmation),
+            busy: isBusy || deleteSubmitting,
+            dirty: deleteDirty,
           })
           if (intent === 'allow') {
             setDeleteTarget(null)
             return
           }
+          details.cancel()
           setDeleteCloseNotice(CLOSE_INTENT_MESSAGES[intent])
         }}
       >
         <DialogContent
           className="workflow-dialog"
-          onOpenAutoFocus={(event) => {
-            event.preventDefault()
-            deleteCancelRef.current?.focus()
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault()
+          initialFocus={() => deleteCancelRef.current ?? false}
+          finalFocus={() => {
+            // The palette hands the dialog a row to return to, because the control
+            // that opened it was the palette itself and no longer exists.
             if (paletteDeleteHandoffRef.current) {
               paletteDeleteHandoffRef.current = false
               const target = paletteHandoffFocusRef.current
               paletteHandoffFocusRef.current = null
-              if (target?.isConnected && !('disabled' in target && target.disabled)) target.focus()
-              else searchRef.current?.focus()
-              return
+              if (target?.isConnected && !('disabled' in target && target.disabled)) return target
+              return searchRef.current ?? false
             }
             const trigger = deleteTriggerRef.current
-            if (trigger && !trigger.disabled) trigger.focus()
-            else searchRef.current?.focus()
+            if (trigger && !trigger.disabled) return trigger
+            return searchRef.current ?? false
           }}
         >
           <DialogHeader>
@@ -3808,7 +3884,14 @@ function App() {
               branches and pull requests will not be deleted.
             </DialogDescription>
           </DialogHeader>
-          <form className="dialog-form" onSubmit={submitDeleteBranch}>
+          <form
+            className="dialog-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              void deleteForm.handleSubmit()
+            }}
+          >
             <WorkflowFrame composition="destructive">
               {deleteCloseNotice ? (
                 <PhaseStatus phase="blocked" message={deleteCloseNotice} />
@@ -3833,35 +3916,45 @@ function App() {
                     : []
                 }
               />
-              <Checkbox
-                id="delete-branch-force"
-                label="Delete even if not merged"
-                checked={deleteForce}
-                disabled={isBusy}
-                onChange={(event) => {
-                  setDeleteForce(event.target.checked)
-                  setDeleteConfirmation('')
-                  setDeleteBranchError(null)
-                  setDeleteCloseNotice(null)
-                }}
-              />
+              <deleteForm.Field name="force">
+                {(field) => (
+                  <Checkbox
+                    id="delete-branch-force"
+                    label="Delete even if not merged"
+                    checked={field.state.value}
+                    disabled={isBusy}
+                    onCheckedChange={(checked) => {
+                      field.handleChange(checked)
+                      // The typed name belonged to the force state it was
+                      // typed under, and so does the message it produced.
+                      deleteForm.setFieldValue('confirmation', '')
+                      deleteForm.setErrorMap({ onSubmit: undefined })
+                      setDeleteCloseNotice(null)
+                    }}
+                  />
+                )}
+              </deleteForm.Field>
               <p className="delete-branch-note">
                 {deleteForce
                   ? 'Commits that exist only on this branch can become unreachable.'
                   : 'Git will refuse deletion if the branch is not fully merged.'}
               </p>
               {deleteForce && deleteTarget ? (
-                <TypedConfirmation
-                  id="delete-branch-confirmation"
-                  label="Type the branch name to confirm"
-                  value={deleteConfirmation}
-                  target={deleteTarget.branch.name}
-                  disabled={isBusy}
-                  onChange={(value) => {
-                    setDeleteConfirmation(value)
-                    setDeleteCloseNotice(null)
-                  }}
-                />
+                <deleteForm.Field name="confirmation">
+                  {(field) => (
+                    <TypedConfirmation
+                      id="delete-branch-confirmation"
+                      label="Type the branch name to confirm"
+                      value={field.state.value}
+                      target={deleteTarget.branch.name}
+                      disabled={isBusy}
+                      onChange={(value) => {
+                        field.handleChange(value)
+                        setDeleteCloseNotice(null)
+                      }}
+                    />
+                  )}
+                </deleteForm.Field>
               ) : null}
               {deleteBranchError ? (
                 <PhaseStatus phase="failed" message={deleteBranchError} />
@@ -3900,19 +3993,20 @@ function App() {
         </DialogContent>
       </Dialog>
       <Dialog
-        onOpenChange={(open) => {
+        onOpenChange={(open, details) => {
           if (open) {
             setNewBranchOpen(true)
             return
           }
           const intent = closeIntent({
-            busy: isBusy,
-            dirty: newBranchEdited,
+            busy: isBusy || newBranchSubmitting,
+            dirty: newBranchDirty,
           })
           if (intent === 'allow') {
             setNewBranchOpen(false)
             return
           }
+          details.cancel()
           setNewBranchNotice(CLOSE_INTENT_MESSAGES[intent])
         }}
         open={newBranchOpen}
@@ -3924,44 +4018,55 @@ function App() {
               Start a new stack branch from an existing local branch.
             </DialogDescription>
           </DialogHeader>
-          <form className="dialog-form" onSubmit={submitBranch}>
+          <form
+            className="dialog-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              void newBranchForm.handleSubmit()
+            }}
+          >
             <WorkflowFrame composition="form">
               {newBranchNotice ? <PhaseStatus phase="blocked" message={newBranchNotice} /> : null}
-              <Field
-                id="new-branch-name"
-                label="Branch name"
-                required
-                description="Local only. Nothing is pushed and no commit is created."
-              >
-                <Input
-                  onChange={(event) => {
-                    setNewBranchName(event.target.value)
-                    setNewBranchEdited(true)
-                    setNewBranchNotice(null)
-                  }}
-                  placeholder="feature/short-description"
-                  value={newBranchName}
-                />
-              </Field>
-              <Field id="new-branch-parent" label="Parent branch" required>
-                <Select
-                  onChange={(event) => {
-                    setNewBranchParent(event.target.value)
-                    setNewBranchEdited(true)
-                    setNewBranchNotice(null)
-                  }}
-                  value={newBranchParent}
-                >
-                  {(snapshot?.branches ?? [])
-                    .filter((branch) => !branch.remote)
-                    .map((branch) => (
-                      <option key={branch.name} value={branch.name}>
-                        {branch.name}
-                        {branch.current ? ' (current)' : ''}
-                      </option>
-                    ))}
-                </Select>
-              </Field>
+              <newBranchForm.Field name="name">
+                {(field) => (
+                  <Field
+                    id="new-branch-name"
+                    label="Branch name"
+                    required
+                    description="Local only. Nothing is pushed and no commit is created."
+                  >
+                    <Input
+                      onBlur={field.handleBlur}
+                      onChange={(event) => {
+                        field.handleChange(event.target.value)
+                        setNewBranchNotice(null)
+                      }}
+                      placeholder="feature/short-description"
+                      value={field.state.value}
+                    />
+                  </Field>
+                )}
+              </newBranchForm.Field>
+              <newBranchForm.Field name="parent">
+                {(field) => (
+                  <Field id="new-branch-parent" label="Parent branch" required>
+                    <Select
+                      onValueChange={(value) => {
+                        field.handleChange(value)
+                        setNewBranchNotice(null)
+                      }}
+                      value={field.state.value}
+                      options={(snapshot?.branches ?? [])
+                        .filter((branch) => !branch.remote)
+                        .map((branch) => ({
+                          value: branch.name,
+                          label: `${branch.name}${branch.current ? ' (current)' : ''}`,
+                        }))}
+                    />
+                  </Field>
+                )}
+              </newBranchForm.Field>
               {newBranchError ? <PhaseStatus phase="failed" message={newBranchError} /> : null}
               <WorkflowActions>
                 <Button onClick={() => setNewBranchOpen(false)} variant="secondary">
@@ -3993,19 +4098,20 @@ function App() {
         </DialogContent>
       </Dialog>
       <Dialog
-        onOpenChange={(open) => {
+        onOpenChange={(open, details) => {
           if (open) {
             setPrOpen(true)
             return
           }
           const intent = closeIntent({
-            busy: isBusy,
-            dirty: prEdited,
+            busy: isBusy || prSubmitting,
+            dirty: prDirty,
           })
           if (intent === 'allow') {
             setPrOpen(false)
             return
           }
+          details.cancel()
           setPrNotice(CLOSE_INTENT_MESSAGES[intent])
         }}
         open={prOpen}
@@ -4017,7 +4123,14 @@ function App() {
               Open a pull request from {selectedBranch?.name ?? 'this branch'} into a base branch.
             </DialogDescription>
           </DialogHeader>
-          <form className="dialog-form" onSubmit={submitPr}>
+          <form
+            className="dialog-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              void prForm.handleSubmit()
+            }}
+          >
             <WorkflowFrame composition="form">
               {prNotice ? <PhaseStatus phase="blocked" message={prNotice} /> : null}
               {snapshot && !snapshot.github.available ? (
@@ -4045,33 +4158,41 @@ function App() {
                     : []
                 }
               />
-              <Field id="pr-title" label="Title" required>
-                <Input
-                  onChange={(event) => {
-                    setPrTitle(event.target.value)
-                    setPrEdited(true)
-                    setPrNotice(null)
-                  }}
-                  placeholder="What does this stack change?"
-                  value={prTitle}
-                />
-              </Field>
-              <Field
-                id="pr-base"
-                label="Base branch"
-                required
-                description="Pick a local branch other than the head branch."
-              >
-                <Input
-                  list="pr-base-options"
-                  onChange={(event) => {
-                    setPrBase(event.target.value)
-                    setPrEdited(true)
-                    setPrNotice(null)
-                  }}
-                  value={prBase}
-                />
-              </Field>
+              <prForm.Field name="title">
+                {(field) => (
+                  <Field id="pr-title" label="Title" required>
+                    <Input
+                      onBlur={field.handleBlur}
+                      onChange={(event) => {
+                        field.handleChange(event.target.value)
+                        setPrNotice(null)
+                      }}
+                      placeholder="What does this stack change?"
+                      value={field.state.value}
+                    />
+                  </Field>
+                )}
+              </prForm.Field>
+              <prForm.Field name="base">
+                {(field) => (
+                  <Field
+                    id="pr-base"
+                    label="Base branch"
+                    required
+                    description="Pick a local branch other than the head branch."
+                  >
+                    <Input
+                      list="pr-base-options"
+                      onBlur={field.handleBlur}
+                      onChange={(event) => {
+                        field.handleChange(event.target.value)
+                        setPrNotice(null)
+                      }}
+                      value={field.state.value}
+                    />
+                  </Field>
+                )}
+              </prForm.Field>
               <datalist id="pr-base-options">
                 {(snapshot?.branches ?? [])
                   .filter((branch) => !branch.remote && branch.name !== currentBranch)
@@ -4079,27 +4200,32 @@ function App() {
                     <option key={branch.name} value={branch.name} />
                   ))}
               </datalist>
-              <Field id="pr-body" label="Description (optional)">
-                <Textarea
-                  onChange={(event) => {
-                    setPrBody(event.target.value)
-                    setPrEdited(true)
-                    setPrNotice(null)
-                  }}
-                  placeholder="Add context for reviewers"
-                  rows={5}
-                  value={prBody}
-                />
-              </Field>
-              <Checkbox
-                id="pr-draft"
-                label="Mark as draft"
-                checked={prDraft}
-                onChange={(event) => {
-                  setPrDraft(event.target.checked)
-                  setPrEdited(true)
-                }}
-              />
+              <prForm.Field name="body">
+                {(field) => (
+                  <Field id="pr-body" label="Description (optional)">
+                    <Textarea
+                      onBlur={field.handleBlur}
+                      onChange={(event) => {
+                        field.handleChange(event.target.value)
+                        setPrNotice(null)
+                      }}
+                      placeholder="Add context for reviewers"
+                      rows={5}
+                      value={field.state.value}
+                    />
+                  </Field>
+                )}
+              </prForm.Field>
+              <prForm.Field name="draft">
+                {(field) => (
+                  <Checkbox
+                    id="pr-draft"
+                    label="Mark as draft"
+                    checked={field.state.value}
+                    onCheckedChange={(checked) => field.handleChange(checked)}
+                  />
+                )}
+              </prForm.Field>
               {prError ? <PhaseStatus phase="failed" message={prError} /> : null}
               <WorkflowActions>
                 <Button onClick={() => setPrOpen(false)} variant="secondary">

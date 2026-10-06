@@ -25,12 +25,17 @@ function RepositoryHoverCard({
 }) {
   const active = React.useContext(ActiveCard)
   const id = React.useId()
-  const triggerRef = React.useRef<React.ElementRef<typeof HoverCardTrigger>>(null)
+  // The trigger renders whatever `render` supplies — a row or a badge, not
+  // necessarily an anchor — so the ref is held as the public HTMLElement type.
+  const triggerRef = React.useRef<HTMLElement>(null)
+  // `render` supplies an arbitrary element, so a callback ref is used instead of a
+  // typed object ref: the trigger's own ref type is narrowed to its anchor default.
+  const setTriggerRef = React.useCallback((node: HTMLElement | null) => {
+    triggerRef.current = node
+  }, [])
   if (!active) throw new Error('Repository hover cards require their provider')
   return (
     <HoverCard
-      openDelay={openDelay}
-      closeDelay={150}
       open={active.id === id}
       onOpenChange={(open) => {
         // A delayed open must not outlive the interaction that scheduled it.
@@ -38,9 +43,7 @@ function RepositoryHoverCard({
         active.setId((current) => (open ? id : current === id ? null : current))
       }}
     >
-      <HoverCardTrigger ref={triggerRef} asChild>
-        {trigger}
-      </HoverCardTrigger>
+      <HoverCardTrigger ref={setTriggerRef} delay={openDelay} closeDelay={150} render={trigger} />
       {children}
     </HoverCard>
   )

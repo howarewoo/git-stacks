@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useForm, useSelector } from '@tanstack/react-form'
 import {
   AlertTriangle,
   GitPullRequest,
@@ -96,7 +97,7 @@ function RepairRow({
         id={`repair-${repair.kind}-${repair.branch ?? repair.pullRequest ?? 'stack'}`}
         checked={checked}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
+        onCheckedChange={onChange}
         label={
           <span className="grid gap-0.5">
             <span className="font-medium text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
@@ -145,20 +146,34 @@ function ReconciliationDialog({
   actionError: string | null
   onCancel: () => void
   onReload: () => void
-  onRun: (ids: string[], confirmRewrites: boolean) => void
+  onRun: (ids: string[], confirmRewrites: boolean) => Promise<void>
 }) {
-  const [selected, setSelected] = React.useState<string[]>([])
-  const [typed, setTyped] = React.useState('')
-
+  const form = useForm({
+    defaultValues: { selected: preview?.repairs.map((repair) => repair.id) ?? [], typed: '' },
+    validators: {
+      onSubmit: ({ value }) => {
+        if (!value.selected.length) return 'Select at least one repair.'
+        const rewrites = preview?.repairs.some(
+          (repair) => repair.requiresConfirmation && value.selected.includes(repair.id),
+        )
+        return rewrites && value.typed.trim() !== (preview?.stackKey ?? snapshotKey)
+          ? 'Type the exact stack name to confirm rewrites.'
+          : undefined
+      },
+    },
+    onSubmit: async ({ value }) => {
+      if (busy || loading || !preview || !preview.repairs.length) return
+      const rewrites = preview.repairs.some(
+        (repair) => repair.requiresConfirmation && value.selected.includes(repair.id),
+      )
+      await onRun(value.selected, rewrites)
+    },
+  })
+  const { selected, typed } = useSelector(form.store, (state) => state.values)
+  const submitting = useSelector(form.store, (state) => state.isSubmitting)
   React.useEffect(() => {
-    if (!preview) {
-      setSelected([])
-      setTyped('')
-      return
-    }
-    setSelected(preview.repairs.map((repair) => repair.id))
-    setTyped('')
-  }, [preview])
+    form.reset({ selected: preview?.repairs.map((repair) => repair.id) ?? [], typed: '' })
+  }, [form, preview])
 
   const rewrites = (preview?.repairs ?? []).filter(
     (repair) => repair.requiresConfirmation && selected.includes(repair.id),
@@ -184,106 +199,120 @@ function ReconciliationDialog({
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent className="gs-reconciliation-dialog">
-        <WorkflowFrame composition="destructive">
-          <DialogHeader>
-            <DialogTitle>Reconcile submitted stack</DialogTitle>
-            <DialogDescription>
-              GitHub stays authoritative for submitted order. Nothing is written until you run a
-              selected repair, and every repair re-checks the captured commits and pull requests
-              immediately before it runs.
-            </DialogDescription>
-          </DialogHeader>
-          {loading ? (
-            <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-              Reading the submitted stack and the local graph…
-            </p>
-          ) : previewError ? (
-            <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]">
-              {previewError}
-            </p>
-          ) : preview ? (
-            <>
-              <OperationContext title={preview.summary} facts={facts} />
-              {preview.blockers.length ? <BlockerList items={preview.blockers} /> : null}
-              {preview.repairs.length ? (
-                <ol aria-label="Proposed repairs" className="m-0 grid list-none gap-2 p-0">
-                  {preview.repairs.map((repair) => (
-                    <RepairRow
-                      key={repair.id}
-                      repair={repair}
-                      checked={selected.includes(repair.id)}
-                      disabled={busy}
-                      onChange={(checked) =>
-                        setSelected((current) =>
-                          checked
-                            ? [...new Set([...current, repair.id])]
-                            : current.filter((id) => id !== repair.id),
-                        )
-                      }
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            void form.handleSubmit()
+          }}
+        >
+          <WorkflowFrame composition="destructive">
+            <DialogHeader>
+              <DialogTitle>Reconcile submitted stack</DialogTitle>
+              <DialogDescription>
+                GitHub stays authoritative for submitted order. Nothing is written until you run a
+                selected repair, and every repair re-checks the captured commits and pull requests
+                immediately before it runs.
+              </DialogDescription>
+            </DialogHeader>
+            {loading ? (
+              <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                Reading the submitted stack and the local graph…
+              </p>
+            ) : previewError ? (
+              <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]">
+                {previewError}
+              </p>
+            ) : preview ? (
+              <>
+                <OperationContext title={preview.summary} facts={facts} />
+                {preview.blockers.length ? <BlockerList items={preview.blockers} /> : null}
+                {preview.repairs.length ? (
+                  <ol aria-label="Proposed repairs" className="m-0 grid list-none gap-2 p-0">
+                    {preview.repairs.map((repair) => (
+                      <RepairRow
+                        key={repair.id}
+                        repair={repair}
+                        checked={selected.includes(repair.id)}
+                        disabled={busy || submitting}
+                        onChange={(checked) =>
+                          form.setFieldValue('selected', (current) =>
+                            checked
+                              ? [...new Set([...current, repair.id])]
+                              : current.filter((id) => id !== repair.id),
+                          )
+                        }
+                      />
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                    {preview.state === 'ambiguous'
+                      ? 'Resolve the reported ambiguity on GitHub or in Git, then review again.'
+                      : 'Nothing to repair for this stack.'}
+                  </p>
+                )}
+                {rewrites.length ? (
+                  <>
+                    <WarningNote>
+                      <span className="inline-flex items-center gap-1.5">
+                        <ShieldAlert className="size-3.5" />
+                        {rewrites.length} selected repair
+                        {rewrites.length === 1 ? '' : 's'} rewrite a branch tip or a pull-request
+                        base. The previous commit is kept at refs/git-stacks/reconciliation.
+                      </span>
+                    </WarningNote>
+                    <TypedConfirmation
+                      id="reconciliation-confirm"
+                      value={typed}
+                      target={target}
+                      disabled={busy || submitting}
+                      onChange={(value) => form.setFieldValue('typed', value)}
+                      label={`Type ${target} to enable branch and pull-request rewrites`}
                     />
-                  ))}
-                </ol>
-              ) : (
-                <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-                  {preview.state === 'ambiguous'
-                    ? 'Resolve the reported ambiguity on GitHub or in Git, then review again.'
-                    : 'Nothing to repair for this stack.'}
-                </p>
-              )}
-              {rewrites.length ? (
-                <>
-                  <WarningNote>
-                    <span className="inline-flex items-center gap-1.5">
-                      <ShieldAlert className="size-3.5" />
-                      {rewrites.length} selected repair
-                      {rewrites.length === 1 ? '' : 's'} rewrite a branch tip or a pull-request
-                      base. The previous commit is kept at refs/git-stacks/reconciliation.
-                    </span>
-                  </WarningNote>
-                  <TypedConfirmation
-                    id="reconciliation-confirm"
-                    value={typed}
-                    target={target}
-                    onChange={setTyped}
-                    label={`Type ${target} to enable branch and pull-request rewrites`}
-                  />
-                </>
-              ) : null}
-            </>
-          ) : null}
-          {actionError ? (
-            <p
-              role="alert"
-              className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]"
-            >
-              {actionError}
-            </p>
-          ) : null}
-          <WorkflowActions>
-            <Button variant="secondary" onClick={onCancel} disabled={busy}>
-              Cancel
-            </Button>
-            <Button variant="secondary" onClick={onReload} disabled={busy || loading}>
-              <RefreshCw className="size-3.5" />
-              Re-read
-            </Button>
-            <Button
-              variant="accent"
-              disabled={
-                busy ||
-                loading ||
-                !preview ||
-                !preview.repairs.length ||
-                !selected.length ||
-                !confirmReady
-              }
-              onClick={() => onRun(selected, rewrites.length > 0)}
-            >
-              <Wrench className="size-3.5" />
-              Run {selected.length || ''} repair{selected.length === 1 ? '' : 's'}
-            </Button>
-          </WorkflowActions>
-        </WorkflowFrame>
+                  </>
+                ) : null}
+              </>
+            ) : null}
+            {actionError ? (
+              <p
+                role="alert"
+                className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]"
+              >
+                {actionError}
+              </p>
+            ) : null}
+            <WorkflowActions>
+              <Button variant="secondary" onClick={onCancel} disabled={busy || submitting}>
+                Cancel
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={onReload}
+                disabled={busy || submitting || loading}
+              >
+                <RefreshCw className="size-3.5" />
+                Re-read
+              </Button>
+              <Button
+                variant="accent"
+                type="submit"
+                disabled={
+                  busy ||
+                  submitting ||
+                  loading ||
+                  !preview ||
+                  !preview.repairs.length ||
+                  !selected.length ||
+                  !confirmReady
+                }
+              >
+                <Wrench className="size-3.5" />
+                Run {selected.length || ''} repair{selected.length === 1 ? '' : 's'}
+              </Button>
+            </WorkflowActions>
+          </WorkflowFrame>
+        </form>
       </DialogContent>
     </Dialog>
   )
@@ -504,7 +533,7 @@ export function ReconciliationPanel({
           actionError={actionError ?? fallbackError}
           onCancel={close}
           onReload={() => void load(openKey)}
-          onRun={(ids, confirmRewrites) => void run(ids, confirmRewrites)}
+          onRun={run}
         />
       ) : null}
     </section>

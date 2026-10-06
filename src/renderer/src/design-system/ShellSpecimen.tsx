@@ -139,13 +139,13 @@ export function ShellSpecimen() {
             </div>
             <div className="nav-section nav-section-bordered recent-section">
               <span className="nav-label">Recent repositories</span>
-              <button className="recent-item" type="button">
+              <Button className="recent-item" type="button" variant="unstyled">
                 <FolderGit2 aria-hidden="true" className="size-3.5" />
                 <span>
                   <strong>repository-with-a-very-long-name-for-responsive-accessibility</strong>
                   <small title={fixturePath}>{fixturePath}</small>
                 </span>
-              </button>
+              </Button>
             </div>
           </div>
           <div className="sidebar-footer">
@@ -166,13 +166,13 @@ export function ShellSpecimen() {
           </div>
           <div className="shell-fixture-content">
             <p className="shell-fixture-caption">Branch matching “{query || 'all'}”</p>
-            <button className="shell-fixture-branch" type="button">
+            <Button className="shell-fixture-branch" type="button" variant="unstyled">
               <GitBranch aria-hidden="true" className="size-4" />
               <span>
                 <strong>feature/navigation-responsive-layout-with-a-deliberately-long-name</strong>
                 <small>Local · selected · main parent</small>
               </span>
-            </button>
+            </Button>
             <label htmlFor="shell-fixture-draft">In-progress commit message</label>
             <Input
               id="shell-fixture-draft"

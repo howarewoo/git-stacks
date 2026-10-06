@@ -25,6 +25,10 @@ body,
   margin: 0;
 }
 
+#root {
+  isolation: isolate;
+}
+
 body {
   min-width: 0;
   overflow: hidden;
@@ -655,7 +659,7 @@ button:disabled {
 .list-toolbar {
   display: flex;
   min-height: 66px;
-  flex: 0 0 66px;
+  flex: 0 0 auto;
   align-items: center;
   gap: 14px;
   border-bottom: 1px solid var(--line);
@@ -3205,7 +3209,7 @@ textarea.conflict-content {
   .gs-segmented-control button,
   .gs-checkbox > label,
   input:not([type='checkbox']),
-  select,
+  [data-slot='select-trigger'],
   textarea {
     min-width: 44px;
     min-height: 44px;

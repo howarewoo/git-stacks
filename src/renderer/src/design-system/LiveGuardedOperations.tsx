@@ -171,12 +171,13 @@ export function LiveGuardedOperations() {
             <Select
               id="live-merge-ref"
               value={ref}
-              onChange={(event) => setRef(event.target.value)}
-            >
-              <option value="">Choose a branch</option>
-              <option value="main">main</option>
-              <option value="release/1.x">release/1.x</option>
-            </Select>
+              onValueChange={setRef}
+              options={[
+                { value: '', label: 'Choose a branch' },
+                { value: 'main', label: 'main' },
+                { value: 'release/1.x', label: 'release/1.x' },
+              ]}
+            />
           </Field>
           <Checkbox id="live-merge-commit" label="Create a merge commit" />
           <WorkflowActions>
