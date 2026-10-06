@@ -198,7 +198,18 @@ export async function measureDesktop(repoRoot, fixture) {
       ),
     )
     await until(client, "!!document.querySelector('button.onboarding-recent')")
-    await click(client, 'button.onboarding-recent')
+    // The environment report can move this button between mouse-down and mouse-up.
+    await evaluate(client, "document.querySelector('button.onboarding-recent').focus()")
+    for (const type of ['keyDown', 'keyUp']) {
+      await client.send('Input.dispatchKeyEvent', {
+        type,
+        key: 'Enter',
+        code: 'Enter',
+        text: type === 'keyDown' ? '\r' : undefined,
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      })
+    }
     await until(
       client,
       "document.querySelector('.list-subtitle')?.textContent?.trim() === '3001 shown' && document.querySelectorAll('.branch-row').length === 200",

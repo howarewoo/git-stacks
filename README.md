@@ -1412,9 +1412,11 @@ benchmark version; older measurements with different definitions are not
 carried into the current trend.
 
 The `startup` measurement runs the built Electron app against the 3,000-ref
-fixture. It starts before process launch and ends after the automation clicks
-the pre-seeded recent repository and its first 200 branch rows complete two
-animation frames. The `interaction` measurement starts at an actual input event
+fixture. It starts before process launch and ends after the automation activates
+the pre-seeded recent repository with Enter and its first 200 branch rows complete
+two animation frames. Keyboard activation avoids stale coordinates when the
+asynchronous Git environment report shifts the onboarding layout. The
+`interaction` measurement starts at an actual input event
 in the “Filter current view branches, files, and pull requests” field, not the
 command palette, and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
