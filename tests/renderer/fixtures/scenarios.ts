@@ -50,6 +50,7 @@ import { githubComHostStatus, toolsAvailable, toolsMissingEditor } from './setti
 import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 import { reviewRail, stackMember } from './review'
+import { graphIndex, graphSnapshot } from './graph'
 
 /**
  * Deterministic snapshot data for every gallery scenario. Repository shapes are reused from
@@ -1381,7 +1382,82 @@ export function notificationInbox(overrides: Partial<NotificationInbox> = {}): N
     ...overrides,
   }
 }
+function graphScenario(
+  name: string,
+  size: Parameters<typeof graphIndex>[0],
+  state: Parameters<typeof graphIndex>[1] = 'complete',
+  degraded = false,
+): FixtureScenario {
+  const index = graphIndex(size, state, degraded)
+  const snapshot = graphSnapshot(connected, index)
+  return {
+    name,
+    summary: `Seed graph-220-v1: ${size} PRs, 50 authors, ${state}${degraded ? ', unsupported review/check fields' : ''}.`,
+    snapshot,
+    prIndex: index,
+    hostStatus: degraded
+      ? {
+          ...githubComHostStatus,
+          capabilities: githubComHostStatus.capabilities.map((capability) =>
+            capability.id === 'graphql' || capability.id === 'native-stacks'
+              ? {
+                  ...capability,
+                  state: 'unsupported',
+                  detail: 'Fixture host does not expose these fields.',
+                }
+              : capability,
+          ),
+        }
+      : githubComHostStatus,
+    recentRepositories: [{ path: snapshot.path, name: snapshot.name }],
+  }
+}
+
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
+  'graph-250': graphScenario('graph-250', 250),
+  'graph-preferences': {
+    ...graphScenario('graph-preferences', 250),
+    graphPreferences: {
+      preset: 'my-prs',
+      text: '#51',
+      author: '',
+      status: 'all',
+      collapse: false,
+      name: 'Authored chain',
+    },
+  },
+  'graph-preferences-held': {
+    ...graphScenario('graph-preferences-held', 250),
+    pending: ['graphPreferences'],
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: graphIndex(250).viewer,
+      version: '2.62.0',
+      identity: 'cli:graph-preferences:1',
+      message: null,
+    },
+    graphPreferences: {
+      preset: 'my-prs',
+      text: '#51',
+      author: '',
+      status: 'all',
+      collapse: false,
+      name: 'Late saved view',
+    },
+  },
+  'graph-1000': graphScenario('graph-1000', 1000),
+  'graph-5000': graphScenario('graph-5000', 5000),
+  'graph-partial': graphScenario('graph-partial', 1000, 'partial'),
+  'graph-error': graphScenario('graph-error', 1000, 'error'),
+  'graph-unsupported': graphScenario('graph-unsupported', 250, 'complete', true),
+  'graph-stale': graphScenario('graph-stale', 250, 'stale'),
+  'graph-index-unavailable': {
+    name: 'graph-index-unavailable',
+    summary: 'PR index transport capability unavailable; local refs remain visible.',
+    snapshot: connected,
+    recentRepositories,
+  },
   'shell-no-repository': {
     name: 'shell-no-repository',
     summary: 'Onboarding with recent repositories and no repository open.',

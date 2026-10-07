@@ -38,6 +38,8 @@ const branch = (name: string, parent: string | null = null): Branch => ({
   updatedAt: '',
   parent,
   parentBehind: null,
+  recordedParent: parent,
+  parentSource: parent ? 'recorded' : null,
   pr: null,
 })
 const id = (kind: 'pr' | 'ref', name: string) => prGraphId('github.com', 'acme/widgets', kind, name)
@@ -345,4 +347,21 @@ test('fork head and missing source associations cannot reconcile a local ref by 
       false,
     )
   }
+})
+
+test('unrecorded parent provenance stays unknown rather than becoming local intent', () => {
+  const parent = branch('parent')
+  const child = { ...branch('child', 'parent'), recordedParent: null, parentSource: null }
+  const graph = projectPrGraph({
+    host: 'github.com',
+    repository: 'acme/widgets',
+    pullRequests: [],
+    branches: [parent, child],
+    complete: true,
+  })
+  assert.equal(graph.edges.filter((edge) => edge.source === 'local-parent').length, 0)
+  assert.equal(
+    graph.edges.find((edge) => edge.source === 'unknown')?.to,
+    id('ref', 'refs/heads/parent'),
+  )
 })

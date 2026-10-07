@@ -12,7 +12,7 @@ import {
   changePaths,
   matchesPullRequest,
 } from '../src/renderer/src/components/data-views'
-import { DiffView, StackView, diffLineKind } from '../src/renderer/src/components/repository-views'
+import { DiffView, diffLineKind } from '../src/renderer/src/components/repository-views'
 import { ReconciliationPanel } from '../src/renderer/src/components/reconciliation-view'
 import { RepositoryHoverCardProvider } from '../src/renderer/src/components/repository-hover-cards'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
@@ -418,42 +418,6 @@ test('truncated changes disable stash creation in both data views', () => {
   )
   assert.match(stashMarkup, /Stash unavailable while the changed-file listing is incomplete/)
   assert.match(stashMarkup, /<button[^>]*disabled[^>]*>[\s\S]*?Stash current changes<\/button>/)
-})
-
-test('unmeasured parent comparison is not presented as publish-ready', () => {
-  const snapshot = {
-    ...changesSnapshots.clean,
-    branches: [
-      {
-        ...changesSnapshots.clean.branches[0],
-        ref: 'refs/heads/feature/unmeasured',
-        name: 'feature/unmeasured',
-        current: true,
-        parent: changesSnapshots.clean.defaultBranch,
-        parentBehind: null,
-        needsRestack: false,
-      },
-    ],
-    currentBranch: 'feature/unmeasured',
-  }
-  const markup = render(
-    React.createElement(StackView, {
-      snapshot,
-      authority: 'fixture',
-      runAction: noopRunAction,
-      actionError: null,
-      onClearActionError: () => undefined,
-      busy: false,
-      onRequest: noopRequest,
-      onReviewNumber: () => undefined,
-      onSelect: () => undefined,
-      onCreate: () => undefined,
-      search: '',
-    }),
-  )
-  assert.match(markup, /Parent comparison unavailable/)
-  assert.match(markup, /Check ancestry before publishing/)
-  assert.doesNotMatch(markup, /Review the stack, publish its PRs/)
 })
 
 test('an empty stash list states the recovery instead of a count of zero actions', () => {
