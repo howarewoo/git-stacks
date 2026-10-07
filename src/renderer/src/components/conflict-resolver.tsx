@@ -361,7 +361,7 @@ export function ConflictResolver({
         <DialogHeader>
           <DialogTitle>Resolve conflict</DialogTitle>
           <DialogDescription>
-            {file ? `${file.labels.title} in` : 'Reading the conflict in'} {file?.path ?? path}
+            <code>{file?.path ?? path}</code>
           </DialogDescription>
         </DialogHeader>
         <div className="dialog-form">
@@ -415,11 +415,7 @@ export function ConflictResolver({
                     </Button>
                   </div>
                 ) : null}
-                <OperationContext
-                  description={file.labels.explanation}
-                  facts={facts}
-                  title={file.labels.title}
-                />
+                <OperationContext description={file.labels.explanation} facts={facts} />
                 {file.binary ? (
                   <PhaseStatus
                     phase="blocked"

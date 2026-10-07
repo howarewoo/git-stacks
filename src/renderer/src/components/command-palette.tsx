@@ -223,7 +223,7 @@ export function CommandPaletteContent({
         <p>Search commands, stack navigation, branches, pull requests, issues, and settings.</p>
       </div>
 
-      <div className="palette-search-row flex items-center border-b border-[var(--gs-semantic-border-essential)] px-4 py-3">
+      <div className="palette-search-row flex items-center border-b border-[var(--gs-semantic-border-essential)] px-5 py-3">
         <Search
           className="mr-3 size-4 text-[var(--gs-semantic-text-secondary)]"
           aria-hidden="true"
@@ -242,7 +242,7 @@ export function CommandPaletteContent({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
-          className="flex-1 bg-transparent text-[14px] text-[var(--gs-component-overlay-text)] placeholder:text-[var(--gs-semantic-text-secondary)] outline-none"
+          className="flex-1 bg-transparent text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-component-overlay-text)] placeholder:text-[var(--gs-semantic-text-secondary)] outline-none"
           autoFocus
         />
         {confirmingId && (
@@ -266,7 +266,7 @@ export function CommandPaletteContent({
         className="palette-results min-w-0 max-h-[360px] overflow-y-auto p-2"
       >
         {filteredItems.length === 0 ? (
-          <div className="p-6 text-center text-[13px] text-[var(--gs-semantic-text-secondary)]">
+          <div className="break-words p-6 text-center text-[length:var(--gs-semantic-type-body-size)] leading-[var(--gs-semantic-type-body-line)] text-[var(--gs-semantic-text-secondary)]">
             No matching commands or entities found for &ldquo;{query}&rdquo;.
           </div>
         ) : (
@@ -275,9 +275,9 @@ export function CommandPaletteContent({
               key={`${group}-${entries[0].flatIndex}`}
               role="group"
               aria-label={group}
-              className="palette-group mb-2 last:mb-0"
+              className="palette-group mb-4 last:mb-0"
             >
-              <div className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--gs-semantic-text-secondary)]">
+              <div className="flex items-center gap-2 px-3 py-2 text-[length:var(--gs-semantic-type-label-size)] font-semibold leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-secondary)]">
                 {groupIcon(group)}
                 <span>{group}</span>
               </div>
@@ -302,34 +302,31 @@ export function CommandPaletteContent({
                         setSelectedIndex(flatIndex)
                       }}
                       className={cn(
-                        'palette-row group flex cursor-pointer items-center justify-between rounded-[var(--gs-semantic-radius-control)] px-3 py-2 text-[13px] transition-colors outline-none select-none',
+                        'palette-row group flex cursor-pointer items-center justify-between rounded-[var(--gs-semantic-radius-control)] px-3 py-2 text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] transition-colors outline-none select-none',
                         isSelected
                           ? isConfirming
                             ? 'bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)]'
                             : 'bg-[var(--gs-semantic-selection-background)] text-[var(--gs-semantic-selection-text)]'
                           : 'text-[var(--gs-component-overlay-text)] hover:bg-[var(--gs-semantic-surface-inset)]',
-                        item.disabled && 'cursor-not-allowed opacity-55 hover:bg-transparent',
+                        item.disabled && 'cursor-not-allowed',
                       )}
                     >
                       <div className="flex min-w-0 flex-1 flex-col">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate font-medium">{item.label}</span>
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="min-w-0 truncate font-medium">{item.label}</span>
                           {item.destructive && (
-                            <Badge
-                              variant={isConfirming ? 'danger' : 'outline'}
-                              className="text-[10px] uppercase tracking-wider"
-                            >
+                            <Badge variant={isConfirming ? 'danger' : 'outline'}>
                               {isConfirming ? 'Confirm destructive action' : 'Destructive'}
                             </Badge>
                           )}
-                          {item.disabled && item.disabledReason && (
-                            <span className="truncate text-[11px] text-[var(--gs-semantic-text-secondary)] italic">
-                              — {item.disabledReason}
-                            </span>
-                          )}
                         </div>
+                        {item.disabled && item.disabledReason && (
+                          <span className="mt-1 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)] [overflow-wrap:anywhere]">
+                            {item.disabledReason}
+                          </span>
+                        )}
                         {item.detail && !item.disabled && (
-                          <span className="truncate text-[12px] text-[var(--gs-semantic-text-secondary)]">
+                          <span className="mt-1 truncate text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
                             {item.detail}
                           </span>
                         )}
@@ -337,7 +334,7 @@ export function CommandPaletteContent({
 
                       <div className="ml-3 flex shrink-0 items-center gap-2">
                         {item.shortcutText && (
-                          <kbd className="rounded border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--gs-semantic-text-secondary)]">
+                          <kbd className="rounded border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-2 py-1 font-sans text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
                             {item.shortcutText}
                           </kbd>
                         )}
@@ -354,16 +351,16 @@ export function CommandPaletteContent({
         )}
       </div>
 
-      <div className="palette-footer flex items-center justify-between border-t border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-4 py-2 text-[11px] text-[var(--gs-semantic-text-secondary)]">
+      <div className="palette-footer flex items-center justify-between border-t border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-5 py-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
         <div className="flex items-center gap-3">
           <span>
-            <kbd className="font-mono">↑↓</kbd> Navigate
+            <kbd className="font-sans">↑↓</kbd> Navigate
           </span>
           <span>
-            <kbd className="font-mono">↵</kbd> Select
+            <kbd className="font-sans">↵</kbd> Select
           </span>
           <span>
-            <kbd className="font-mono">esc</kbd> Dismiss
+            <kbd className="font-sans">esc</kbd> Dismiss
           </span>
         </div>
         <span>{filteredItems.length} results</span>

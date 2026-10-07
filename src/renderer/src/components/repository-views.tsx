@@ -22,9 +22,10 @@ import { actionBlockReason, submodulePathReason } from '../../../shared/capabili
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { SegmentedControl } from './ui/segmented-control'
-import { InlineAlert } from './ui/surface'
+import { EmptyState, InlineAlert } from './ui/surface'
 import { Select } from './ui/select'
 import { describeBranchRow, sortBranchesByUpdatedAt } from '../lib/branches'
+import { reviewLabel } from '../lib/pull-request-state'
 import {
   claimsRovingKey,
   clampRovingIndex,
@@ -658,8 +659,14 @@ export function HistoryView({
             History
           </h1>
           <span className="list-subtitle">
-            {refName} · commits {offset + 1}–{offset + commits.length}
-            {hasMore ? ' (more available)' : ''}
+            <code>{refName}</code> ·{' '}
+            {loading
+              ? 'Loading commits…'
+              : error
+                ? 'History unavailable'
+                : commits.length > 0
+                  ? `commits ${offset + 1}–${offset + commits.length}${hasMore ? ' (more available)' : ''}`
+                  : 'No commits'}
           </span>
         </div>
         <div className="workflow-row">
@@ -725,7 +732,7 @@ export function HistoryView({
               >
                 <GitCommitHorizontal className="size-4" />
                 <span className="history-copy">
-                  <strong>{commit.subject}</strong>
+                  <strong title={commit.subject}>{commit.subject}</strong>
                   <small>
                     {commit.author} · {new Date(commit.date).toLocaleDateString()}
                   </small>
@@ -740,7 +747,7 @@ export function HistoryView({
             <LoaderCircle className="size-4 animate-spin" />
             Loading commits…
           </p>
-        ) : visible.length === 0 ? (
+        ) : !error && visible.length === 0 ? (
           <p className="section-empty">
             {search
               ? 'No matching loaded commits. Load more history or change your search.'
@@ -774,7 +781,7 @@ export function HistoryView({
         <section className="commit-inspector" aria-label="Selected commit">
           <header className="inspector-heading">
             <div className="inspector-title">
-              <strong>{selected.subject}</strong>
+              <strong className="commit-subject">{selected.subject}</strong>
               <small>
                 {selected.author} · {new Date(selected.date).toLocaleDateString()}
               </small>
@@ -938,18 +945,6 @@ export function StackView({
               : ''}
           </span>
         </div>
-        <Button
-          size="sm"
-          variant="accent"
-          disabled={blocked || Boolean(actionBlockReason(snapshot.capabilities, 'createBranch'))}
-          tooltip={
-            actionBlockReason(snapshot.capabilities, 'createBranch') ??
-            'Create a local branch and switch to it.'
-          }
-          onClick={onCreate}
-        >
-          New branch
-        </Button>
       </div>
       <ReconciliationPanel
         snapshot={snapshot}
@@ -1001,7 +996,7 @@ export function StackView({
         </details>
       ) : null}
       {!root ? (
-        <div className="empty-state">
+        <EmptyState>
           <Layers className="empty-icon" />
           <h2>Build a stack from a branch</h2>
           <p>
@@ -1019,7 +1014,7 @@ export function StackView({
           >
             Create a stack branch
           </Button>
-        </div>
+        </EmptyState>
       ) : (
         <>
           <div className="stack-workspace-header">
@@ -1053,6 +1048,20 @@ export function StackView({
                 : 'Review the stack, publish its PRs, and merge from the base upward.'}
             </p>
             <div className="workflow-row">
+              <Button
+                size="sm"
+                variant="accent"
+                disabled={
+                  blocked || Boolean(actionBlockReason(snapshot.capabilities, 'createBranch'))
+                }
+                tooltip={
+                  actionBlockReason(snapshot.capabilities, 'createBranch') ??
+                  'Create a local branch and switch to it.'
+                }
+                onClick={onCreate}
+              >
+                New branch
+              </Button>
               <Button
                 size="sm"
                 variant={stale ? 'accent' : 'secondary'}
@@ -1101,9 +1110,12 @@ export function StackView({
               Local parent management and restacking remain available.
             </p>
           ) : null}
-          <p className="workflow-note">
+          <p className="workflow-note stack-order-note">
             Local branches · children above parents. Local order is not submitted native order.
           </p>
+          {visibleMembers.length === 0 ? (
+            <p className="section-empty">No branches in this stack match your search.</p>
+          ) : null}
           <div
             aria-label="Stack branches, children above parents"
             className="stack-members"
@@ -1157,7 +1169,7 @@ export function StackView({
                       tabIndex={rovingTabIndex(memberIndex, memberRows.activeIndex)}
                     >
                       <GitBranch className="size-4" />
-                      <strong>{branch.name}</strong>
+                      <strong className="stack-branch-ref">{branch.name}</strong>
                       <ChevronRight className="size-3.5" />
                     </Button>
                   </BranchHoverCard>
@@ -1170,10 +1182,12 @@ export function StackView({
                 </div>
                 <details className="stack-layer-details">
                   <summary>Branch & parent details</summary>
-                  <p className="workflow-note">Full branch: {branch.name}</p>
+                  <p className="workflow-note">
+                    Full branch: <code>{branch.name}</code>
+                  </p>
                   <div className="stack-member-meta">
                     <span>
-                      Parent: <strong>{branch.parent ?? 'Not set'}</strong>
+                      Parent: {branch.parent ? <code>{branch.parent}</code> : <span>Not set</span>}
                     </span>
                     <span>
                       {branch.parentSource === 'recorded'
@@ -1242,13 +1256,7 @@ export function StackView({
                       >
                         {branch.pr.checks === 'none' ? 'No checks' : `Checks ${branch.pr.checks}`}
                       </Badge>
-                      <span className="workflow-note">
-                        {['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'].includes(
-                          branch.pr.reviewDecision ?? '',
-                        )
-                          ? `Review ${branch.pr.reviewDecision!.replaceAll('_', ' ').toLowerCase()}`
-                          : 'Review unknown'}
-                      </span>
+                      <span className="workflow-note">{reviewLabel(branch.pr)}</span>
                     </div>
                     {branch.pr.state === 'OPEN' && branch.pr.base === snapshot.defaultBranch ? (
                       <Button

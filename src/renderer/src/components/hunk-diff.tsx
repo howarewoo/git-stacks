@@ -291,9 +291,9 @@ function HunkLine({
       className={cn('hunk-line hunk-line-selectable', className, !selected && 'hunk-line-excluded')}
       disabled={disabled}
       aria-pressed={selected}
-      aria-label={`${selected ? 'Exclude' : 'Include'} line ${position} of this hunk${
-        line.oldLine === null ? '' : `, file line ${line.oldLine}`
-      }`}
+      aria-label={`${selected ? 'Exclude' : 'Include'} ${line.kind === 'add' ? 'added' : 'removed'} line ${position} of this hunk${
+        (line.newLine ?? line.oldLine) === null ? '' : `, file line ${line.newLine ?? line.oldLine}`
+      }: ${line.text}`}
       title={
         selected
           ? 'Exclude this line from the patch. Nothing is written until the hunk is applied.'

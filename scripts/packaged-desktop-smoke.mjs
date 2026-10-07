@@ -1256,8 +1256,7 @@ async function commitThroughUi(workspace, locators, message) {
   await refreshSnapshot(locators)
   await gotoView(locators, 'Working changes')
   const stageAll = locators.button('Stage all')
-  await stageAll.waitFor()
-  assert(!(await stageAll.isDisabled()), '"Stage all" stayed disabled with unstaged changes')
+  await expect(stageAll).toBeEnabled({ timeout: UI_TIMEOUT })
   await withNotice(locators, () => stageAll.click(), /^Staged \d+ path/)
   const field = locators.page.getByRole('textbox', { name: 'Commit message' })
   await field.waitFor()
@@ -2227,7 +2226,7 @@ async function run(options) {
       await dialog.waitFor()
       await dialog.getByRole('textbox', { name: 'Branch name', exact: true }).fill(FEATURE)
       await dialog.getByRole('combobox', { name: 'Parent branch', exact: true }).click()
-      await locators.page.getByRole('option', { name: 'main', exact: true }).click()
+      await locators.page.getByRole('option', { name: /^main(?: \(|$)/u }).click()
       const create = dialog.getByRole('button', { name: 'Create branch', exact: true })
       assert(
         !(await create.isDisabled()),

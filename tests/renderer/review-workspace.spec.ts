@@ -362,7 +362,7 @@ for (const outcome of ['completed', 'refused']) {
     })
     await switchDestination(page, 'review')
     await page.getByRole('button', { name: 'Checks', exact: true }).click()
-    const rerun = page.getByRole('button', { name: 'Rerun', exact: true }).first()
+    const rerun = page.getByRole('button', { name: /^Rerun /u }).first()
     await expect(rerun).toBeEnabled()
     await holdDoubleCall(page, 'rerunPullRequestCheck')
     if (outcome === 'refused')

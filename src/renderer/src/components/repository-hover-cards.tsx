@@ -53,7 +53,7 @@ function ContextRow({ label, children }: { label: string; children: React.ReactN
   return (
     <div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-3">
       <dt className="text-[var(--gs-semantic-text-secondary)]">{label}</dt>
-      <dd className="m-0">{children}</dd>
+      <dd className="m-0 min-w-0 [overflow-wrap:anywhere]">{children}</dd>
     </div>
   )
 }
@@ -62,15 +62,19 @@ export function BranchHoverCard({ branch, children }: { branch: Branch; children
   return (
     <RepositoryHoverCard trigger={children} openDelay={650}>
       <HoverCardContent>
-        <strong className="block">{branch.name}</strong>
-        <p className="mt-1 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+        <strong className="block font-mono [overflow-wrap:anywhere]">{branch.name}</strong>
+        <p className="mt-1 text-xs text-[var(--gs-semantic-text-secondary)]">
           {branch.current ? 'Current branch' : branch.remote ? 'Remote branch' : 'Local branch'}
         </p>
-        <p className="my-3 leading-relaxed">{branch.subject || 'No commit subject'}</p>
+        <p className="my-3 text-[length:var(--gs-semantic-type-body-size)] leading-[var(--gs-semantic-type-body-line)] [overflow-wrap:anywhere]">
+          {branch.subject || 'No commit subject'}
+        </p>
         <dl className="space-y-2 text-xs">
-          <ContextRow label="Parent">{branch.parent ?? 'No stack parent'}</ContextRow>
+          <ContextRow label="Parent">
+            {branch.parent ? <code>{branch.parent}</code> : 'No stack parent'}
+          </ContextRow>
           <ContextRow label="Upstream">
-            {branch.upstream ?? 'Not tracking a remote branch'}
+            {branch.upstream ? <code>{branch.upstream}</code> : 'Not tracking a remote branch'}
           </ContextRow>
           {branch.upstream ? (
             <ContextRow label="Sync">
@@ -83,8 +87,8 @@ export function BranchHoverCard({ branch, children }: { branch: Branch; children
             </ContextRow>
           ) : null}
         </dl>
-        {branch.needsRestack ? (
-          <p className="mt-3 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-warning-text)]">
+        {branch.needsRestack || (branch.parentBehind ?? 0) > 0 ? (
+          <p className="mt-3 text-xs text-[var(--gs-semantic-feedback-warning-text)]">
             The parent or recorded boundary changed. Review a restack before publishing.
           </p>
         ) : null}
@@ -103,12 +107,12 @@ export function PullRequestHoverCard({
   return (
     <RepositoryHoverCard trigger={children} openDelay={500}>
       <HoverCardContent>
-        <p className="mb-1 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+        <p className="mb-1 text-xs text-[var(--gs-semantic-text-secondary)]">
           Pull request #{pr.number} ·{' '}
           {pr.state === 'OPEN' && pr.draft ? 'draft' : pr.state.toLowerCase()}
         </p>
-        <strong className="block leading-snug">{pr.title}</strong>
-        <p className="my-3 text-[length:var(--gs-semantic-type-metadata-size)]">
+        <strong className="block leading-snug [overflow-wrap:anywhere]">{pr.title}</strong>
+        <p className="my-3 font-mono text-xs [overflow-wrap:anywhere]">
           <span>{pr.head}</span> → <span>{pr.base}</span>
         </p>
         <dl className="space-y-2 text-xs">
@@ -116,13 +120,13 @@ export function PullRequestHoverCard({
             {pr.checks === 'none' ? 'No checks reported' : pr.checks}
           </ContextRow>
           <ContextRow label="Review">
-            {pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() || 'No review decision'}
+            {pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() || 'Review unavailable'}
           </ContextRow>
           <ContextRow label="Merge state">
             {pr.mergeState?.replaceAll('_', ' ').toLowerCase() || 'Not reported by GitHub'}
           </ContextRow>
         </dl>
-        <p className="mt-3 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+        <p className="mt-3 text-xs text-[var(--gs-semantic-text-secondary)]">
           GitHub rules and the reviewed head are checked again before merging.
         </p>
       </HoverCardContent>

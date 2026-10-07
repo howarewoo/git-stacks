@@ -152,6 +152,42 @@ test.describe('Onboarding and repository discovery', () => {
     await expect(dialog.getByText('No repositories to show')).toHaveCount(0)
   })
 
+  test('clipboard refusal is visible and copy confirmation belongs to the current command', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      let attempt = 0
+      Object.defineProperty(navigator, 'clipboard', {
+        value: {
+          writeText: async () => {
+            if (attempt++ === 0) throw new DOMException('Clipboard denied', 'NotAllowedError')
+          },
+        },
+      })
+    })
+    await openGallery(page, { scenario: 'shell-no-repository' })
+    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
+    await dialog.getByRole('button').filter({ hasText: 'howarewoo/git-stacks' }).click()
+    await dialog.getByRole('button', { name: 'Choose folder', exact: true }).click()
+    const copy = dialog.getByRole('button', { name: 'Copy the git clone command', exact: true })
+    await copy.click()
+    await expect(
+      dialog.getByText('Clipboard unavailable. Select and copy the command.'),
+    ).toBeVisible()
+    await expect(copy).toHaveText('Copy')
+    await copy.click()
+    await expect(copy).toHaveText('Copied')
+    await expect(
+      dialog.getByText('Clipboard unavailable. Select and copy the command.'),
+    ).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'SSH', exact: true }).click()
+    await expect(dialog.locator('.onboarding-command-text').first()).toContainText(
+      'git@github.com:',
+    )
+    await expect(copy).toHaveText('Copy')
+  })
+
   test('adding an existing repository and drag-and-drop triggers repository registration', async ({
     page,
   }) => {

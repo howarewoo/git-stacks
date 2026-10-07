@@ -61,7 +61,7 @@ const DialogContent = React.forwardRef<
 DialogContent.displayName = 'DialogContent'
 
 const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn('flex flex-col gap-1.5 pr-8 text-left', className)} {...props} />
+  <div className={cn('flex flex-col gap-2 pr-8 text-left', className)} {...props} />
 )
 DialogHeader.displayName = 'DialogHeader'
 
@@ -97,7 +97,7 @@ const DialogDescription = React.forwardRef<
     ref={ref}
     data-slot="dialog-description"
     className={cn(
-      'text-[length:var(--gs-semantic-type-label-size)] leading-5 text-[var(--gs-semantic-text-secondary)]',
+      'text-[length:var(--gs-semantic-type-body-size)] leading-[var(--gs-semantic-type-body-line)] text-[var(--gs-semantic-text-secondary)]',
       className,
     )}
     {...props}

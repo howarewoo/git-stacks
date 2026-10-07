@@ -5222,7 +5222,12 @@ export async function getSnapshot(
   // so a local refresh after a local commit still completes even if the signed-in
   // account changed while it ran — it simply goes on to answer that refresh by
   // asking nothing at all, which is what the check below it arranges.
-  const staleCredential = () => live !== null && generation !== confirmedPayloadGeneration
+  // Origins that cannot reach the GitHub transport carry no credential-bound
+  // answer, so initial CLI authentication must not cancel their local Git read.
+  const staleCredential = () =>
+    live !== null &&
+    generation !== confirmedPayloadGeneration &&
+    remoteHostContext(parseRemote(originUrl)) !== null
   if (staleCredential() || signal?.aborted) throw new CommandCancelled()
   // Read-only: the report compares submitted membership with the local graph
   // and never rewrites a branch, a local hint, or a pull-request base.

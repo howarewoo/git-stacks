@@ -83,6 +83,7 @@ function CheckRow({
         {check.workflowRunId !== null ? (
           <Button
             disabled={!canRerun}
+            aria-label={`Rerun ${check.name} workflow`}
             loading={rerunning}
             size="sm"
             variant="secondary"
@@ -133,7 +134,7 @@ export function PullRequestChecksPanel({
 }) {
   if (loading && !report) {
     return (
-      <section aria-label="Checks" className="detail-section">
+      <section aria-label="Checks" className="detail-section checks-panel">
         <h3>Checks</h3>
         <p className="check-note" role="status">
           <LoaderCircle className="size-3 animate-spin" aria-hidden="true" />
@@ -149,20 +150,22 @@ export function PullRequestChecksPanel({
   const rollup = report.rollup
 
   return (
-    <section aria-label="Checks" className="detail-section">
+    <section aria-label="Checks" className="detail-section checks-panel">
       <h3>Checks</h3>
       <div className="checks-summary">
-        <Badge variant={checksVariant(report.summary)}>
+        <Badge variant={report.available ? checksVariant(report.summary) : 'outline'}>
           <ShieldCheck className="size-3" />
-          {checkLabel(report.summary)}
+          {report.available ? checkLabel(report.summary) : 'checks unavailable'}
         </Badge>
         <span className="check-note">
-          {rollup.total === 0
-            ? 'GitHub reported no checks for this head.'
-            : `${rollup.passing} passed · ${rollup.failing} failing · ${rollup.pending} pending` +
-              (rollup.skipped || rollup.neutral || rollup.unknown
-                ? ` · ${rollup.skipped} skipped · ${rollup.neutral} neutral · ${rollup.unknown} unknown`
-                : '')}
+          {!report.available
+            ? 'Checks are unavailable for this head.'
+            : rollup.total === 0
+              ? 'No check runs, commit statuses, or Actions runs are reported for this head.'
+              : `${rollup.passing} passed · ${rollup.failing} failing · ${rollup.pending} pending` +
+                (rollup.skipped || rollup.neutral || rollup.unknown
+                  ? ` · ${rollup.skipped} skipped · ${rollup.neutral} neutral · ${rollup.unknown} unknown`
+                  : '')}
         </span>
       </div>
       {rollup.requirementKnown ? (
@@ -171,7 +174,7 @@ export function PullRequestChecksPanel({
           {rollup.requiredTotal} required of {rollup.total} checks
         </p>
       ) : (
-        <p className="check-note">
+        <p className="check-note check-explanation">
           Git Stacks could not read this repository&apos;s required checks, so no check is claimed
           to be required or optional.
         </p>
@@ -183,7 +186,7 @@ export function PullRequestChecksPanel({
           it.
         </InlineAlert>
       ) : null}
-      <InlineAlert tone={freshness.tone} title={freshness.title}>
+      <InlineAlert className="check-explanation" tone={freshness.tone} title={freshness.title}>
         {freshness.detail}
       </InlineAlert>
       <div className="checks-controls">
@@ -212,12 +215,7 @@ export function PullRequestChecksPanel({
         </Button>
       </div>
       {!report.permissions.canRerun && report.permissions.reason ? (
-        <p className="check-note">{report.permissions.reason}</p>
-      ) : null}
-      {report.available && report.checks.length === 0 ? (
-        <p className="check-note">
-          No check runs, commit statuses, or Actions runs are reported for this head.
-        </p>
+        <p className="check-note check-explanation">{report.permissions.reason}</p>
       ) : null}
       {GROUPS.map(({ requirement, title }) => {
         const group = report.checks.filter((check) => check.requirement === requirement)

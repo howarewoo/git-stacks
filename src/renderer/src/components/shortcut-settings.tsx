@@ -1,8 +1,9 @@
 import * as React from 'react'
-import { AlertCircle, Check, RotateCcw, Settings } from 'lucide-react'
+import { RotateCcw, Settings } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { Button } from './ui/button'
 import { Badge } from './ui/badge'
+import { InlineAlert } from './ui/surface'
 import {
   SHORTCUT_DEFINITIONS,
   assignShortcut,
@@ -43,7 +44,11 @@ export function ShortcutEditor({
   const isMac = isMacPlatform()
 
   React.useEffect(() => {
-    if (!recordingId) return
+    if (disabledReason) setRecordingId(null)
+  }, [disabledReason])
+
+  React.useEffect(() => {
+    if (!recordingId || disabledReason) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
       event.preventDefault()
@@ -64,11 +69,6 @@ export function ShortcutEditor({
 
       const chord = chordFromEvent(event, isMac)
       if (!chord) return
-
-      if (disabledReason) {
-        setRecordingId(null)
-        return
-      }
 
       const result = assignShortcut(bindings, recordingId, chord)
       if (result.reserved) {
@@ -98,7 +98,7 @@ export function ShortcutEditor({
 
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [bindings, isMac, onBindingsChange, recordingId])
+  }, [bindings, disabledReason, isMac, onBindingsChange, recordingId])
 
   const handleResetAll = () => {
     if (disabledReason) return
@@ -122,38 +122,27 @@ export function ShortcutEditor({
   return (
     <div className="shortcut-settings-editor space-y-4">
       {disabledReason ? (
-        <div
-          className="rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-3 text-[13px] text-[var(--gs-semantic-text-secondary)]"
-          role="status"
-        >
+        <InlineAlert tone="info" role="status">
           {disabledReason}
-        </div>
+        </InlineAlert>
       ) : null}
 
       {conflictMessage && (
-        <div
-          className="flex items-center gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] p-3 text-[13px] text-[var(--gs-semantic-feedback-error-text)]"
-          role="alert"
-        >
-          <AlertCircle className="size-4 shrink-0" aria-hidden="true" />
-          <span>{conflictMessage}</span>
-        </div>
+        <InlineAlert tone="error" role="alert">
+          {conflictMessage}
+        </InlineAlert>
       )}
 
       {successMessage && (
-        <div
-          className="flex items-center gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-feedback-success-text)] bg-[var(--gs-semantic-feedback-success-surface)] p-3 text-[13px] text-[var(--gs-semantic-feedback-success-text)]"
-          role="status"
-        >
-          <Check className="size-4 shrink-0" aria-hidden="true" />
-          <span>{successMessage}</span>
-        </div>
+        <InlineAlert tone="success" role="status">
+          {successMessage}
+        </InlineAlert>
       )}
 
       <div className="max-h-[380px] space-y-4 overflow-y-auto pr-1">
         {groups.map(([groupName, defs]) => (
-          <div key={groupName} className="space-y-1.5">
-            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[var(--gs-semantic-text-secondary)]">
+          <div key={groupName} className="space-y-2">
+            <h2 className="m-0 text-[length:var(--gs-semantic-type-label-size)] font-semibold leading-[1.35] text-[var(--gs-semantic-text-primary)]">
               {groupName}
             </h2>
             <div className="divide-y divide-[var(--gs-semantic-border-essential)] rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)]">
@@ -163,24 +152,24 @@ export function ShortcutEditor({
                 return (
                   <div
                     key={def.id}
-                    className="flex items-center justify-between px-3 py-2 text-[13px]"
+                    className="flex flex-wrap items-center justify-between gap-y-2 px-3 py-2 text-[13px]"
                   >
-                    <div className="min-w-0 flex-1 pr-3">
+                    <div className="min-w-0 flex-1 basis-40 pr-3">
                       <div className="font-medium text-[var(--gs-component-overlay-text)]">
                         {def.label}
                       </div>
-                      <div className="text-[12px] text-[var(--gs-semantic-text-secondary)]">
+                      <div className="text-[length:var(--gs-semantic-type-metadata-size)] leading-[1.4] text-[var(--gs-semantic-text-secondary)]">
                         {def.description}
                       </div>
                     </div>
 
                     <div className="flex shrink-0 items-center gap-2">
                       {isRecording ? (
-                        <Badge variant="warning" className="animate-pulse">
+                        <Badge variant="warning" role="status">
                           Press new keys… (Esc cancels)
                         </Badge>
                       ) : (
-                        <kbd className="rounded border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-2 py-0.5 font-mono text-[12px] text-[var(--gs-semantic-text-secondary)]">
+                        <kbd className="rounded border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-2 py-1 text-[length:var(--gs-semantic-type-metadata-size)] leading-[1.4] text-[var(--gs-semantic-text-secondary)]">
                           {formatChord(chord, isMac)}
                         </kbd>
                       )}
@@ -197,7 +186,7 @@ export function ShortcutEditor({
                             setSuccessMessage(null)
                           }
                         }}
-                        aria-label={`Change shortcut for ${def.label}`}
+                        aria-label={`${isRecording ? 'Cancel changing' : 'Change'} shortcut for ${def.label}`}
                       >
                         {isRecording ? 'Cancel' : 'Change'}
                       </Button>

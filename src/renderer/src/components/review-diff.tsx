@@ -49,7 +49,9 @@ export function ReviewDiff({
     return (
       <div className="code-region review-diff-region">
         <div className="code-region-header">
-          <strong>{file.path}</strong>
+          <strong>
+            <code>{file.path}</code>
+          </strong>
           <Badge variant={file.diff.kind === 'binary' ? 'secondary' : 'warning'}>
             {file.diff.kind === 'binary' ? 'binary' : 'no text diff'}
           </Badge>
@@ -63,7 +65,9 @@ export function ReviewDiff({
   return (
     <div className="code-region review-diff-region">
       <div className="code-region-header">
-        <strong>{file.path}</strong>
+        <strong>
+          <code>{file.path}</code>
+        </strong>
         <span className="code-region-meta">
           {hunks.length} hunk{hunks.length === 1 ? '' : 's'} · +{file.additions} −{file.deletions}
         </span>
@@ -178,6 +182,7 @@ function UnifiedRows({
                   aria-label={`Comment on ${file.path} line ${
                     row.line.side === 'base' ? row.line.oldLine : row.line.newLine
                   } on the ${row.line.side}`}
+                  aria-pressed={inSelection(selection, file.path, row.line)}
                   className="review-line-gutter"
                   variant="unstyled"
                   type="button"
@@ -247,6 +252,7 @@ function SplitRows({
                 >
                   <Button
                     aria-label={`Comment on ${file.path} line ${row.left.number} on the base`}
+                    aria-pressed={inSelection(selection, file.path, row.left.line)}
                     className="review-split-gutter"
                     variant="unstyled"
                     type="button"
@@ -273,6 +279,7 @@ function SplitRows({
                 >
                   <Button
                     aria-label={`Comment on ${file.path} line ${row.right.number} on the head`}
+                    aria-pressed={inSelection(selection, file.path, row.right.line)}
                     className="review-split-gutter"
                     variant="unstyled"
                     type="button"

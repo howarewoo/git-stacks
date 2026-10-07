@@ -32,11 +32,7 @@ import { UPDATE_CHANNELS, type UpdateChannel, type UpdateStatus } from '../../..
 import { CAPABILITY_STATE_LABELS, type GitHubHostStatus } from '../../../shared/host'
 import { GitHubCliStatusSection } from './github-cli-status'
 import { UpdateFacts, UpdateNotice } from './update-summary'
-import {
-  NOTIFICATION_CONSENT_POINTS,
-  NOTIFICATION_CREDENTIAL_KIND,
-  NOTIFICATION_CREDENTIAL_SCOPE,
-} from '../../../shared/notifications'
+import { NOTIFICATION_CONSENT_POINTS } from '../../../shared/notifications'
 
 const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
   merge: 'Merge commit',
@@ -409,7 +405,7 @@ export function SettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="settings-dialog max-w-3xl">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
@@ -417,8 +413,11 @@ export function SettingsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex gap-4">
-          <nav aria-label="Settings sections" className="grid w-44 shrink-0 content-start gap-1">
+        <div className="settings-layout flex gap-4">
+          <nav
+            aria-label="Settings sections"
+            className="settings-navigation grid w-44 shrink-0 content-start gap-1"
+          >
             {SECTIONS.map((entry) => (
               <Button
                 key={entry.id}
@@ -435,7 +434,7 @@ export function SettingsDialog({
           <div className="grid min-w-0 flex-1 content-start gap-4">
             {!snapshot ? <InlineAlert tone="info">Reading settings…</InlineAlert> : null}
             {message ? (
-              <InlineAlert tone="success">
+              <InlineAlert tone="success" role="status">
                 <Check aria-hidden="true" className="size-4" /> {message}
               </InlineAlert>
             ) : null}
@@ -457,6 +456,7 @@ export function SettingsDialog({
             {section === 'github' && settings ? (
               <WorkflowSection label="GitHub host">
                 <form
+                  className="grid gap-3"
                   onSubmit={(event) => {
                     event.preventDefault()
                     event.stopPropagation()
@@ -524,7 +524,7 @@ export function SettingsDialog({
                 <Field
                   id="settings-notifications"
                   label={<span className="sr-only">Read a GitHub Notifications inbox</span>}
-                  description={`Optional and separate from CLI authentication. Reading this inbox needs a ${NOTIFICATION_CREDENTIAL_KIND} with the ${NOTIFICATION_CREDENTIAL_SCOPE} scope. It is entered here, crosses the bridge to the main process once, and is kept sealed by the operating system's own protection in a vault file this module owns; ordinary application state holds only an opaque reference to it, and the stored credential is never sent back to this window. Turning it off stops the polling and hides the list; it does not remove that token, it asks nothing of the GitHub CLI session, and it changes nothing about pull requests, stacks, or reviews.`}
+                  description="Turning it off stops the polling and hides the list; it does not remove that token, it asks nothing of the GitHub CLI session, and it changes nothing about pull requests, stacks, or reviews."
                   error={problemFor('notifications.enabled')}
                 >
                   <Checkbox
@@ -545,13 +545,13 @@ export function SettingsDialog({
                 {lockFor('notifications.enabled') ? (
                   <InlineAlert tone="info">{lockFor('notifications.enabled')!.reason}</InlineAlert>
                 ) : null}
-                <p className="text-[length:var(--gs-semantic-type-label-size)]">
+                <h4 className="m-0 text-[length:var(--gs-semantic-type-label-size)] font-semibold leading-[1.35]">
                   What authorizing one adds, in full
-                </p>
-                <ul className="m-0 grid list-none gap-2 p-0">
+                </h4>
+                <ul className="m-0 grid list-none gap-3 p-0">
                   {NOTIFICATION_CONSENT_POINTS.map((point) => (
                     <li
-                      className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+                      className="text-[length:var(--gs-semantic-type-body-size)] leading-[var(--gs-semantic-type-body-line)] text-[var(--gs-semantic-text-secondary)]"
                       key={point}
                     >
                       {point}
@@ -829,7 +829,12 @@ export function SettingsDialog({
                   onBindingsChange={(bindings) => {
                     void save({ shortcuts: bindings }, 'Shortcuts saved.')
                   }}
-                  disabledReason={lockFor('shortcuts')?.reason}
+                  disabledReason={
+                    lockFor('shortcuts')?.reason ??
+                    (busy
+                      ? 'Saving settings. Shortcut changes are temporarily unavailable.'
+                      : undefined)
+                  }
                 />
               </WorkflowSection>
             ) : null}
@@ -890,7 +895,7 @@ export function SettingsDialog({
                             <summary className="cursor-pointer text-[length:var(--gs-semantic-type-label-size)]">
                               {entry.title}
                             </summary>
-                            <pre className="max-h-48 overflow-auto rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-2 text-[length:var(--gs-semantic-type-metadata-size)]">
+                            <pre className="max-h-48 overflow-auto rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-2 text-xs">
                               {entry.content}
                             </pre>
                           </details>
@@ -919,7 +924,7 @@ export function SettingsDialog({
 
             {settings ? (
               <div className="flex items-center justify-between gap-3 border-t border-[var(--gs-semantic-border)] pt-3">
-                <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
                   Stored in {snapshot?.file ?? 'application data'}
                 </span>
                 <Button

@@ -66,14 +66,19 @@ export function GitRuntimeDialog({
         <DialogHeader>
           <DialogTitle>Git runtime</DialogTitle>
           <DialogDescription>
-            Every branch, ref, and pull request action runs through the one Git runtime below. It
-            ships inside this release and is never downloaded at runtime.
+            Every branch, ref, and pull request action uses the selected Git runtime below. The
+            bundled runtime ships inside this release and is never downloaded at runtime.
           </DialogDescription>
         </DialogHeader>
         <div className="dialog-form">
           {status?.error ? (
             <InlineAlert tone="error" role="alert">
               {status.error}
+            </InlineAlert>
+          ) : null}
+          {!status ? (
+            <InlineAlert tone="info" role="status">
+              Reading the Git runtime…
             </InlineAlert>
           ) : null}
           <WorkflowSection label="Runtime">
@@ -88,24 +93,24 @@ export function GitRuntimeDialog({
               )}
             />
           </WorkflowSection>
-          <WorkflowSection label="Capabilities">
-            <div className="flex flex-wrap gap-2">
-              {runtime
-                ? (Object.keys(CAPABILITY_LABELS) as GitCapability[]).map((capability) => (
-                    <Badge
-                      key={capability}
-                      variant={runtime.capabilities[capability] ? 'success' : 'warning'}
-                    >
-                      {CAPABILITY_LABELS[capability]}:{' '}
-                      {runtime.capabilities[capability] ? 'yes' : 'no'}
-                    </Badge>
-                  ))
-                : null}
-            </div>
-          </WorkflowSection>
+          {runtime ? (
+            <WorkflowSection label="Capabilities">
+              <div className="flex flex-wrap gap-2">
+                {(Object.keys(CAPABILITY_LABELS) as GitCapability[]).map((capability) => (
+                  <Badge
+                    key={capability}
+                    variant={runtime.capabilities[capability] ? 'success' : 'warning'}
+                  >
+                    {CAPABILITY_LABELS[capability]}:{' '}
+                    {runtime.capabilities[capability] ? 'yes' : 'no'}
+                  </Badge>
+                ))}
+              </div>
+            </WorkflowSection>
+          ) : null}
           <WorkflowSection label="Git executable">
             <SegmentedControl
-              disabled={busy}
+              disabled={busy || !status}
               label="Git executable"
               onValueChange={(value) => onSelectSystemGit(value === 'system')}
               options={[
@@ -114,32 +119,32 @@ export function GitRuntimeDialog({
               ]}
               value={status?.useSystemGit ? 'system' : 'bundled'}
             />
-            <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-              This choice is stored with your preferences and applies to every repository. Turn it
-              off at any time to return to the runtime shipped with Git Stacks.
+            <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">
+              This choice is stored with your preferences and applies to every repository. Choose
+              Bundled runtime to return to the runtime shipped with Git Stacks.
             </p>
           </WorkflowSection>
-          {runtime ? (
-            <>
-              <WorkflowSection label="Preserved environment">
-                <OperationFacts
-                  facts={runtime.preservedEnvironment.map((key) => ({
-                    label: key,
-                    value: 'passed through',
-                    code: true,
-                  }))}
-                />
-              </WorkflowSection>
-              <WorkflowSection label="Preserved configuration">
-                <OperationFacts
-                  facts={runtime.preservedConfiguration.map((key) => ({
-                    label: key,
-                    value: 'never overridden',
-                    code: true,
-                  }))}
-                />
-              </WorkflowSection>
-            </>
+          {runtime?.preservedEnvironment.length ? (
+            <WorkflowSection label="Preserved environment">
+              <OperationFacts
+                facts={runtime.preservedEnvironment.map((key) => ({
+                  label: key,
+                  value: 'passed through',
+                  code: true,
+                }))}
+              />
+            </WorkflowSection>
+          ) : null}
+          {runtime?.preservedConfiguration.length ? (
+            <WorkflowSection label="Preserved configuration">
+              <OperationFacts
+                facts={runtime.preservedConfiguration.map((key) => ({
+                  label: key,
+                  value: 'never overridden',
+                  code: true,
+                }))}
+              />
+            </WorkflowSection>
           ) : null}
         </div>
       </DialogContent>

@@ -1,6 +1,5 @@
 import * as React from 'react'
 import { RefreshCw } from 'lucide-react'
-import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { InlineAlert } from './ui/surface'
@@ -37,13 +36,6 @@ const STATE_TONES: Record<GitHubCliState, Tone> = {
   'permission-denied': 'error',
   offline: 'warning',
   unavailable: 'error',
-}
-
-const BADGE_TONES: Record<Tone, 'info' | 'success' | 'warning' | 'danger'> = {
-  info: 'info',
-  success: 'success',
-  warning: 'warning',
-  error: 'danger',
 }
 
 /**
@@ -142,12 +134,12 @@ export function GitHubCliStatusSection({
           <span className="font-mono">gh</span>, then refresh this status.
         </InlineAlert>
       ) : null}
-      <div className="grid gap-1.5">
+      <div className="grid gap-2">
         {cliCommands(status).map((command) => (
           <CopyableCommand key={command.label} label={command.label} command={command.command} />
         ))}
       </div>
-      <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+      <p className="m-0 text-[length:var(--gs-semantic-type-body-size)] leading-[var(--gs-semantic-type-body-line)] text-[var(--gs-semantic-text-secondary)]">
         The GitHub CLI owns sign-in, credential storage, account switching, and sign-out. These
         commands are shown for you to run in a terminal; this window never runs them, and opening,
         refreshing, or closing it changes nothing in the CLI session. Local Git — staging,
@@ -167,9 +159,8 @@ export function GitHubCliStatusSection({
 }
 
 /**
- * The dialog the sidebar's GitHub status control opens: the same status section
- * with the state named as a badge, so the title says which distinct state this
- * is rather than leaving it to be inferred from a dot.
+ * The sidebar status dialog uses the same measured facts and terminal guidance
+ * as Settings, without repeating the session in a second status block.
  */
 export function GitHubCliStatusDialog({
   onOpenChange,
@@ -184,26 +175,17 @@ export function GitHubCliStatusDialog({
   refreshing: boolean
   status: GitHubCliStatus | null
 }) {
-  const state: GitHubCliState = status?.state ?? 'checking'
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="workflow-dialog" aria-label="GitHub CLI status">
         <DialogHeader>
           <DialogTitle>GitHub CLI authentication</DialogTitle>
           <DialogDescription>
-            Git Stacks reads GitHub through the GitHub CLI installed on this computer. That CLI owns
-            sign-in, credential storage, account switching, and sign-out; this window reports what
-            it found and changes nothing about it.
+            Git Stacks reads GitHub through the GitHub CLI installed on this computer. This window
+            reports the session it found.
           </DialogDescription>
         </DialogHeader>
         <div className="dialog-form">
-          <WorkflowSection label="Status">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={BADGE_TONES[STATE_TONES[state]]}>{STATE_TITLES[state]}</Badge>
-              {status?.login ? <Badge variant="outline">{status.login}</Badge> : null}
-              {status?.host ? <Badge variant="outline">{status.host}</Badge> : null}
-            </div>
-          </WorkflowSection>
           <GitHubCliStatusSection onRefresh={onRefresh} refreshing={refreshing} status={status} />
         </div>
       </DialogContent>

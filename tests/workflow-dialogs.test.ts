@@ -7,7 +7,6 @@ import {
   OperationContext,
   OperationSteps,
   PhaseStatus,
-  TypedConfirmation,
   WarningNote,
   WorkflowFrame,
 } from '../src/renderer/src/components/workflow-composition'
@@ -718,45 +717,6 @@ test('the three compositions are distinguishable in the rendered surface', () =>
       React.createElement(WorkflowFrame, { composition: 'reviewed', wide: true }, 'body'),
     ),
     /max-w-\[760px\]/,
-  )
-})
-
-test('a typed confirmation reports the mismatch and only confirms on an exact match', () => {
-  const mismatch = renderToStaticMarkup(
-    React.createElement(TypedConfirmation, {
-      id: 'workflow-confirm',
-      value: 'feature/check',
-      target: 'feature/checkout',
-      onChange: () => undefined,
-    }),
-  )
-  assert.match(mismatch, /Type feature\/checkout to confirm/)
-  assert.match(mismatch, /does not match/)
-  assert.match(mismatch, /aria-invalid="true"/)
-
-  const match = renderToStaticMarkup(
-    React.createElement(TypedConfirmation, {
-      id: 'workflow-confirm',
-      value: 'feature/checkout',
-      target: 'feature/checkout',
-      onChange: () => undefined,
-    }),
-  )
-  assert.doesNotMatch(match, /does not match/)
-  assert.match(match, /Confirmed/)
-
-  const untouched = renderToStaticMarkup(
-    React.createElement(TypedConfirmation, {
-      id: 'workflow-confirm',
-      value: '',
-      target: 'feature/checkout',
-      onChange: () => undefined,
-    }),
-  )
-  assert.doesNotMatch(
-    untouched,
-    /does not match/,
-    'an empty field is incomplete, not a mismatch worth interrupting about',
   )
 })
 

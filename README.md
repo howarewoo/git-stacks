@@ -380,6 +380,9 @@ Check status before logging in if you already authenticated. `gh` owns sign-in,
 credential storage, refresh, account switching, and sign-out; Git Stacks reports
 what it found and changes nothing about that session. Local Git remains available
 when the CLI is missing, signed out, rejected, or offline.
+Repositories without a GitHub origin also open while the initial CLI status is
+settling or the CLI account changes; those local reads carry no GitHub answer to
+retire. Reads that contact GitHub still reject answers from a replaced credential.
 
 Any current `gh` release that reports `gh auth status --json hosts` works. The
 version shown in this repository's fixtures is a fixture version, not a minimum:
@@ -1416,6 +1419,9 @@ with an ordinary Git working tree:
   destination folder, HTTPS or SSH, and an optional shallow clone. Before
   anything is written, the dialog shows the exact `git clone` and
   `gh repo clone` commands and copies either one to the clipboard.
+  Copy confirmation resets when the displayed command changes. If the clipboard
+  refuses the write, the command remains selectable and the copy control shows
+  recovery guidance instead of silently failing.
 - **Add local repository** opens the folder picker and adopts whatever is
   there. It is read, never written: adding a repository never rewrites its
   config, refs, or files.
@@ -1711,6 +1717,32 @@ workflows. The keyboard, accessibility, safety, and motion/zoom renderer suites
 cover these contracts. After intentional shell changes, update the affected
 macOS visual baselines with `npm run test:visual:update`.
 
+For a broad polish pass, inspect every destination: Branches, Stacks, Working
+changes, History, Stashes, Pull requests, Review, PR Inbox, GitHub Notifications,
+and Diagnostics. Cover all nine Settings sections and all five Review tabs,
+including unified/split Code, lower submitted threads, replies, and pending
+drafts. Inspect ordinary, reviewed, and destructive workflows alongside clone,
+CLI status, Git runtime, shortcuts, reconciliation, dirty-checkout, credential
+consent, and conflict-resolution dialogs. Use the default and minimum native
+windows in both themes; keep wide-window and 720×470 zoom-equivalent coverage.
+
+Include confirmed, empty, loading, stale, and refused reads, not only populated
+lists. Check computed type roles, content insets, disabled gates, keyboard focus,
+and local scrolling to lower controls. At the minimum window, scroll the sidebar
+itself to reach its lower destinations; do not confuse its fixed footer with
+page overflow. Long native-stack disclosures must fully reveal the selected
+layer and retain keyboard navigation without reducing the collapsed Code
+viewport's row budget.
+
+Also exercise `ancestry-requires-restack` with the inspector shown and hidden
+and tall `shell-no-repository` content at the minimum window. Branch identities
+must remain readable beside state badges, onboarding must start within its
+local scroll region, and Settings must leave the selected controls reachable.
+`tests/renderer/onboarding.spec.ts` covers clipboard refusal and retiring copy
+confirmation when the command changes. Review intentional visual differences
+before updating macOS baselines; keep run-specific screenshots and results out
+of `DESIGN.md`.
+
 The typed control surface is `window.fixture`: `actions` and `externalUrls` record dispatch; `calls` records reads and writes; `hold(method)` and `release(method, occurrence?)` control in-flight requests, oldest first (or targeted by `'oldest'` or `'newest'`); `failNext(method, message)` rejects one request; `answerNext(method, value)` answers one request with a value the producer itself would return, so a spec can put a read that ended on the wire; and `setScenario(name)` installs another scenario's answers into the double that is already installed, without remounting the App — the window keeps its destination, its state, and its reads in flight, and subsequent reads answer from the newly selected scenario's own repository (or refuse when it has none), while the repository already displayed is preserved until the user or application opens another repository or refreshes. That is what makes an in-place transition provable: a remount is indistinguishable from a first load, and every in-place transition — a read that ends, a read that is replaced, a read that names no account — would only ever be provable by reloading the page.
 
 `pull-requests-checks-detail` and `pull-requests-checks-stale` are the checks
@@ -1793,6 +1825,14 @@ npm run test:desktop
 The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `release/linux-unpacked/git-stacks` on Linux; Windows is unsupported until its process-tree cleanup can be verified. `node scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates a disposable repository and local bare remote, isolates the Chromium user data, the temporary directory, the Git configuration and the gh configuration inside the workspace, strips inherited Git/GitHub and credential-shaped environment variables, and cleans the temporary workspace. On macOS the app inherits the host home directory, because the system only spawns the app's sandboxed helper processes against the home the password database reports: with a synthetic `HOME` the browser process never brings those helpers up and stops answering on its own DevTools endpoint, so the smoke can never reach the renderer. Nothing the app, git or gh reads comes from that home — user data is the redirected `--user-data-dir`, and `GIT_CONFIG_NOSYSTEM=1` with an empty `GIT_CONFIG_GLOBAL` and a disposable `GH_CONFIG_DIR` keep the machine's own Git identity, credential helpers and GitHub login out of the fixture. A `browserType.connectOverCDP` timeout on the first `/json/version` request is that dead endpoint, not a slow start. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
 
 The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
+
+The branch-creation check selects the branch identity independently of appended
+picker status annotations, then verifies the checkout, branch tip, and recorded
+stack parent with Git.
+
+The commit helper waits for Stage all to become enabled after a repository
+refresh rather than sampling its transient disabled state once. The existing
+20-second UI timeout and real Git commit and clean-working-tree assertions remain.
 
 ### IPC sender validation
 

@@ -1209,7 +1209,7 @@ function ReviewHeadlineBlock({
         <code>{pr.base}</code>
         {pr.headOid ? (
           <span className="review-headline-oid">
-            head {pr.headOid.slice(0, 7)}
+            head <code>{pr.headOid.slice(0, 7)}</code>
             {filesComparison && filesComparison.headOid !== pr.headOid
               ? ' as of the headline'
               : null}
@@ -1325,8 +1325,7 @@ function ReviewRail({
           if (!event.currentTarget.open) return
           const list = event.currentTarget.querySelector<HTMLOListElement>('.review-stack-members')
           const current = list?.querySelector<HTMLElement>('[aria-current="page"]')
-          if (list && current)
-            list.scrollTop += current.getBoundingClientRect().top - list.getBoundingClientRect().top
+          current?.scrollIntoView({ block: 'nearest' })
         }}
       >
         <summary>

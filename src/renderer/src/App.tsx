@@ -2704,7 +2704,6 @@ function App() {
           >
             Git runtime
           </Button>
-          <span className="version-label">Git Stacks</span>
         </div>
       </div>
     </aside>
@@ -2886,38 +2885,6 @@ function App() {
           Details
         </Button>
       ) : null}
-    </div>
-  )
-
-  const renderBranchFilters = () => (
-    <div className="list-toolbar">
-      <div className="list-title-group">
-        <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
-          Branches
-        </h1>
-        <span className="list-subtitle">{visibleBranches.length} shown</span>
-      </div>
-      <SegmentedControl<BranchFilter>
-        label="Branch filters"
-        value={branchFilter}
-        onValueChange={(value) => {
-          if (
-            (value === 'remote' && selectedRemote === false) ||
-            (value === 'local' && selectedRemote === true)
-          ) {
-            setBranchSelection((current) =>
-              current ? { ...current, refs: new Set<string>() } : null,
-            )
-          }
-          setBranchFilter(value)
-        }}
-        options={[
-          { value: 'all', label: 'All' },
-          { value: 'local', label: 'Local' },
-          { value: 'remote', label: 'Remote' },
-          { value: 'prs', label: 'With PRs' },
-        ]}
-      />
     </div>
   )
 
@@ -3360,86 +3327,114 @@ function App() {
       )
     return (
       <div className="branches-view">
-        {renderBranchFilters()}
-        <div className="flex flex-wrap items-center gap-2 px-4 py-2">
-          {branchSelectionMode ? (
-            <>
-              <Checkbox
-                label="Select all visible"
-                title={`Select eligible ${selectingRemote ? 'remote' : 'local'} branches on this page.`}
-                checked={
-                  selectedVisibleCount > 0 &&
-                  selectedVisibleCount === selectableVisibleBranches.length
-                }
-                indeterminate={
-                  selectedVisibleCount > 0 &&
-                  selectedVisibleCount < selectableVisibleBranches.length
-                }
-                disabled={isBusy || operationActive || selectableVisibleBranches.length === 0}
-                onCheckedChange={(checked) => {
-                  const refs = new Set(branchSelection?.refs)
-                  for (const branch of selectableVisibleBranches) {
-                    if (checked) refs.add(branch.ref)
-                    else refs.delete(branch.ref)
-                  }
-                  setBranchSelection({ repoPath: snapshot.path, refs })
-                }}
-              />
-              <span role="status" className="text-sm text-[var(--gs-semantic-text-secondary)]">
-                {selectedDeleteBranches.length}{' '}
-                {selectedRemote === undefined ? '' : selectedRemote ? 'remote ' : 'local '}selected
-              </span>
-              <Button
-                size="sm"
-                variant="danger"
-                disabled={
-                  isBusy ||
-                  operationActive ||
-                  selectedDeleteBranches.length === 0 ||
-                  selectedDeleteBranches.some((branch) => branchSelectionReason(branch)) ||
-                  Boolean(shapeReason(selectionActionType))
-                }
-                tooltip={
-                  shapeReason(selectionActionType) ??
-                  `Review the selected ${selectingRemote ? 'remote' : 'local'} branches before deleting.`
-                }
-                onClick={() => openDeleteDialog(selectedDeleteBranches)}
-              >
-                <Trash2 aria-hidden="true" className="size-3.5" />
-                Delete selected ({selectedDeleteBranches.length})
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={isBusy}
-                onClick={() => setBranchSelection({ repoPath: snapshot.path, refs: new Set() })}
-              >
-                Clear selection
-              </Button>
+        <div className="list-toolbar">
+          <div className="list-title-group">
+            <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+              Branches
+            </h1>
+            <span className="list-subtitle">{visibleBranches.length} shown</span>
+          </div>
+          <div className="branch-header-controls">
+            {!branchSelectionMode ? (
               <Button
                 size="sm"
                 variant="secondary"
-                disabled={isBusy}
-                onClick={() => setBranchSelection(null)}
+                disabled={isBusy || operationActive || Boolean(shapeReason(selectionActionType))}
+                tooltip={
+                  shapeReason(selectionActionType) ??
+                  'Select local or remote branches to delete. Each batch uses one type.'
+                }
+                onClick={() => setBranchSelection({ repoPath: snapshot.path, refs: new Set() })}
               >
-                Done selecting
+                Select branches
               </Button>
-            </>
-          ) : (
+            ) : null}
+            <SegmentedControl<BranchFilter>
+              label="Branch filters"
+              value={branchFilter}
+              onValueChange={(value) => {
+                if (
+                  (value === 'remote' && selectedRemote === false) ||
+                  (value === 'local' && selectedRemote === true)
+                ) {
+                  setBranchSelection((current) =>
+                    current ? { ...current, refs: new Set<string>() } : null,
+                  )
+                }
+                setBranchFilter(value)
+              }}
+              options={[
+                { value: 'all', label: 'All' },
+                { value: 'local', label: 'Local' },
+                { value: 'remote', label: 'Remote' },
+                { value: 'prs', label: 'With PRs' },
+              ]}
+            />
+          </div>
+        </div>
+        {branchSelectionMode ? (
+          <div className="branch-selection-controls">
+            <Checkbox
+              label="Select all visible"
+              title={`Select eligible ${selectingRemote ? 'remote' : 'local'} branches on this page.`}
+              checked={
+                selectedVisibleCount > 0 &&
+                selectedVisibleCount === selectableVisibleBranches.length
+              }
+              indeterminate={
+                selectedVisibleCount > 0 && selectedVisibleCount < selectableVisibleBranches.length
+              }
+              disabled={isBusy || operationActive || selectableVisibleBranches.length === 0}
+              onCheckedChange={(checked) => {
+                const refs = new Set(branchSelection?.refs)
+                for (const branch of selectableVisibleBranches) {
+                  if (checked) refs.add(branch.ref)
+                  else refs.delete(branch.ref)
+                }
+                setBranchSelection({ repoPath: snapshot.path, refs })
+              }}
+            />
+            <span role="status" className="text-xs text-[var(--gs-semantic-text-secondary)]">
+              {selectedDeleteBranches.length}{' '}
+              {selectedRemote === undefined ? '' : selectedRemote ? 'remote ' : 'local '}selected
+            </span>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={
+                isBusy ||
+                operationActive ||
+                selectedDeleteBranches.length === 0 ||
+                selectedDeleteBranches.some((branch) => branchSelectionReason(branch)) ||
+                Boolean(shapeReason(selectionActionType))
+              }
+              tooltip={
+                shapeReason(selectionActionType) ??
+                `Review the selected ${selectingRemote ? 'remote' : 'local'} branches before deleting.`
+              }
+              onClick={() => openDeleteDialog(selectedDeleteBranches)}
+            >
+              <Trash2 aria-hidden="true" className="size-3.5" />
+              Delete selected ({selectedDeleteBranches.length})
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={isBusy}
+              onClick={() => setBranchSelection({ repoPath: snapshot.path, refs: new Set() })}
+            >
+              Clear selection
+            </Button>
             <Button
               size="sm"
               variant="secondary"
-              disabled={isBusy || operationActive || Boolean(shapeReason(selectionActionType))}
-              tooltip={
-                shapeReason(selectionActionType) ??
-                'Select local or remote branches to delete. Each batch uses one type.'
-              }
-              onClick={() => setBranchSelection({ repoPath: snapshot.path, refs: new Set() })}
+              disabled={isBusy}
+              onClick={() => setBranchSelection(null)}
             >
-              Select branches
+              Done selecting
             </Button>
-          )}
-        </div>
+          </div>
+        ) : null}
         {renderBranchList()}
       </div>
     )
@@ -4114,7 +4109,7 @@ function App() {
         >
           <Search className="size-3.5" />
           Palette
-          <kbd className="ml-1 rounded border border-[var(--gs-semantic-border-essential)] px-1 font-mono text-[length:var(--gs-semantic-type-metadata-size)]">
+          <kbd className="ml-1 rounded border border-[var(--gs-semantic-border-essential)] px-1 font-sans text-xs">
             {formatChord(shortcutBindings['palette.open'], isMac)}
           </kbd>
         </Button>

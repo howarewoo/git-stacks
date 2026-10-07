@@ -26,10 +26,10 @@ export const Checkbox = React.forwardRef<HTMLElement, CheckboxProps>(
       [props['aria-describedby'], descriptionId, errorId].filter(Boolean).join(' ') || undefined
 
     return (
-      <div className={cn('gs-checkbox grid min-h-9 gap-1.5', className)}>
+      <div className={cn('gs-checkbox grid min-h-9 gap-2', className)}>
         <label
           className={cn(
-            'flex min-h-9 min-w-9 items-center gap-2',
+            'flex min-h-9 min-w-9 items-center gap-2 text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)]',
             props.disabled ? 'cursor-not-allowed' : 'cursor-pointer',
           )}
           htmlFor={controlId}
@@ -60,7 +60,7 @@ export const Checkbox = React.forwardRef<HTMLElement, CheckboxProps>(
           {label ? (
             <span
               id={labelId}
-              className="text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]"
+              className="text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-primary)]"
             >
               {label}
             </span>
@@ -69,7 +69,7 @@ export const Checkbox = React.forwardRef<HTMLElement, CheckboxProps>(
         {description ? (
           <p
             id={descriptionId}
-            className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+            className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]"
           >
             {description}
           </p>
@@ -78,7 +78,7 @@ export const Checkbox = React.forwardRef<HTMLElement, CheckboxProps>(
           <p
             id={errorId}
             role="alert"
-            className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]"
+            className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-feedback-error-text)]"
           >
             {error}
           </p>

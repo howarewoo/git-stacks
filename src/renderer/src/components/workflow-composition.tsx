@@ -64,7 +64,7 @@ export function WorkflowSection({
       {...props}
     >
       {label ? (
-        <h3 className="m-0 text-[length:var(--gs-semantic-type-label-size)] font-semibold uppercase tracking-wide text-[var(--gs-semantic-text-secondary)]">
+        <h3 className="m-0 text-[length:var(--gs-semantic-type-label-size)] font-semibold leading-[1.35] text-[var(--gs-semantic-text-primary)]">
           {label}
         </h3>
       ) : null}
@@ -105,7 +105,7 @@ export function OperationContext({
         </p>
       ) : null}
       {description ? (
-        <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] leading-relaxed text-[var(--gs-semantic-text-secondary)]">
+        <p className="m-0 text-[length:var(--gs-semantic-type-body-size)] leading-[1.5] text-[var(--gs-semantic-text-secondary)]">
           {description}
         </p>
       ) : null}
@@ -124,18 +124,16 @@ export function OperationFacts({
   return (
     <dl
       className={cn(
-        'm-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-3 py-2.5',
+        'm-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-3',
         className,
       )}
     >
       {facts.map((fact) => (
         <React.Fragment key={fact.label}>
-          <dt className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-            {fact.label}
-          </dt>
+          <dt className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">{fact.label}</dt>
           <dd
             className={cn(
-              'm-0 min-w-0 break-words text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-primary)]',
+              'm-0 min-w-0 break-words text-xs text-[var(--gs-semantic-text-primary)]',
               fact.code && 'font-mono',
             )}
           >
@@ -164,9 +162,7 @@ export function OperationSteps({
 }) {
   if (!steps.length) {
     return emptyNote ? (
-      <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-        {emptyNote}
-      </p>
+      <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">{emptyNote}</p>
     ) : null
   }
   return (
@@ -184,18 +180,16 @@ export function OperationSteps({
             <strong className="break-words text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
               {step.branch}
             </strong>
-            <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+            <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
               into {step.parent} · {step.commits} commit{step.commits === 1 ? '' : 's'} ·{' '}
               <code className="font-mono">{step.oid.slice(0, 10)}</code>
             </span>
             {step.note ? (
-              <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-                {step.note}
-              </p>
+              <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">{step.note}</p>
             ) : null}
           </div>
           {step.pr ? (
-            <span className="col-span-2 col-start-2 flex flex-wrap items-center gap-1.5 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+            <span className="col-span-2 col-start-2 flex flex-wrap items-center gap-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
               <Badge variant={step.pr.state === 'OPEN' ? 'secondary' : 'outline'}>
                 {step.pr.draft ? 'draft' : step.pr.state.toLowerCase()}
               </Badge>
@@ -226,12 +220,7 @@ export function PhaseStatus({
   if (phase === 'ready' && !title) {
     if (!message) return null
     return (
-      <p
-        className={cn(
-          'm-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]',
-          className,
-        )}
-      >
+      <p className={cn('m-0 text-xs text-[var(--gs-semantic-text-secondary)]', className)}>
         {message}
       </p>
     )
@@ -312,7 +301,7 @@ export function TypedConfirmation({
       label={label ?? `Type ${target} to confirm`}
       description={
         matches
-          ? 'Confirmed. This action is enabled.'
+          ? 'The name matches. Review any remaining requirements before running this action.'
           : 'The name must match exactly. Nothing runs until it does.'
       }
       error={value && !matches ? 'The typed name does not match yet.' : undefined}
@@ -385,7 +374,7 @@ export function PublishProgressPanel({
       ) : (
         <InlineAlert tone="info">{progress.message}</InlineAlert>
       )}
-      <ol aria-label="Submission steps" className="m-0 grid list-none gap-1.5 p-0">
+      <ol aria-label="Submission steps" className="m-0 grid list-none gap-2 p-0">
         {progress.steps.map((step, index) => (
           <li
             key={`${step.kind}-${step.branch ?? 'stack'}-${index}`}
@@ -401,13 +390,13 @@ export function PublishProgressPanel({
               <strong className="break-words text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
                 {step.label}
               </strong>
-              <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+              <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
                 {step.detail}
                 {step.pullRequest === null ? '' : ` · #${step.pullRequest}`}
               </span>
             </div>
             {progress.resumeAt === index && step.status === 'failed' ? (
-              <span className="col-span-2 col-start-2 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+              <span className="col-span-2 col-start-2 text-xs text-[var(--gs-semantic-text-secondary)]">
                 {step.failure?.retryable
                   ? 'Retry continues from this step without repeating the finished ones.'
                   : 'This step cannot be retried; dismiss the submission and take a fresh preview.'}
@@ -495,7 +484,7 @@ export function MergeOutcomePanel({
       ) : (
         <InlineAlert tone="info">{progress.message}</InlineAlert>
       )}
-      <ol aria-label="Merged pull requests" className="m-0 grid list-none gap-1.5 p-0">
+      <ol aria-label="Merged pull requests" className="m-0 grid list-none gap-2 p-0">
         {progress.layers.map((layer) => {
           const presentation = mergeLayerPresentation[layer.status]
           return (
@@ -510,17 +499,17 @@ export function MergeOutcomePanel({
                 <strong className="break-words text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
                   #{layer.pullRequest} {layer.branch}
                 </strong>
-                <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
                   {layer.detail}
                 </span>
                 {layer.queue ? (
-                  <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                  <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
                     {queueDetail(layer.queue)}
                   </span>
                 ) : null}
               </div>
               {layer.mergedOid ? (
-                <span className="font-mono text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                <span className="font-mono text-xs text-[var(--gs-semantic-text-secondary)]">
                   {layer.mergedOid.slice(0, 10)}
                 </span>
               ) : null}

@@ -105,7 +105,9 @@ function repositoryBadges(repository: GitHubRepositorySummary) {
  * from renderer input and never spawns a process for it.
  */
 export function CopyableCommand({ label, command }: { label: string; command: string }) {
-  const [copied, setCopied] = React.useState(false)
+  const [result, setResult] = React.useState<{ command: string; copied: boolean } | null>(null)
+  const copied = result?.command === command && result.copied
+  const failed = result?.command === command && !result.copied
   return (
     <div className="onboarding-command">
       <span className="onboarding-command-label">
@@ -115,11 +117,14 @@ export function CopyableCommand({ label, command }: { label: string; command: st
       <code className="onboarding-command-text">{command}</code>
       <Button
         aria-label={`Copy the ${label} command`}
-        onClick={() => {
-          navigator.clipboard
-            .writeText(command)
-            .then(() => setCopied(true))
-            .catch(() => setCopied(false))
+        onClick={async () => {
+          setResult(null)
+          try {
+            await navigator.clipboard.writeText(command)
+            setResult({ command, copied: true })
+          } catch {
+            setResult({ command, copied: false })
+          }
         }}
         size="sm"
         type="button"
@@ -132,8 +137,12 @@ export function CopyableCommand({ label, command }: { label: string; command: st
         )}
         {copied ? 'Copied' : 'Copy'}
       </Button>
-      <span aria-live="polite" className="sr-only">
-        {copied ? `${label} command copied` : ''}
+      <span aria-live="polite" className={failed ? 'onboarding-command-feedback' : 'sr-only'}>
+        {copied
+          ? `${label} command copied`
+          : failed
+            ? 'Clipboard unavailable. Select and copy the command.'
+            : ''}
       </span>
     </div>
   )
@@ -521,9 +530,9 @@ export function RepositoryDiscoveryDialog({
                 </InlineAlert>
               ) : null}
               <div className="onboarding-clone-grid">
-                <div className="grid gap-1.5">
+                <div className="grid gap-2">
                   <label
-                    className="text-[length:var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-primary)]"
+                    className="text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-primary)]"
                     htmlFor="clone-folder"
                   >
                     Folder
@@ -556,7 +565,7 @@ export function RepositoryDiscoveryDialog({
                     </Button>
                   </div>
                   <p
-                    className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+                    className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] leading-[1.4] text-[var(--gs-semantic-text-secondary)]"
                     id="clone-folder-description"
                   >
                     {cloneConfig.parentDirectory ||
