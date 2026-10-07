@@ -151,6 +151,10 @@ identity so file-content changes not represented by summary fields still reload
 the selected file. Scope read keys to their repository, host/CLI authority,
 pull request, ref, and comparison as applicable. Retire superseded reads before
 adopting pushed or confirmed results.
+Repository identity transitions carry the admitted snapshot as the new observer's
+initial data, so zero-lifetime inactive cache collection cannot erase a local
+open before React renders. A retired GitHub authority seeds only local facts
+with remote-derived state removed; it never restores the retired credential.
 
 Review line selections retire when any part of the displayed comparison changes.
 Confirmed review delivery retires only delivered draft identities in main's
@@ -1692,6 +1696,31 @@ These are the extreme cases the app states rather than hanging or crashing on.
 ## Renderer verification
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
+
+### Approved migration references
+
+The immutable #131 Stacks reference is
+[`approved-stacks-demo.html`](tests/renderer/references/ui-131/approved-stacks-demo.html),
+downloaded from the [approved original demo](https://github.com/user-attachments/files/33138100/Git-Stacks-Large-Repo-Demo.html).
+Its SHA-256 is `972d767ffb2607ea0dc91288255adb4160dd393116da6cab4cc807cbd4d13f7d`.
+The [original parity plan](tests/renderer/references/ui-131/original-parity-plan.md)
+has SHA-256 `6fbd6fe294b3cffbd897d229ee8f30030e7bc0ea88cd2a1d56a69c5df8383c88`.
+The demo is a visual reference only; its simulated or disabled controls are not
+feature-parity evidence and its runtime is not imported by production.
+
+The frozen production captures preserve Review panes, working changes/conflicts,
+operation preview/recovery, onboarding, PR Inbox, independent Notifications, and
+all nine Settings sections in both themes at 1000×700, 1440×940, and 1920×1080.
+The repository-owned images live beside the approved demo. Ordinary renderer
+tests must not overwrite these approved references. Updating them requires an
+intentional visual review of the changed composition against the frozen reference
+in both themes and all three sizes, with the reason and replacement evidence
+recorded in the associated pull request. The one-time capture collector was
+removed after the reference freeze.
+These fixture captures prove renderer composition, not native Git success,
+OS window behavior, VoiceOver, actual browser zoom, signed updates, or final
+integrated graph parity. Existing packaged smoke and manual gates remain required.
+
 
 ### Fresh checkout
 

@@ -496,6 +496,8 @@ function App() {
   const [repositoryIdentity, setRepositoryIdentity] = React.useState<{
     path: string | null
     generation: number
+    /** Seed the new observer even if the zero-lifetime cache is collected before render. */
+    snapshot?: RepositorySnapshot | null
   }>({ path: null, generation: 0 })
   const repositoryKey = React.useMemo(
     () => ['repository-snapshot', repositoryIdentity.path, repositoryIdentity.generation] as const,
@@ -507,6 +509,7 @@ function App() {
     queryKey: repositoryKey,
     enabled: false,
     structuralSharing: false,
+    initialData: repositoryIdentity.snapshot,
   })
   const snapshot = snapshotQuery.data ?? null
   const recentRepositoriesQuery = useQuery({
@@ -863,7 +866,7 @@ function App() {
       queryClient.setQueryData(key, next)
       repositoryKeyRef.current = key
       if (previous[1] !== next.path) {
-        setRepositoryIdentity({ path: next.path, generation: previous[2] })
+        setRepositoryIdentity({ path: next.path, generation: previous[2], snapshot: next })
       }
       snapshotPathRef.current = next.path
       // A snapshot the main process produced already knows its own freshness.
@@ -1212,9 +1215,10 @@ function App() {
     void queryClient.cancelQueries({ queryKey: previousKey, exact: true })
     const current = queryClient.getQueryData<RepositorySnapshot | null>(previousKey)
     const nextKey = ['repository-snapshot', previousKey[1], previousKey[2] + 1] as const
-    queryClient.setQueryData(nextKey, current ? withoutReplacedCredential(current) : null)
+    const retired = current ? withoutReplacedCredential(current) : null
+    queryClient.setQueryData(nextKey, retired)
     repositoryKeyRef.current = nextKey
-    setRepositoryIdentity({ path: nextKey[1], generation: nextKey[2] })
+    setRepositoryIdentity({ path: nextKey[1], generation: nextKey[2], snapshot: retired })
     setReviewNumber(null)
   }, [leaveInbox, queryClient, repositoryGate])
 

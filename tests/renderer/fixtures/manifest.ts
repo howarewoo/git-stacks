@@ -114,6 +114,9 @@ export const SCENARIO_NAMES = [
   'notifications-mark-all-accepted',
   'notifications-no-subject-link',
   'notifications-turned-off',
+  // Settings
+  'settings-ready',
+  'settings-managed',
 ] as const
 
 export type ScenarioName = (typeof SCENARIO_NAMES)[number]
@@ -207,6 +210,7 @@ export const SCENARIO_GROUPS = {
     'notifications-no-subject-link',
     'notifications-turned-off',
   ],
+  settings: ['settings-ready', 'settings-managed'],
 } as const satisfies Record<string, readonly ScenarioName[]>
 
 export type ScenarioGroupId = keyof typeof SCENARIO_GROUPS
