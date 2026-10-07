@@ -380,6 +380,9 @@ Check status before logging in if you already authenticated. `gh` owns sign-in,
 credential storage, refresh, account switching, and sign-out; Git Stacks reports
 what it found and changes nothing about that session. Local Git remains available
 when the CLI is missing, signed out, rejected, or offline.
+Repositories without a GitHub origin also open while the initial CLI status is
+settling or the CLI account changes; those local reads carry no GitHub answer to
+retire. Reads that contact GitHub still reject answers from a replaced credential.
 
 Any current `gh` release that reports `gh auth status --json hosts` works. The
 version shown in this repository's fixtures is a fixture version, not a minimum:

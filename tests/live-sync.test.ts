@@ -1605,6 +1605,46 @@ test('a live snapshot read that cannot reach GitHub never reuses the confirmed p
   }
 })
 
+test('credential replacement does not cancel snapshots without a GitHub origin', async (t) => {
+  for (const origin of [null, '/local/remote.git']) {
+    await t.test(origin ?? 'no origin', async () => {
+      const { repo, cleanup } = await disposableRepository()
+      try {
+        if (origin) git(repo, 'remote', 'add', 'origin', origin)
+        git(repo, 'branch', 'feature/local')
+        await writeFile(join(repo, 'shared.txt'), 'local change\n')
+        const head = git(repo, 'rev-parse', 'HEAD').trim()
+
+        const reading = getSnapshot(repo)
+        retireConfirmedGitHubPayloads()
+        const snapshot = await reading
+
+        assert.equal(snapshot.currentBranch, 'main')
+        assert.equal(snapshot.headOid, head)
+        assert.deepEqual(snapshot.branches.map((branch) => branch.ref).sort(), [
+          'refs/heads/feature/local',
+          'refs/heads/main',
+        ])
+        assert.deepEqual(
+          snapshot.files.map((file) => ({ path: file.path, worktree: file.worktree })),
+          [{ path: 'shared.txt', worktree: 'M' }],
+        )
+        assert.equal(snapshot.remoteUrl, origin)
+        assert.equal(snapshot.github.available, false)
+        assert.deepEqual(snapshot.pullRequests, [])
+        assert.deepEqual(snapshot.issues, [])
+
+        const controller = new AbortController()
+        const cancelled = getSnapshot(repo, controller.signal)
+        controller.abort()
+        await assert.rejects(cancelled, (error: unknown) => error instanceof CommandCancelled)
+      } finally {
+        await cleanup()
+      }
+    })
+  }
+})
+
 test('a snapshot whose credential was replaced while it was being read is never published', async () => {
   const { repo, cleanup } = await disposableRepository()
   git(repo, 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git')
