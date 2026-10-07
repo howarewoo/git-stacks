@@ -268,3 +268,81 @@ test('qualified equivalent targets agree while other remotes and same-name local
       )
   }
 })
+
+test('confirmed PR head associations reconcile local intents without collapsing provenance', () => {
+  const parent = pr(1, 'parent', 'main', 'author')
+  const child = pr(2, 'child', 'parent', 'author')
+  const remote = {
+    ...branch('parent'),
+    ref: 'refs/remotes/origin/parent',
+    name: 'origin/parent',
+    remote: true,
+  }
+  const otherRemote = { ...remote, ref: 'refs/remotes/upstream/parent', name: 'upstream/parent' }
+  for (const recorded of [
+    'parent',
+    'refs/heads/parent',
+    'refs/remotes/origin/parent',
+    'refs/remotes/upstream/parent',
+    'refs/heads/other',
+  ]) {
+    const graph = projectPrGraph({
+      host: 'github.com',
+      repository: 'acme/widgets',
+      pullRequests: [parent, child],
+      branches: [
+        { ...branch('parent'), pr: parent },
+        remote,
+        otherRemote,
+        branch('other'),
+        {
+          ...branch('child', recorded),
+          recordedParent: recorded,
+          parentSource: 'recorded',
+          pr: child,
+        },
+      ],
+      complete: true,
+    })
+    const differs = recorded === 'refs/remotes/upstream/parent' || recorded === 'refs/heads/other'
+    assert.equal(graph.conflicts.length, differs ? 1 : 0, recorded)
+    assert.equal(
+      graph.edges.find((edge) => edge.from === id('pr', '2') && edge.source === 'github-base')?.to,
+      id('pr', '1'),
+    )
+    assert.equal(graph.edges.filter((edge) => edge.source === 'local-parent').length, 1)
+    assert.equal(
+      graph.edges.filter((edge) => edge.from === id('pr', '1') && edge.source === 'github-head')
+        .length,
+      2,
+    )
+  }
+})
+
+test('fork head and missing source associations cannot reconcile a local ref by short name', () => {
+  for (const headRepository of ['other/widgets', undefined]) {
+    const parent = { ...pr(1, 'parent', 'main', 'author'), headRepository }
+    const child = pr(2, 'child', 'parent', 'author')
+    const graph = projectPrGraph({
+      host: 'github.com',
+      repository: 'acme/widgets',
+      pullRequests: [parent, child],
+      branches: [
+        { ...branch('parent'), pr: parent },
+        { ...branch('parent'), ref: 'refs/remotes/origin/parent', remote: true },
+        {
+          ...branch('child', 'refs/heads/parent'),
+          recordedParent: 'refs/heads/parent',
+          parentSource: 'recorded',
+          pr: child,
+        },
+      ],
+      complete: true,
+    })
+    assert.equal(graph.conflicts.length, 1)
+    assert.equal(
+      graph.edges.some((edge) => edge.from === id('pr', '1') && edge.source === 'github-head'),
+      false,
+    )
+  }
+})

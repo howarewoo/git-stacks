@@ -241,27 +241,29 @@ export class ProgressivePullRequestIndex {
     number: number,
     read: () => Promise<PullRequest & { body: string }>,
   ): Promise<PullRequest & { body: string }> {
-    if (
-      this.state &&
-      this.retainedAuthority !== null &&
-      this.retainedAuthority !== (await this.authority(this.state.host))
-    ) {
-      this.invalidate()
-      throw new CommandCancelled()
+    const generation = this.generation
+    const admitted = this.state
+    const retainedAuthority = this.retainedAuthority
+    const captured = admitted?.pullRequests.find((pr) => pr.number === number)
+    if (admitted && retainedAuthority !== null) {
+      const authority = await this.authority(admitted.host)
+      if (generation !== this.generation) throw new CommandCancelled()
+      if (retainedAuthority !== authority) {
+        this.invalidate()
+        throw new CommandCancelled()
+      }
     }
     const cached = this.detail.get(number)
     if (cached) return cached
-    const generation = this.generation
-    const captured = this.state?.pullRequests.find((pr) => pr.number === number)
     const value = await read()
     if (generation !== this.generation) throw new CommandCancelled()
-    if (
-      this.state &&
-      this.retainedAuthority !== null &&
-      this.retainedAuthority !== (await this.authority(this.state.host))
-    ) {
-      this.invalidate()
-      throw new CommandCancelled()
+    if (admitted && retainedAuthority !== null) {
+      const authority = await this.authority(admitted.host)
+      if (generation !== this.generation) throw new CommandCancelled()
+      if (retainedAuthority !== authority) {
+        this.invalidate()
+        throw new CommandCancelled()
+      }
     }
     const current = this.state?.pullRequests.find((pr) => pr.number === number)
     if (

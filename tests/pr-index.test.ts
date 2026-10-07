@@ -274,3 +274,69 @@ test('source changes during the final authority fence cannot revive old selected
   finalAuthority.resolve('account')
   await assert.rejects(selected)
 })
+
+test('retirement during initial selected authority admission rejects before detail read', async () => {
+  const held = Promise.withResolvers<string>()
+  const started = Promise.withResolvers<void>()
+  let hold = false
+  let reads = 0
+  const index = new ProgressivePullRequestIndex(
+    async () => page(1, null),
+    async () => {
+      if (hold) {
+        hold = false
+        started.resolve()
+        return held.promise
+      }
+      return 'account'
+    },
+    () => {},
+    () => true,
+  )
+  await index.load('/tmp/repo', 'github.com', 'https://github.com/acme/widgets')
+  hold = true
+  const selected = index.selected(1, async () => {
+    reads++
+    return { ...pr(1), body: 'retired read' }
+  })
+  await started.promise
+  index.invalidate()
+  await index.load('/tmp/replacement', 'github.com', 'https://github.com/acme/widgets')
+  held.resolve('account')
+  await assert.rejects(selected)
+  assert.equal(reads, 0)
+  assert.equal(index.current()?.repository, '/tmp/replacement')
+})
+
+test('retired final authority response cannot invalidate replacement source facts', async () => {
+  const held = Promise.withResolvers<string>()
+  const started = Promise.withResolvers<void>()
+  let hold = false
+  let account = 'account'
+  const index = new ProgressivePullRequestIndex(
+    async () => page(1, null),
+    async () => {
+      if (hold) {
+        hold = false
+        started.resolve()
+        return held.promise
+      }
+      return account
+    },
+    () => {},
+    () => true,
+  )
+  await index.load('/tmp/repo', 'github.com', 'https://github.com/acme/widgets')
+  const selected = index.selected(1, async () => {
+    hold = true
+    return { ...pr(1), body: 'old detail' }
+  })
+  await started.promise
+  index.invalidate()
+  account = 'replacement-account'
+  await index.load('/tmp/replacement', 'github.com', 'https://github.com/acme/widgets')
+  held.resolve('retired-authority')
+  await assert.rejects(selected)
+  assert.equal(index.current()?.repository, '/tmp/replacement')
+  assert.equal(index.current()?.complete, true)
+})
