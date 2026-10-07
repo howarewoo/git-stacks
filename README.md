@@ -1826,6 +1826,14 @@ The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `r
 
 The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
 
+The branch-creation check selects the branch identity independently of appended
+picker status annotations, then verifies the checkout, branch tip, and recorded
+stack parent with Git.
+
+The commit helper waits for Stage all to become enabled after a repository
+refresh rather than sampling its transient disabled state once. The existing
+20-second UI timeout and real Git commit and clean-working-tree assertions remain.
+
 ### IPC sender validation
 
 The same packaged smoke proves the `validateSender` boundary in `src/main/index.ts` through the real Electron IPC path, never a renderer double or an exported guard. The authorized main frame calls read-only bridge methods first and is expected to be answered, then:
