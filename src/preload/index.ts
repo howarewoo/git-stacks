@@ -62,7 +62,7 @@ const desktop: DesktopAPI = {
     }
   },
   refresh: () => ipcRenderer.invoke('repository:refresh'),
-  prIndex: () => ipcRenderer.invoke('repository:pr-index'),
+  prIndex: (options) => ipcRenderer.invoke('repository:pr-index', options),
   onPrIndex: (listener: (index: PullRequestIndex) => void) =>
     subscribe('repository:pr-index', listener),
   prIndexDetail: (number) => ipcRenderer.invoke('repository:pr-index-detail', number),
@@ -175,6 +175,11 @@ const desktop: DesktopAPI = {
   pullRequestInbox: (request) => ipcRenderer.invoke('inbox:pull-requests', request),
   pullRequestInboxFilters: () => ipcRenderer.invoke('inbox:filters'),
   savePullRequestInboxFilters: (filters) => ipcRenderer.invoke('inbox:filters-save', filters),
+  graphPreferences: () => ipcRenderer.invoke('graph:preferences'),
+  saveGraphPreferences: (preferences, expectedScope) =>
+    ipcRenderer.invoke('graph:preferences-save', preferences, expectedScope),
+  resetGraphPreferences: (expectedScope) =>
+    ipcRenderer.invoke('graph:preferences-reset', expectedScope),
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

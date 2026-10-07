@@ -1721,6 +1721,86 @@ These fixture captures prove renderer composition, not native Git success,
 OS window behavior, VoiceOver, actual browser zoom, signed updates, or final
 integrated graph parity. Existing packaged smoke and manual gates remain required.
 
+### Graph workbench fixtures and checks
+
+The production Stacks destination imports `GraphWorkbench`, using the shared
+`projectPrGraph` and graph discovery model. Gallery scenarios `graph-250`,
+`graph-1000`, and `graph-5000` use seed `graph-220-v1`, fixed timestamps, and
+exactly 50 PR author identities. They include a 100-deep mixed-author path,
+an 80-wide fork attached to PR40, nested forks attached to PR120, a shared
+ancestor PR20, 24 local PR refs, a local-only branch, a remote-tracking-only
+ref, and PRs without any local checkout. These are PR authors, not app teams.
+
+Use `/?scenario=graph-1000#/app`, open the fixture repository, and select Stacks.
+`graph-partial` and `graph-error` retain the first 100 PRs with explicit
+incomplete page state; `graph-unsupported` degrades unavailable checks/review
+facts; `graph-stale` retains unreconfirmed source facts; `graph-index-unavailable`
+leaves local discovery available without claiming remote completeness.
+Fixture controls `pushPrIndex(index)` and `changeGraphPr(number, 'head' | 'base' |
+'status')` exercise progressive pages and external changes through the typed
+production subscription. Hold/fail/answer controls also cover selected-only
+`prIndexDetail` reads. Fixture transport is absent from the shipped renderer.
+`graph-preferences` and `graph-preferences-held` exercise positive save/restore/reset
+with a nonempty saved view and delayed initial answer. Typed preference calls use
+the same hold/release/answer/fail controls; tests cover pending edits and retired
+host/repository/account answers without browser storage.
+
+Index, selected-detail, and preference reads belong to the existing TanStack Query
+client. Keys include checkout origin and CLI authority, plus observed qualified
+index identity. A push cancels a late read and updates scoped query data; authored
+criteria, camera and selection remain local. A known identity boundary retires old
+selection and both controlled search fields. Matching PR numbers cannot bridge
+different repositories. Refresh index explicitly rereads metadata, not Git fetch;
+ordinary `prIndex()` keeps its useful cached-load semantics.
+
+Preference replies include the main-observed checkout path, host, qualified repository
+and account, never credentials or opaque authority. The renderer checks that public
+provenance against its captured namespace. Save/reset additionally send the same
+namespace as a precondition: main independently derives its scope, rejects a stale
+caller before file IO, and never uses caller context to choose a storage file.
+Initial index adoption with a known typed CLI account does not duplicate preference
+reads; credential rotation still retires the existing authority-keyed queries.
+
+After source changes, run Node24/npm `npm run typecheck`, the selected root
+tests `tests/graph-workbench.test.ts`, `tests/graph-preferences.test.ts`,
+`tests/graph-fixtures.test.ts`, `tests/pr-graph.test.ts`, and
+`tests/pr-index.test.ts`, then the renderer `graph-workbench.spec.ts` suite.
+The focused commands are:
+
+```sh
+npx tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/graph-workbench.test.ts tests/graph-preferences.test.ts tests/graph-fixtures.test.ts tests/pr-graph.test.ts tests/pr-index.test.ts
+GALLERY_PORT=5241 npx playwright test tests/renderer/graph-workbench.spec.ts --workers=1
+```
+
+Inspect light/dark at 1000×700, 1440×940, and 1920×1080 and a 720×470
+zoom-equivalent viewport. The renderer suite proves production dispatch and
+bounded presentation, not native Git success, VoiceOver, OS zoom, or final
+Electron timing/heap acceptance.
+
+Graph budgets live alongside unchanged existing budgets in
+`src/shared/performance.ts`: at most 64 mounted outline rows, 32 detailed graph
+nodes, a 20-endpoint path page, and four selected detail bodies retained in
+main. The final production Electron gate measures at least 20 warm samples:
+input-to-paint p95 ≤250ms and projection plus layout ≤100ms, excluding network.
+Post-GC graph-owned heap growth must be ≤32MiB from 250 to 5000 PRs and ≤8MiB
+after 30 navigation/refresh cycles. Screenshot or SSR duration is not a
+substitute. Keep final timing/heap evidence separate from fixture invariants.
+The production component exposes the current render's local projection/reduction
+and reduced-layout computation as `data-graph-projection-layout-ms`. It retains no
+sample history. Electron input-to-paint and post-GC heap must still be measured by
+the final gate; a cached render's zero compute value is not a timing pass.
+Dispose task-owned browsers, fixture servers, profiles, and disposable
+repositories after verification; never operate on personal repos or credentials.
+
+Graph view persistence uses main-owned version-1 scoped files under the app's
+`graph-preferences` user-data directory. Save/restore/reset operates on the
+main-observed host/repository/account only. Invalid, unreadable, oversized, or
+future-version data is reported as recovered and retained until explicit
+save/reset; unknown authority is unavailable rather than an invented account.
+Preferences contain only bounded name, preset, search, author, status, and
+collapse criteria. Selection and camera are not persisted.
+
+
 
 ### Fresh checkout
 

@@ -36,6 +36,18 @@ export const SNAPSHOT_BRANCH_BUDGET = 1_500
 /** Native stack layers enriched in one readonly GraphQL summary batch. */
 export const REVIEW_STACK_METADATA_LIMIT = 32
 
+/** Graph discovery budgets; these do not change repository-list budgets. */
+export const GRAPH_OUTLINE_ROW_LIMIT = 64
+export const GRAPH_DETAIL_NODE_LIMIT = 32
+export const GRAPH_PATH_PAGE_SIZE = 20
+export const GRAPH_SELECTED_CACHE_LIMIT = 4
+export const GRAPH_INPUT_PAINT_BUDGET_MS = 250
+export const GRAPH_PROJECTION_LAYOUT_BUDGET_MS = 100
+export const GRAPH_SCALE_HEAP_BUDGET_BYTES = 32 * 1024 * 1024
+export const GRAPH_NAVIGATION_HEAP_BUDGET_BYTES = 8 * 1024 * 1024
+export const GRAPH_WARM_SAMPLE_COUNT = 20
+export const GRAPH_NAVIGATION_CYCLE_COUNT = 30
+
 /**
  * What a snapshot deliberately left out. The renderer states these instead of
  * pretending an extreme repository was fully analysed.

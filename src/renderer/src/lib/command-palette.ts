@@ -700,7 +700,7 @@ export function buildPaletteItems(context: BuildPaletteContext): PaletteItem[] {
   items.push({
     id: 'command.toggleDetails',
     label: 'Toggle details pane',
-    detail: 'Show or hide the branch inspector sidebar',
+    detail: 'Show or hide the selected item inspector',
     group: 'Commands',
     keywords: 'toggle details inspector pane sidebar view',
     disabled: !snapshot,

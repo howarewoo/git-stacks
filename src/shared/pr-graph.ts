@@ -7,6 +7,7 @@ export type PrGraphSource =
   | 'local-parent'
   | 'ancestry'
   | 'native-membership'
+  | 'unknown'
 export type PrGraphResolution = 'resolved' | 'unresolved' | 'ambiguous' | 'incomplete' | 'cycle'
 export interface PrGraphNode {
   id: string
@@ -153,7 +154,9 @@ export function projectPrGraph(input: PrGraphInput): PrGraph {
             ? 'native-membership'
             : branch.parentSource === 'pullRequest'
               ? 'github-base'
-              : 'local-parent'
+              : branch.parentSource === 'recorded'
+                ? 'local-parent'
+                : 'unknown'
       parentFacts.push({ target: branch.parent, source })
     }
     for (const { target, source } of parentFacts) {

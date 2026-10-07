@@ -166,6 +166,7 @@ import {
   type PullRequestInboxTarget,
 } from './pr-inbox'
 import { PullRequestInboxFilters } from './pr-inbox-filters'
+import { GraphPreferencesStore } from './graph-preferences'
 import {
   PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
   type PullRequestInboxFilterDraft,
@@ -372,6 +373,38 @@ const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
 const inboxFiltersPath = () => join(app.getPath('userData'), 'pull-request-inbox.json')
 const inboxFilters = new PullRequestInboxFilters(inboxFiltersPath())
+const graphPreferences = new GraphPreferencesStore(
+  join(app.getPath('userData'), 'graph-preferences'),
+  async () => {
+    const root = activeRepository
+    const generation = hostGeneration
+    if (!root) return null
+    try {
+      const origin = parseRemote(await getOriginUrl(root))
+      const host = remoteHostContext(origin)
+      if (!origin || !host) return null
+      const status = await gitHubCliStatusService(host.host).read()
+      if (
+        root !== activeRepository ||
+        generation !== hostGeneration ||
+        status.state !== 'authenticated' ||
+        !status.login ||
+        !status.identity ||
+        canonicalHostName(status.host) !== canonicalHostName(host.host)
+      )
+        return null
+      return {
+        repositoryPath: root,
+        host: host.host,
+        repository: origin.fullName,
+        account: status.login,
+        authority: JSON.stringify([root, generation, status.identity]),
+      }
+    } catch {
+      return null
+    }
+  },
+)
 /**
  * The authenticated identity the queue's rows belong to. It is the identity the
  * GitHub CLI status read established: it names the host, the account, and the
@@ -1571,14 +1604,29 @@ function installHandlers() {
     // The person's own refresh always reads GitHub; it never reuses a payload.
     return sync.refreshNow()
   })
-  ipcMain.handle('repository:pr-index', async (event) => {
+  ipcMain.handle('repository:pr-index', async (event, options: unknown) => {
+    let refresh = false
+    if (options !== undefined) {
+      if (
+        typeof options !== 'object' ||
+        options === null ||
+        Array.isArray(options) ||
+        Object.keys(options).length !== 1 ||
+        !('refresh' in options) ||
+        typeof options.refresh !== 'boolean'
+      )
+        throw new Error('PR index options must contain only a boolean refresh flag.')
+      refresh = options.refresh
+    }
     const root = repository()
     const originUrl = await getOriginUrl(root)
     const origin = parseRemote(originUrl)
     const host = remoteHostContext(origin)
     if (!originUrl || !origin || !host)
       throw new Error('A GitHub origin remote is required for PR indexing.')
-    return prIndex.load(root, host.host, originUrl)
+    return refresh
+      ? prIndex.refresh(root, host.host, originUrl)
+      : prIndex.load(root, host.host, originUrl)
   })
   ipcMain.handle('repository:pr-index-detail', (event, number: unknown) => {
     const selected = requirePullRequestNumber(number)
@@ -2012,6 +2060,13 @@ function installHandlers() {
   ipcMain.handle('inbox:filters', async (event) => {
     return inboxFiltersReady.then(() => inboxFilters.list())
   })
+  ipcMain.handle('graph:preferences', () => graphPreferences.read())
+  ipcMain.handle('graph:preferences-save', (_event, value: unknown, expectedScope: unknown) =>
+    graphPreferences.save(value, expectedScope),
+  )
+  ipcMain.handle('graph:preferences-reset', (_event, expectedScope: unknown) =>
+    graphPreferences.reset(expectedScope),
+  )
   ipcMain.handle('inbox:filters-save', async (event, value: unknown) => {
     if (!Array.isArray(value)) throw new Error('Saved filters must be a list.')
     // This write replaces the whole list, so it waits for the stored list to
