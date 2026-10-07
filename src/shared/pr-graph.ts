@@ -95,6 +95,7 @@ export function projectPrGraph(input: PrGraphInput): PrGraph {
   const edges: PrGraphEdge[] = []
   const githubTargets = new Map<string, PrGraphEdge>()
   const localTargets = new Map<string, PrGraphEdge>()
+  const headRefs = new Map<string, Set<string>>()
   const connect = (from: string, target: string, source: PrGraphSource, candidates: string[]) => {
     const unique = [...new Set(candidates)]
     const edge: PrGraphEdge = {
@@ -115,6 +116,11 @@ export function projectPrGraph(input: PrGraphInput): PrGraph {
     edges.push(edge)
     if (source === 'github-base') githubTargets.set(from, edge)
     if (source === 'local-parent' && !localTargets.has(from)) localTargets.set(from, edge)
+    if (source === 'github-head') {
+      const associated = headRefs.get(from) ?? new Set<string>()
+      for (const ref of unique) associated.add(ref)
+      headRefs.set(from, associated)
+    }
   }
   for (const pr of input.pullRequests) {
     const id = prGraphId(host, repository, 'pr', String(pr.number))
@@ -251,6 +257,8 @@ export function projectPrGraph(input: PrGraphInput): PrGraph {
       edge.resolution = 'cycle'
   }
   const conflicts: PrGraphConflict[] = []
+  const sameTarget = (a: string, b: string): boolean =>
+    a === b || headRefs.get(a)?.has(b) === true || headRefs.get(b)?.has(a) === true
   for (const pr of input.pullRequests) {
     const id = prGraphId(host, repository, 'pr', String(pr.number))
     for (const local of localHeads.get(pr.number) ?? []) {
@@ -259,11 +267,13 @@ export function projectPrGraph(input: PrGraphInput): PrGraph {
         branch?.recordedParent ?? (branch?.parentSource === 'recorded' ? branch.parent : null)
       const githubTarget = githubTargets.get(id)
       const localTarget = localTargets.get(local)
-      const hasResolvedEvidence = githubTarget?.to && localTarget?.to
-      const differs = hasResolvedEvidence
-        ? githubTarget.to !== localTarget.to
-        : recorded !== pr.base &&
-          !githubTarget?.candidates.some((candidate) => localTarget?.candidates.includes(candidate))
+      const differs =
+        githubTarget?.to && localTarget?.to
+          ? !sameTarget(githubTarget.to, localTarget.to)
+          : recorded !== pr.base &&
+            !githubTarget?.candidates.some((candidate) =>
+              localTarget?.candidates.some((other) => sameTarget(candidate, other)),
+            )
       if (recorded && differs)
         conflicts.push({
           pr: id,
