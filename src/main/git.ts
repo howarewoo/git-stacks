@@ -5025,6 +5025,7 @@ export async function getSnapshot(
     const pullRequest = localPullRequests.get(name) ?? null
     const config = configParents.get(name)
     branch.pr = pullRequest
+    branch.recordedParent = config?.parent ?? null
     if (config?.parent) {
       branch.parent = config.parent
       branch.parentTip = config.parentTip ?? null

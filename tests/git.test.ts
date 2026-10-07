@@ -825,6 +825,8 @@ test('default fallback links ordinary descendants without overriding explicit pa
     assert.equal(branch('old')?.parent, 'main')
     assert.equal(branch('old')?.parentBehind, 1)
     assert.equal(branch('configured')?.parent, 'feature')
+    assert.equal(branch('configured')?.recordedParent, 'feature')
+    assert.equal(branch('old')?.recordedParent, null)
     assert.equal(branch('main')?.parent, null)
     assert.equal(branch('orphan')?.parent, null)
     assert.deepEqual(

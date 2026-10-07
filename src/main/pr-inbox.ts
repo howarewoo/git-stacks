@@ -36,6 +36,7 @@ import {
   resetGitHubRateLimit,
 } from './github-transport'
 import { loadRepositoryNativeStacks } from './native-stacks'
+import { directReviewRequests } from './github'
 
 /** One registered repository the queue reads. */
 export interface PullRequestInboxTarget {
@@ -403,39 +404,6 @@ function nodeDate(value: unknown): string | null {
   return typeof value === 'string' && value ? value : null
 }
 
-/** Direct review-request logins. A team request carries no user login and is dropped. */
-function requestedLogins(value: unknown): string[] {
-  if (!isRecord(value) || !Array.isArray(value.nodes)) return []
-  const logins: string[] = []
-  for (const node of value.nodes) {
-    if (!isRecord(node)) continue
-    const login = nodeLogin(node.requestedReviewer)
-    if (login) logins.push(login)
-  }
-  return logins
-}
-
-/** Pagination alone cannot establish a reviewer list that failed to decode. */
-function reviewRequestsComplete(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    !Array.isArray(value.nodes) ||
-    !isRecord(value.pageInfo) ||
-    value.pageInfo.hasNextPage !== false
-  )
-    return false
-  return value.nodes.every((node) => {
-    if (!isRecord(node) || !isRecord(node.requestedReviewer)) return false
-    const reviewer = node.requestedReviewer
-    if (reviewer.__typename === 'Team') return true
-    return (
-      (reviewer.__typename === undefined || reviewer.__typename === 'User') &&
-      typeof reviewer.login === 'string' &&
-      reviewer.login.trim().length > 0
-    )
-  })
-}
-
 /** The author of the most recent review or issue comment, whichever is later. */
 function lastTurnAuthor(
   latestReviews: unknown,
@@ -577,6 +545,7 @@ function inboxItem(
   const headRepository = isRecord(node.headRepository)
     ? nodeDate(node.headRepository.nameWithOwner)
     : null
+  const requests = directReviewRequests(node.reviewRequests)
   const countsUnsupported = context.basic || context.countsUnsupported === true
   return {
     number,
@@ -596,8 +565,8 @@ function inboxItem(
     repositoryPath: context.path,
     host: context.host,
     author: nodeLogin(node.author),
-    reviewRequested: requestedLogins(node.reviewRequests),
-    reviewRequestsComplete: reviewRequestsComplete(node.reviewRequests),
+    reviewRequested: requests.logins,
+    reviewRequestsComplete: requests.complete,
     reviewDecision: context.basic
       ? null
       : typeof node.reviewDecision === 'string'
