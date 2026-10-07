@@ -17,6 +17,13 @@ import type { ReviewHistory, ReviewHistoryDiff } from '../../../src/shared/revie
 
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { PullRequestInboxReport } from '../../../src/shared/pr-inbox'
+import type {
+  SettingsIssue,
+  SettingsLock,
+  SettingsTools,
+  SupportBundlePreview,
+} from '../../../src/shared/settings'
+import type { GitHubHostStatus } from '../../../src/shared/host'
 import type { AppSettings } from '../../../src/shared/settings'
 import type { GitHubCliStatus } from '../../../src/shared/types'
 import type { NotificationInbox } from '../../../src/shared/notifications'
@@ -89,6 +96,10 @@ export type FixtureCall =
   | 'notificationSettingsHost'
   | 'notificationSettingsEnable'
   | 'diagnostics'
+  | 'resetSettings'
+  | 'githubHostStatus'
+  | 'supportBundlePreview'
+  | 'exportSupportBundle'
 
 /** One entry of the ordered {@link FixtureControl.calls} log. */
 export interface FixtureCallRecord {
@@ -199,6 +210,22 @@ export interface FixtureScenario {
    * footer of every other scenario to a session no one staged.
    */
   readonly githubCliStatus?: GitHubCliStatus
+  /**
+   * What this computer's settings policy and settings file report beyond the
+   * values themselves: which keys a policy fixes, which stored values were
+   * refused, whether the file was unreadable, and which configured tools exist.
+   * Omitted means an unmanaged computer with a healthy file.
+   */
+  readonly settingsPolicy?: {
+    locks?: readonly SettingsLock[]
+    issues?: readonly SettingsIssue[]
+    recovered?: boolean
+    tools?: SettingsTools
+  }
+  /** What the configured host was observed to support; omitted means it never answered. */
+  readonly hostStatus?: GitHubHostStatus
+  /** Optional preview override; otherwise the synthetic bundle follows stored privacy consent. */
+  readonly supportBundle?: SupportBundlePreview
 }
 
 /** Typed gallery control surface. Every field is plain serializable data. */
