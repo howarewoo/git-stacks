@@ -561,11 +561,13 @@ function PrLinkedIssuesSection({
   const linkedNumbers = new Set(links.map((l) => l.number))
 
   return (
-    <div className="workflow-section border-t border-[var(--gs-semantic-border-subtle)] pt-3 mt-3">
+    <div className="workflow-section border-t border-[var(--gs-semantic-border-subtle)] pt-4 mt-4">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Link2 className="size-4 text-[var(--gs-semantic-text-secondary)]" />
-          <strong className="text-sm font-semibold">Linked issues</strong>
+          <strong className="text-[length:var(--gs-semantic-type-label-size)] leading-[1.35] font-semibold">
+            Linked issues
+          </strong>
           {links.length > 0 ? <Badge variant="secondary">{links.length}</Badge> : null}
         </div>
         {loading ? (
@@ -588,13 +590,13 @@ function PrLinkedIssuesSection({
       ) : null}
 
       {links.length > 0 ? (
-        <div className="flex flex-col gap-1.5 mb-3">
+        <div className="flex flex-col gap-2 mb-3">
           {links.map((link) => (
             <div
               key={link.number}
               className="flex items-center justify-between gap-2 p-2 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
             >
-              <div className="flex items-center gap-1.5 min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
                 <Badge variant={link.state === 'OPEN' ? 'success' : 'secondary'}>
                   {link.state.toLowerCase()}
                 </Badge>
@@ -727,13 +729,14 @@ function PrLinkedIssuesSection({
       ) : null}
 
       <div className="space-y-2">
-        <span className="text-xs font-medium text-[var(--gs-semantic-text-secondary)]">
+        <span className="text-[length:var(--gs-semantic-type-label-size)] leading-[1.35] font-medium text-[var(--gs-semantic-text-primary)]">
           Search and link issues
         </span>
         <div className="flex items-center gap-2">
           <search.Field name="query">
             {(field) => (
               <Input
+                aria-label="Search and link issues"
                 value={field.state.value}
                 placeholder="Search issues by number or title…"
                 disabled={disabled || actionBusy}
@@ -771,15 +774,15 @@ function PrLinkedIssuesSection({
         ) : null}
 
         {searchResults.length > 0 ? (
-          <div className="flex flex-col gap-1.5 max-h-48 overflow-y-auto p-1.5 rounded border border-[var(--gs-semantic-border-subtle)] bg-[var(--gs-semantic-surface-sunken)]">
+          <div className="flex flex-col gap-2 max-h-48 overflow-y-auto p-2 rounded border border-[var(--gs-semantic-border-subtle)] bg-[var(--gs-semantic-surface-sunken)]">
             {searchResults.map((issue) => {
               const isAlreadyLinked = linkedNumbers.has(issue.number)
               return (
                 <div
                   key={issue.number}
-                  className="flex items-center justify-between gap-2 p-1.5 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
+                  className="flex items-center justify-between gap-2 p-2 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
                 >
-                  <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
                     <Badge variant={issue.state === 'OPEN' ? 'success' : 'secondary'}>
                       {issue.state?.toLowerCase() ?? 'open'}
                     </Badge>
@@ -2147,7 +2150,7 @@ export function WorkflowDialog({
                                 key={`layer-${id}`}
                                 label={`${layer.branch} → ${layer.base}`}
                               >
-                                <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                                <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">
                                   {layer.create
                                     ? 'A new pull request is opened with the title, description and readiness chosen below.'
                                     : `Pull request #${

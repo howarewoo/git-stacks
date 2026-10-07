@@ -63,10 +63,10 @@ export const Select = React.forwardRef<HTMLButtonElement, SelectProps>(
         ref={ref}
         data-slot="select-trigger"
         className={cn(
-          'flex w-full min-w-0 items-center justify-between gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-component-field-border)] bg-[var(--gs-component-field-background)] py-2 pl-3 pr-3 text-[var(--gs-component-field-text)] outline-none transition-colors focus-visible:border-[var(--gs-component-field-focus-border)] focus-visible:ring-2 focus-visible:ring-[var(--gs-component-field-focus-ring)] disabled:cursor-not-allowed disabled:bg-[var(--gs-component-field-disabled-background)] disabled:opacity-65 aria-[invalid=true]:border-[var(--gs-semantic-feedback-error-text)]',
+          'flex w-full min-w-0 items-center justify-between gap-2 rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-component-field-border)] bg-[var(--gs-component-field-background)] py-2 pl-3 pr-3 text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-component-field-text)] outline-none transition-colors focus-visible:border-[var(--gs-component-field-focus-border)] focus-visible:ring-2 focus-visible:ring-[var(--gs-component-field-focus-ring)] disabled:cursor-not-allowed disabled:bg-[var(--gs-component-field-disabled-background)] disabled:opacity-65 aria-[invalid=true]:border-[var(--gs-semantic-feedback-error-text)]',
           controlSize === 'compact'
-            ? 'h-[var(--gs-semantic-density-control-compact)] text-[length:var(--gs-semantic-type-metadata-size)]'
-            : 'h-[var(--gs-semantic-density-control-standard)] text-[length:var(--gs-semantic-type-label-size)]',
+            ? 'h-[var(--gs-semantic-density-control-compact)]'
+            : 'h-[var(--gs-semantic-density-control-standard)]',
           className,
         )}
         {...props}
@@ -98,7 +98,7 @@ export const Select = React.forwardRef<HTMLButtonElement, SelectProps>(
                   value={option.value}
                   disabled={option.disabled}
                   data-slot="select-item"
-                  className="relative flex min-h-9 cursor-default select-none items-center gap-2 rounded-[var(--gs-semantic-radius-control)] py-2 pl-3 pr-9 text-[length:var(--gs-semantic-type-label-size)] outline-none data-[highlighted]:bg-[var(--gs-semantic-selection-background)] data-[highlighted]:text-[var(--gs-semantic-selection-text)] data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
+                  className="relative flex min-h-9 cursor-default select-none items-center gap-2 rounded-[var(--gs-semantic-radius-control)] py-2 pl-3 pr-9 text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] outline-none data-[highlighted]:bg-[var(--gs-semantic-selection-background)] data-[highlighted]:text-[var(--gs-semantic-selection-text)] data-[disabled]:pointer-events-none data-[disabled]:opacity-50"
                 >
                   <SelectPrimitive.ItemText className="min-w-0 break-words">
                     {option.label}

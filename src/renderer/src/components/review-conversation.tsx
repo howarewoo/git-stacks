@@ -307,14 +307,14 @@ export function ReviewConversation({
   return (
     <section className="review-conversation" aria-label="Review conversation">
       <div className="review-tree-header">
-        <strong>Review</strong>
+        <strong>Conversation</strong>
         <span className="code-region-meta">
           {draftList.length} pending · {read?.threads.threads.length ?? 0} submitted
         </span>
       </div>
 
       {frozenReason ? (
-        <InlineAlert className="review-conversation-alert" tone="info" role="status">
+        <InlineAlert tone="info" role="status">
           {frozenReason}
         </InlineAlert>
       ) : null}
@@ -352,12 +352,12 @@ export function ReviewConversation({
       />
 
       {error ? (
-        <InlineAlert className="review-conversation-alert" tone="warning" role="status">
+        <InlineAlert tone="warning" role="status">
           {error}
         </InlineAlert>
       ) : null}
       {notice ? (
-        <InlineAlert className="review-conversation-alert" tone="info" role="status">
+        <InlineAlert tone="info" role="status">
           {notice}
         </InlineAlert>
       ) : null}
@@ -390,8 +390,8 @@ function SelectionComposer({
     return (
       <p className="review-conversation-note">
         <MessageSquarePlus aria-hidden="true" className="size-3.5" />
-        Choose a line in the diff to comment on it. Choose a second line on the same side to comment
-        on a range.
+        Choose a line in the diff to comment on it. Shift-click a second line on the same side to
+        comment on a range.
       </p>
     )
   }
@@ -529,6 +529,7 @@ function SubmitBar({
   uncertain: boolean
 }) {
   const busy = useSelector(form.store, (state) => state.isSubmitting)
+  const summaryReasonId = React.useId()
   return (
     <form
       className="review-submit"
@@ -588,6 +589,8 @@ function SubmitBar({
                     <span>Review summary</span>
                     <Textarea
                       aria-label="Review summary"
+                      aria-describedby={summaryReasonId}
+                      aria-invalid={summaryProblem !== null}
                       disabled={busy}
                       name={summary.name}
                       onBlur={summary.handleBlur}
@@ -636,7 +639,9 @@ function SubmitBar({
                       ? 'Sending…'
                       : `Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one review`}
                   </Button>
-                  <p className="review-submit-reason">{reason}</p>
+                  <p className="review-submit-reason" id={summaryReasonId}>
+                    {reason}
+                  </p>
                 </>
               )
             }}
@@ -770,7 +775,7 @@ function ThreadList({
         ) : null}
       </div>
       {actionError ? (
-        <InlineAlert className="review-conversation-alert" tone="warning" role="status">
+        <InlineAlert tone="warning" role="status">
           {actionError}
         </InlineAlert>
       ) : null}
@@ -790,7 +795,7 @@ function ThreadList({
                         {comment.viewerDidAuthor ? <Badge variant="outline">you</Badge> : null}
                         {comment.createdAt ? <small>{comment.createdAt.slice(0, 10)}</small> : null}
                       </span>
-                      <p>{comment.body}</p>
+                      <p className="review-thread-comment-body">{comment.body}</p>
                     </li>
                   ))}
                 </ul>

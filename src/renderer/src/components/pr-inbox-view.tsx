@@ -307,7 +307,7 @@ export function PullRequestInboxView({
       </div>
       <div className="pr-inbox-body">
         <nav aria-label="Inbox groups" className="pr-inbox-rail">
-          <span className="nav-label">Groups</span>
+          <h2 className="pr-inbox-rail-heading">Groups</h2>
           {PULL_REQUEST_INBOX_GROUPS.map((group) => {
             const active = group.id === filter.group
             return (
@@ -327,7 +327,7 @@ export function PullRequestInboxView({
           })}
           {savedFilters.length > 0 ? (
             <>
-              <span className="nav-label pr-inbox-rail-section">Saved filters</span>
+              <h2 className="pr-inbox-rail-heading pr-inbox-rail-section">Saved filters</h2>
               {savedFilters.map((saved) => (
                 <div className="inbox-saved" key={saved.id}>
                   <Button
@@ -565,12 +565,12 @@ export function PullRequestInboxView({
               Clear filters
             </Button>
           </div>
-          {activeGroup ? (
+          {activeGroup && presentation.list !== 'empty' ? (
             <p className="pr-inbox-rule">
               <strong>{activeGroup.label}:</strong> {activeGroup.rule}
             </p>
           ) : null}
-          {presentation.notice ? (
+          {presentation.notice && presentation.list !== 'unconfirmed' ? (
             <InlineAlert
               className="gh-banner"
               role={presentation.notice.tone === 'error' ? 'alert' : 'status'}
@@ -589,12 +589,14 @@ export function PullRequestInboxView({
           {error ? (
             <InlineAlert
               className="gh-banner"
-              onClick={onDismissError}
               role="alert"
               title="The queue could not be refreshed"
               tone="error"
             >
-              {error}
+              <p className="m-0">{error}</p>
+              <Button className="mt-2" onClick={onDismissError} size="sm" variant="secondary">
+                Dismiss
+              </Button>
             </InlineAlert>
           ) : null}
           {presentation.list === 'rows' ? (
@@ -632,7 +634,7 @@ export function PullRequestInboxView({
                         <small>
                           {item.repository} · {inboxAuthorLabel(item)}
                         </small>
-                        <small title={`${item.head} into ${item.base}`}>
+                        <small className="pr-inbox-branch" title={`${item.head} into ${item.base}`}>
                           {item.head} into {item.base}
                         </small>
                       </span>
@@ -691,12 +693,8 @@ export function PullRequestInboxView({
               Reading the pull request queue from GitHub…
             </p>
           ) : presentation.list === 'unconfirmed' ? (
-            <EmptyState className="compact-empty">
+            <EmptyState className="compact-empty" role="status">
               <Search className="empty-icon" />
-              {/* The notice's own heading, because every state that reaches
-                  here already says something more exact than "unconfirmed"
-                  would: which read ended, and why. The generic line stays for a
-                  report that carries no notice at all. */}
               <h2>{presentation.notice?.title ?? 'The queue is unconfirmed'}</h2>
               <p>
                 {presentation.notice?.detail ??

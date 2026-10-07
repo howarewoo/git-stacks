@@ -42,7 +42,7 @@ export function RadioGroupItem({
       htmlFor={id}
       title={title}
       className={cn(
-        'inline-flex min-h-9 items-center gap-2 text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]',
+        'inline-flex min-h-9 items-center gap-2 text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-primary)]',
         disabled ? 'cursor-not-allowed' : 'cursor-pointer',
         className,
       )}

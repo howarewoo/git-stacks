@@ -323,7 +323,9 @@ test.describe('Safety and mutation dispatch invariants', () => {
       // dispatch would be silently wrong. Take the OID the row actually shows.
       const stashItem = page.getByRole('listitem').filter({ hasText: 'stash@{1}' })
       await expect(stashItem).toBeVisible()
-      expect(await stashItem.locator('code').innerText()).toBe('a1b2c3d4')
+      expect(await stashItem.locator('code').filter({ hasText: 'a1b2c3d4' }).innerText()).toBe(
+        'a1b2c3d4',
+      )
 
       await stashItem.getByRole('button', { name: 'Pop stash@{1}', exact: true }).click()
       await settle(page)

@@ -71,7 +71,7 @@ const DropdownMenuItem = React.forwardRef<
     ref={ref}
     data-slot="dropdown-menu-item"
     className={cn(
-      'flex min-h-9 cursor-default select-none items-center rounded-[var(--gs-semantic-radius-control)] px-3 text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)] outline-none data-[highlighted]:bg-[var(--gs-semantic-selection-background)] data-[highlighted]:text-[var(--gs-semantic-selection-text)] data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
+      'flex min-h-9 cursor-default select-none items-center rounded-[var(--gs-semantic-radius-control)] px-3 text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-primary)] outline-none data-[highlighted]:bg-[var(--gs-semantic-selection-background)] data-[highlighted]:text-[var(--gs-semantic-selection-text)] data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
       className,
     )}
     {...props}

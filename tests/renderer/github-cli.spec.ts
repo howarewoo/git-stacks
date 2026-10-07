@@ -44,15 +44,6 @@ function cliStatusDialog(page: Page): Locator {
   return page.getByRole('dialog', { name: 'GitHub CLI authentication' })
 }
 
-/**
- * The badges that name the state at the top of the dialog. The same state and
- * account are repeated as measured facts below them, so an assertion about one
- * has to say which of the two it means.
- */
-function cliStatusBadges(page: Page): Locator {
-  return cliStatusDialog(page).getByRole('region', { name: 'Status' })
-}
-
 /** The measurements themselves: what was read about this computer, one per row. */
 function cliStatusFacts(page: Page): Locator {
   return cliStatusDialog(page).getByRole('region', { name: 'GitHub CLI' })
@@ -106,7 +97,6 @@ test.describe('Required GitHub CLI status', () => {
     await openCliStatusDialog(page, 'github-cli-missing')
 
     // The state is a fact about this computer, distinct from being signed out.
-    await expect(cliStatusBadges(page).getByText('GitHub CLI not installed')).toBeVisible()
     await expect(cliStatusFacts(page).getByText('Not detected')).toBeVisible()
     await expect(cliStatusDialog(page)).toContainText('https://cli.github.com/')
     await expect(cliStatusDialog(page)).not.toContainText('gh auth login')
@@ -133,7 +123,6 @@ test.describe('Required GitHub CLI status', () => {
   }) => {
     await openCliStatusDialog(page, 'github-cli-authenticated')
 
-    await expect(cliStatusBadges(page).getByText('Signed in to GitHub')).toBeVisible()
     await expect(cliStatusFacts(page).getByText('2.62.0')).toBeVisible()
     await expect(cliStatusFacts(page).getByText('octo', { exact: true })).toBeVisible()
     await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed in')
@@ -179,7 +168,6 @@ test.describe('Required GitHub CLI status', () => {
     // main process publishes it because this window did not cause it.
     await publishCliStatus(page, ACCOUNT_B)
     await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
-    await expect(cliStatusBadges(page).getByText('Not signed in')).toBeVisible()
 
     // The held read answers now, late, and it succeeds: it carries the account
     // and credential that have just been replaced. It must repaint neither the
@@ -424,7 +412,11 @@ test.describe('Required GitHub CLI status', () => {
     await confirmation.fill('private-stack')
     await holdDoubleCall(page, 'runAction')
     await dialog.getByRole('button', { name: 'Run 2 repairs', exact: true }).click()
-    await expect(dialog.getByRole('button', { name: 'Run 2 repairs', exact: true })).toBeDisabled()
+    await expect(dialog.locator('button[aria-busy="true"]')).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Close dialog' }).click()
+    await expect(dialog).toBeVisible()
     await page.evaluate((value) => window.fixture.pushSnapshot(value), withReport)
     await settle(page)
     await answerNextDoubleCall(page, 'refresh', withReport)

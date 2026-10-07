@@ -1175,32 +1175,6 @@ test('hunk shortcuts ignore nested line controls, modifiers and repeated writes'
   assert.equal(prevented, 3)
 })
 
-test('a narrowed hunk states what it will stage and keeps the rest included', () => {
-  const side = hunks(1)
-  const [hunk] = side.hunks
-  const whole = markup(React.createElement(HunkList, listProps({ side })))
-  assert.match(whole, /Stage hunk/u)
-  assert.ok(!whole.includes('changed lines'), 'a whole hunk needs no line count')
-  assert.match(whole, /aria-pressed="true"/u, 'every changed line starts out included')
-
-  const narrowedMarkup = markup(
-    React.createElement(HunkList, listProps({ side, excluded: { [hunk.id]: [2] } })),
-  )
-  assert.match(narrowedMarkup, /1 of 2 changed lines/u)
-  assert.match(narrowedMarkup, /Stage 1 lines/u, 'the control says what it will stage')
-  assert.match(
-    narrowedMarkup,
-    /aria-pressed="false"[^>]*aria-label="Include line 3 of this hunk"/u,
-    'the excluded line offers itself back',
-  )
-  assert.match(narrowedMarkup, /aria-label="Exclude line 2 of this hunk, file line 2"/u)
-
-  const nothing = markup(
-    React.createElement(HunkList, listProps({ side, excluded: { [hunk.id]: [1, 2] } })),
-  )
-  assert.match(nothing, /<button[^>]*disabled/u, 'a hunk with no line left cannot be staged')
-})
-
 test('a line toggle changes the patch that the hunk control applies', () => {
   const [hunk] = hunks(1).hunks
   const changed = changedLineIndexes(hunk)

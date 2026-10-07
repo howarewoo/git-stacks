@@ -9,7 +9,7 @@ test.describe('Async loading and workflow recovery', () => {
       await openGallery(page, { scenario: 'history-loading' })
       await switchDestination(page, 'history')
 
-      const loadingMsg = page.getByText('Loading commits…')
+      const loadingMsg = page.locator('.history-view').getByRole('status')
       await expect(loadingMsg).toBeVisible()
 
       // Settle the pending history call

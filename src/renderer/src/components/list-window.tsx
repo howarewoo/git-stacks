@@ -26,7 +26,7 @@ export function ListWindowMore({
       ) : null}
       {remaining > 0 ? (
         <Button className="list-window-more" size="sm" variant="ghost" onClick={onReveal}>
-          Show {pageSize} more {noun} ({remaining} remaining)
+          Show {Math.min(pageSize, remaining)} more {noun} ({remaining} remaining)
         </Button>
       ) : null}
     </div>

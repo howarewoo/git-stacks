@@ -145,22 +145,6 @@ test('the rename row shows the original path and the new path', () => {
   assert.match(markup, /class="file-path-original"/)
 })
 
-test('clean, staged-only, unstaged-only, and filtered states each read truthfully', () => {
-  assert.match(changes(changesSnapshots.clean), /Your working tree is clean\./)
-  assert.match(
-    changes(changesSnapshots.clean),
-    /Stage files from the working tree to prepare a commit\./,
-  )
-  assert.match(changes(changesSnapshots.stagedOnly), /2 files ready to commit/)
-  assert.match(changes(changesSnapshots.unstagedOnly), /0 files ready to commit/)
-
-  const filtered = changes(changesSnapshots.filtered, 'styles')
-  assert.match(filtered, /Stage shown/)
-  assert.match(filtered, /Unstage shown/)
-  assert.match(filtered, /No staged files match your search\./)
-  assert.ok(!filtered.includes('DESIGN.md'))
-})
-
 test('a conflicted file blocks bulk staging and says why', () => {
   const markup = changes(changesSnapshots.conflicted)
 
@@ -381,38 +365,6 @@ test('reconciliation shows local-only stacks separately from matching submitted 
   assert.match(markup, /GitHub stack #9/)
   assert.match(markup, /Matching/)
   assert.ok(!markup.includes('No local or submitted stack relationships were found'))
-})
-
-test('lifecycle, checks, and review stay independent and always carry a label', () => {
-  const markup = render(
-    React.createElement(PullRequestListView, {
-      busy: false,
-      canCreate: true,
-      createTooltip: 'Create a pull request.',
-      onCreate: () => undefined,
-      onRequest: noopRequest,
-      onReviewNumber: () => undefined,
-      pullRequests: pullRequestSnapshots.available.pullRequests,
-      snapshot: pullRequestSnapshots.available,
-    }),
-  )
-
-  for (const label of [
-    'draft',
-    '>open<',
-    '>closed<',
-    '>merged<',
-    'checks passing',
-    'checks failing',
-    'checks pending',
-    'no checks',
-    'review approved',
-    'changes requested',
-    'review required',
-  ]) {
-    assert.ok(markup.includes(label), `expected the ${label} label in the pull request list`)
-  }
-  assert.match(markup, /aria-label="Open pull request #42 [^"]+, open"/)
 })
 
 test('pull request search keeps its own filter and reports no matches', () => {

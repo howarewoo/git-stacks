@@ -27,7 +27,7 @@ export function RemoteFreshnessBadge({
   now?: number
 }) {
   const description = describeFreshness(freshness, now)
-  const Icon = ICON_BY_STATE[freshness?.state ?? 'fresh']
+  const Icon = freshness ? ICON_BY_STATE[freshness.state] : Clock
   return (
     <Tooltip>
       <TooltipTrigger

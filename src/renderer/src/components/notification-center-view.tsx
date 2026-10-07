@@ -20,8 +20,6 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import {
   NOTIFICATION_CONSENT_POINTS,
-  NOTIFICATION_CREDENTIAL_SCOPE,
-  NOTIFICATION_CREDENTIAL_KIND,
   NOTIFICATION_REASON_LABELS,
   NOTIFICATION_STALE_LABELS,
   NOTIFICATION_STATE_LABELS,
@@ -61,9 +59,6 @@ const BADGE_TONES: Record<Tone, 'info' | 'success' | 'warning' | 'danger'> = {
 
 /** What the poll has to say about the list on screen, in the order it matters. */
 function pollSubtitle(inbox: NotificationInbox): string {
-  if (inbox.state !== 'ready') return NOTIFICATION_STATE_LABELS[inbox.state]
-  if (inbox.stale && inbox.staleReason)
-    return `Stale · ${NOTIFICATION_STALE_LABELS[inbox.staleReason]}`
   return `${inbox.threads.length} threads · ${inbox.unreadCount} unread`
 }
 
@@ -247,30 +242,17 @@ export function NotificationCredentialDialog({
             void credentialForm.handleSubmit()
           }}
         >
-          <ul className="m-0 grid list-none gap-2 p-0">
+          <ul className="notification-consent-points">
             {NOTIFICATION_CONSENT_POINTS.map((point) => (
-              <li
-                className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
-                key={point}
-              >
-                {point}
-              </li>
+              <li key={point}>{point}</li>
             ))}
           </ul>
-          <dl className="m-0 grid gap-1 text-[length:var(--gs-semantic-type-metadata-size)]">
-            <div className="flex gap-2">
-              <dt className="text-[var(--gs-semantic-text-secondary)]">Credential</dt>
-              <dd className="m-0">{NOTIFICATION_CREDENTIAL_KIND}</dd>
-            </div>
-            <div className="flex gap-2">
-              <dt className="text-[var(--gs-semantic-text-secondary)]">Scope</dt>
-              <dd className="m-0">{NOTIFICATION_CREDENTIAL_SCOPE}</dd>
-            </div>
-            <div className="flex gap-2">
+          <dl className="notification-credential-facts">
+            <div>
               <dt className="text-[var(--gs-semantic-text-secondary)]">Host</dt>
               <dd className="m-0">{host}</dd>
             </div>
-            <div className="flex gap-2">
+            <div>
               <dt className="text-[var(--gs-semantic-text-secondary)]">Account</dt>
               <dd className="m-0">{login ?? 'The account this token belongs to'}</dd>
             </div>
@@ -302,7 +284,7 @@ export function NotificationCredentialDialog({
             {(field) => (
               <Checkbox
                 checked={field.state.value}
-                description="It is stored separately from the GitHub CLI credential, is removed on its own, and asks nothing of the CLI session — pull requests, stacks, and reviews keep working on the account they already use."
+                description="Authorize the separate notification credential described above."
                 label="I understand the boundary this credential adds."
                 onCheckedChange={(checked) => field.handleChange(checked)}
               />
@@ -395,21 +377,20 @@ export function NotificationCenterView({
   const awaitingConfirmation = polls && status.markAllReadPending === true
 
   return (
-    <div className="diagnostics-view">
-      <div className="list-toolbar notification-toolbar">
+    <div className="diagnostics-view notification-center-view">
+      <div className="list-toolbar">
         <div className="list-title-group">
           <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
             GitHub Notifications
           </h1>
-          <span className="list-subtitle">
-            {status ? pollSubtitle(status) : 'Reading the module state…'}
-            {polls
-              ? ` · GitHub asks for at most one read every ${status.poll.pollIntervalSeconds}s`
-              : ''}
-            {polls && status.poll.nextPollAt
-              ? ` · next read ${new Date(status.poll.nextPollAt).toLocaleTimeString()}`
-              : ''}
-          </span>
+          {!status || polls ? (
+            <span className="list-subtitle">
+              {status ? pollSubtitle(status) : 'Reading the module state…'}
+              {polls && status.poll.nextPollAt
+                ? ` · next read ${new Date(status.poll.nextPollAt).toLocaleTimeString()}`
+                : ''}
+            </span>
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {polls ? (
@@ -458,7 +439,7 @@ export function NotificationCenterView({
         </div>
       </div>
       <div className="capability-scroll">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="notification-status">
           <Badge variant={BADGE_TONES[tone]}>{NOTIFICATION_STATE_LABELS[state]}</Badge>
           {status ? <Badge variant="outline">{status.host}</Badge> : null}
           {status && (hasStoredCredential || !off) ? (

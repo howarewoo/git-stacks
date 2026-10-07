@@ -5,7 +5,7 @@ import { cn } from '../../lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
 
 const buttonVariants = cva(
-  'gs-button inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--gs-semantic-radius-control)] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--gs-semantic-surface-content)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-55',
+  'gs-button inline-flex shrink-0 scroll-m-1 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--gs-semantic-radius-control)] text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--gs-semantic-surface-content)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-55',
   {
     variants: {
       variant: {
@@ -25,10 +25,9 @@ const buttonVariants = cva(
         unstyled: '',
       },
       size: {
-        sm: 'min-h-[var(--gs-semantic-density-control-compact)] px-3 text-[length:var(--gs-semantic-type-label-size)]',
-        default:
-          'min-h-[var(--gs-semantic-density-control-standard)] px-4 text-[length:var(--gs-semantic-type-label-size)]',
-        lg: 'min-h-[var(--gs-semantic-density-control-standard)] px-5 text-[length:var(--gs-semantic-type-body-size)]',
+        sm: 'min-h-[var(--gs-semantic-density-control-compact)] px-3',
+        default: 'min-h-[var(--gs-semantic-density-control-standard)] px-4',
+        lg: 'min-h-[var(--gs-semantic-density-control-standard)] px-5',
         icon: 'size-11',
         'icon-sm': 'size-9',
       },
@@ -78,7 +77,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
             isDisabled ? (
               <span
                 role="group"
-                className="inline-flex shrink-0 rounded-[var(--gs-semantic-radius-control)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]"
+                className="inline-flex shrink-0 scroll-m-1 rounded-[var(--gs-semantic-radius-control)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]"
                 tabIndex={0}
                 aria-label={typeof hint === 'string' ? hint : props['aria-label']}
               >

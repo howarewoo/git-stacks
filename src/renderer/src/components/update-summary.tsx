@@ -83,7 +83,11 @@ export function updateFacts(status: UpdateStatus | null, channel: UpdateChannel)
     { label: 'Signing key', value: TRUST_LABEL[status?.trust ?? 'none'] },
     {
       label: 'In-place updates',
-      value: status?.supported ? 'Supported on this platform' : 'Not supported on this platform',
+      value: status
+        ? status.supported
+          ? 'Supported on this platform'
+          : 'Not supported on this platform'
+        : 'Reading platform support…',
     },
   ]
 }

@@ -77,7 +77,7 @@ const TooltipContent = React.forwardRef<HTMLDivElement, TooltipContentProps>(
             ref={ref}
             data-slot="tooltip-content"
             className={cn(
-              'max-w-[min(20rem,calc(100vw-24px))] rounded-[var(--gs-semantic-radius-control)] bg-[var(--gs-semantic-text-primary)] px-3 py-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-relaxed text-[var(--gs-semantic-text-inverse)] shadow-[var(--gs-semantic-elevation-medium)] [overflow-wrap:anywhere]',
+              'max-w-[min(20rem,calc(100vw-24px))] rounded-[var(--gs-semantic-radius-control)] bg-[var(--gs-semantic-text-primary)] px-3 py-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-inverse)] shadow-[var(--gs-semantic-elevation-medium)] [overflow-wrap:anywhere]',
               className,
             )}
             {...props}

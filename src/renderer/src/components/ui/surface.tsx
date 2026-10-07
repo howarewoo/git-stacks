@@ -37,7 +37,7 @@ export function SurfaceDescription({
   return (
     <p
       className={cn(
-        'm-0 text-[length:var(--gs-semantic-type-body-size)] text-[var(--gs-semantic-text-secondary)]',
+        'm-0 text-[length:var(--gs-semantic-type-body-size)] leading-[var(--gs-semantic-type-body-line)] text-[var(--gs-semantic-text-secondary)]',
         className,
       )}
       {...props}
@@ -64,7 +64,7 @@ export function InlineAlert({
     <div
       role={tone === 'error' ? 'alert' : 'status'}
       className={cn(
-        'flex items-start gap-2 rounded-[var(--gs-semantic-radius-control)] px-3 py-2 text-[length:var(--gs-semantic-type-metadata-size)]',
+        'flex items-start gap-2 rounded-[var(--gs-semantic-radius-control)] px-3 py-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)]',
         tone === 'info' &&
           'bg-[var(--gs-semantic-feedback-info-surface)] text-[var(--gs-semantic-feedback-info-text)]',
         tone === 'success' &&
@@ -78,9 +78,13 @@ export function InlineAlert({
       {...props}
     >
       <Icon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-      <div className="min-w-0">
-        {title ? <strong className="block font-semibold">{title}</strong> : null}
-        {children ? <div className="leading-relaxed">{children}</div> : null}
+      <div className="grid min-w-0 gap-1">
+        {title ? (
+          <strong className="block text-[length:var(--gs-semantic-type-label-size)] font-semibold leading-[var(--gs-semantic-type-label-line)]">
+            {title}
+          </strong>
+        ) : null}
+        {children ? <div>{children}</div> : null}
       </div>
     </div>
   )
@@ -94,7 +98,7 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        'grid justify-items-center gap-2 rounded-[var(--gs-semantic-radius-item)] border border-dashed border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-8 text-center',
+        'gs-empty-state grid justify-items-center gap-2 rounded-[var(--gs-semantic-radius-item)] border border-dashed border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-8 text-center',
         className,
       )}
       {...props}
@@ -114,7 +118,7 @@ export function LoadingState({
       role="status"
       aria-busy="true"
       className={cn(
-        'flex items-center gap-2 text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-secondary)]',
+        'flex items-center gap-2 text-[length:var(--gs-semantic-type-label-size)] leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-secondary)]',
         className,
       )}
       {...props}

@@ -30,7 +30,6 @@ export function DirtyCheckoutContent({
     <WorkflowFrame composition="reviewed">
       <OperationContext
         title={`Check out ${target?.name ?? 'branch'}`}
-        description="Choose whether to carry compatible edits to the target branch or prepare a clean tree first. Git will refuse a carry that would overwrite work."
         facts={[
           { label: 'Target branch', value: target?.name ?? '—' },
           {
@@ -45,7 +44,7 @@ export function DirtyCheckoutContent({
         ]}
       />
 
-      <div className="rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-3 text-[13px] text-[var(--gs-semantic-text-secondary)]">
+      <div className="rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-3 text-[length:var(--gs-semantic-type-body-size)] leading-[1.5] text-[var(--gs-semantic-text-secondary)]">
         <div className="flex items-start gap-2">
           <AlertCircle
             className="size-4 shrink-0 text-[var(--gs-semantic-feedback-warning-text)]"

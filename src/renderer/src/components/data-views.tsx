@@ -176,7 +176,7 @@ export function ChangesView({
         title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
         type="button"
         onClick={() => onInspect(file.path)}
-        aria-label={`${file.conflicted ? 'Resolve' : 'Inspect'} ${file.path}`}
+        aria-label={`${file.conflicted ? 'Resolve' : 'Inspect'} ${file.path}${file.originalPath ? `, renamed from ${file.originalPath}` : ''}`}
       >
         {file.originalPath ? (
           <span className="file-path-rename">
@@ -254,8 +254,8 @@ export function ChangesView({
       {listingTruncated ? (
         <p className="workflow-note" role="status">
           Showing the first {snapshot.limits.filesListed} changed files. This repository reports
-          more, so bulk stage, unstage, and stash are unavailable. Narrow the search, or use your
-          editor or the command line for the remaining files.
+          more, so bulk stage, unstage, and stash are unavailable. Search filters only the listed
+          files; use your editor or the command line for the remaining files.
         </p>
       ) : null}
       <div className="changes-columns">
@@ -263,9 +263,7 @@ export function ChangesView({
           <div className="change-section-header">
             <div>
               <h2 id="staged-heading">Staged</h2>
-              <span>
-                {groups.staged.length} file{groups.staged.length === 1 ? '' : 's'} ready to commit
-              </span>
+              <span>Ready to commit</span>
             </div>
             <Badge variant={groups.staged.length > 0 ? 'accent' : 'secondary'}>
               {groups.staged.length}
@@ -400,11 +398,9 @@ export function ChangesView({
           <GitCommitHorizontal className="size-4" />
           <div>
             <h2>{commitAmend ? 'Amend the last commit' : 'Commit staged changes'}</h2>
-            <span>
-              {commitAmend
-                ? 'Enter the full replacement message. Staged changes are included.'
-                : 'Only staged files will be included.'}
-            </span>
+            {commitAmend ? (
+              <span>Enter the full replacement message. Staged changes are included.</span>
+            ) : null}
           </div>
         </div>
         <Checkbox
@@ -544,13 +540,14 @@ export function PullRequestListView({
                   onClick={() => onReviewNumber(pr.number)}
                   disabled={busy}
                   type="button"
-                  aria-label={`Open pull request #${pr.number} ${pr.title}, ${lifecycleLabel(pr)}`}
+                  aria-label={`Open pull request #${pr.number} ${pr.title}, ${lifecycleLabel(pr)}, ${checkLabel(pr.checks)}, ${reviewLabel(pr)}`}
                 >
                   <span className="pr-number">#{pr.number}</span>
                   <span className="pr-copy">
-                    <strong>{pr.title}</strong>
+                    <strong title={pr.title}>{pr.title}</strong>
                     <small>
-                      {pr.head} <span aria-hidden="true">→</span> {pr.base}
+                      <code>{pr.head}</code> <span aria-hidden="true">→</span>{' '}
+                      <code>{pr.base}</code>
                     </small>
                   </span>
                   <span className="pr-badges">
@@ -664,82 +661,84 @@ export function StashesView({
         </Button>
       </div>
       {snapshot.stashes.length > 0 ? (
-        <div className="stash-list" role="list">
-          {stashWindow.visible.map((stash) => (
-            <div
-              className="stash-row"
-              key={stash.oid}
-              role="listitem"
-              aria-label={`Stash ${stash.ref}`}
-            >
-              <Archive className="size-4" />
-              <span className="stash-copy">
-                <strong>{stash.message || 'WIP'}</strong>
-                <small>
-                  {stash.ref} · <code>{stash.oid.slice(0, 8)}</code>
-                </small>
-              </span>
-              <Button
-                disabled={busy || operationActive || Boolean(applyReason)}
-                aria-label={`Apply ${stash.ref}`}
-                tooltip={
-                  applyReason ??
-                  'Restore this stash’s working changes and saved staging state, and keep the stash. May conflict with current edits.'
-                }
-                onClick={() =>
-                  runAction({ type: 'stashApply', ref: stash.ref, oid: stash.oid }, 'Apply stash')
-                }
-                size="sm"
-                variant="ghost"
+        <>
+          <div className="stash-list" role="list">
+            {stashWindow.visible.map((stash) => (
+              <div
+                className="stash-row"
+                key={stash.oid}
+                role="listitem"
+                aria-label={`Stash ${stash.ref}`}
               >
-                Apply
-              </Button>
-              <Button
-                disabled={busy || Boolean(applyReason || removalReason)}
-                aria-label={`Pop ${stash.ref}`}
-                tooltip={
-                  applyReason ??
-                  removalReason ??
-                  'Reapply this stash to the working tree, then delete it from the list. Stops on conflicts so saved changes are not lost silently.'
-                }
-                onClick={() =>
-                  runAction({ type: 'stashPop', ref: stash.ref, oid: stash.oid }, 'Pop stash')
-                }
-                size="sm"
-                variant="secondary"
-              >
-                <RotateCcw className="size-3.5" />
-                Pop
-              </Button>
-              <Button
-                disabled={
-                  busy ||
-                  operationActive ||
-                  Boolean(removalReason || actionBlockReason(snapshot.capabilities, 'stashDrop'))
-                }
-                aria-label={`Drop ${stash.ref}`}
-                tooltip={
-                  actionBlockReason(snapshot.capabilities, 'stashDrop') ??
-                  removalReason ??
-                  'Preview permanently removing this saved stash without applying it. This app cannot restore a dropped stash.'
-                }
-                onClick={() =>
-                  onRequest({
-                    kind: 'confirm',
-                    title: 'Drop this stash?',
-                    description: `Permanently remove ${stash.ref}: ${stash.message}. Its saved changes will not be applied.`,
-                    label: 'Drop stash',
-                    action: { type: 'stashDrop', ref: stash.ref, oid: stash.oid },
-                    destructive: true,
-                  })
-                }
-                size="sm"
-                variant="danger"
-              >
-                Drop…
-              </Button>
-            </div>
-          ))}
+                <Archive className="size-4" />
+                <span className="stash-copy">
+                  <strong title={stash.message || 'WIP'}>{stash.message || 'WIP'}</strong>
+                  <small>
+                    <code>{stash.ref}</code> · <code>{stash.oid.slice(0, 8)}</code>
+                  </small>
+                </span>
+                <Button
+                  disabled={busy || operationActive || Boolean(applyReason)}
+                  aria-label={`Apply ${stash.ref}`}
+                  tooltip={
+                    applyReason ??
+                    'Restore this stash’s working changes and saved staging state, and keep the stash. May conflict with current edits.'
+                  }
+                  onClick={() =>
+                    runAction({ type: 'stashApply', ref: stash.ref, oid: stash.oid }, 'Apply stash')
+                  }
+                  size="sm"
+                  variant="ghost"
+                >
+                  Apply
+                </Button>
+                <Button
+                  disabled={busy || Boolean(applyReason || removalReason)}
+                  aria-label={`Pop ${stash.ref}`}
+                  tooltip={
+                    applyReason ??
+                    removalReason ??
+                    'Reapply this stash to the working tree, then delete it from the list. Stops on conflicts so saved changes are not lost silently.'
+                  }
+                  onClick={() =>
+                    runAction({ type: 'stashPop', ref: stash.ref, oid: stash.oid }, 'Pop stash')
+                  }
+                  size="sm"
+                  variant="secondary"
+                >
+                  <RotateCcw className="size-3.5" />
+                  Pop
+                </Button>
+                <Button
+                  disabled={
+                    busy ||
+                    operationActive ||
+                    Boolean(removalReason || actionBlockReason(snapshot.capabilities, 'stashDrop'))
+                  }
+                  aria-label={`Drop ${stash.ref}`}
+                  tooltip={
+                    actionBlockReason(snapshot.capabilities, 'stashDrop') ??
+                    removalReason ??
+                    'Preview permanently removing this saved stash without applying it. This app cannot restore a dropped stash.'
+                  }
+                  onClick={() =>
+                    onRequest({
+                      kind: 'confirm',
+                      title: 'Drop this stash?',
+                      description: `Permanently remove ${stash.ref}: ${stash.message || 'WIP'}. Its saved changes will not be applied.`,
+                      label: 'Drop stash',
+                      action: { type: 'stashDrop', ref: stash.ref, oid: stash.oid },
+                      destructive: true,
+                    })
+                  }
+                  size="sm"
+                  variant="danger"
+                >
+                  Drop…
+                </Button>
+              </div>
+            ))}
+          </div>
           <ListWindowMore
             pageSize={LIST_PAGE_SIZE}
             remaining={stashWindow.remaining}
@@ -748,7 +747,7 @@ export function StashesView({
             onReveal={stashWindow.reveal}
             onPrevious={stashWindow.retreat}
           />
-        </div>
+        </>
       ) : (
         <EmptyState className="compact-empty">
           <Archive className="empty-icon" />

@@ -25,9 +25,9 @@ export function Field({
   const describedBy = [descriptionId, errorId].filter(Boolean).join(' ') || undefined
 
   return (
-    <div className={cn('grid gap-1.5', className)}>
+    <div className={cn('grid min-w-0 gap-2 [overflow-wrap:anywhere]', className)}>
       <label
-        className="text-[length:var(--gs-semantic-type-label-size)] font-medium text-[var(--gs-semantic-text-primary)]"
+        className="text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-primary)]"
         htmlFor={id}
       >
         {label}
@@ -45,7 +45,7 @@ export function Field({
       })}
       {description ? (
         <p
-          className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+          className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]"
           id={descriptionId}
         >
           {description}
@@ -53,7 +53,7 @@ export function Field({
       ) : null}
       {error ? (
         <p
-          className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]"
+          className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-feedback-error-text)]"
           id={errorId}
           role="alert"
         >

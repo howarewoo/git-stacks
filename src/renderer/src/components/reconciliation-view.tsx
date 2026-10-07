@@ -93,33 +93,33 @@ function RepairRow({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <li className="gs-reconciliation-repair grid gap-1.5 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-2.5">
+    <li className="gs-reconciliation-repair grid gap-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] p-3">
       <Checkbox
         id={`repair-${repair.kind}-${repair.branch ?? repair.pullRequest ?? 'stack'}`}
         checked={checked}
         disabled={disabled}
         onCheckedChange={onChange}
         label={
-          <span className="grid gap-0.5">
+          <span className="grid gap-1">
             <span className="font-medium text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
               {repairLabels[repair.kind]}
             </span>
-            <span className="text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+            <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
               {repair.summary}
             </span>
           </span>
         }
       />
-      <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+      <p className="m-0 text-[length:var(--gs-semantic-type-body-size)] leading-[1.5] text-[var(--gs-semantic-text-secondary)]">
         {repair.detail}
       </p>
       {repair.requiresConfirmation ? (
-        <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+        <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">
           Rewrites a branch tip or a pull-request base.
         </p>
       ) : null}
       {repair.evidence ? (
-        <p className="m-0 font-mono text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+        <p className="m-0 font-mono text-xs text-[var(--gs-semantic-text-secondary)]">
           {repair.evidence.previousParent ?? 'no recorded parent'} @{' '}
           {repair.evidence.previousParentTip?.slice(0, 10) ?? 'no recorded boundary'}
         </p>
@@ -198,7 +198,7 @@ function ReconciliationDialog({
   const confirmReady = rewrites.length === 0 || typed.trim() === target
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+    <Dialog open onOpenChange={(open) => !open && !busy && !submitting && onCancel()}>
       <DialogContent className="gs-reconciliation-dialog">
         <form
           onSubmit={(event) => {
@@ -217,11 +217,11 @@ function ReconciliationDialog({
               </DialogDescription>
             </DialogHeader>
             {loading ? (
-              <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+              <p role="status" className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">
                 Reading the submitted stack and the local graph…
               </p>
             ) : previewError ? (
-              <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]">
+              <p role="alert" className="m-0 text-xs text-[var(--gs-semantic-feedback-error-text)]">
                 {previewError}
               </p>
             ) : preview ? (
@@ -247,7 +247,7 @@ function ReconciliationDialog({
                     ))}
                   </ol>
                 ) : (
-                  <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+                  <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">
                     {preview.state === 'ambiguous'
                       ? 'Resolve the reported ambiguity on GitHub or in Git, then review again.'
                       : 'Nothing to repair for this stack.'}
@@ -256,11 +256,12 @@ function ReconciliationDialog({
                 {rewrites.length ? (
                   <>
                     <WarningNote>
-                      <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-flex items-center gap-2">
                         <ShieldAlert className="size-3.5" />
                         {rewrites.length} selected repair
-                        {rewrites.length === 1 ? '' : 's'} rewrite a branch tip or a pull-request
-                        base. The previous commit is kept at refs/git-stacks/reconciliation.
+                        {rewrites.length === 1 ? ' rewrites' : 's rewrite'} a branch tip or a
+                        pull-request base. The previous commit is kept at
+                        refs/git-stacks/reconciliation.
                       </span>
                     </WarningNote>
                     <TypedConfirmation
@@ -276,10 +277,7 @@ function ReconciliationDialog({
               </>
             ) : null}
             {actionError ? (
-              <p
-                role="alert"
-                className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-feedback-error-text)]"
-              >
+              <p role="alert" className="m-0 text-xs text-[var(--gs-semantic-feedback-error-text)]">
                 {actionError}
               </p>
             ) : null}
@@ -292,12 +290,13 @@ function ReconciliationDialog({
                 onClick={onReload}
                 disabled={busy || submitting || loading}
               >
-                <RefreshCw className="size-3.5" />
-                Re-read
+                <RefreshCw className="size-3.5" aria-hidden="true" />
+                {loading ? 'Re-reading…' : 'Re-read'}
               </Button>
               <Button
                 variant="accent"
                 type="submit"
+                loading={busy || submitting}
                 disabled={
                   busy ||
                   submitting ||
@@ -308,8 +307,10 @@ function ReconciliationDialog({
                   !confirmReady
                 }
               >
-                <Wrench className="size-3.5" />
-                Run {selected.length || ''} repair{selected.length === 1 ? '' : 's'}
+                <Wrench className="size-3.5" aria-hidden="true" />
+                {busy || submitting
+                  ? 'Running repairs…'
+                  : `Run ${selected.length || ''} repair${selected.length === 1 ? '' : 's'}`}
               </Button>
             </WorkflowActions>
           </WorkflowFrame>
@@ -338,18 +339,16 @@ function StackRow({
           {stack.stackNumber === null ? 'Local stack' : `GitHub stack #${stack.stackNumber}`}
         </strong>
         {stateBadge(stack.state)}
-        <span className="font-mono text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
+        <span className="font-mono text-xs text-[var(--gs-semantic-text-secondary)]">
           {stack.key}
         </span>
       </div>
-      <p className="m-0 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]">
-        {stack.summary}
-      </p>
+      <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">{stack.summary}</p>
       <ul className="m-0 grid list-none gap-1 p-0">
         {stack.members.map((member) => (
           <li
             key={member.branch}
-            className="flex flex-wrap items-center gap-1.5 text-[length:var(--gs-semantic-type-metadata-size)] text-[var(--gs-semantic-text-secondary)]"
+            className="flex flex-wrap items-center gap-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]"
           >
             <GitPullRequest className="size-3" />
             <span className="font-mono">{member.branch}</span>
@@ -486,7 +485,7 @@ export function ReconciliationPanel({
     <section className="gs-reconciliation" aria-label="Submitted stack reconciliation" tabIndex={0}>
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h2 className="m-0 flex items-center gap-2 text-[length:var(--gs-semantic-type-heading-size)] font-semibold text-[var(--gs-semantic-text-primary)]">
+          <h2 className="m-0 flex items-center gap-2 text-[length:var(--gs-semantic-type-heading-size)] font-semibold leading-[var(--gs-semantic-type-heading-line)] text-[var(--gs-semantic-text-primary)]">
             <History className="size-4" />
             Reconciliation
           </h2>
