@@ -982,6 +982,7 @@ export function GraphWorkbench({
           <div
             className="graph-viewport"
             ref={graphRef}
+            role="region"
             tabIndex={0}
             aria-label="Scrollable graph canvas"
           >
@@ -1287,13 +1288,15 @@ export function GraphWorkbench({
             <h3>
               Submitted native #{native.number} · {native.status}
             </h3>
-            <ol>
+            <ol className="graph-submitted-order">
               {[...native.pullRequests]
                 .sort((a, b) => a.position - b.position)
                 .map((member) => (
                   <li key={member.number}>
                     <Button size="sm" variant="link" onClick={() => onReviewNumber(member.number)}>
-                      #{member.number} {member.head}
+                      #{member.number}{' '}
+                      {snapshot.pullRequests.find((pr) => pr.number === member.number)?.title ??
+                        member.head}
                     </Button>{' '}
                     · {member.state.toLowerCase()} · position {member.position}/{member.total}
                   </li>

@@ -4994,6 +4994,14 @@ textarea.conflict-content {
 .graph-description {
   white-space: pre-wrap;
 }
+.graph-submitted-order button {
+  max-width: 100%;
+  height: auto;
+  justify-content: flex-start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
 .graph-notice {
   margin: 0;
   padding: var(--gs-semantic-space-3);

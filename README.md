@@ -1745,6 +1745,13 @@ with a nonempty saved view and delayed initial answer. Typed preference calls us
 the same hold/release/answer/fail controls; tests cover pending edits and retired
 host/repository/account answers without browser storage.
 
+Renderer navigation checks target the graph outline, not the retired local stack
+rail: arrows and Home/End traverse its virtual window. Select a PR or associated
+ref, then use **Review #N** in the inspector to open readonly Review.
+Open **Submitted native order and reconciliation** before inspecting submitted
+membership or reviewing repairs. Submitted links retain known PR titles, fall
+back to head refs when titles are unavailable, and wrap within the disclosure.
+
 Index, selected-detail, and preference reads belong to the existing TanStack Query
 client. Keys include checkout origin and CLI authority, plus observed qualified
 index identity. A push cancels a late read and updates scoped query data; authored

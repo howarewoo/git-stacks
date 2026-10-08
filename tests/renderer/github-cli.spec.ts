@@ -305,6 +305,11 @@ test.describe('Required GitHub CLI status', () => {
     await answerNextDoubleCall(page, 'refresh', withReport)
     await page.getByRole('button', { name: 'Refresh repository' }).click()
     await switchDestination(page, 'stacks')
+    await page
+      .locator('details.graph-reconciliation > summary', {
+        hasText: 'Submitted native order and reconciliation',
+      })
+      .click()
     const reconciliation = page.getByRole('region', { name: 'Submitted stack reconciliation' })
     await expect(reconciliation).toContainText('Private submitted stack from the old account')
     await expect(reconciliation.getByRole('button', { name: /Review repairs/ })).toBeEnabled()
@@ -388,6 +393,11 @@ test.describe('Required GitHub CLI status', () => {
     await answerNextDoubleCall(page, 'refresh', withReport)
     await page.getByRole('button', { name: 'Refresh repository' }).click()
     await switchDestination(page, 'stacks')
+    await page
+      .locator('details.graph-reconciliation > summary', {
+        hasText: 'Submitted native order and reconciliation',
+      })
+      .click()
     await page.getByRole('button', { name: /Review repairs/ }).click()
     const dialog = page.getByRole('dialog', { name: 'Reconcile submitted stack' })
     const hint = dialog.getByRole('checkbox', { name: /Remove old parent hint/ })
