@@ -10,6 +10,7 @@ import type {
 } from '../shared/types'
 import type { NotificationInbox } from '../shared/notifications'
 import type { UpdateStatus } from '../shared/update'
+import type { PullRequestIndex } from '../shared/pr-index'
 
 /**
  * Dropped folders never cross the bridge as `File` objects. The preload resolves
@@ -61,6 +62,10 @@ const desktop: DesktopAPI = {
     }
   },
   refresh: () => ipcRenderer.invoke('repository:refresh'),
+  prIndex: () => ipcRenderer.invoke('repository:pr-index'),
+  onPrIndex: (listener: (index: PullRequestIndex) => void) =>
+    subscribe('repository:pr-index', listener),
+  prIndexDetail: (number) => ipcRenderer.invoke('repository:pr-index-detail', number),
   conflictView: (path) => ipcRenderer.invoke('repository:conflict', path),
   runAction: (action) => ipcRenderer.invoke('repository:action', action),
   fileView: (path) => ipcRenderer.invoke('repository:file', path),

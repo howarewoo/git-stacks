@@ -5,6 +5,7 @@ import type { RepositoryCapabilities } from './capabilities'
 import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord } from './review'
 import type { ReviewHistory, ReviewHistoryDiff } from './review-snapshots'
 import type { PullRequestChecksReport } from './pull-request-checks'
+import type { PullRequestIndex } from './pr-index'
 import type { NotificationInbox, NotificationModuleStatus } from './notifications'
 import type {
   PullRequestInboxFilterDraft,
@@ -257,6 +258,11 @@ export interface PullRequest {
   reviewDecision?: string
   mergeState?: string
   stack?: PullRequestStackMembership | null
+  /** Source-backed collaboration facts; absent means the source did not establish them. */
+  author?: string | null
+  reviewRequested?: readonly string[]
+  reviewRequestsComplete?: boolean
+  metadata?: 'full' | 'degraded'
 }
 
 /** How GitHub is asked to land a pull request, per the asynchronous merge API. */
@@ -383,6 +389,8 @@ export interface Branch {
   oid?: string
   parentTip?: string | null
   parentSource?: 'recorded' | 'pullRequest' | 'stack' | 'inferred' | null
+  /** Independently observed local configuration, even when it agrees with native order. */
+  recordedParent?: string | null
   needsRestack?: boolean
 }
 export interface ChangedFile {
@@ -1238,6 +1246,11 @@ export interface DesktopAPI {
    */
   onRepositoryDropped?(listener: (paths: string[]) => void): () => void
   refresh(): Promise<RepositorySnapshot>
+  /** Lightweight source-backed open PR pages; never a mutation preflight. */
+  prIndex?(): Promise<PullRequestIndex>
+  onPrIndex?(listener: (index: PullRequestIndex) => void): () => void
+  /** Selected-item detail only; at most four completed bodies are retained in main. */
+  prIndexDetail?(number: number): Promise<PullRequest & { body: string }>
   runAction(action: GitAction): Promise<ActionResult>
   fileView(path: string): Promise<FileView>
   conflictView(path: string): Promise<ConflictFile>

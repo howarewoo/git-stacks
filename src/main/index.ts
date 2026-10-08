@@ -25,7 +25,9 @@ import {
   retireConfirmedGitHubPayloads,
 } from './git'
 import { CommandCancelled, getOriginUrl } from './git-core'
-import { getGitHubIssues, getPullRequest } from './github'
+import { getGitHubIssues, getPullRequest, getPullRequestIndexPage } from './github'
+import { ProgressivePullRequestIndex } from './pr-index'
+import { lastGitHubRateLimitFor } from './github-transport'
 import {
   getMergeStatus,
   getSubmitStackProgress,
@@ -82,7 +84,11 @@ import {
   type ReadPurpose,
 } from './request-registry'
 import { RepositoryScheduler } from './repository-scheduler'
-import { RepositorySyncCoordinator, type SyncIntervals } from './sync-coordinator'
+import {
+  DEFAULT_INTERVALS,
+  RepositorySyncCoordinator,
+  type SyncIntervals,
+} from './sync-coordinator'
 import { RepositoryWatcher } from './git-watcher'
 import {
   configureGitRuntime,
@@ -271,10 +277,55 @@ const sync = new RepositorySyncCoordinator({
   scheduler,
 })
 
+const prIndex = new ProgressivePullRequestIndex(
+  (origin, cursor, basic, signal) => {
+    const root = repository()
+    return scheduler.read(
+      root,
+      (readSignal) =>
+        backgroundRead(
+          root,
+          AbortSignal.any([signal, readSignal]),
+          (_path, combined) => getPullRequestIndexPage(origin, cursor, basic, combined),
+          'pr-index-page',
+          'github',
+        ),
+      signal,
+    )
+  },
+  hostCredentialAuthority,
+  (state) => {
+    if (state.repository === activeRepository && window && !window.isDestroyed())
+      window.webContents.send('repository:pr-index', state)
+  },
+  (host) => {
+    const report = lastGitHubRateLimitFor(host)
+    return (
+      report.rateLimit.remaining === null ||
+      report.rateLimit.remaining > DEFAULT_INTERVALS.budgetFloor ||
+      (report.rateLimit.reset !== null && report.rateLimit.reset.getTime() <= Date.now())
+    )
+  },
+)
+
 sync.onEvent((event) => {
   if (!window || window.isDestroyed()) return
   if (event.kind === 'snapshot' && event.snapshot) {
     if (event.snapshot.path !== activeRepository) return
+    if (prIndex.current()) {
+      const origin = parseRemote(event.snapshot.remoteUrl)
+      const host = remoteHostContext(origin)
+      const indexed = prIndex.current()!
+      if (
+        !origin ||
+        !host ||
+        indexed.host !== host.host ||
+        indexed.fullName.toLowerCase() !== origin.fullName.toLowerCase()
+      )
+        prIndex.invalidate()
+      else if (!event.snapshot.githubStale && event.snapshot.github.available)
+        prIndex.adopt(event.snapshot.path, host.host, origin.fullName, event.snapshot.pullRequests)
+    }
     const { githubStale, ...snapshot } = event.snapshot
     window.webContents.send('repository:background-snapshot', snapshot)
     return
@@ -302,6 +353,7 @@ function startBackgroundSync(root: string, snapshot: RepositorySnapshot): void {
 function stopBackgroundSync(): void {
   watcher?.stop()
   watcher = null
+  prIndex.invalidate()
   sync.detach()
 }
 const productionOrigin = 'app://git-stacks'
@@ -548,6 +600,7 @@ function githubCli() {
         // none of these readers can reach it.
         readKeys.cancelGitHub()
         retireConfirmedGitHubPayloads()
+        prIndex.invalidate()
         retirePullRequestChecks()
         clearCredentialCheckBackoffs()
       }
@@ -691,6 +744,7 @@ function applySettings(settings: AppSettings): void {
   // dropped with it, so a returning host reads its CLI afresh rather than
   // answering from what was established before it was left.
   retireInboxIdentity(`host:${settings.github.host}`)
+  prIndex.invalidate()
   forgetHost(previousHost ?? undefined)
   forgetGitHubCliServices()
   // The notification inbox belongs to the host it was read from, and the window
@@ -1000,13 +1054,19 @@ async function activateRepository(selected: string, signal?: AbortSignal) {
     if (signal?.aborted) throw new CommandCancelled()
     return inGitRuntime(async () => {
       if (signal?.aborted) throw new CommandCancelled()
-      const snapshot = await getSnapshot(path)
+      const snapshot = await getSnapshot(path, undefined, undefined, 'reuse')
       if (signal?.aborted) throw new CommandCancelled()
       // Past this point the recent entry is written and the switch completes:
       // recents and the active repository must name the same folder.
       await remember(path)
       activeRepository = path
       startBackgroundSync(path, snapshot)
+      // The local workspace opens without waiting for every GitHub page. The
+      // existing coordinator owns the subsequent complete remote refresh.
+      void sync.refreshNow().catch(() => {
+        // The coordinator already reports background failure; a repository switch
+        // can also retire this refresh before it obtains a snapshot.
+      })
       return snapshot
     })
   })
@@ -1511,6 +1571,25 @@ function installHandlers() {
     // The person's own refresh always reads GitHub; it never reuses a payload.
     return sync.refreshNow()
   })
+  ipcMain.handle('repository:pr-index', async (event) => {
+    const root = repository()
+    const originUrl = await getOriginUrl(root)
+    const origin = parseRemote(originUrl)
+    const host = remoteHostContext(origin)
+    if (!originUrl || !origin || !host)
+      throw new Error('A GitHub origin remote is required for PR indexing.')
+    return prIndex.load(root, host.host, originUrl)
+  })
+  ipcMain.handle('repository:pr-index-detail', (event, number: unknown) => {
+    const selected = requirePullRequestNumber(number)
+    return prIndex.selected(selected, () =>
+      readRepository(
+        (root, signal) => getPullRequest(root, selected, signal),
+        'pr-index-detail',
+        'github',
+      ),
+    )
+  })
   ipcMain.handle('repository:status', (event) => {
     return sync.freshness()
   })
@@ -1849,6 +1928,7 @@ function installHandlers() {
 
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
     if (typeof requestId !== 'string' || !requestId) return
+    if (requestId === 'pr-index') prIndex.cancel()
     onboardingKeys.cancel(ONBOARDING_ROOT, requestId)
     // The queue runs across repositories, so it is cancelled whether or not one
     // is open: a window with no repository still has a queue to stop.

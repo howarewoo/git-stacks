@@ -88,7 +88,31 @@ function normalizeState(value: unknown, mergedAt?: unknown): PullRequest['state'
   return state === 'MERGED' || state === 'CLOSED' ? state : 'OPEN'
 }
 
-function parseGraphQlPullRequest(value: unknown): PullRequestWithRepository | null {
+export function directReviewRequests(value: unknown): { logins: string[]; complete: boolean } {
+  if (!isRecord(value) || !Array.isArray(value.nodes)) return { logins: [], complete: false }
+  const logins: string[] = []
+  let complete = isRecord(value.pageInfo) && value.pageInfo.hasNextPage === false
+  for (const entry of value.nodes) {
+    const reviewer = isRecord(entry) ? entry.requestedReviewer : null
+    if (!isRecord(reviewer)) {
+      complete = false
+    } else if (reviewer.__typename !== 'Team') {
+      if (
+        (reviewer.__typename === undefined || reviewer.__typename === 'User') &&
+        typeof reviewer.login === 'string' &&
+        reviewer.login.trim()
+      )
+        logins.push(reviewer.login)
+      else complete = false
+    }
+  }
+  return { logins, complete }
+}
+
+function parseGraphQlPullRequest(
+  value: unknown,
+  degraded = false,
+): PullRequestWithRepository | null {
   if (!isRecord(value)) return null
   const number = value.number
   const title = value.title
@@ -116,6 +140,7 @@ function parseGraphQlPullRequest(value: unknown): PullRequestWithRepository | nu
     isRecord(value.mergeCommit) && typeof value.mergeCommit.oid === 'string'
       ? value.mergeCommit.oid
       : undefined
+  const requests = directReviewRequests(value.reviewRequests)
   const pullRequest: PullRequest = {
     number,
     title,
@@ -130,6 +155,11 @@ function parseGraphQlPullRequest(value: unknown): PullRequestWithRepository | nu
     ...(typeof value.reviewDecision === 'string' ? { reviewDecision: value.reviewDecision } : {}),
     ...(typeof value.mergeStateStatus === 'string' ? { mergeState: value.mergeStateStatus } : {}),
     ...(mergeOid ? { mergeOid } : {}),
+    author:
+      isRecord(value.author) && typeof value.author.login === 'string' ? value.author.login : null,
+    reviewRequested: requests.logins,
+    reviewRequestsComplete: requests.complete,
+    metadata: degraded ? 'degraded' : 'full',
   }
   return { pullRequest, headRepository }
 }
@@ -352,7 +382,7 @@ export async function getGitHubData(
         isRecord(connection) && Array.isArray(connection.nodes) ? connection.nodes : null
       if (!nodes) throw new Error('GitHub could not load pull requests')
       for (const node of nodes) {
-        const parsed = parseGraphQlPullRequest(node)
+        const parsed = parseGraphQlPullRequest(node, conservative)
         if (!parsed) continue
         pullRequests.push(parsed.pullRequest)
         headRepositories.push(parsed.headRepository)
@@ -402,6 +432,74 @@ export async function getGitHubData(
     if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
     observeGraphqlFailure(host, error)
     return unavailableGitHubResult(githubErrorMessage(error), typedFailure(error))
+  }
+}
+
+/** One lightweight page; this never replaces getGitHubData's complete mutation read. */
+export async function getPullRequestIndexPage(
+  originUrl: string,
+  cursor: string | null,
+  conservative: boolean,
+  signal?: AbortSignal,
+): Promise<{
+  pullRequests: PullRequest[]
+  next: string | null
+  viewer: string | null
+  conservative: boolean
+}> {
+  const remote = parseRemote(originUrl)
+  const host = remoteHostContext(remote)
+  if (!remote || !host) throw new Error('A GitHub origin remote is required for PR indexing.')
+  const transport = hostTransport(host)
+  const query = (basic: boolean) => `query($owner: String!, $name: String!, $cursor: String) {
+    viewer { login }
+    repository(owner: $owner, name: $name) {
+      pullRequests(first: 50, after: $cursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        nodes { number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner }
+          ${basic ? '' : 'author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }'} }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }`
+  const variables = { owner: remote.owner, name: remote.name, cursor }
+  let basic = conservative
+  let page: Record<string, unknown>
+  try {
+    page = await transport.graphql(query(basic), variables, { signal })
+  } catch (error) {
+    if (basic || !isSchemaRefusal(error)) throw error
+    observeGraphqlFailure(host, error)
+    basic = true
+    page = await transport.graphql(query(true), variables, { signal })
+  }
+  if (signal?.aborted) throw new CommandCancelled()
+  const repository = isRecord(page) ? page.repository : null
+  const connection = isRecord(repository) ? repository.pullRequests : null
+  if (
+    !isRecord(connection) ||
+    !Array.isArray(connection.nodes) ||
+    !isRecord(connection.pageInfo) ||
+    typeof connection.pageInfo.hasNextPage !== 'boolean'
+  ) {
+    throw new Error('GitHub returned an incomplete pull request page')
+  }
+  const next = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null
+  if (connection.pageInfo.hasNextPage && (typeof next !== 'string' || !next || next === cursor)) {
+    throw new Error('GitHub returned an invalid pull request cursor')
+  }
+  const pullRequests = connection.nodes.map(
+    (node) => parseGraphQlPullRequest(node, true)?.pullRequest,
+  )
+  if (pullRequests.some((pr) => !pr || pr.state !== 'OPEN')) {
+    throw new Error('GitHub returned an invalid open pull request')
+  }
+  const viewer =
+    isRecord(page.viewer) && typeof page.viewer.login === 'string' ? page.viewer.login : null
+  return {
+    pullRequests: pullRequests as PullRequest[],
+    next: next as string | null,
+    viewer,
+    conservative: basic,
   }
 }
 
@@ -460,6 +558,7 @@ function pullRequestFields(conservative: boolean, withBody = false): string {
   return conservative
     ? base
     : `${base}
+        author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }
         reviewDecision mergeStateStatus
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
 }
@@ -502,6 +601,7 @@ export async function getPullRequest(
     const ask = (conservative: boolean) =>
       transport.graphql(query(conservative), variables, { signal })
     let value: unknown
+    let degraded = false
     try {
       value = await ask(false)
     } catch (error) {
@@ -511,11 +611,12 @@ export async function getPullRequest(
       if (!isSchemaRefusal(error)) throw error
       observeGraphqlFailure(host, error)
       value = await ask(true)
+      degraded = true
     }
     if (signal?.aborted) throw new CommandCancelled()
     const repository = isRecord(value) ? value.repository : null
     const node = isRecord(repository) ? repository.pullRequest : null
-    const parsed = parseGraphQlPullRequest(node)
+    const parsed = parseGraphQlPullRequest(node, degraded)
     // `mergeStateStatus` and a commit's `statusCheckRollup` are recent additions
     // to the schema; a host that does not have them still answers everything
     // below, so only the fields every host has are required here.

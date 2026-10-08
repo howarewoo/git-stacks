@@ -4,8 +4,16 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
-import { getGitHubData, getGitHubIssues, getPullRequest } from '../src/main/github'
+import {
+  getGitHubData,
+  getGitHubIssues,
+  getPullRequest,
+  getPullRequestIndexPage,
+} from '../src/main/github'
 import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
+import { ProgressivePullRequestIndex } from '../src/main/pr-index'
+import { RepositoryScheduler } from '../src/main/repository-scheduler'
+import { configuredHostContext, hostTransport } from '../src/main/github-host'
 
 /**
  * Fake `gh` answering the three GraphQL shapes Git Stacks sends: the paginated
@@ -17,8 +25,8 @@ const fakeGitHubCli = `'use strict'
 const { readFileSync, writeSync } = require('node:fs')
 const { basename } = require('node:path')
 const open = [
-  { number: 3, title: 'Feature', url: 'https://github.com/acme/widgets/pull/3', headRefName: 'feature', headRefOid: 'a'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', reviewDecision: 'APPROVED', mergeStateStatus: 'CLEAN', headRepository: { nameWithOwner: 'acme/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } },
-  { number: 4, title: 'Fork feature', url: 'https://github.com/acme/widgets/pull/4', headRefName: 'feature', headRefOid: 'b'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', headRepository: { nameWithOwner: 'evil/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
+  { number: 3, title: 'Feature', url: 'https://github.com/acme/widgets/pull/3', headRefName: 'feature', headRefOid: 'a'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', author: { login: 'alice' }, reviewRequests: { nodes: [{ requestedReviewer: { __typename: 'User', login: 'fixture-user' } }], pageInfo: { hasNextPage: false } }, reviewDecision: 'APPROVED', mergeStateStatus: 'CLEAN', headRepository: { nameWithOwner: 'acme/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } },
+  { number: 4, title: 'Fork feature', url: 'https://github.com/acme/widgets/pull/4', headRefName: 'feature', headRefOid: 'b'.repeat(40), baseRefName: 'main', isDraft: false, state: 'OPEN', author: { login: 'unrelated-author' }, reviewRequests: { nodes: [], pageInfo: { hasNextPage: true } }, headRepository: { nameWithOwner: 'evil/widgets' }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
 ]
 const tracked = { number: 7, title: 'Merged parent', url: 'https://github.com/acme/widgets/pull/7', body: 'body', state: 'MERGED', isDraft: false, headRefName: 'parent', headRefOid: 'c'.repeat(40), headRepository: { nameWithOwner: 'acme/widgets' }, baseRefName: 'main', mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED', mergeCommit: { oid: 'd'.repeat(40) }, commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] } }
 const issues = [
@@ -54,12 +62,14 @@ if (basename(args[0] || '') === 'api' && args.includes('graphql')) {
   const text = String(input.query || '')
   if (text.includes('pullRequest(number:') && input.variables?.number === 7) {
     response = { data: { repository: { pullRequest: tracked } } }
-  } else if (text.includes('viewer')) {
+  } else if (text.includes('viewer') && !text.includes('pullRequests(first:')) {
     response = { data: { viewer: { login: account } } }
   } else if (text.includes('issues(first:')) {
     response = { data: { repository: { issues: { nodes: issues, pageInfo: { hasNextPage: false, endCursor: null } } } } }
   } else {
-    response = { data: { repository: { pullRequests: { nodes: open, pageInfo: { hasNextPage: false, endCursor: null } } } } }
+    const lightweight = text.includes('pullRequests(first: 50')
+    const second = input.variables?.cursor === 'page-two'
+    response = { data: { viewer: { login: account }, repository: { pullRequests: { nodes: lightweight ? [open[second ? 1 : 0]] : open, pageInfo: { hasNextPage: lightweight && !second, endCursor: lightweight && !second ? 'page-two' : null } } } } }
   }
 }
 if (!response) {
@@ -168,6 +178,62 @@ test('GitHub fixture keeps fork heads separate and includes tracked closed paren
     assert.equal(result.pullRequests[local]?.headOid, 'a'.repeat(40))
     assert.equal(result.pullRequests[local]?.reviewDecision, 'APPROVED')
     assert.equal(result.pullRequests[local]?.mergeState, 'CLEAN')
+  })
+})
+test('lightweight transport page includes unrelated authors and direct-request completeness', async () => {
+  await withGitHubFixture(async (repo) => {
+    const index = await getPullRequestIndexPage('https://github.com/acme/widgets.git', null, false)
+    assert.equal(index.viewer, 'fixture-user')
+    assert.equal(index.next, 'page-two')
+    assert.equal(index.pullRequests[0]?.author, 'alice')
+    assert.equal(index.pullRequests[0]?.reviewRequestsComplete, true)
+    const second = await getPullRequestIndexPage(
+      'https://github.com/acme/widgets.git',
+      index.next,
+      false,
+    )
+    assert.equal(second.next, null)
+    assert.equal(second.pullRequests[0]?.author, 'unrelated-author')
+    assert.equal(second.pullRequests[0]?.reviewRequestsComplete, false)
+    assert.equal(second.pullRequests[0]?.headRepository, 'evil/widgets')
+  })
+})
+test('production progressive service publishes real host transport pages through the existing scheduler', async () => {
+  await withGitHubFixture(async (repo) => {
+    const scheduler = new RepositoryScheduler()
+    const published: string[] = []
+    const finished = Promise.withResolvers<void>()
+    const service = new ProgressivePullRequestIndex(
+      (origin, cursor, basic, signal) =>
+        scheduler.read(
+          repo,
+          (readSignal) => getPullRequestIndexPage(origin, cursor, basic, readSignal),
+          signal,
+        ),
+      (host) => hostTransport(configuredHostContext(host)).credentialAuthority(),
+      (state) => {
+        published.push(state.state)
+        if (state.complete) finished.resolve()
+      },
+      () => true,
+    )
+    const first = await service.load(repo, 'github.com', 'https://github.com/acme/widgets.git')
+    assert.equal(first.fullName, 'acme/widgets')
+    assert.equal(first.complete, false)
+    assert.deepEqual(
+      first.pullRequests.map((pr) => pr.number),
+      [3],
+    )
+    await finished.promise
+    assert.deepEqual(
+      service.current()?.pullRequests.map((pr) => pr.number),
+      [3, 4],
+    )
+    assert.deepEqual(published, ['loading', 'partial', 'complete'])
+    const detail = await service.selected(7, () => getPullRequest(repo, 7))
+    assert.equal(detail.body, 'body')
+    service.invalidate()
+    assert.equal(service.current(), null)
   })
 })
 test('GitHub issue discovery returns open issue identities from the repository', async () => {
