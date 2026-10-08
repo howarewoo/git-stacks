@@ -139,7 +139,10 @@ export class ProgressivePullRequestIndex {
           const result = await this.page(origin, cursor, basic, controller.signal)
           if (controller.signal.aborted || generation !== this.generation)
             throw new CommandCancelled()
-          if (authority !== (await this.authority(host))) {
+          const currentAuthority = await this.authority(host)
+          if (controller.signal.aborted || generation !== this.generation)
+            throw new CommandCancelled()
+          if (authority !== currentAuthority) {
             this.invalidate()
             throw new CommandCancelled()
           }
