@@ -184,6 +184,8 @@ export function GraphWorkbench({
     accountLogin,
   ])
   const indexKey = React.useMemo(() => ['graph-index', rootScope] as const, [rootScope])
+  const sourceGeneration = React.useRef(0)
+  const [detailRevision, setDetailRevision] = React.useState(0)
   const acceptIndex = React.useCallback(
     (next: PullRequestIndex): GraphIndexRead =>
       next.repository === snapshot.path &&
@@ -202,7 +204,11 @@ export function GraphWorkbench({
   const readIndex = React.useCallback(
     async (signal: AbortSignal, refresh = false) => {
       if (!desktop?.prIndex) throw new Error('Progressive PR indexing is unavailable.')
+      const generation = sourceGeneration.current
       const next = await desktop.prIndex(refresh ? { refresh: true } : undefined)
+      // Index pushes can cancel this query while the forced main-process read still completes.
+      if (refresh && generation === sourceGeneration.current)
+        setDetailRevision((value) => value + 1)
       signal.throwIfAborted()
       return acceptIndex(next)
     },
@@ -303,7 +309,6 @@ export function GraphWorkbench({
     (preferencesQuery.data ? preferencesQuery.data.state !== 'unavailable' : true)
   const outlineRef = React.useRef<HTMLDivElement>(null)
   const graphRef = React.useRef<HTMLDivElement>(null)
-  const sourceGeneration = React.useRef(0)
   const previousScope = React.useRef({
     root: rootScope,
     viewer: null as string | null,
@@ -512,6 +517,7 @@ export function GraphWorkbench({
     queryKey: [
       'graph-selected-detail',
       sourceScope,
+      detailRevision,
       selectedNode?.id,
       detailPr?.head,
       detailPr?.base,
@@ -570,6 +576,7 @@ export function GraphWorkbench({
     Math.max(0, outline.rows.length - GRAPH_OUTLINE_ROW_LIMIT),
   )
   const mounted = outline.rows.slice(start, start + GRAPH_OUTLINE_ROW_LIMIT)
+  const mountedActiveRow = Math.max(start, Math.min(activeRow, start + mounted.length - 1))
   const focusRow = (position: number) => {
     const target = Math.max(0, Math.min(outline.rows.length - 1, position))
     setActiveRow(target)
@@ -860,7 +867,7 @@ export function GraphWorkbench({
                     type="button"
                     aria-pressed={row.path.includes(selected ?? '')}
                     data-outline-position={start + offset}
-                    tabIndex={start + offset === activeRow ? 0 : -1}
+                    tabIndex={start + offset === mountedActiveRow ? 0 : -1}
                     onFocus={() => setActiveRow(start + offset)}
                     onClick={() => select(row.id)}
                     onKeyDown={(event) => {

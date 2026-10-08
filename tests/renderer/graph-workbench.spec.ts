@@ -11,6 +11,86 @@ const preferenceScope = {
   account: graphIndex(250).viewer!,
 }
 
+test('outline retains keyboard row entry after scrolling and source shrinkage', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  const outline = page.getByRole('list', { name: 'Matching items and prerequisite context' })
+  const entry = outline.locator('[data-outline-position][tabindex="0"]')
+  await outline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect
+    .poll(async () => Number(await entry.getAttribute('data-outline-position')))
+    .toBeGreaterThan(0)
+  await expect(entry).toHaveCount(1)
+  await page.locator('.graph-saved summary').focus()
+  await page.keyboard.press('Tab')
+  await expect(entry).toBeFocused()
+  await page.keyboard.press('End')
+  const lastPosition = Number(
+    await outline.locator('[data-outline-position]:focus').getAttribute('data-outline-position'),
+  )
+  await page.keyboard.press('Enter')
+  await expect(outline.locator('[data-outline-position]:focus')).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  const index = graphIndex(250)
+  await page.evaluate((value) => window.fixture.pushPrIndex(value), {
+    ...index,
+    pullRequests: index.pullRequests.slice(0, 10),
+  })
+  await expect(page.locator('.graph-index-status')).toContainText('10 indexed PRs')
+  await expect(entry).toHaveCount(1)
+  expect(Number(await entry.getAttribute('data-outline-position'))).toBeLessThan(lastPosition)
+  await entry.focus()
+  await page.keyboard.press('Home')
+  await expect(outline.locator('[data-outline-position="0"]')).toBeFocused()
+})
+
+test('Refresh index reconciles a body-only update without changing selection or camera', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(inspector).toContainText('Selected PR detail loaded')
+  await expect(inspector.getByRole('button', { name: 'Review #100', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Zoom graph out' }).click()
+  await page.evaluate(
+    (pr) => {
+      window.fixture.answerNext('prIndexDetail', { ...pr, body: 'Body-only refreshed description' })
+    },
+    graphIndex(250).pullRequests.find((pr) => pr.number === 100)!,
+  )
+  const before = (await getDoubleCalls(page)).filter((call) => call.call === 'prIndexDetail').length
+  await page.getByRole('button', { name: 'Refresh index', exact: true }).click()
+  await expect(inspector).toContainText('Body-only refreshed description')
+  await expect(inspector).toContainText('Selected PR detail loaded')
+  await expect(inspector.getByRole('button', { name: 'Review #100', exact: true })).toBeVisible()
+  await expect(page.locator('.graph-camera')).toContainText('90%')
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'prIndexDetail')).toHaveLength(
+    before + 1,
+  )
+  await page.evaluate((index) => {
+    window.fixture.hold('prIndex')
+    window.fixture.answerNext('prIndexDetail', {
+      ...index.pullRequests.find((pr) => pr.number === 100)!,
+      body: 'Description refreshed after index push',
+    })
+  }, graphIndex(250))
+  await page.getByRole('button', { name: 'Refresh index', exact: true }).click()
+  await page.evaluate((index) => {
+    window.fixture.pushPrIndex(index)
+    window.fixture.release('prIndex')
+  }, graphIndex(250))
+  await expect(inspector).toContainText('Description refreshed after index push')
+  await expect(inspector.getByRole('button', { name: 'Review #100', exact: true })).toBeVisible()
+  await expect(page.locator('.graph-camera')).toContainText('90%')
+})
+
 test('bounded production outline, keyboard, wide nested endpoints and remote Review selection', async ({
   page,
 }) => {
