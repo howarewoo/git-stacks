@@ -46,6 +46,7 @@ import {
   type PullRequestInboxSignals,
 } from '../../../src/shared/pr-inbox'
 import type { GitHubCapabilityState } from '../../../src/shared/host'
+import { githubComHostStatus, toolsAvailable, toolsMissingEditor } from './settings'
 import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 import { reviewRail, stackMember } from './review'
@@ -2351,5 +2352,58 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       unreadCount: 0,
       message: 'GitHub Notifications is off.',
     }),
+  },
+  'settings-ready': {
+    name: 'settings-ready',
+    summary:
+      'An unmanaged computer: an authenticated CLI, a probed github.com host, both configured tools present, and nothing locked.',
+    snapshot: connected,
+    recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:github.com:octo:1',
+      message: null,
+    },
+    hostStatus: githubComHostStatus,
+    settingsPolicy: { tools: toolsAvailable },
+  },
+  'settings-managed': {
+    name: 'settings-managed',
+    summary:
+      'A policy fixes three settings, one stored value was refused, and the configured editor is not installed here.',
+    snapshot: connected,
+    recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:github.com:octo:1',
+      message: null,
+    },
+    hostStatus: githubComHostStatus,
+    settingsPolicy: {
+      locks: [
+        {
+          key: 'updates.channel',
+          reason: 'Fixed to the stable channel by your organization.',
+        },
+        {
+          key: 'privacy.includeLocalPaths',
+          reason: 'Local paths may not leave this computer under your organization policy.',
+        },
+        { key: 'git.mergeTool', reason: 'The merge tool is provisioned by your organization.' },
+      ],
+      issues: [
+        {
+          key: 'git.fetchIntervalSeconds',
+          message: 'must be at least 30 seconds; 120 is in use',
+        },
+      ],
+      tools: toolsMissingEditor,
+    },
   },
 }

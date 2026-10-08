@@ -23,6 +23,7 @@ import type {
 import {
   DEFAULT_SETTINGS,
   type AppSettings,
+  type SettingsPatch,
   type SettingsSnapshot,
 } from '../../../src/shared/settings'
 import {
@@ -71,6 +72,7 @@ import type {
 import { checksReportFor, notificationInbox, scenarios } from './scenarios'
 import { updateStatusFixture } from './update-status'
 import { diagnosticsReportFixture } from './diagnostics'
+import { supportBundleFixture } from './settings'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '../../../src/shared/pull-request-checks'
 import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
@@ -376,18 +378,44 @@ export function installFixtureControl(options: {
   const policyLockedNotifications = scenario.notifications?.policyDisabled === true
   const settingsSnapshot = (): SettingsSnapshot => ({
     settings: structuredClone(notificationSettings),
-    locks: policyLockedNotifications
-      ? [
-          {
-            key: 'notifications.enabled',
-            reason: 'Notifications are held off by policy on this computer.',
-          },
-        ]
-      : [],
-    issues: [],
-    recovered: false,
+    locks: [
+      ...(policyLockedNotifications
+        ? [
+            {
+              key: 'notifications.enabled',
+              reason: 'Notifications are held off by policy on this computer.',
+            },
+          ]
+        : []),
+      ...(scenario.settingsPolicy?.locks ?? []),
+    ],
+    issues: [...(scenario.settingsPolicy?.issues ?? [])],
+    recovered: scenario.settingsPolicy?.recovered ?? false,
     file: '/fixture/settings.json',
+    ...(scenario.settingsPolicy?.tools ? { tools: scenario.settingsPolicy.tools } : {}),
   })
+  /**
+   * The keys a patch would change that this scenario's policy fixes. Re-saving
+   * a value a lock already holds is allowed, as it is in the main process, so
+   * an unrelated edit is never blocked by a setting it did not touch.
+   */
+  const refusedByPolicy = (patch: SettingsPatch): string[] => {
+    const refused: string[] = []
+    for (const lock of scenario.settingsPolicy?.locks ?? []) {
+      if (lock.key === 'shortcuts') {
+        if (patch.shortcuts !== undefined) refused.push(lock.key)
+        continue
+      }
+      const [group, field] = lock.key.split('.') as [
+        'git' | 'github' | 'appearance' | 'privacy' | 'updates' | 'notifications',
+        string,
+      ]
+      const offered = (patch[group] as Record<string, unknown> | undefined)?.[field]
+      const stored = (notificationSettings[group] as unknown as Record<string, unknown>)[field]
+      if (offered !== undefined && offered !== stored) refused.push(lock.key)
+    }
+    return refused
+  }
   const updateListeners = new Set<(status: UpdateStatus) => void>()
   /**
    * The snapshot repository reads are answered from. Seeded from the scenario,
@@ -603,6 +631,14 @@ export function installFixtureControl(options: {
               ? 'notificationSettingsHost'
               : 'updateSettings'
       record(call, [patch])
+      const refused = refusedByPolicy(patch)
+      if (refused.length > 0) {
+        return answer(call, () => {
+          throw new Error(
+            `${refused.join(', ')} ${refused.length === 1 ? 'is' : 'are'} fixed by the settings policy on this computer and cannot be changed here.`,
+          )
+        })
+      }
       // The write lands when it is made and only the answer is ever delayed.
       // That is what keeps a held write honest: it is applied to the host that
       // was selected when it was made, never to whichever host the window has
@@ -1679,6 +1715,61 @@ export function installFixtureControl(options: {
     diagnostics: () => {
       record('diagnostics', [])
       return answer('diagnostics', () => structuredClone(diagnosticsReportFixture))
+    },
+    // Settings > Reset restores every default except the keys a policy fixes,
+    // the same rule the main process applies, so a locked value is kept and
+    // the answer is the snapshot that was actually stored.
+    resetSettings: () => {
+      record('resetSettings', [])
+      const kept = new Set((scenario.settingsPolicy?.locks ?? []).map((lock) => lock.key))
+      const defaults = structuredClone(DEFAULT_SETTINGS)
+      const next = structuredClone(notificationSettings)
+      for (const group of [
+        'git',
+        'github',
+        'appearance',
+        'privacy',
+        'updates',
+        'notifications',
+      ] as const) {
+        const target = next[group] as unknown as Record<string, unknown>
+        const fresh = defaults[group] as unknown as Record<string, unknown>
+        for (const field of Object.keys(fresh)) {
+          if (!kept.has(`${group}.${field}`)) target[field] = fresh[field]
+        }
+      }
+      if (!kept.has('shortcuts')) next.shortcuts = defaults.shortcuts
+      Object.assign(notificationSettings, next)
+      const stored = settingsSnapshot()
+      return answer('resetSettings', () => stored)
+    },
+    // What the configured host was observed to support. A scenario that does
+    // not declare an answer is a host that never answered: the read is refused.
+    githubHostStatus: () => {
+      record('githubHostStatus', [])
+      return answer('githubHostStatus', () => {
+        if (!scenario.hostStatus) throw new Error('The host has not answered a capability probe.')
+        return structuredClone(scenario.hostStatus)
+      })
+    },
+    // The preview follows the privacy setting as main does: with local paths
+    // not opted in, the Git executable path is withheld from the bundle.
+    supportBundlePreview: () => {
+      record('supportBundlePreview', [])
+      return answer('supportBundlePreview', () =>
+        structuredClone(
+          scenario.supportBundle ??
+            supportBundleFixture(notificationSettings.privacy.includeLocalPaths),
+        ),
+      )
+    },
+    exportSupportBundle: (previewId) => {
+      record('exportSupportBundle', [previewId])
+      return answer('exportSupportBundle', () => ({
+        path: '/fixture/Downloads/git-stacks-support.json',
+        bytes: 412,
+        includedPaths: notificationSettings.privacy.includeLocalPaths ? 1 : 0,
+      }))
     },
     onUpdateStatus: (listener) => {
       updateListeners.add(listener)

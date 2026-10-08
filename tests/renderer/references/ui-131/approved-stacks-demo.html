@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="A standalone Git Stacks prototype for exploring a large repository through personal views, bounded PR graphs, and progressive indexing. Fictional data; no Git commands or network requests.">
+<title>Git Stacks — focused views for a large repository</title>
+<style>:root{color-scheme:light;--canvas:#E8ECF3;--shell:#EFF2F7;--surface:#FFF;--inset:#F2F4F8;--ink:#171C24;--muted:#536176;--line:#D7DDE7;--border:#7C879A;--blue:#3155A6;--blue-bg:#EDF2FC;--focus:#355BC5;--green:#276449;--green-bg:#DCEEE3;--amber:#865B13;--amber-bg:#FAF2DE;--red:#9D3D43;--red-bg:#F9DFDF;--violet:#635097;--violet-bg:#E4DFF5;--sans:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;--mono:ui-monospace,SFMono-Regular,Consolas,monospace;--row-height:86px}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased}button,input,select{font:inherit;color:inherit}button{border:0;cursor:pointer}button:disabled{cursor:not-allowed}a{color:var(--blue)}:focus-visible{outline:2px solid var(--focus);outline-offset:3px}::selection{background:#dfe8fc}[hidden]{display:none!important}h1,h2,h3,p{margin:0}button,a{touch-action:manipulation}svg.icon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;vertical-align:middle}.icon.small{width:14px;height:14px}.row{display:flex;align-items:center;gap:8px}.grow{flex:1;min-width:0}.mono{font-family:var(--mono)}.muted{color:var(--muted)}.green{color:var(--green)}.small-text{font-size:12px}.kicker{font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:650;color:var(--muted)}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}.skip-link{position:fixed;top:-70px;left:20px;z-index:200;background:white;padding:12px}.skip-link:focus{top:20px}.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;background:white;border:1px solid var(--line);border-radius:999px;padding:8px 15px;min-height:38px;font-size:12px;font-weight:550;white-space:nowrap}.btn:hover{background:var(--inset)}.btn.primary{color:white;background:var(--ink);border-color:var(--ink)}.btn.primary:hover{background:#2a3340}.btn.ghost{border-color:transparent;background:transparent}.btn.ghost:hover{background:#FFFFFFB0}.btn.full{width:100%}.icon-btn{display:inline-grid;place-items:center;width:36px;height:36px;background:transparent;border-radius:10px;flex-shrink:0}.icon-btn:hover{background:var(--inset)}.icon-btn.small{width:30px;height:30px}.icon-btn.small .icon{width:15px;height:15px}.text-btn{display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--blue);font-size:12px;min-height:30px;padding:4px;border-radius:6px}.text-btn:hover{background:var(--blue-bg)}.text-btn .icon{width:14px;height:14px}.badge{display:inline-flex;align-items:center;gap:4px;border-radius:6px;padding:3px 7px;font-size:10px;font-weight:550;line-height:1.4;white-space:nowrap;color:var(--muted);background:var(--inset)}.badge.blue{color:var(--blue);background:#DFE8FC}.badge.green{color:var(--green);background:var(--green-bg)}.badge.amber{color:var(--amber);background:var(--amber-bg)}.badge.red{color:var(--red);background:var(--red-bg)}.badge.violet{color:var(--violet);background:var(--violet-bg)}.avatar{width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border:2px solid white;background:#DFE8FC;font-size:9px;font-weight:650;color:#263541}.a0{background:#F2DDD5}.a1{background:#D6E7DF}.a2{background:#DDE6FB}.a3{background:#F2E7CD}.a4{background:#E3DCF3}.a5{background:#DAE9EE}.avatars{display:flex;padding-left:5px}.avatars .avatar{margin-left:-5px}.status-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}.count{padding:1px 6px;font-size:10px;font-weight:500;line-height:17px;border-radius:5px;background:var(--inset);color:var(--muted);font-variant-numeric:tabular-nums}.app{height:calc(100dvh - 28px);margin:14px;border-radius:26px;background:var(--shell);border:1px solid white;overflow:hidden;box-shadow:0 15px 45px #17202d08}.app-header{height:62px;padding:0 24px;display:flex;align-items:center;gap:24px;border-bottom:1px solid var(--line)}.brand{display:flex;align-items:center;gap:9px;font-size:21px;font-weight:700;letter-spacing:-.9px;white-space:nowrap}.brand .icon{width:27px;height:27px;stroke-width:2}.brand-dot{margin-left:-10px}.crumbs{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:12px;margin-left:17px}.crumbs strong{font-weight:550;color:var(--ink)}.repo-label{font-size:10px}.slash{color:#93A0B2}.header-end{margin-left:auto;display:flex;gap:14px;align-items:center;font-size:11px;color:var(--muted)}.source-pill{display:flex;align-items:center;gap:6px}.source-pill .icon{width:15px;height:15px}.demo-pill{border:1px solid var(--line);border-radius:99px;padding:5px 10px;background:#FFFFFF70}.body-grid{display:grid;grid-template-columns:166px minmax(0,1fr);height:calc(100% - 62px)}.sidebar{border-right:1px solid var(--line);padding:19px 11px 13px;display:flex;flex-direction:column;gap:25px;min-height:0;overflow:auto}.repository{border:1px solid var(--line);background:white;border-radius:16px;padding:14px 10px;display:flex;gap:8px;align-items:center}.repository>.icon{width:15px;height:15px}.repository strong{display:block;font-weight:600;font-size:12px}.repository small{display:block;font-size:9px;color:var(--muted);white-space:nowrap}.nav-kicker{font-size:9px;margin:0 10px 10px}.nav-item{width:100%;padding:10px 11px;min-height:43px;border-radius:99px;display:flex;gap:9px;align-items:center;background:transparent;text-align:left;font-size:12px;margin-bottom:4px;white-space:nowrap}.nav-item.active{background:var(--ink);color:white}.nav-item:disabled{color:#758090;opacity:1}.nav-item .icon{width:16px;height:16px}.saved-side{padding:0 7px}.saved-side>.row{justify-content:space-between}.saved-side p{font-size:11px;color:var(--muted);line-height:1.8;margin-top:5px}.saved-link{display:flex;align-items:center;gap:7px;background:transparent;text-align:left;font-size:11px;padding:9px 0;width:100%}.saved-link span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.saved-link .icon{width:14px;height:14px;color:var(--muted)}.saved-link.active{color:var(--blue)}.side-context{border-top:1px solid var(--line);padding:19px 8px 0;font-size:11px;line-height:1.8;color:var(--muted)}.side-context>.icon{width:15px;height:15px;margin-bottom:8px}.checkout{margin-top:auto;border:1px solid var(--line);border-radius:15px;padding:13px 10px;background:#FFFFFF90;color:var(--muted);font-size:10px}.checkout strong{font-size:10px;color:var(--ink);display:flex;gap:3px;align-items:center;overflow-wrap:anywhere;margin:11px 0 12px;letter-spacing:-.25px}.checkout strong .icon{width:13px;height:13px}.checkout>.row{justify-content:space-between;border-top:1px solid var(--line);padding-top:9px}.checkout small{display:block;font-size:10px;margin-top:6px;line-height:1.7}.checkout .kicker{font-size:9px}.workspace{padding:22px 20px 0;min-width:0;min-height:0;display:flex;flex-direction:column}.page-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}.page-eyebrow{font-size:9px;letter-spacing:.14em;color:var(--muted);font-weight:650;margin-bottom:5px}.page-heading h1{font-size:31px;letter-spacing:-1.1px;line-height:1.2;font-weight:620;margin-bottom:6px}.page-heading p{font-size:13px;color:var(--muted)}.page-actions{display:flex;align-items:center;gap:17px}.page-actions>span{font-size:12px;color:var(--muted)}.viewbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}.preset-tabs{display:flex;align-items:center;gap:5px}.preset{display:flex;align-items:center;gap:7px;border:1px solid transparent;background:transparent;border-radius:99px;padding:8px 12px;font-size:12px;min-height:38px;white-space:nowrap}.preset:hover{background:#FFFFFF80}.preset.active{background:white;border-color:var(--line);box-shadow:0 1px 4px #171C2406}.preset.active .count{background:var(--blue-bg);color:var(--blue)}.preset .icon{width:14px;height:14px}.save-top{margin-left:auto;font-size:11px;color:var(--muted)}.filterbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.search{position:relative;width:310px;display:block}.search>.icon{position:absolute;left:13px;top:12px;width:15px;height:15px;color:var(--muted)}.search input{width:100%;height:39px;border:1px solid var(--line);border-radius:99px;background:#FFFFFFDB;padding:0 36px 0 37px;font-size:12px}.search input::placeholder{color:var(--muted)}.search kbd{font:11px/1 var(--sans);position:absolute;right:15px;top:14px;color:var(--muted);pointer-events:none}.filter-chip{display:flex;align-items:center;gap:7px;background:#FFFFFFDB;border:1px solid var(--line);border-radius:99px;height:39px;padding:0 11px;font-size:11px;white-space:nowrap}.filter-chip .icon{width:14px;height:14px;color:var(--muted)}.filter-chip .icon:last-child:not(:first-child){width:11px;height:11px;transform:rotate(90deg)}.filter-chip.quiet{background:#FFFFFF60;color:var(--muted)}.filter-chip:hover{background:white}.filter-end{display:flex;gap:3px;align-items:center;margin-left:auto}.filter-end .btn{font-size:11px;padding:7px 9px}.index-strip{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:38px;margin:3px 2px 7px;font-size:10px;color:var(--muted)}.index-state{display:flex;gap:7px;align-items:center}.index-tools{display:flex;align-items:center;gap:9px}.snapshot-trigger{color:var(--muted);font-size:10px}.snapshot-trigger .icon{width:13px;height:13px}.index-progress{width:64px;background:#D7DDE7;height:3px;overflow:hidden;border-radius:10px}.index-progress>span{display:block;height:100%;background:var(--blue);width:0;transition:width 180ms}.work-area{display:grid;grid-template-columns:256px minmax(0,1fr) 276px;gap:13px;flex:1;min-height:0;min-width:0}.panel{border-radius:22px;background:white;overflow:hidden;display:flex;flex-direction:column;min-height:0;min-width:0;border:1px solid #FFFFFF}.panel-heading{display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--line);padding:15px 15px;min-height:73px}.panel-heading>div{min-width:0;flex:1}.panel-heading h2{font-size:13px;font-weight:600;display:flex;gap:7px;align-items:center}.panel-heading small{font-size:10px;color:var(--muted);display:block;margin-top:4px;line-height:1.5}.panel-heading>.icon-btn{margin-left:auto}.list-topline{display:flex;align-items:center;justify-content:space-between;padding:9px 15px;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.07em;border-bottom:1px solid #F0F2F6}.results{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;position:relative;scrollbar-width:thin;scrollbar-color:#C7CFDB transparent}.results:focus-visible{outline-offset:-3px}#result-spacer{position:relative;width:100%}#result-rows{position:absolute;inset:0 0 auto 0}.result{position:absolute;left:7px;right:7px;height:calc(var(--row-height) - 6px);border-radius:13px;border:1px solid transparent;background:white;text-align:left;padding:9px 10px;display:flex;flex-direction:column;gap:4px;width:calc(100% - 14px)}.result:hover{background:var(--inset)}.result.selected{background:var(--blue-bg);border-color:#B7C9F1}.result-top{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:10px;line-height:1.5}.result-number{font-family:var(--mono);font-weight:500}.result-top .icon{width:13px;height:13px;color:var(--green)}.result-time{margin-left:auto;font-size:9px}.result-title{font-size:12px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;line-height:1.6;max-width:100%}.result-bottom{display:flex;gap:5px;align-items:center;font-size:10px;color:var(--muted);min-height:18px}.result-bottom .avatar{width:19px;height:19px;font-size:7px}.result-bottom .checks-dot{margin-left:auto;width:6px;height:6px;border-radius:50%;background:var(--green)}.checks-dot.failing{background:var(--red)!important}.checks-dot.pending{background:var(--amber)!important}.checks-dot.unknown,.checks-dot.none{background:#8793A5!important}.tiny-tag{font-size:9px;border-radius:4px;padding:1px 4px;background:#f0f2f6;color:var(--muted)}.outline-footer{display:flex;justify-content:space-between;gap:4px;align-items:center;padding:10px 12px;font-size:9px;color:var(--muted);border-top:1px solid var(--line);min-height:39px}.outside-selection{padding:10px 12px;font-size:10px;background:var(--amber-bg);color:var(--amber);border-bottom:1px solid #E7DCC0}.outside-selection button{background:transparent;color:inherit;text-decoration:underline;padding:0;font-size:10px}.graph-heading{padding:14px 17px}.graph-heading .badge{font-size:9px;font-weight:500}.graph-toolbar{min-height:47px;display:flex;gap:6px;align-items:center;justify-content:space-between;padding:6px 11px;border-bottom:1px solid var(--line)}.segments{display:flex;align-items:center;padding:3px;background:var(--inset);border-radius:99px;gap:2px}.segments button{padding:6px 9px;min-height:28px;background:transparent;border-radius:99px;font-size:10px;white-space:nowrap}.segments button[aria-pressed=true]{background:white;box-shadow:0 1px 3px #17202d12;font-weight:550}.graph-controls{display:flex;align-items:center;gap:3px;font-size:9px;color:var(--muted)}.graph-controls>.icon{width:12px;height:12px}.graph-controls .icon-btn{width:25px;height:28px;min-width:24px}#zoom-label{width:30px;text-align:center;font-variant-numeric:tabular-nums}.graph-context{display:flex;gap:6px;align-items:center;min-height:32px;font-size:10px;background:#F6F8FC;border-bottom:1px solid #E6ECF6;padding:7px 16px;color:var(--blue)}.graph-context>.icon{width:13px;height:13px}.graph-context strong{font-weight:600}.graph-context button{margin-left:auto;font-size:10px;min-height:20px;padding:0 2px}.graph-notice{padding:9px 15px;background:var(--amber-bg);color:var(--amber);font-size:11px;border-bottom:1px solid #E4D6B9}.graph-viewport{flex:1;min-height:0;min-width:0;overflow:auto;position:relative;background-image:radial-gradient(#D8E0ED70 .7px,transparent .7px);background-size:18px 18px;scrollbar-width:thin;scrollbar-color:#C7CFDB transparent}.graph-viewport:focus-visible{outline-offset:-3px}#graph-stage{position:relative;margin:auto;min-width:100%}#graph-world{position:relative;transform-origin:top left}.graph-svg{position:absolute;inset:0;overflow:visible;pointer-events:none}.edge{fill:none;stroke:#A0B3D2;stroke-width:1.5}.edge.highlight{stroke:#4166AE;stroke-width:1.7}.edge.summary-edge{stroke-dasharray:4 4;stroke:#A2ADBF}.node-card{position:absolute;border:1px solid #D3DFF3;border-radius:15px;background:white;box-shadow:0 3px 8px #26374e03;text-align:left;padding:11px 12px;display:flex;flex-direction:column;gap:5px;width:218px;height:118px}.node-card:hover{border-color:#8EAADC;box-shadow:0 3px 10px #2B416310}.node-card.selected{background:var(--blue-bg);border-color:#6389D5;outline:3px solid #DFE8FB;outline-offset:2px}.node-card.context{background:#FEFEFF;border-color:#D9E0EC}.node-card.context .node-top{color:#657287}.node-card.merged{border-color:#BCADDF}.node-top{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:10px;line-height:1.5}.node-top>.icon{width:13px;height:13px}.node-number{font-family:var(--mono)}.node-check{margin-left:auto;display:inline-flex;gap:3px;align-items:center;font-size:9px}.node-check .icon{width:11px;height:11px}.node-check.passing{color:var(--green)}.node-check.failing{color:var(--red)}.node-check.pending{color:var(--amber)}.node-title{font-size:12px;line-height:1.6;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:100%}.node-ref{font:9px/1.5 var(--mono);color:var(--muted);overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:100%}.node-bottom{display:flex;align-items:center;gap:4px;font-size:9px;color:var(--muted);margin-top:auto}.node-bottom .avatar{width:20px;height:20px;font-size:7px}.node-bottom .tiny-tag{margin-left:auto;font-size:8px}.node-bottom .tiny-tag.blue{background:#DFE8FC;color:var(--blue)}.node-card.run{background:#F5F7FB;border-style:dashed;border-color:#AAB9D0}.node-card.run .node-title{font:600 13px/1.65 var(--mono)}.node-card.run .node-ref{font-family:var(--sans);font-size:10px}.node-card.summary-node{background:#F9FAFC;border:1px dashed #BCC8DA;box-shadow:none;justify-content:center;align-items:center;gap:7px;text-align:center;height:79px;width:192px}.summary-node .row{font-size:11px;font-weight:550;color:var(--muted);gap:5px}.summary-node .row .icon{width:13px;height:13px}.summary-node small{font-size:9px;color:var(--blue)}.base-node{position:absolute;transform:translateX(-50%);height:29px;min-width:105px;border:1px solid #D0DCEE;border-radius:99px;background:white;display:flex;align-items:center;justify-content:center;gap:6px;font:11px var(--mono);padding:0 12px;color:var(--muted)}.base-node .icon{width:12px;height:12px}.base-node.unresolved{border-style:dashed;color:var(--amber)}.graph-footer{display:flex;justify-content:space-between;align-items:center;gap:7px;min-height:39px;border-top:1px solid var(--line);padding:7px 13px;color:var(--muted);font-size:9px}.graph-footer .text-btn{font-size:9px;min-height:20px;white-space:nowrap}.legend{display:flex;align-items:center;gap:6px;white-space:nowrap}.legend-line{width:15px;height:0;border-top:1px solid #557BBA;position:relative}.legend-line:after{content:'';position:absolute;right:0;top:-3px;border-left:4px solid #557BBA;border-top:2px solid transparent;border-bottom:2px solid transparent}.legend-dot{width:5px;height:5px;border:1px solid #A2B2CA;border-radius:50%;margin-left:6px}.inspector{position:relative}.inspector-scroll{padding:17px 16px;overflow:auto;flex:1;min-height:0;scrollbar-width:thin}.inspector-kicker{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;font-size:10px}.inspector-kicker .mono{color:var(--muted);font-size:10px}.inspector h2{font-size:19px;line-height:1.35;letter-spacing:-.5px;margin:10px 0 6px;overflow-wrap:anywhere}.inspector-ref{font:10px/1.8 var(--mono);color:var(--muted);overflow-wrap:anywhere;margin-bottom:16px}.person-row{display:flex;gap:8px;align-items:center;margin-bottom:15px;font-size:12px}.person-row>.avatar{width:29px;height:29px;font-size:10px}.person-row small{font-size:9px;color:var(--muted);display:block}.data-row{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:11px;margin:10px 0}.checks{display:inline-flex;gap:4px;align-items:center;font-size:10px}.checks .icon{width:12px;height:12px}.checks.passing{color:var(--green)}.checks.failing{color:var(--red)}.checks.pending{color:var(--amber)}.checks.none,.checks.unknown{color:var(--muted)}.info-box{font-size:10px;line-height:1.65;background:var(--blue-bg);color:var(--blue);padding:10px;border-radius:10px;margin:12px 0}.info-box.amber{background:var(--amber-bg);color:var(--amber)}.inspector-section{border-top:1px solid var(--line);margin-top:17px;padding-top:15px}.inspector-section h3{font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:10px}.inspector-section h3 small{font-size:8px;color:var(--muted);font-weight:400}.inspector-section p{font-size:10px;color:var(--muted);line-height:1.8;margin-top:8px}.target{width:100%;border:1px solid #D3DFF3;background:#FBFCFF;border-radius:11px;text-align:left;padding:10px;display:flex;gap:7px;align-items:center;font-size:10px;min-height:53px}.target>.icon{width:14px;height:14px;color:var(--muted)}.target:hover{background:var(--blue-bg)}.target div{min-width:0}.target strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;font-weight:550}.target small{color:var(--muted);font-size:9px;display:block;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.target .avatar{margin-left:auto}.target-count{margin-left:auto}.inspector-facts{display:grid;grid-template-columns:auto 1fr;gap:9px;font-size:10px}.inspector-facts>span{color:var(--muted)}.inspector-facts>strong{text-align:right;font-weight:500;overflow-wrap:anywhere}.inspector-footer{padding:12px 15px;background:#FAFBFD;border-top:1px solid var(--line)}.inspector-footer .btn{font-size:11px;min-height:35px;padding:7px 8px}.inspector-footer .btn+.btn{margin-top:7px}.inspector-footer p{color:var(--muted);font-size:9px;text-align:center;margin-top:7px}.statusbar{display:flex;align-items:center;justify-content:space-between;gap:9px;min-height:26px;color:var(--muted);font-size:8px}.statusbar>span{display:flex;gap:5px;align-items:center}.statusbar button{background:transparent;color:var(--muted);padding:5px 2px;font-size:9px}.statusbar button:hover{color:var(--blue)}.statusbar .status-dot{width:4px;height:4px}.updates{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid #C0D1F0;background:#E7EFFD;border-radius:12px;color:var(--blue);margin-top:10px;font-size:11px}.updates>.icon{width:15px;height:15px}.updates>.text-btn{margin-left:auto;font-size:11px}.updates>.icon-btn{width:24px;height:24px}.details-mobile{display:none}.empty{padding:35px 18px;text-align:center;color:var(--muted);font-size:12px}.empty .icon{width:25px;height:25px;margin-bottom:12px}.empty h3{font-size:14px;color:var(--ink);margin-bottom:7px}.empty p{font-size:11px;line-height:1.8;margin-bottom:10px}.toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);border-radius:12px;background:#171C24;color:white;padding:11px 16px;font-size:12px;box-shadow:0 8px 35px #0002;max-width:min(90vw,650px);z-index:150;pointer-events:none}.toast:empty{display:none}dialog{border:1px solid var(--line);border-radius:23px;padding:0;background:white;color:var(--ink);width:min(510px,calc(100vw - 32px));max-height:calc(100dvh - 40px);box-shadow:0 20px 70px #14203424;overflow:auto}dialog::backdrop{background:#14203435;backdrop-filter:blur(3px)}dialog.drawer{margin:14px 14px 14px auto;height:calc(100dvh - 28px);max-height:none;width:min(390px,calc(100vw - 28px))}dialog.drawer .dialog-body{padding:20px}.dialog-head{display:flex;align-items:flex-start;gap:12px;padding:20px;border-bottom:1px solid var(--line)}.dialog-head>div{flex:1;min-width:0}.dialog-head h2{font-size:20px;line-height:1.3;letter-spacing:-.5px;margin-bottom:5px}.dialog-head p{font-size:11px;color:var(--muted);line-height:1.7}.dialog-head>.icon-btn{margin-top:-5px;margin-right:-5px}.dialog-body{padding:20px;overflow:auto}.dialog-footer{display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:15px 20px;background:#FAFBFD;border-top:1px solid var(--line);position:sticky;bottom:0}.field{display:block;margin-bottom:17px;font-size:12px;font-weight:550}.field>span{display:block;margin-bottom:7px}.field select,.field input{display:block;width:100%;border:1px solid var(--border);border-radius:10px;background:white;padding:9px 11px;min-height:40px;font-size:12px}.field small{display:block;font-size:10px;color:var(--muted);font-weight:400;line-height:1.7;margin-top:6px}.checkbox{display:flex;align-items:flex-start;gap:9px;font-size:12px;line-height:1.6;margin:14px 0}.checkbox input{accent-color:var(--blue);margin-top:4px;width:15px;height:15px}.checkbox small{display:block;color:var(--muted);font-size:10px;margin-top:4px}.dialog-note{padding:12px;border-radius:11px;background:var(--inset);color:var(--muted);font-size:11px;line-height:1.8;margin:16px 0}.dialog-note strong{color:var(--ink);font-weight:550}.dialog-body h3{font-size:12px;margin:18px 0 8px}.dialog-body>p{font-size:12px;color:var(--muted);line-height:1.8}.settings-rule{border:0;border-top:1px solid var(--line);margin:20px 0}.settings-section-label{font-size:9px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px;font-weight:600}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:9px}.metric{background:var(--inset);border-radius:12px;padding:12px}.metric strong{font-size:22px;letter-spacing:-.6px;display:block;font-variant-numeric:tabular-nums}.metric span{display:block;font-size:10px;color:var(--muted);margin-top:4px}.metric small{font-size:9px;color:var(--muted)}.saved-item{display:flex;align-items:center;gap:7px;padding:9px 0;border-bottom:1px solid var(--line);font-size:12px}.saved-item>span{flex:1;min-width:0;overflow-wrap:anywhere}.saved-item>button{background:transparent;color:var(--red);font-size:10px;padding:7px}.danger-text{color:var(--red);font-size:11px}.budget-options{display:flex;gap:6px;flex-wrap:wrap}.budget-options .btn{flex:1;font-size:11px}.inspector-dialog .inspector-scroll{overflow:visible}.inspector-dialog .inspector-footer{position:sticky;bottom:0}.dense{--row-height:70px}.dense .result{padding-top:6px;padding-bottom:6px;gap:2px}.dense .result-bottom .avatar{width:16px;height:16px}.dense .result-title{font-size:11px}.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+@media(min-width:1700px){.work-area{grid-template-columns:285px minmax(0,1fr) 306px}.body-grid{grid-template-columns:183px minmax(0,1fr)}.workspace{padding:24px 24px 0}.sidebar{padding-inline:13px}.result-title{font-size:13px}}
+@media(max-width:1360px){.work-area{grid-template-columns:238px minmax(0,1fr) 254px;gap:10px}.workspace{padding-inline:15px}.body-grid{grid-template-columns:151px minmax(0,1fr)}.sidebar{padding-inline:8px}.page-actions>span{font-size:11px}.graph-controls>span:first-child,.graph-controls>.icon{display:none}.search{width:270px}.filter-chip.quiet{display:none}.inspector-scroll{padding:16px 13px}.inspector h2{font-size:18px}.graph-heading{padding-inline:13px}.graph-toolbar{padding-inline:8px}.segments button{padding-inline:8px}.legend-dot,.legend-dot+span{display:none}}
+@media(max-width:1170px){.work-area{grid-template-columns:250px minmax(0,1fr)}.inspector{display:none}.details-mobile{display:grid}.page-actions>span{display:none}.search{width:290px}.source-pill{display:none}.status-middle{display:none}.body-grid{grid-template-columns:158px minmax(0,1fr)}.app-header{gap:12px}.crumbs{margin-left:12px}.filter-end{gap:0}.filter-end .btn{font-size:10px}.graph-controls>span:first-child,.graph-controls>.icon{display:initial}.legend-dot,.legend-dot+span{display:initial}}
+@media(max-width:920px){.sidebar{padding:15px 7px}.body-grid{grid-template-columns:62px minmax(0,1fr)}.repository,.saved-side,.side-context,.checkout,.nav-kicker{display:none}.nav-item{font-size:0;justify-content:center;padding:12px;width:43px;height:43px;min-height:43px;margin:0 auto 9px}.nav-item .icon{width:18px;height:18px}.app-header{padding-inline:18px}.crumbs{font-size:11px}.page-heading{margin-bottom:16px}.page-heading h1{font-size:27px}.workspace{padding-top:18px}.work-area{grid-template-columns:223px minmax(0,1fr)}.search{width:245px}.save-top{font-size:0}.save-top .icon{width:16px;height:16px}.preset{padding:7px 8px;font-size:11px}.index-tools #saved-status{display:none}.graph-controls>span:first-child,.graph-controls>.icon{display:none}.legend-dot,.legend-dot+span{display:none}.filter-end .btn{font-size:0;padding:8px}.filter-end .btn .icon{width:17px;height:17px}.filter-chip{padding-inline:9px;font-size:10px}.header-end{gap:10px}}
+@media(max-width:700px){.app{margin:6px;height:calc(100dvh - 12px);border-radius:19px}.app-header{height:54px;padding:0 14px}.brand{font-size:19px}.brand .icon{width:23px;height:23px}.crumbs{display:none}.body-grid{height:calc(100% - 54px);grid-template-columns:1fr}.sidebar{display:none}.workspace{padding:16px 10px 0}.page-eyebrow{font-size:8px}.page-heading h1{font-size:25px}.page-heading p{font-size:11px}.page-actions .btn{font-size:0;width:36px;min-height:36px;padding:8px}.page-actions .btn .icon{width:16px;height:16px}.demo-pill{font-size:9px}.header-end .avatar{width:21px;height:21px;font-size:8px}.viewbar{margin-bottom:10px;overflow:auto;min-height:39px;flex-shrink:0}.preset-tabs{gap:2px}.preset{font-size:10px;padding:7px 7px;min-height:33px}.preset .icon{width:12px;height:12px}.preset .count{font-size:8px;padding-inline:4px;line-height:15px}.save-top{display:none}.search{width:100%;order:0;flex-basis:100%}.filterbar{gap:6px}.filter-chip{height:32px}.filter-end .btn,.filter-end .icon-btn{height:32px;min-height:32px}.index-strip{font-size:9px;min-height:32px;gap:4px;flex-wrap:wrap;margin-bottom:4px}.index-progress{width:30px}.snapshot-trigger{font-size:9px}.work-area{grid-template-columns:1fr;grid-template-rows:185px minmax(250px,1fr);gap:9px;overflow:auto}.panel{border-radius:17px;flex-shrink:0}.outline-panel .panel-heading{min-height:49px;padding:9px 13px}.outline-panel .panel-heading small{display:none}.outline-panel .list-topline{display:none}.outline-panel .outline-footer{min-height:27px;padding:5px 11px}.results{min-height:92px}.graph-panel{min-height:390px}.graph-heading{min-height:58px;padding:10px 13px}.graph-heading small{font-size:9px}.graph-toolbar{min-height:43px}.segments button{font-size:9px;padding:5px 8px}.graph-context{font-size:9px;padding:6px 11px}.graph-footer{font-size:8px;padding:6px 10px}.graph-footer .text-btn{font-size:8px}.statusbar{font-size:7px;min-height:24px}.updates{font-size:10px;padding:7px;flex-wrap:wrap}.updates .text-btn{font-size:10px}.outside-selection{font-size:9px;padding:6px 10px}.statusbar button{font-size:8px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+/* A graph card has one inspection target and a separate expansion control. */
+.node-card{height:138px;padding:0;display:block}.node-select{display:flex;flex-direction:column;gap:5px;width:100%;height:100%;padding:12px;border-radius:inherit;background:transparent;text-align:left}.node-card.has-hidden .node-select{height:111px;padding-bottom:4px}.node-select:hover{background:#3155A602}.node-select:focus-visible{outline-offset:3px}.offshoot{position:absolute;left:10px;right:10px;bottom:6px;height:21px;border-radius:5px;background:#EEF2F8;display:flex;align-items:center;justify-content:center;gap:4px;font-size:8.5px;color:var(--muted);white-space:nowrap;border:1px dashed #BAC8DF}.offshoot:hover{background:#E1EAF9;color:var(--blue)}.offshoot .icon{width:10px;height:10px}.ancestry-warning{color:var(--amber)}
+@media(max-height:820px) and (min-width:701px){.app-header{height:53px}.body-grid{height:calc(100% - 53px)}.workspace{padding-top:14px}.page-eyebrow{display:none}.page-heading{margin-bottom:11px}.page-heading h1{font-size:26px;margin-bottom:0}.page-heading p{font-size:11px;margin-top:3px}.viewbar{margin-bottom:10px}.index-strip{min-height:30px;margin-bottom:5px}.panel-heading{min-height:62px;padding-top:10px;padding-bottom:10px}.graph-toolbar{min-height:43px}.sidebar{gap:17px;padding-top:14px}.side-context{display:none}.graph-context{font-size:9px}.saved-side p{line-height:1.65}}
+@media(max-height:750px) and (min-width:701px){.page-heading p{display:none}.page-heading{min-height:38px}.preset{min-height:34px;padding-block:6px}.repository{padding-block:10px}.nav-item{min-height:39px;padding-block:9px}.saved-side{font-size:10px}.checkout{padding:10px}.checkout small{font-size:9px}}
+
+/* Keep PR titles readable when the compact graph is fit to the work surface. */
+.node-card{width:244px}.node-title{font-size:14px;line-height:1.45}.node-ref{font-size:10px}.node-top{font-size:11px}.node-check{font-size:10px}.node-bottom{font-size:10px}.node-bottom .avatar{width:22px;height:22px;font-size:8px}.node-card.run .node-title{font-size:14px}.node-card.run .node-ref{font-size:10px}.offshoot{font-size:9px}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#results">Skip to pull requests</a>
+<div class="app">
+  <header class="app-header">
+    <div class="brand"><span data-icon="layers"></span>git stacks<span class="brand-dot">.</span></div>
+    <div class="crumbs"><span>howarewoo</span><span class="slash">/</span><strong>git-stacks</strong><span class="repo-label">Repository</span></div>
+    <div class="header-end"><span class="source-pill"><span data-icon="gitbranch"></span>Local Git + GitHub</span><span class="demo-pill">Interactive prototype</span><span class="avatar a0" title="Sample signed-in user: Maya Chen">MC</span></div>
+  </header>
+  <div class="body-grid">
+    <aside class="sidebar" aria-label="Repository navigation">
+      <div class="repository"><span data-icon="folder"></span><div><strong>git-stacks</strong><small>howarewoo / git-stacks</small></div></div>
+      <nav><div class="kicker nav-kicker">Repository</div>
+        <button class="nav-item" disabled title="Outside this focused prototype"><span data-icon="gitbranch"></span>Branches</button>
+        <button class="nav-item active" aria-current="page" data-action="home"><span data-icon="layers"></span>Stacks</button>
+        <button class="nav-item" disabled title="Outside this focused prototype"><span data-icon="history"></span>History</button>
+        <button class="nav-item" disabled title="Outside this focused prototype"><span data-icon="files"></span>Working changes</button>
+        <button class="nav-item" disabled title="Outside this focused prototype"><span data-icon="pr"></span>Pull requests</button>
+        <button class="nav-item" disabled title="Outside this focused prototype"><span data-icon="archive"></span>Stashes</button>
+      </nav>
+      <div class="saved-side"><div class="row"><span class="kicker">Saved views</span><button class="icon-btn small" aria-label="Save current view" data-action="save"><span data-icon="plus"></span></button></div><div id="saved-side-list"></div><p id="saved-empty">Your filters. Your layout.<br>Saved on this device.</p></div>
+      <div class="side-context"><span data-icon="info"></span><p>One repository.<br>Every contributor’s PRs.<br>No stack names or owners.</p></div>
+      <div class="checkout"><div class="kicker">Current checkout</div><strong><span data-icon="gitbranch"></span>feat/cache-keys</strong><div class="row"><span>Working tree</span><span class="green">Clean</span></div><small>Inspecting never switches branches.</small></div>
+    </aside>
+    <main class="workspace" id="main">
+      <section class="page-heading"><div><div class="page-eyebrow">REPOSITORY WORKSPACE</div><h1>Stacks</h1><p>Your work, with the dependencies it needs.</p></div><div class="page-actions"><span id="repo-summary"></span><button class="btn primary" data-action="refresh" id="refresh-btn"><span data-icon="refresh"></span>Refresh snapshot</button></div></section>
+      <div class="viewbar"><div id="preset-tabs" class="preset-tabs" aria-label="Default views"></div><button class="text-btn save-top" data-action="save"><span data-icon="plus"></span>Save view</button></div>
+      <div class="filterbar">
+        <label class="search"><span data-icon="search"></span><input type="search" id="search" placeholder="Search PRs, titles, or branch refs…" autocomplete="off" aria-label="Search indexed PRs"><kbd>/</kbd></label>
+        <button class="filter-chip" id="author-chip" data-action="filters"><span data-icon="user"></span><span>Author: @maya</span><span data-icon="chevron"></span></button>
+        <span class="filter-chip quiet" id="state-chip"><span data-icon="pr"></span>Open · drafts included</span>
+        <button class="filter-chip" data-action="filters"><span data-icon="sliders"></span>Filters<span id="extra-filter-count"></span></button>
+        <div class="filter-end"><button class="btn ghost" data-action="view-options"><span data-icon="sliders"></span>View options</button><button class="icon-btn" data-action="diagnostics" aria-label="Open prototype controls and performance counters" title="Prototype controls"><span data-icon="code"></span></button></div>
+      </div>
+      <div class="updates" id="updates" hidden><span data-icon="refresh"></span><span><strong>3 incoming changes</strong> · Your selection and layout have not moved.</span><button class="text-btn" data-action="apply-updates">Apply updates</button><button class="icon-btn small" data-action="dismiss-updates" aria-label="Dismiss queued updates"><span data-icon="x"></span></button></div>
+      <div class="index-strip"><div class="index-state"><span class="status-dot" id="index-dot"></span><span id="index-label"></span><span class="index-progress" id="index-progress"><span></span></span></div><div class="index-tools"><span class="muted" id="saved-status"></span><button class="text-btn snapshot-trigger" data-action="snapshot" id="snapshot-label">Sample snapshot · fresh <span data-icon="info"></span></button></div></div>
+      <div class="work-area">
+        <section class="panel outline-panel" aria-label="Matching pull requests">
+          <div class="panel-heading"><div><h2 id="outline-title">My PRs <span id="result-count" class="count"></span></h2><small id="outline-description">Open PRs authored by @maya</small></div><button class="icon-btn small" data-action="filters" aria-label="Configure results"><span data-icon="sliders"></span></button></div>
+          <div id="outside-selection" class="outside-selection" hidden></div>
+          <div class="list-topline"><span>Pull request</span><span>Updated</span></div>
+          <div id="results" class="results" tabindex="0" aria-label="Scrollable matching pull requests. Use arrow keys to navigate." role="region"><div id="result-spacer"><div id="result-rows"></div></div><div id="empty-results" hidden></div></div>
+          <div class="outline-footer"><span id="row-range"></span><span id="row-mount" title="Only nearby rows are mounted"></span></div>
+        </section>
+        <section class="panel graph-panel" aria-label="Focused PR graph">
+          <div class="panel-heading graph-heading"><div><h2>PR dependencies <span class="badge blue">Focused</span></h2><small id="graph-subtitle"></small></div><button class="icon-btn small details-mobile" data-action="inspector" aria-label="Open selected PR details"><span data-icon="panel"></span></button></div>
+          <div class="graph-toolbar"><div class="segments" aria-label="Graph scope"><button data-scope="nearby" aria-pressed="true">Nearby</button><button data-scope="ancestry" aria-pressed="false">Ancestry</button><button data-scope="dependents" aria-pressed="false">Dependents</button></div><div class="graph-controls"><span>Parents below</span><span data-icon="arrowup"></span><button class="icon-btn small" data-action="zoom-out" aria-label="Zoom out"><span data-icon="minus"></span></button><span id="zoom-label">100%</span><button class="icon-btn small" data-action="zoom-in" aria-label="Zoom in"><span data-icon="plus"></span></button><button class="icon-btn small" data-action="fit" aria-label="Fit graph"><span data-icon="maximize"></span></button></div></div>
+          <div id="graph-context" class="graph-context"></div>
+          <div id="graph-notice" class="graph-notice" hidden></div>
+          <div id="graph-viewport" class="graph-viewport" tabindex="0" aria-label="Scrollable graph. PR cards are keyboard accessible."><div id="graph-stage"><div id="graph-world"></div></div></div>
+          <div class="graph-footer"><span class="legend"><span class="legend-line"></span>PR base target <span class="legend-dot"></span><span>Context retained</span></span><button class="text-btn" data-action="graph-budget" id="graph-budget-label"></button></div>
+        </section>
+        <aside class="panel inspector" id="inspector" aria-label="Selected PR details"></aside>
+      </div>
+      <footer class="statusbar"><span><span class="status-dot"></span>Fictional data · no Git or network requests</span><span class="status-middle">Selection is not checkout · view filters never scope a mutation</span><button data-action="reset">Reset demo</button></footer>
+    </main>
+  </div>
+</div>
+<div class="sr-only" role="status" aria-live="polite" id="announcement"></div>
+<div class="toast" role="status" aria-live="polite" id="toast"></div>
+<dialog id="modal" aria-labelledby="dialog-title"></dialog>
+<script>'use strict';
+/* A local, dependency-free design specimen, not the Electron renderer.
+   Mock records are delivered to a separate paged in-memory index. No network or
+   Git APIs exist in this file. Only view preferences use localStorage.
+   PR author, PR targets, current checkout and local ancestry are distinct facts. */
+const ICONS={
+ layers:'<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>',
+ gitbranch:'<circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M18 8c0 6-12 3-12 9"/>',
+ pr:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10M18 17V9a4 4 0 0 0-4-4h-2m3-3-3 3 3 3"/>',
+ folder:'<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
+ github:'<path d="M9 19c-4 1-4-2-6-2m12 4v-3a3 3 0 0 0-.8-2.2c2.8-.3 5.8-1.4 5.8-6.2a5 5 0 0 0-1.4-3.5 4.5 4.5 0 0 0-.1-3.5S17.4 2.3 15 4a13 13 0 0 0-6 0C6.6 2.3 5.5 2.6 5.5 2.6a4.5 4.5 0 0 0-.1 3.5A5 5 0 0 0 4 9.6c0 4.8 3 5.9 5.8 6.2A3 3 0 0 0 9 18v3"/>',
+ refresh:'<path d="M20 7a8 8 0 0 0-14-2L3 8m0-5v5h5M4 17a8 8 0 0 0 14 2l3-3m0 5v-5h-5"/>',
+ search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+ user:'<circle cx="12" cy="7" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
+ laptop:'<rect x="5" y="3" width="14" height="12" rx="2"/><path d="M5 15 2 20h20l-3-5M10 17h4"/>',
+ chevron:'<path d="m9 5 7 7-7 7"/>',arrowup:'<path d="M12 21V3m-6 6 6-6 6 6"/>',arrow:'<path d="M3 12h18m-6-6 6 6-6 6"/>',
+ info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/>',
+ check:'<path d="m5 12 4 4L19 6"/>',checkcircle:'<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+ alert:'<path d="M10.3 3.8 2 18.2A1.7 1.7 0 0 0 3.5 21h17a1.7 1.7 0 0 0 1.5-2.8L13.7 3.8a2 2 0 0 0-3.4 0Z"/><path d="M12 9v5m0 3v.1"/>',
+ clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',circle:'<circle cx="12" cy="12" r="8"/>',
+ x:'<path d="m6 6 12 12M6 18 18 6"/>',plus:'<path d="M12 5v14M5 12h14"/>',minus:'<path d="M5 12h14"/>',
+ list:'<path d="M9 6h12M9 12h12M9 18h12M3 6h.1M3 12h.1M3 18h.1"/>',
+ tree:'<circle cx="6" cy="5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M6 9c0 3 2 3 5 3h5"/>',
+ sliders:'<path d="M4 7h7m4 0h5M4 17h3m4 0h9M11 4v6M7 14v6"/>',
+ maximize:'<path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/>',
+ panel:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/>',
+ fold:'<path d="m8 3 4 4 4-4M5 9h14M5 15h14m-11 6 4-4 4 4"/>',
+ history:'<path d="M3 11a9 9 0 1 1 2 7M3 4v7h7m2-4v5l3 2"/>',
+ files:'<path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10Z"/><path d="M13 3v7h7M8 15h8m-8 3h5"/>',
+ archive:'<rect x="3" y="3" width="18" height="4" rx="1"/><path d="M5 7v14h14V7M9 11h6"/>',
+ external:'<path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/>',
+ code:'<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-2-15-4 18"/>',
+ copy:'<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+ eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+ lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+ commit:'<circle cx="12" cy="12" r="4"/><path d="M2 12h6m8 0h6"/>'
+};
+
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const icon = (name, cls='') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ICONS.circle}</svg>`;
+function hydrate(root=document){root.querySelectorAll('[data-icon]').forEach(el => el.outerHTML=icon(el.dataset.icon));}
+const fmt = n => Number(n).toLocaleString('en-US');
+const REPO='howarewoo/git-stacks', CURRENT=483, VIEWER='maya', STORAGE='git-stacks-large-demo:v3:howarewoo/git-stacks:maya';
+const NAMES=['Maya Chen','Theo Brooks','Priya Shah','Noor Patel','Jules Martin','Sasha Kim','Oliver Evans','Leila Aziz','Ben Ortiz','Riley Jones','Alex Rivera','Ella Park','Dani Cruz','Elliott Reed','Leo Fischer','Val Morgan','Kevin Liu','Amara Okafor','Luca Romano','Nina Ivanova','Owen Price','Zara Ahmed','Hugo Costa','Iris Wang','Finn Murphy','Asha Rao','Mateo Silva','Grace Lin','Emil Jensen','Lena Weber','Sam Taylor','Sofia Rossi','Kai Nguyen','Aria Santos','Noah Brown','Mei Tan','Ethan Cole','Avery Hall','Jin Park','Anika Desai','Louis Dubois','Ada Nwosu','Max Berg','Yuki Sato','Mila Novak','Caleb Green','Nora Wilson','Dev Mehta','Elena Torres','Robin Lee'];
+const PEOPLE=NAMES.map((name,i)=>({index:i,name,login:name.split(' ')[0].toLowerCase(),initials:name.split(' ').map(n=>n[0]).join('')}));
+const person = login => PEOPLE.find(a=>a.login===login) || PEOPLE[0];
+const avatar = a => `<span class="avatar a${a.index%6}" title="PR author: ${esc(a.name)} (@${esc(a.login)})" aria-label="PR author ${esc(a.name)}">${a.initials}</span>`;
+const refKey = r => `${r.repository.toLowerCase()}\0${r.ref}`;
+const TITLES=['Normalize repository paths','Preserve worktree identity','Surface repository warnings','Unify input states','Improve keyboard focus','Add compact controls','Parse unified diff headers','Preserve diff whitespace','Show renamed file paths','Bound large diff previews','Add hunk navigation','Capture remote branch tips','Validate publish previews','Resume interrupted publication','Report rejected leases','Read pull request metadata','Separate check and review states','Load review requests','Preserve unavailable states','Track repository refreshes','Cancel superseded requests','Cache last-known PR state','Show snapshot freshness','List remote-only branches','Consolidate tracking refs','Handle ambiguous branch names','Keep stable selection','Render PR connections','Collapse linear PR runs','Preserve fork context','Navigate graph by keyboard','Preview local branch deletion','Protect worktree checkouts','Explain destructive actions','Add file status filters','Keep filtered staging scoped','Inspect conflicted paths','Preserve commit message input','Read credential availability','Recover expired sessions','Keep local Git independent','Detect changed parent tips','Preview dependent changes','Preserve recovery journals','Recheck branch identity','Load commit history','Paginate commit rows','Inspect merge parents','Show commit author details','Read PR issue links','Separate context and closing links','Preview issue link edits','Restore last selection','Improve empty repository state','Parse stash references','Preserve captured stash IDs','Preview stash removal','Respect reduced motion','Improve dialog focus return','Label icon-only controls','Measure large repository reads','Bound background reads','Show partial history coverage','Test repository-qualified refs','Improve native titlebar spacing','Handle high-DPI layouts'];
+function makeFixture(total){
+  const records=[];
+  const add=(number,title,head,base,author,age,opts={})=>{
+    const a=PEOPLE[author%50];
+    records.push({number,title,head:{repository:REPO,ref:head,oid:`${number.toString(16).padStart(8,'0')}${'c'.repeat(32)}`},base:{repository:REPO,ref:base},author:a,age,state:'OPEN',draft:opts.draft??false,checks:opts.checks||(['passing','passing','passing','pending','none','failing'][number%6]),review:opts.review||(['approved','required','approved','required'][number%4]),requestedUsers:opts.requested??(a.login!=='maya'&&number%29===0?['maya']:[]),local:opts.local??false,parentContained:opts.contained??true,label:opts.label||['performance','ui','tests','infrastructure'][number%4]});
+  };
+  // The example path contains several authors, two forks, and side branches.
+  [
+    [482,'Define cache contract','feat/cache-contract','main',1,53,{checks:'passing',review:'approved'}],
+    [483,'Cache key registry','feat/cache-keys','feat/cache-contract',2,28,{checks:'passing',review:'approved',local:true}],
+    [484,'Subscribe to cache events','feat/cache-events','feat/cache-keys',0,8,{checks:'passing',local:true}],
+    [485,'Batch invalidations','feat/cache-batch','feat/cache-events',3,19,{checks:'failing',draft:true}],
+    [486,'Expose cache metrics','feat/cache-metrics','feat/cache-keys',0,2,{checks:'passing',review:'required',local:true,contained:false}],
+    [487,'Diagnostics panel','feat/cache-diagnostics','feat/cache-metrics',1,22,{checks:'passing',requested:['maya']}],
+    [488,'CLI cache inspection','feat/cache-cli','feat/cache-metrics',4,16,{checks:'pending',requested:['maya']}],
+    [489,'Document inspection output','docs/cache-output','feat/cache-cli',0,12,{checks:'passing'}],
+    [490,'Poll cache events','feat/cache-poll','feat/cache-events',2,41,{checks:'passing'}],
+    [491,'Test invalidation order','test/cache-order','feat/cache-batch',0,14,{checks:'passing'}],
+    [492,'Test empty diagnostics','test/cache-empty','feat/cache-diagnostics',12,31,{checks:'passing'}],
+    [493,'Preserve cache statistics','feat/cache-statistics','feat/cache-diagnostics',13,38,{checks:'passing'}],
+    [494,'Benchmark event throughput','perf/cache-throughput','feat/cache-poll',14,36,{checks:'pending'}],
+    [495,'Debounce registry refresh','feat/registry-refresh','feat/cache-keys',3,70,{checks:'passing'}],
+    [496,'Retry stale snapshots','feat/registry-retry','feat/registry-refresh',15,92,{checks:'passing'}],
+    [497,'Recover polling failures','fix/poll-failures','feat/registry-retry',16,130,{checks:'failing'}]
+  ].forEach(row=>add(...row));
+  for(let j=0;j<18;j++) add(498+j,TITLES[(j+40)%TITLES.length],`feat/cache-probe-${j+1}`,j%3===0?'feat/cache-keys':`feat/cache-probe-${j}`,5+j,170+j*8,{checks:j%7===0?'pending':'passing'});
+  let index=0,number=1000;
+  while(records.length<total){
+    const length=Math.min(index===2?83:4+(index%9),total-records.length),heads=[];
+    for(let j=0;j<length;j++){
+      const num=number++,t=TITLES[(index*7+j)%TITLES.length],h=`${['feat','fix','test','perf'][index%4]}/${t.toLowerCase().replace(/[^a-z0-9]+/g,'-')}-${num}`;
+      let base=j===0?(index%7===0?'release/1.x':'main'):heads[j-1];
+      if(index===2&&j>1) base=heads[j<64?0:1]; // Deliberate high-fan-out fixture.
+      else if(j>3&&j%4===0) base=heads[1];
+      add(num,t,h,base,(index*9+j+7)%50,24+((num*17)%1450),{draft:j===length-1&&index%2===0,local:num%97===0});
+      heads.push(h);
+    }
+    index++;
+  }
+  return records;
+}
+const defaults=()=>({preset:'mine',author:'preset',query:'',drafts:true,directBase:'any',checks:'any',label:'any',sort:'updated',compact:true,scope:'nearby',density:'comfortable',budget:60,selected:486,savedId:null});
+let state=defaults(), savedViews=[],storageAvailable=true;
+const preferenceKeys=Object.keys(defaults()).filter(k=>!['selected','savedId'].includes(k));
+function validPrefs(raw){
+  const s=defaults();if(!raw||typeof raw!=='object')return s;
+  for(const k of preferenceKeys)if(typeof raw[k]===typeof s[k])s[k]=raw[k];
+  if(!['mine','review','current','all'].includes(s.preset))s.preset='mine';
+  if(!['nearby','ancestry','dependents'].includes(s.scope))s.scope='nearby';
+  if(!['updated','number'].includes(s.sort))s.sort='updated';
+  if(!['comfortable','compact'].includes(s.density))s.density='comfortable';
+  if(![30,60,80].includes(s.budget))s.budget=60;
+  if(!['any','passing','failing','pending','none','unknown'].includes(s.checks))s.checks='any';
+  if(!['any','main','release/1.x'].includes(s.directBase))s.directBase='any';
+  if(!['any','performance','ui','tests','infrastructure'].includes(s.label))s.label='any';
+  if(!['preset','any',...PEOPLE.map(a=>a.login)].includes(s.author))s.author='preset';
+  s.query=s.query.slice(0,200);return s;
+}
+try{const stored=JSON.parse(localStorage.getItem(STORAGE)||'null');if(stored){state={...validPrefs(stored.current),selected:Number.isInteger(stored.current?.selected)?stored.current.selected:486,savedId:typeof stored.current?.savedId==='string'?stored.current.savedId:null};savedViews=Array.isArray(stored.views)?stored.views.filter(v=>v&&typeof v.id==='string'&&typeof v.name==='string').slice(0,12).map(v=>({id:v.id,name:v.name.slice(0,45),prefs:validPrefs(v.prefs)})):[];}}catch{storageAvailable=false;}
+function persist(){try{localStorage.setItem(STORAGE,JSON.stringify({current:state,views:savedViews}));storageAvailable=true;}catch{storageAvailable=false;}}
+let fixture=[],index=new Map(),heads=new Map(),parents=new Map(),children=new Map(),roots=new Map(),indexed=0,total=1000,indexToken=0,indexing=false,paused=false;
+let filtered=[],matchSet=new Set(),rootMembers=new Map(),expanded=new Map(),unfolded=new Set(),outside=false;
+let offline=false,shallow=false,queued=false,frozenIds=null,lastGraph=null,graphSignature='',manualZoom=null,filterTime=0,layoutTime=0,renderFrame=0,outlineFrame=0;
+let detailCache=new Map(),detailToken=0,detailsLoading=false,detailReads=0;
+let dialogReturn=null,toastTimer=null,activeModal=null,scenarioSeed=0,dependentPicker=null;
+const rowHeight=()=>state.density==='compact'?70:86;
+const loadedComplete=()=>indexed>=total;
+const effectiveAuthor=()=>state.author==='preset'?(state.preset==='mine'?VIEWER:'any'):state.author;
+function notify(text){$('announcement').textContent=text;}
+function toast(text){$('toast').textContent=text;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').textContent='',4300);}
+function rebuildEdges(){
+  heads=new Map();parents=new Map();children=new Map();roots=new Map();rootMembers=new Map();
+  for(const p of index.values()){const key=refKey(p.head);const arr=heads.get(key)||[];arr.push(p.number);heads.set(key,arr);children.set(p.number,[]);}
+  for(const p of index.values()){
+    const candidates=(heads.get(refKey(p.base))||[]).filter(n=>n!==p.number);
+    if(candidates.length===1){parents.set(p.number,candidates[0]);children.get(candidates[0]).push(p.number);}
+    else parents.set(p.number,null);
+  }
+  const resolveRoot=id=>{if(roots.has(id))return roots.get(id);const path=[],seen=new Set();let n=id;while(n!=null&&!roots.has(n)&&!seen.has(n)){path.push(n);seen.add(n);n=parents.get(n);}const root=roots.get(n)??path.at(-1)??id;for(const k of path)roots.set(k,root);return root;};
+  for(const p of index.values()){const root=resolveRoot(p.number);const members=rootMembers.get(root)||[];members.push(p.number);rootMembers.set(root,members);}
+  for(const cs of children.values())cs.sort((a,b)=>a-b);
+}
+function ancestors(id){const list=[],seen=new Set();let n=id;while(n!=null&&index.has(n)&&!seen.has(n)){list.push(n);seen.add(n);n=parents.get(n);}return list.reverse();}
+function descendants(id,limit=Infinity){const out=[],seen=new Set([id]),q=[...(children.get(id)||[])];for(let i=0;i<q.length&&out.length<limit;i++){const n=q[i];if(seen.has(n))continue;seen.add(n);out.push(n);q.push(...(children.get(n)||[]));}return out;}
+function distance(a,b){const aa=ancestors(a),bb=ancestors(b);let k=0;while(k<aa.length&&k<bb.length&&aa[k]===bb[k])k++;return aa.length+bb.length-2*k;}
+function matches(p){
+  if(p.state!=='OPEN')return false;
+  if(!state.drafts&&p.draft)return false;
+  const author=effectiveAuthor();if(author!=='any'&&p.author.login!==author)return false;
+  if(state.preset==='review'&&!p.requestedUsers.includes(VIEWER))return false;
+  if(state.preset==='current'&&p.number!==CURRENT)return false;
+  if(state.directBase!=='any'&&p.base.ref!==state.directBase)return false;
+  if(state.label!=='any'&&p.label!==state.label)return false;
+  if(state.checks!=='any'&&(offline?'unknown':p.checks)!==state.checks)return false;
+  const q=state.query.toLowerCase().trim();return !q||`${p.number} #${p.number} ${p.title} ${p.head.ref} ${p.base.ref} ${p.author.login} ${p.author.name}`.toLowerCase().includes(q);
+}
+function computeMatches(){const start=performance.now();filtered=[...index.values()].filter(matches).sort(state.sort==='number'?(a,b)=>b.number-a.number:(a,b)=>a.age-b.age||a.number-b.number);matchSet=new Set(filtered.map(p=>p.number));outside=!!index.get(state.selected)&&!matchSet.has(state.selected);filterTime=performance.now()-start;}
+function loadFixture(size=1000){
+  indexToken++;detailToken++;const token=indexToken;total=size;fixture=makeFixture(total);index=new Map();indexed=0;indexing=true;paused=false;expanded.clear();unfolded.clear();frozenIds=null;detailCache.clear();detailsLoading=false;detailReads=0;offline=false;shallow=false;queued=false;graphSignature='';
+  if(!fixture.some(p=>p.number===state.selected))state.selected=486;
+  $('updates').hidden=true;
+  function batch(){if(token!==indexToken)return;if(paused){setTimeout(batch,100);return;}const end=Math.min(indexed+100,total);for(let i=indexed;i<end;i++)index.set(fixture[i].number,fixture[i]);indexed=end;rebuildEdges();indexing=indexed<total;render();if(index.has(state.selected)&&!detailCache.has(state.selected)&&!detailsLoading)loadDetails(state.selected);if(indexing)setTimeout(batch,total===5000?85:135);else{notify(`${fmt(total)} fictional PRs indexed. ${fmt(filtered.length)} match this view.`);loadDetails(state.selected);}}
+  batch();
+}
+function renderTabs(){
+  const values=[...index.values()],counts={mine:values.filter(p=>p.state==='OPEN'&&p.author.login===VIEWER).length,review:values.filter(p=>p.state==='OPEN'&&p.requestedUsers.includes(VIEWER)).length,all:values.filter(p=>p.state==='OPEN').length};
+  const tabs=[['mine','user','My PRs'],['review','pr','Review requested'],['current','gitbranch','Current branch'],['all','layers','All open PRs']];
+  $('preset-tabs').innerHTML=tabs.map(([id,i,title])=>`<button class="preset ${state.preset===id?'active':''}" data-preset="${id}" aria-pressed="${state.preset===id}">${icon(i)}${title}${id!=='current'?`<span class="count">${fmt(counts[id])}${indexing?'+':''}</span>`:''}</button>`).join('');
+  $('repo-summary').textContent=`${fmt(total)} sample PRs · 50 PR authors`;
+  const a=effectiveAuthor();$('author-chip').innerHTML=`${icon('user')}<span>${a==='any'?'Any PR author':'Author: @'+esc(a)}</span>${icon('chevron')}`;
+  $('state-chip').innerHTML=`${icon('pr')}Open · ${state.drafts?'drafts included':'no drafts'}`;
+  const extras=[state.directBase!=='any',state.checks!=='any',state.label!=='any',!state.drafts].filter(Boolean).length;
+  $('extra-filter-count').innerHTML=extras?`<span class="count">${extras}</span>`:'';
+  $('saved-status').textContent=state.savedId?(savedViews.find(v=>v.id===state.savedId)?.name||'Saved view'):'';
+  $('index-label').textContent=indexing?`${fmt(indexed)} / ${fmt(total)} PRs indexed · results still loading`:`${fmt(indexed)} PRs indexed · graph detail loads on selection`;
+  $('index-dot').style.background=indexing?'var(--blue)':'var(--green)';$('index-progress').hidden=!indexing;$('index-progress').firstElementChild.style.width=(indexed/total*100)+'%';
+  $('snapshot-label').innerHTML=`${offline?'Offline · last-known targets':'Sample snapshot · fresh'} ${icon('info')}`;
+  $('snapshot-label').style.color=offline?'var(--amber)':'';
+}
+function renderSaved(){
+  $('saved-empty').hidden=savedViews.length>0;
+  $('saved-side-list').innerHTML=savedViews.map(v=>`<button class="saved-link ${state.savedId===v.id?'active':''}" data-saved="${esc(v.id)}" title="Load local view: ${esc(v.name)}">${icon('eye')}<span>${esc(v.name)}</span></button>`).join('');
+}
+function renderOutline(){
+  const name={mine:'My PRs',review:'Review requested',current:'Current branch',all:'All open PRs'}[state.preset];
+  $('outline-title').innerHTML=`${esc(state.savedId?savedViews.find(v=>v.id===state.savedId)?.name||name:name)} <span id="result-count" class="count">${fmt(filtered.length)}${indexing?'+':''}</span>`;
+  $('outline-description').textContent=state.query?`Search: “${state.query}”`:{mine:'PR authorship, not stack ownership',review:offline?'Last-known review requests · status unknown':'Requests directed to @maya',current:'One checkout · all necessary context',all:'One repository · no named stack groups'}[state.preset];
+  $('outside-selection').hidden=!outside;
+  if(outside){$('outside-selection').innerHTML=`Inspecting <strong>#${state.selected}</strong> outside this view.<br>Context stays visible. <button data-action="first-match">Select a match</button>`;}
+  const h=filtered.length*rowHeight();$('result-spacer').style.height=h+'px';
+  const empty=!filtered.length;$('empty-results').hidden=!empty;
+  if(empty)$('empty-results').innerHTML=`<div class="empty">${icon('search')}<h3>${indexing?'No matches indexed yet':'No matching PRs'}</h3><p>${indexing?`Only ${fmt(indexed)} of ${fmt(total)} records have arrived.`:offline&&state.checks!=='any'?'Current check results are unknown while offline.':'Your selected PR and its relationships remain inspectable.'}</p><button class="btn" data-action="clear-filters">Clear filters</button></div>`;
+  renderRows();
+}
+function renderRows(){
+  const el=$('results'),height=el.clientHeight||500,h=rowHeight(),visibleStart=Math.min(Math.floor(el.scrollTop/h),Math.max(0,filtered.length-1));
+  const start=Math.max(0,visibleStart-4),end=Math.min(filtered.length,Math.ceil((el.scrollTop+height)/h)+5);
+  $('result-rows').innerHTML=filtered.slice(start,end).map((p,k)=>`<button class="result ${state.selected===p.number?'selected':''}" style="top:${(start+k)*h+3}px" data-select="${p.number}" data-result="${p.number}" ${state.selected===p.number?'aria-current="true"':''} aria-label="PR ${p.number}, ${esc(p.title)}, author ${esc(p.author.name)}${p.draft?', draft':''}"><span class="result-top">${icon('pr')}<span class="result-number">#${p.number}</span>${p.draft?'<span class="tiny-tag">Draft</span>':''}<span class="result-time">${p.age<60?p.age+'m':Math.floor(p.age/60)+'h'}</span></span><strong class="result-title" title="${esc(p.title)}">${esc(p.title)}</strong><span class="result-bottom">${avatar(p.author)}<span>@${esc(p.author.login)}</span>${p.number===CURRENT?'<span class="tiny-tag">Current</span>':''}<span class="checks-dot ${offline?'unknown':p.checks}" title="Checks: ${offline?'unknown':p.checks}"></span></span></button>`).join('');
+  $('row-range').textContent=filtered.length?`${Math.min(visibleStart+1,filtered.length)}–${Math.min(Math.ceil((el.scrollTop+height)/h),filtered.length)} of ${fmt(filtered.length)} ${indexing?'indexed matches':'matches'}`:'No results';
+  $('row-mount').textContent=`${Math.max(0,end-start)} rows mounted`;
+}
+function graphScope(){
+  const selected=index.get(state.selected);if(!selected)return null;
+  const path=ancestors(selected.number),root=roots.get(selected.number);const members=rootMembers.get(root)||[];
+  // Bound semantic scope BEFORE laying out nodes, not by hiding a complete graph.
+  const cap=Math.max(15,state.budget-3);let ids=new Set();let clipped=false;
+  const add=id=>{
+    if(ids.has(id))return;
+    if(ids.size>=cap){clipped=true;return;}
+    const par=parents.get(id);
+    if(ids.size&&par!=null&&!ids.has(par)){clipped=true;return;}
+    // Bound width as well as card count. A very wide fork stays a picker,
+    // not 50 parallel lanes just because 50 is under the node budget.
+    if(par!=null&&(children.get(par)||[]).some(n=>ids.has(n))){
+      const leaves=[...ids].filter(n=>!(children.get(n)||[]).some(c=>ids.has(c))).length;
+      if(leaves>=4){clipped=true;return;}
+    }
+    ids.add(id);
+  };
+  let nearestPath=path;
+  if(path.length>cap-8){nearestPath=path.slice(-(cap-8));clipped=true;}
+  nearestPath.forEach(add);
+  if(frozenIds){for(const id of frozenIds)if(index.has(id))add(id);}
+  else if(state.scope==='nearby'){
+    const nearby=members.filter(id=>matchSet.has(id)&&distance(id,selected.number)<=3).sort((a,b)=>distance(a,selected.number)-distance(b,selected.number)).slice(0,3);
+    for(const id of nearby)for(const n of ancestors(id))if(nearestPath.includes(n)||ancestors(n).includes(nearestPath[0]))add(n);
+    (children.get(selected.number)||[]).slice(0,3).forEach(add);
+  }else if(state.scope==='dependents'){
+    descendants(selected.number,cap).forEach(add);
+  }
+  // Expand at a precise fork; cap admission and leave an explicit remainder.
+  for(const [id,limit] of expanded){if(ids.has(id))for(const n of descendants(id,Math.min(limit,cap)))add(n);}
+  if(state.scope==='ancestry'&&!expanded.size&&!frozenIds)ids=new Set(nearestPath);
+  const map=new Map(),representatives=[],visited=new Set();
+  // Compress a linear run only when it cannot swallow the selected PR or a fork.
+  for(const id of [...ids].sort((a,b)=>ancestors(a).length-ancestors(b).length||a-b)){
+    if(visited.has(id))continue;let run=[id],cursor=id;
+    if(state.compact&&id!==selected.number&&!unfolded.has(id)){
+      while((children.get(cursor)||[]).length===1){const child=children.get(cursor)[0];if(!ids.has(child)||child===selected.number||unfolded.has(child)||visited.has(child))break;run.push(child);cursor=child;if((children.get(child)||[]).length!==1)break;}
+    }
+    const key=run[0],node={key,ids:run,end:run.at(-1),children:[],parent:null,x:0,y:0};
+    for(const n of run){map.set(n,key);visited.add(n);}representatives.push(node);
+  }
+  const reps=new Map(representatives.map(n=>[n.key,n]));
+  for(const n of representatives){const p=parents.get(n.ids[0]);if(p!=null&&map.has(p)&&map.get(p)!==n.key){n.parent=map.get(p);reps.get(n.parent).children.push(n.key);}}
+  for(const n of representatives){n.hiddenRoots=(children.get(n.end)||[]).filter(id=>!ids.has(id));n.hiddenIds=new Set();for(const id of n.hiddenRoots){n.hiddenIds.add(id);for(const d of descendants(id))if(!ids.has(d))n.hiddenIds.add(d);}n.matchCount=n.ids.filter(id=>matchSet.has(id)).length;}
+  return {ids:[...ids],nodes:representatives,reps,map,root,members,clipped,upstreamClipped:nearestPath[0]!==path[0]};
+}
+function layoutGraph(g){
+  const t=performance.now(),by=g.reps;const rootNodes=g.nodes.filter(n=>n.parent===null);let leaves=0,maxDepth=0;
+  function visit(n,d,seen){if(seen.has(n.key))return;seen.add(n.key);n.depth=d;maxDepth=Math.max(d,maxDepth);if(!n.children.length){n.center=136+leaves*270;leaves++;}else{for(const id of n.children)visit(by.get(id),d+1,seen);n.center=(by.get(n.children[0]).center+by.get(n.children.at(-1)).center)/2;}}
+  rootNodes.forEach(n=>visit(n,0,new Set()));
+  for(const n of g.nodes){n.x=n.center-122;n.y=24+(maxDepth-n.depth)*166;}
+  const width=Math.max(300,leaves*270+4),height=24+(maxDepth+1)*166+40;
+  layoutTime=performance.now()-t;return {width,height,roots:rootNodes};
+}
+function checkMarkup(p,cls='checks'){
+ const s=offline?'unknown':p.checks,label={passing:'Passing',failing:'Failing',pending:'Running',none:'No checks',unknown:'Unknown'}[s];return `<span class="${cls} ${s}">${icon(s==='passing'?'checkcircle':s==='failing'?'alert':s==='pending'?'clock':'circle','small')}${label}</span>`;
+}
+function renderGraph(){
+  const g=graphScope();lastGraph=g;
+  document.querySelectorAll('[data-scope]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scope===state.scope)));
+  if(!g){$('graph-world').innerHTML=`<div class="empty"><h3>Loading PR #${state.selected}</h3><p>The graph will appear when this record reaches the index.</p></div>`;return;}
+  const lay=layoutGraph(g),path=new Set(ancestors(state.selected)),matched=g.ids.filter(id=>matchSet.has(id)).length,hidden=new Set();
+  for(const n of g.nodes)for(const id of n.hiddenIds)hidden.add(id);
+  const signature=g.nodes.map(n=>n.key+':'+n.ids.join(',')+':'+n.parent).join('|');
+  $('graph-subtitle').textContent=`Around #${state.selected} · ${g.ids.length} PRs · ${new Set(g.ids.map(id=>index.get(id).author.login)).size} PR authors`;
+  $('graph-context').innerHTML=`${icon('eye')}<span><strong>${matched} ${matched===1?'match':'matches'}</strong> + ${g.ids.length-matched} context PRs in this graph${hidden.size?` · ${hidden.size}${indexing?'+':''} summarized`:''}</span><button class="text-btn" data-action="about-context" aria-label="How graph context works">${icon('info')}</button>`;
+  $('graph-notice').hidden=!g.clipped&&!offline;
+  $('graph-notice').textContent=offline?'Last-known targets retained. Current checks and review status are unknown.':g.clipped?'Focused graph limit reached. More paths remain summarized; choose an offshoot to inspect it.':'';
+  const arrows=`<defs><marker id="arrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0 0L5 2.5L0 5Z" fill="#A0B3D2"/></marker><marker id="arrow-blue" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0 0L5 2.5L0 5Z" fill="#4166AE"/></marker></defs>`;
+  let edges='';
+  for(const n of g.nodes){let sx,sy;if(n.parent!==null){const parent=g.reps.get(n.parent);sx=parent.center;sy=parent.y;}else{sx=n.center;sy=n.y+171;}
+    const ex=n.center,ey=n.y+138,mid=ey+(sy-ey)*.55,highlight=n.ids.some(id=>path.has(id));
+    const d=Math.abs(ex-sx)<1?`M${sx} ${sy}V${ey+2}`:`M${sx} ${sy}V${mid+5}Q${sx} ${mid} ${sx+(ex>sx?5:-5)} ${mid}H${ex+(ex>sx?-5:5)}Q${ex} ${mid} ${ex} ${mid-5}V${ey+2}`;
+    edges+=`<path class="edge ${highlight?'highlight':''}" d="${d}" marker-end="url(#${highlight?'arrow-blue':'arrow'})"/>`;
+  }
+  const cards=g.nodes.map(n=>{
+    const p=index.get(n.ids[0]),last=index.get(n.end),selected=n.ids.includes(state.selected),isRun=n.ids.length>1,context=n.matchCount===0,hiddenCount=n.hiddenIds.size;
+    const title=isRun?`#${p.number} → #${last.number}`:p.title;
+    const as=[...new Map(n.ids.map(id=>{const a=index.get(id).author;return[a.login,a];})).values()];
+    return `<div class="node-card ${selected?'selected':''} ${context?'context':''} ${isRun?'run':''} ${p.state==='MERGED'?'merged':''} ${hiddenCount?'has-hidden':''}" style="left:${n.x}px;top:${n.y}px" data-node="${n.key}"><button class="node-select" ${isRun?`data-unfold="${n.key}"`:`data-select="${p.number}"`} aria-label="${isRun?'Expand linear path '+n.ids.map(id=>'#'+id).join(' through '):'Inspect PR '+p.number+', '+esc(p.title)+', author '+esc(p.author.name)}${context?', dependency context':''}" ${selected?'aria-current="true"':''}>
+      <span class="node-top">${icon(isRun?'fold':'pr')}<span class="node-number">${isRun?`${n.ids.length} PRs · linear path`:'#'+p.number}</span>${!isRun?checkMarkup(p,'node-check'):`<span class="node-check">Expand ${icon('plus')}</span>`}</span>
+      <strong class="node-title" title="${esc(isRun?n.ids.map(id=>index.get(id).title).join(' → '):title)}">${esc(title)}</strong>
+      <span class="node-ref">${esc(isRun?p.title+' → '+last.title:p.head.ref)}</span>
+      <span class="node-bottom">${isRun?`<span class="avatars">${as.slice(0,3).map(avatar).join('')}</span><span>${as.length} PR authors</span>`:avatar(p.author)+`<span>@${esc(p.author.login)}</span>`}${n.ids.includes(CURRENT)?`<span class="tiny-tag blue">Current${isRun?' #'+CURRENT:''}</span>`:p.state==='MERGED'?'<span class="tiny-tag">Merged</span>':context?'<span class="tiny-tag">Context</span>':p.draft?'<span class="tiny-tag">Draft</span>':isRun?`<span class="tiny-tag blue">${n.matchCount} match${n.matchCount===1?'':'es'}</span>`:p.requestedUsers.includes(VIEWER)?'<span class="tiny-tag blue">Your review</span>':'<span class="tiny-tag blue">Match</span>'}</span>
+    </button>${hiddenCount?`<button class="offshoot" data-expand="${n.end}" aria-label="Expand ${hiddenCount} known other dependents after PR ${n.end}">${icon('gitbranch','small')} ${fmt(hiddenCount)}${indexing?'+':''} other dependent PRs ${icon('plus','small')}</button>`:''}</div>`;
+  }).join('');
+  const bases=lay.roots.map(n=>{const p=index.get(n.ids[0]);const knownParent=parents.get(p.number);const label=knownParent?`More ancestors · #${knownParent}`:p.base.ref;const unknown=!knownParent&&!['main','release/1.x'].includes(p.base.ref);return`<${knownParent?'button':'div'} class="base-node ${unknown?'unresolved':''}" style="left:${n.center}px;top:${n.y+171}px" ${knownParent?`data-select="${knownParent}"`:''}>${icon('gitbranch')}${esc(label)}${unknown?' · unresolved':''}</${knownParent?'button':'div'}>`;}).join('');
+  const v=$('graph-viewport'),sx=v.scrollLeft,sy=v.scrollTop;
+  $('graph-world').innerHTML=`<svg class="graph-svg" width="${lay.width}" height="${lay.height}" viewBox="0 0 ${lay.width} ${lay.height}" aria-hidden="true">${arrows}${edges}</svg>${cards}${bases}`;
+  $('graph-world').style.width=lay.width+'px';$('graph-world').style.height=lay.height+'px';
+  g.layout=lay;
+  const changed=signature!==graphSignature;graphSignature=signature;
+  fitGraph();if(!changed){v.scrollLeft=sx;v.scrollTop=sy;}else requestAnimationFrame(centerSelected);
+  $('graph-budget-label').textContent=`${g.nodes.length} / ${state.budget} cards · bounded view`;
+}
+function fitGraph(){
+  if(!lastGraph?.layout)return;
+  const {width,height}=lastGraph.layout,v=$('graph-viewport');
+  // Keep text readable; use local scrolling instead of shrinking an entire repo.
+  const natural=Math.min(1.06,(v.clientWidth-26)/width,(v.clientHeight-22)/height),scale=manualZoom??Math.max(.72,natural);
+  const left=Math.max(10,(v.clientWidth-width*scale)/2),top=Math.max(11,(v.clientHeight-height*scale)/2);
+  $('graph-world').style.transform=`translate(${left}px,${top}px) scale(${scale})`;
+  $('graph-stage').style.width=Math.max(v.clientWidth,width*scale+left+15)+'px';$('graph-stage').style.height=Math.max(v.clientHeight,height*scale+top+12)+'px';
+  $('zoom-label').textContent=Math.round(scale*100)+'%';lastGraph.scale=scale;lastGraph.offset={left,top};
+}
+function centerSelected(){
+  if(!lastGraph?.layout||!lastGraph.offset)return;
+  const key=lastGraph.map.get(state.selected),n=lastGraph.reps.get(key);if(!n)return;
+  const v=$('graph-viewport'),{scale,offset}=lastGraph;
+  const x=offset.left+n.center*scale,y=offset.top+(n.y+69)*scale;
+  v.scrollLeft=Math.max(0,Math.min(v.scrollWidth-v.clientWidth,x-v.clientWidth/2));
+  v.scrollTop=Math.max(0,Math.min(v.scrollHeight-v.clientHeight,y-v.clientHeight/2));
+}
+function inspectorMarkup(){
+  const p=index.get(state.selected);if(!p)return `<div class="empty">Loading selected PR…</div>`;
+  const parentId=parents.get(p.number),parent=index.get(parentId),cs=children.get(p.number)||[],allDesc=descendants(p.number),cached=detailCache.has(p.number);
+  const review=offline?'Unknown':p.requestedUsers.includes(VIEWER)?'Requested: you':p.review==='approved'?'Approved':'Review required';
+  const explanation=p.local?(shallow?'Incomplete local history':p.parentContained?'Current parent tip contained':'Current parent tip is not contained'):'Not available in this clone';
+  return `<div class="inspector-scroll"><div class="inspector-kicker"><span class="kicker">Pull request</span><span class="mono">#${p.number}</span></div><div class="row"><span class="badge ${p.state==='MERGED'?'violet':p.draft?'':'green'}">${icon('pr','small')}${p.state==='MERGED'?'Merged':p.draft?'Draft':'Open'}</span>${p.local?'<span class="badge">Local branch</span>':''}${outside?'<span class="badge amber">Outside view</span>':''}</div>
+    <h2>${esc(p.title)}</h2><div class="inspector-ref">${esc(p.head.ref)}</div><div class="person-row">${avatar(p.author)}<div><small>PR author</small>${esc(p.author.name)} <span class="muted">@${esc(p.author.login)}</span></div></div>
+    <div class="data-row"><span>Checks</span>${checkMarkup(p)}</div><div class="data-row"><span>Review</span><span class="${!offline&&p.review==='approved'?'green':'muted'}">${review}</span></div>
+    ${offline?'<div class="info-box amber">Last-known relationship data. Current status has not been refreshed.</div>':p.requestedUsers.includes(VIEWER)?`<div class="info-box">Your review is requested on <strong>#${p.number}</strong>, not on a named stack.</div>`:outside?'<div class="info-box amber">This PR no longer matches your filters. Your inspection context has been preserved.</div>':'<div class="info-box">Selection is local to this view. The checked-out branch is unchanged.</div>'}
+    <section class="inspector-section"><h3>Targets <small>GitHub · PR base ref</small></h3>${parent?`<button class="target" data-select="${parent.number}">${icon('pr')}<div><strong>#${parent.number} ${esc(parent.title)}</strong><small>@${esc(parent.author.login)} · ${esc(parent.head.ref)}</small></div></button>`:`<div class="target">${icon('gitbranch')}<div><strong>${esc(p.base.ref)}</strong><small>${esc(p.base.repository)}</small></div></div>`}<p>${parent?`This PR’s base matches #${parent.number}’s head branch.`:['main','release/1.x'].includes(p.base.ref)?'Repository base boundary. Other PRs targeting this base are not pulled into this graph.':'The index has not resolved a unique parent PR. This is not proof of independence.'}</p></section>
+    <section class="inspector-section"><h3>Commit ancestry <small>Local Git · separate evidence</small></h3><div class="row small-text ${p.local&&(!p.parentContained||shallow)?'ancestry-warning':'muted'}" style="font-size:10px">${icon(p.local&&(!p.parentContained||shallow)?'alert':p.local?'checkcircle':'laptop','small')}<span>${explanation}</span></div><p>${p.local?shallow?'A partial history cannot establish containment. The PR target edge is still known.':!p.parentContained?'The PR still targets the same branch. Inspect the actual Git state before restacking.':'Containment describes commits, not stack ownership.':'Browsing this PR does not require checking out or fetching its branch.'}</p></section>
+    <section class="inspector-section"><h3>Targets this PR’s branch <span class="count">${cs.length}${indexing?'+':''}</span></h3>${cs.slice(0,2).map(id=>{const child=index.get(id);return`<button class="target" style="margin-bottom:6px" data-select="${id}"><div><strong>#${id} ${esc(child.title)}</strong><small>PR author @${esc(child.author.login)}</small></div>${avatar(child.author)}</button>`;}).join('')||'<p>No direct dependents in the loaded index.</p>'}<p>${fmt(allDesc.length)} known dependent PRs${indexing?' · discovery is incomplete':''}. Hidden PRs are not excluded from an operation’s safety checks.</p></section>
+    <section class="inspector-section"><h3>Detail loading <small>Mock data source</small></h3><div class="data-row"><span>${cached?'Selected detail cached':detailsLoading?'Loading selected detail…':'Summary indexed'}</span><span class="muted">${detailCache.size}/12 cached</span></div><p>Only the selected PR’s detail is requested. The graph uses the lightweight repository index.</p></section>
+    </div><div class="inspector-footer"><button class="btn primary full" data-action="inspect-dependents">${icon('tree')}Inspect ${fmt(allDesc.length)} dependent PRs</button><button class="btn full" data-action="pr-details">${icon('pr')}PR details</button><p>Inspection only · checkout unchanged</p></div>`;
+}
+function renderInspector(){const el=$('inspector'),scroll=el.querySelector('.inspector-scroll')?.scrollTop||0;el.innerHTML=inspectorMarkup();if(el.querySelector('.inspector-scroll'))el.querySelector('.inspector-scroll').scrollTop=scroll;}
+function loadDetails(id){
+  if(!index.has(id))return;
+  const token=++detailToken;
+  if(detailCache.has(id)){const value=detailCache.get(id);detailCache.delete(id);detailCache.set(id,value);detailsLoading=false;renderInspector();return;}
+  detailsLoading=true;detailReads++;renderInspector();
+  setTimeout(()=>{if(token!==detailToken||!index.has(id))return;detailCache.set(id,{number:id,body:`${index.get(id).title}. This fictional PR description is loaded separately from the repository index.`,loadedAt:performance.now()});while(detailCache.size>12)detailCache.delete(detailCache.keys().next().value);detailsLoading=false;renderInspector();},200);
+}
+function render(){
+  computeMatches();document.documentElement.classList.toggle('dense',state.density==='compact');renderTabs();renderOutline();renderGraph();renderInspector();renderSaved();
+  if($('search').value!==state.query)$('search').value=state.query;
+  if(activeModal==='diagnostics')refreshMetrics();
+}
+function selectPR(id,{reveal=true}={}){
+  if(!index.has(id)){toast('That PR has not reached the index yet.');return;}
+  const fromGraph=document.activeElement?.closest('[data-node]');
+  state.selected=id;expanded.clear();unfolded.clear();frozenIds=null;manualZoom=null;graphSignature='';persist();render();loadDetails(id);
+  if(reveal){const pos=filtered.findIndex(p=>p.number===id);if(pos>=0){const y=pos*rowHeight(),el=$('results');if(y<el.scrollTop||y+rowHeight()>el.scrollTop+el.clientHeight){el.scrollTop=Math.max(0,y-25);renderRows();}}}
+  if(fromGraph)requestAnimationFrame(()=>document.querySelector(`[data-node="${id}"] [data-select]`)?.focus({preventScroll:true}));
+  notify(`Inspecting PR ${id}, ${index.get(id).title}. Checkout remains feat/cache-keys.`);
+}
+function changeView(){expanded.clear();unfolded.clear();frozenIds=null;manualZoom=null;state.savedId=null;$('results').scrollTop=0;persist();render();}
+function setPreset(id){if(!['mine','review','current','all'].includes(id))return;state.preset=id;state.author='preset';state.query='';state.drafts=true;state.checks='any';state.directBase='any';state.label='any';if(id==='current')state.selected=CURRENT;changeView();loadDetails(state.selected);notify(`${{mine:'My PRs',review:'Review requested',current:'Current branch',all:'All open PRs'}[id]} view. ${fmt(filtered.length)} indexed matches.`);}
+function openModal(title,subtitle,body,footer='',drawer=false,type=null){
+  const modal=$('modal');if(!modal.open)dialogReturn=document.activeElement;
+  modal.className=drawer?'drawer':'';activeModal=type;
+  modal.innerHTML=`<header class="dialog-head"><div><h2 id="dialog-title">${esc(title)}</h2><p>${esc(subtitle)}</p></div><button class="icon-btn" data-action="close" aria-label="Close dialog">${icon('x')}</button></header><div class="dialog-body">${body}</div>${footer?`<footer class="dialog-footer">${footer}</footer>`:''}`;
+  if(!modal.open)modal.showModal();modal.querySelector('input:not([type=checkbox]),select,button')?.focus();
+}
+function closeModal(){if($('modal').open)$('modal').close();activeModal=null;const target=dialogReturn;dialogReturn=null;if(target?.isConnected)target.focus();else $('search').focus();}
+function option(v,label,selected){return`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(label)}</option>`;}
+function filterDialog(){
+  openModal('Filter PRs','Filters select matches. Parents and shared ancestors remain context.',`<form id="filter-form"><label class="field"><span>PR author</span><select name="author">${option('preset',state.preset==='mine'?'Use view default (@maya)':'Use view default (any author)',state.author)}${option('any','Any PR author',state.author)}${PEOPLE.map(a=>option(a.login,`${a.name} (@${a.login})`,state.author)).join('')}</select><small>Matches the person who opened each PR, not a stack owner.</small></label><label class="field"><span>PR directly targets</span><select name="directBase">${option('any','Any base branch',state.directBase)}${option('main','main — direct targets only',state.directBase)}${option('release/1.x','release/1.x — direct targets only',state.directBase)}</select><small>This is not the eventual base of a whole dependency path.</small></label><label class="field"><span>Check status</span><select name="checks">${['any','passing','failing','pending','none','unknown'].map(s=>option(s,{any:'Any checks',passing:'Passing',failing:'Failing',pending:'Running',none:'No checks',unknown:'Unknown / unavailable'}[s],state.checks)).join('')}</select></label><label class="field"><span>PR label</span><select name="label">${['any','performance','ui','tests','infrastructure'].map(s=>option(s,s==='any'?'Any label':s,state.label)).join('')}</select></label><label class="checkbox"><input name="drafts" type="checkbox" ${state.drafts?'checked':''}><span>Include draft PRs<small>No age cutoff is applied. Older dependencies stay discoverable.</small></span></label></form><div class="dialog-note">${state.preset==='review'?'<strong>Review requested</strong> also requires a direct request to @maya. ':''}Search covers indexed records. An incomplete index is not a complete repository search.</div>`,`<button class="btn" data-action="clear-filters">Clear filters</button><button class="btn primary" data-action="apply-filters">Apply filters</button>`,true,'filters');
+}
+function viewDialog(){
+  openModal('View options','Presentation preferences for this repository, on this device.',`<form id="view-form"><div class="settings-section-label">PR outline</div><label class="field"><span>Sort matches</span><select name="sort">${option('updated','Most recently updated',state.sort)}${option('number','Highest PR number',state.sort)}</select><small>Sort is for navigation. It never determines dependency edges.</small></label><label class="field"><span>Row density</span><select name="density">${option('comfortable','Comfortable',state.density)}${option('compact','Compact',state.density)}</select></label><hr class="settings-rule"><div class="settings-section-label">Dependency graph</div><label class="field"><span>Initial context</span><select name="scope">${option('nearby','Nearby matches + dependency paths',state.scope)}${option('ancestry','Selected PR and its ancestors',state.scope)}${option('dependents','Selected PR and its dependents',state.scope)}</select></label><label class="field"><span>Maximum detailed graph cards</span><select name="budget">${[30,60,80].map(n=>option(String(n),`${n} cards${n===60?' — default':''}`,String(state.budget))).join('')}</select><small>This is not a result limit. Wide forks stay within four lanes; a path picker exposes the rest.</small></label><label class="checkbox"><input type="checkbox" name="compact" ${state.compact?'checked':''}><span>Collapse linear PR runs<small>Keep fork points identifiable. Collapsed labels use real PR numbers.</small></span></label></form><div class="dialog-note"><strong>Updates do not move you around.</strong><br>Selected PRs stay inspectable when they leave the active filters. Apply queued changes when ready.</div>`,`<button class="btn" data-action="close">Cancel</button><button class="btn primary" data-action="apply-view">Apply view</button>`,true,'view');
+}
+function saveDialog(){
+  const generated={mine:'My open PRs',review:'My review requests',current:'Current branch context',all:'Repository overview'}[state.preset];
+  openModal('Save this view','A local filter preset—not a name for a stack.',`<form id="save-form"><label class="field"><span>View name</span><input name="name" id="view-name" maxlength="45" required value="${esc(generated)}" autocomplete="off"><small>Stores filters, sort, context, density, and the graph budget.</small></label><div class="dialog-note">${storageAvailable?'Saved locally for':'Browser storage is unavailable. This session can still retain views for'} <strong>${esc(REPO)}</strong> as <strong>@maya</strong>. No GitHub object or shared database record is created.</div><p class="danger-text" id="save-error" role="alert"></p></form>${savedViews.length?'<h3>Saved on this device</h3>'+savedViews.map(v=>`<div class="saved-item"><span>${esc(v.name)}</span><button data-delete-view="${esc(v.id)}" aria-label="Delete saved view ${esc(v.name)}">Remove</button></div>`).join(''):''}`,`<button class="btn" data-action="close">Cancel</button><button class="btn primary" data-action="save-confirm">Save view</button>`,false,'save');
+  setTimeout(()=>$('view-name')?.select(),0);
+}
+function snapshotDialog(){
+  openModal('Snapshot controls','Fictional update scenarios. Nothing contacts Git or GitHub.',`<div class="settings-section-label">Data freshness</div><label class="checkbox"><input type="checkbox" id="offline-input" ${offline?'checked':''}><span>Simulate unavailable GitHub status<small>Keep last-known PR targets. Current checks and reviews become Unknown.</small></span></label><label class="checkbox"><input type="checkbox" id="shallow-input" ${shallow?'checked':''}><span>Simulate incomplete local history<small>Local containment becomes unknown. PR target edges remain.</small></span></label><hr class="settings-rule"><h3>Incoming changes</h3><p>Queue a sample merge of the selected PR, a check update, and an activity update. The graph stays put until you apply them.</p><button class="btn full" style="margin-top:14px" data-action="queue-updates">${icon('refresh')}Queue 3 sample updates</button><div class="dialog-note">A selected PR that leaves the Open filter is kept as <strong>Outside view</strong>. It is not silently dropped.</div>`,`<button class="btn primary" data-action="apply-snapshot">Apply freshness settings</button>`,false,'snapshot');
+}
+function diagnosticsDialog(){
+  openModal('Prototype controls','A real local fixture, not a production benchmark.',`<label class="field"><span>Sample repository size</span><select id="fixture-size">${[250,1000,5000].map(n=>option(String(n),`${fmt(n)} PRs · 50 author identities`,String(total))).join('')}</select><small>Generates real in-memory PR records. The index receives 100 records per mock batch.</small></label><div class="row"><button class="btn" data-action="reload-fixture">Reload fixture</button><button class="btn" data-action="pause-index" id="pause-label">${paused?'Resume':'Pause'} indexing</button></div><h3>Live local counters</h3><div class="metrics" id="metrics"></div><div class="dialog-note">Timers measure this HTML prototype’s local JavaScript only—not Electron, input-to-paint, Git analysis, or GitHub latency. Mock batch and detail delays are intentional.</div><h3>What stays bounded</h3><p>The outline mounts a small scrolling window. The graph is scoped before layout. Selected PR details use a 12-item LRU cache. Increasing the fixture does not mount every record.</p>`,`<button class="btn primary" data-action="close">Back to repository</button>`,true,'diagnostics');refreshMetrics();
+}
+function refreshMetrics(){if(!$('metrics'))return;$('metrics').innerHTML=[['Indexed',`${fmt(indexed)} / ${fmt(total)}`,'Mock records'],['Matches',fmt(filtered.length),indexing?'Index incomplete':'Loaded index'],['Outline rows',String(document.querySelectorAll('[data-result]').length),'Mounted in the DOM'],['Graph cards',String(document.querySelectorAll('[data-node]').length),`Budget: ${state.budget}`],['Filter compute',filterTime.toFixed(2)+' ms','Local JavaScript'],['Layout compute',layoutTime.toFixed(2)+' ms','Reduced graph only'],['Detail cache',`${detailCache.size} / 12`,'LRU bound'],['Detail reads',String(detailReads),'Simulated reads']].map(([label,value,detail])=>`<div class="metric"><strong style="${value.length>11?'font-size:19px':''}">${value}</strong><span>${label}</span><small>${detail}</small></div>`).join('');}
+function queueUpdates(){queued=true;$('updates').hidden=false;closeModal();fitGraph();toast('Sample changes queued. Selection and layout have not moved.');}
+function applyUpdates(){
+  if(!queued)return;const p=index.get(state.selected);if(!p)return;
+  frozenIds=lastGraph?.ids.slice()||null;p.state='MERGED';p.requestedUsers=[];
+  const other=[...index.values()].find(q=>q.number!==p.number&&q.author.login==='maya'&&q.state==='OPEN');if(other){other.checks='pending';other.age=1;}
+  queued=false;$('updates').hidden=true;render();notify(`PR ${p.number} merged in the sample update. Selection retained outside the Open filter.`);toast(`Updates applied. #${p.number} stays selected outside this view.`);
+}
+function aboutContext(){openModal('Focus without losing the path','PR targets form the graph. Views decide what to emphasize.',`<h3>Matches + context</h3><p>Filters match individual PRs. Other authors’ PRs remain visible when they explain a prerequisite. Nearby mode includes a few matches within a small graph neighborhood and the first direct dependents of the selection. Other offshoots stay explicitly summarized.</p><h3>Summarized offshoots</h3><p>“Other dependent PRs” is attached to the exact parent they target. Expand it to see more, or pick a PR in the outline to focus elsewhere.</p><h3>Repository boundaries</h3><p>Sharing <span class="mono">main</span> does not bring every PR into one canvas. Discovery continues in the repository outline.</p><div class="dialog-note">${fmt(filtered.length)} matching PRs in the ${indexing?'partial':'complete'} index. Only ${lastGraph?.nodes.length||0} cards are rendered in this focused graph.</div>`,`<button class="btn primary" data-action="close">Got it</button>`);}
+function detailsDialog(){const p=index.get(state.selected);if(!p)return;openModal(`#${p.number} · PR details`,'Sample GitHub record. No remote page is opened.',`<div class="row" style="margin-bottom:16px">${avatar(p.author)}<strong>${esc(p.title)}</strong></div><div class="inspector-facts"><span>PR author</span><strong>@${esc(p.author.login)}</strong><span>Head repository</span><strong>${REPO}</strong><span>Head ref</span><strong class="mono">${esc(p.head.ref)}</strong><span>Base repository</span><strong>${REPO}</strong><span>Base ref</span><strong class="mono">${esc(p.base.ref)}</strong><span>PR state</span><strong>${p.state}</strong><span>Current checkout</span><strong class="mono">feat/cache-keys</strong></div><div class="dialog-note">${esc(detailCache.get(p.number)?.body||'Detailed description is not cached yet. The PR summary is independently available in the index.')}</div><p>There is no stack name, stack owner, or team record. PR-target relationships and local commit ancestry remain separate.</p>`,`<button class="btn primary" data-action="close">Done</button>`);}
+function showInspector(){openModal('Selected PR','Inspection only; no checkout changes.',inspectorMarkup(),' ',true,'inspector');$('modal').classList.add('inspector-dialog');}
+function expandAt(id){
+  if(!index.has(id))return;
+  const hiddenDirect=(children.get(id)||[]).filter(n=>!lastGraph?.ids.includes(n));
+  if(hiddenDirect.length>6){dependentPicker={id,page:0,query:''};openDependentPicker();return;}
+  if(lastGraph&&lastGraph.ids.length>=state.budget-4){
+    const targets=(children.get(id)||[]).filter(n=>!lastGraph.ids.includes(n));
+    openModal('Choose a smaller focus','The graph budget keeps individual PRs readable.',`<p>The remaining PRs are still in the repository index. Focus one branch below, rather than adding everything to the canvas.</p>${targets.slice(0,12).map(n=>`<button class="target" style="margin-top:9px" data-focus-select="${n}"><div><strong>#${n} ${esc(index.get(n).title)}</strong><small>@${esc(index.get(n).author.login)}</small></div></button>`).join('')}<div class="dialog-note">${targets.length>12?`${targets.length-12} more direct dependents remain discoverable in the outline.`:'Increase the graph budget under View options when useful.'}</div>`,`<button class="btn" data-action="close">Keep current focus</button>`);return;
+  }
+  const before=lastGraph?.ids.length||0;expanded.set(id,(expanded.get(id)||0)+8);frozenIds=null;manualZoom=null;render();if((lastGraph?.ids.length||0)===before&&hiddenDirect.length){dependentPicker={id,page:0,query:''};openDependentPicker();return;}toast(`Expanded dependents after #${id}. Further branches stay summarized when the budget is reached.`);
+}
+function openDependentPicker(){
+  if(!dependentPicker)return;
+  const {id}=dependentPicker;
+  openModal(`Dependents of #${id}`,'This fork is wide. Focus one path without expanding every PR.',`<label class="field"><span>Find a direct dependent</span><input id="dependent-search" type="search" placeholder="PR number, title, or author" value="${esc(dependentPicker.query)}"></label><div id="dependent-choices"></div><div class="dialog-note">Selecting a PR focuses its path. Other offshoots stay summarized at the shared parent.</div>`,`<button class="btn" data-action="close">Keep current focus</button>`,false,'dependency-picker');
+  renderDependentChoices();
+}
+function renderDependentChoices(){
+  if(!dependentPicker||!$('dependent-choices'))return;
+  const {id,query}=dependentPicker,all=(children.get(id)||[]).map(n=>index.get(n)).filter(p=>`${p.number} ${p.title} ${p.author.login}`.toLowerCase().includes(query.toLowerCase()));
+  const totalPages=Math.max(1,Math.ceil(all.length/8));dependentPicker.page=Math.min(dependentPicker.page,totalPages-1);
+  const start=dependentPicker.page*8;
+  $('dependent-choices').innerHTML=all.slice(start,start+8).map(p=>`<button class="target" style="margin-top:8px" data-focus-select="${p.number}"><div><strong>#${p.number} ${esc(p.title)}</strong><small>PR author @${esc(p.author.login)}</small></div>${avatar(p.author)}</button>`).join('')+`<div class="row" style="justify-content:space-between;margin-top:12px;font-size:11px"><button class="btn" data-picker-page="-1" ${dependentPicker.page===0?'disabled':''}>Previous</button><span>${all.length?start+1:0}–${Math.min(start+8,all.length)} of ${all.length}</span><button class="btn" data-picker-page="1" ${dependentPicker.page>=totalPages-1?'disabled':''}>Next</button></div>`;
+}
+
+function perform(action){
+  switch(action){
+    case 'home':setPreset('mine');break;
+    case 'close':closeModal();break;
+    case 'filters':filterDialog();break;
+    case 'view-options':viewDialog();break;
+    case 'save':saveDialog();break;
+    case 'snapshot':snapshotDialog();break;
+    case 'diagnostics':diagnosticsDialog();break;
+    case 'about-context':case 'graph-budget':aboutContext();break;
+    case 'inspector':showInspector();break;
+    case 'pr-details':detailsDialog();break;
+    case 'queue-updates':queueUpdates();break;
+    case 'apply-updates':applyUpdates();break;
+    case 'dismiss-updates':queued=false;$('updates').hidden=true;fitGraph();break;
+    case 'apply-snapshot':offline=$('offline-input').checked;shallow=$('shallow-input').checked;closeModal();render();break;
+    case 'inspect-dependents':state.scope='dependents';expanded.clear();frozenIds=null;manualZoom=null;closeModalIfOpen();persist();render();break;
+    case 'first-match':if(filtered[0])selectPR(filtered[0].number);else toast('There are no indexed matches. Clear filters to browse the repository.');break;
+    case 'clear-filters':state.author='any';state.query='';state.directBase='any';state.checks='any';state.label='any';state.drafts=true;state.preset='all';closeModalIfOpen();changeView();break;
+    case 'apply-filters':{const f=new FormData($('filter-form'));state.author=String(f.get('author'));state.directBase=String(f.get('directBase'));state.checks=String(f.get('checks'));state.label=String(f.get('label'));state.drafts=f.get('drafts')==='on';if(state.preset==='mine'&&!['preset','maya'].includes(state.author))state.preset='all';closeModal();changeView();break;}
+    case 'apply-view':{const f=new FormData($('view-form'));state.sort=String(f.get('sort'));state.density=String(f.get('density'));state.scope=String(f.get('scope'));state.budget=Number(f.get('budget'));state.compact=f.get('compact')==='on';closeModal();changeView();requestAnimationFrame(fitGraph);break;}
+    case 'save-confirm':{const name=$('view-name').value.trim();if(!name){$('save-error').textContent='Enter a view name.';$('view-name').focus();return;}const exists=savedViews.find(v=>v.name===name);if(!exists&&savedViews.length>=12){$('save-error').textContent='Remove a saved view before adding another (12-view limit).';return;}const prefs={};for(const k of preferenceKeys)prefs[k]=state[k];const id=exists?.id||`view-${Date.now()}-${++scenarioSeed}`;if(exists)exists.prefs=prefs;else savedViews.push({id,name,prefs});state.savedId=id;persist();closeModal();render();toast(`“${name}” saved ${storageAvailable?'on this device':'for this session (storage unavailable)'}.`);break;}
+    case 'reload-fixture':{const size=Number($('fixture-size').value);loadFixture(size);refreshMetrics();break;}
+    case 'pause-index':paused=!paused;if($('pause-label'))$('pause-label').textContent=(paused?'Resume':'Pause')+' indexing';refreshMetrics();break;
+    case 'zoom-in':manualZoom=Math.min(1.5,(lastGraph?.scale||1)+.1);fitGraph();break;
+    case 'zoom-out':manualZoom=Math.max(.6,(lastGraph?.scale||1)-.1);fitGraph();break;
+    case 'fit':manualZoom=null;fitGraph();centerSelected();break;
+    case 'refresh':{
+      const b=$('refresh-btn');if(b.disabled)return;b.disabled=true;b.innerHTML=icon('refresh','spin')+'Refreshing…';
+      setTimeout(()=>{offline=false;b.disabled=false;b.innerHTML=icon('refresh')+'Refresh snapshot';render();loadDetails(state.selected);toast('Sample snapshot refreshed. No Git or network requests were made.');},600);break;
+    }
+    case 'reset':state=defaults();savedViews=[];try{localStorage.removeItem(STORAGE);}catch{}closeModalIfOpen();$('results').scrollTop=0;manualZoom=null;loadFixture(1000);toast('Demo and saved views reset.');break;
+  }
+}
+function closeModalIfOpen(){if($('modal').open)closeModal();}
+document.addEventListener('click',event=>{
+ const el=event.target.closest('button');if(!el||el.disabled)return;
+ if(el.dataset.select){selectPR(Number(el.dataset.select));if(activeModal==='inspector')showInspector();return;}
+ if(el.dataset.focusSelect){closeModal();selectPR(Number(el.dataset.focusSelect));return;}
+ if(el.dataset.pickerPage){if(dependentPicker){dependentPicker.page+=Number(el.dataset.pickerPage);renderDependentChoices();}return;}
+ if(el.dataset.preset){setPreset(el.dataset.preset);return;}
+ if(el.dataset.scope){state.scope=el.dataset.scope;frozenIds=null;expanded.clear();manualZoom=null;persist();render();return;}
+ if(el.dataset.unfold){const n=lastGraph?.reps.get(Number(el.dataset.unfold));if(n)n.ids.forEach(id=>unfolded.add(id));frozenIds=null;manualZoom=null;render();return;}
+ if(el.dataset.expand){expandAt(Number(el.dataset.expand));return;}
+ if(el.dataset.saved){const v=savedViews.find(v=>v.id===el.dataset.saved);if(v){const selected=state.selected;state={...defaults(),...validPrefs(v.prefs),selected,savedId:v.id};expanded.clear();unfolded.clear();frozenIds=null;manualZoom=null;persist();$('results').scrollTop=0;render();toast(`Loaded “${v.name}”.`);}return;}
+ if(el.dataset.deleteView){savedViews=savedViews.filter(v=>v.id!==el.dataset.deleteView);if(state.savedId===el.dataset.deleteView)state.savedId=null;persist();renderSaved();saveDialog();return;}
+ if(el.dataset.action)perform(el.dataset.action);
+});
+document.addEventListener('input',e=>{if(e.target.id==='dependent-search'&&dependentPicker){dependentPicker.query=e.target.value;dependentPicker.page=0;renderDependentChoices();}});
+$('search').addEventListener('input',e=>{state.query=e.target.value.slice(0,200);state.savedId=null;frozenIds=null;cancelAnimationFrame(renderFrame);renderFrame=requestAnimationFrame(()=>{$('results').scrollTop=0;render();persist();});});
+$('results').addEventListener('scroll',()=>{cancelAnimationFrame(outlineFrame);outlineFrame=requestAnimationFrame(renderRows);},{passive:true});
+$('results').addEventListener('keydown',e=>{
+ if(!['ArrowDown','ArrowUp','Home','End','Enter'].includes(e.key))return;
+ let pos=filtered.findIndex(p=>p.number===state.selected);if(e.key==='Enter')return;e.preventDefault();pos=e.key==='Home'?0:e.key==='End'?filtered.length-1:Math.max(0,Math.min(filtered.length-1,pos+(e.key==='ArrowDown'?1:-1)));
+ if(filtered[pos]){selectPR(filtered[pos].number);requestAnimationFrame(()=>document.querySelector(`[data-result="${state.selected}"]`)?.focus({preventScroll:true}));}
+});
+document.addEventListener('keydown',e=>{
+ const typing=e.target.matches('input,select,textarea');
+ if(!$('modal').open&&e.key==='/'&&!typing){e.preventDefault();$('search').focus();}
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'&&!$('modal').open){e.preventDefault();$('search').focus();}
+});
+$('modal').addEventListener('cancel',e=>{e.preventDefault();closeModal();});
+$('modal').addEventListener('submit',e=>{e.preventDefault();if(e.target.id==='save-form')perform('save-confirm');if(e.target.id==='filter-form')perform('apply-filters');if(e.target.id==='view-form')perform('apply-view');});
+new ResizeObserver(()=>{requestAnimationFrame(()=>{fitGraph();centerSelected();renderRows();});}).observe($('graph-viewport'));
+hydrate();loadFixture(1000);
+// Read-only diagnostics for testing this prototype. No application data is mutated here.
+Object.defineProperty(window,'demoDiagnostics',{get:()=>Object.freeze({total,indexed,complete:loadedComplete(),matches:filtered.length,selected:state.selected,currentCheckout:CURRENT,visiblePRs:lastGraph?.ids.slice()||[],mountedGraphCards:document.querySelectorAll('[data-node]').length,mountedRows:document.querySelectorAll('[data-result]').length,budget:state.budget,detailCache:detailCache.size,detailReads,savedViews:savedViews.length,offline,shallow,filterComputeMs:filterTime,layoutComputeMs:layoutTime,selectedOutsideView:outside})});
+</script>
+</body></html>
