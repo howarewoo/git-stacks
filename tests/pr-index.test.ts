@@ -128,6 +128,62 @@ test('out-of-order pages from retired generation cannot undo newer full snapshot
   assert.equal(reads, 6)
 })
 
+for (const retirement of ['adopt', 'invalidate'] as const) {
+  for (const response of ['account', 'retired-authority']) {
+    test(`${retirement} during post-page authority await fences ${response} response`, async () => {
+      const held = Promise.withResolvers<string>()
+      const started = Promise.withResolvers<void>()
+      let hold = false
+      let pages = 0
+      let account = 'account'
+      let publications = 0
+      const index = new ProgressivePullRequestIndex(
+        async () => {
+          if (++pages === 1) {
+            hold = true
+            return { ...page(1, null), viewer: 'retired-viewer' }
+          }
+          return { ...page(10, null), viewer: 'replacement-viewer' }
+        },
+        async () => {
+          if (hold) {
+            hold = false
+            started.resolve()
+            return held.promise
+          }
+          return account
+        },
+        () => publications++,
+        () => true,
+      )
+      const initial = index.load('/tmp/repo', 'github.com', 'https://github.com/acme/widgets')
+      await started.promise
+      if (retirement === 'adopt') {
+        index.adopt('/tmp/repo', 'github.com', 'acme/widgets', [pr(10)])
+        assert.equal(await initial, index.current())
+      } else {
+        const rejected = assert.rejects(initial)
+        index.invalidate()
+        await rejected
+        account = 'replacement-account'
+        await index.load('/tmp/replacement', 'github.com', 'https://github.com/acme/widgets')
+      }
+      const replacement = index.current()
+      const published = publications
+      held.resolve(response)
+      await nextTurn()
+      assert.equal(index.current(), replacement)
+      assert.equal(publications, published)
+      assert.equal(index.current()?.complete, true)
+      assert.deepEqual(
+        index.current()?.pullRequests.map((item) => item.number),
+        [10],
+      )
+      assert.equal(index.current()?.viewer, retirement === 'adopt' ? null : 'replacement-viewer')
+    })
+  }
+}
+
 test('host budget parks later pages without claiming complete scope or losing confirmed topology', async () => {
   let calls = 0
   let fail = false
