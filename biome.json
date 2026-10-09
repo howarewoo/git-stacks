@@ -7,8 +7,9 @@
       "**",
       "!**/package-lock.json",
       "!**/.impeccable",
-      "!src/renderer/src/design-system/tokens.css",
-      "!tests/renderer/references/ui-131/approved-stacks-demo.html"
+      "!**/.turbo",
+      "!apps/desktop/src/renderer/src/design-system/tokens.css",
+      "!apps/desktop/tests/renderer/references/ui-131/approved-stacks-demo.html"
     ]
   },
   "formatter": {

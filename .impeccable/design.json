@@ -573,7 +573,7 @@
       "Do keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.",
       "Do use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.",
       "Do use semantic.border.essential for essential boundaries, semantic.focus.ring for keyboard focus, and text/icon descriptions alongside every Git status.",
-      "Do use npm run tokens:generate followed by npm run tokens:check after editing src/renderer/src/design-system/tokens.json; never hand-edit generated tokens.css.",
+      "Do use npm run tokens:generate followed by npm run tokens:check after editing apps/desktop/src/renderer/src/design-system/tokens.json; never hand-edit generated tokens.css.",
       "Do keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation."
     ],
     "donts": [

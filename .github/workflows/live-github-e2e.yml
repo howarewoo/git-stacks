@@ -63,7 +63,7 @@ jobs:
           }
           git diff --quiet HEAD -- || { echo '::error::the working tree was changed'; exit 1; }
       - name: Run the live suite against a controlled GitHub over real Git and TLS
-        run: npx tsx tests/live/cli.ts --controlled
+        run: npx tsx apps/desktop/tests/live/cli.ts --controlled
 
   # The authorized target. It creates a repository under a named account, runs
   # the same scenarios against real GitHub, and deletes what it created.
@@ -156,7 +156,7 @@ jobs:
           # a record of a leftover that nobody can act on. This directory outlives the
           # job, and the recovery job below reads it.
           GIT_STACKS_LIVE_GITHUB_RECEIPT: ${{ runner.temp }}/../git-stacks-live-receipts/${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: npx tsx tests/live/cli.ts --github
+        run: npx tsx apps/desktop/tests/live/cli.ts --github
       - name: Publish the sanitized receipt
         # The receipt is written before each resource is created and updated
         # after every change, so it names what is still standing even when a run
@@ -228,4 +228,4 @@ jobs:
             echo '::error::this run published no receipt, so nothing can be recovered'
             exit 1
           fi
-          npx tsx tests/live/cli.ts --recover "$receipt"
+          npx tsx apps/desktop/tests/live/cli.ts --recover "$receipt"

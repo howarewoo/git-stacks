@@ -43,13 +43,13 @@ and may download it when absent.
   is not supported. Keep manual assistive-technology evidence separate from automation.
 - For performance changes, use [Performance budgets](README.md#performance-budgets)
   and `npm run bench:performance` after a build. Budget values belong in
-  `src/shared/performance.ts`, not duplicated constants.
+  `packages/shared/src/performance.ts`, not duplicated constants.
 
 ## Implementation boundaries
 
-- Keep Git, filesystem, credentials, and GitHub transport in `src/main`.
-  The React renderer uses the typed `DesktopAPI` in `src/shared/types.ts` through
-  `src/preload/index.ts`; preserve sender validation, sandboxing, context
+- Keep Git, filesystem, credentials, and GitHub transport in `apps/desktop/src/main`.
+  The React renderer uses the typed `DesktopAPI` in `@git-stacks/shared/types` through
+  `apps/desktop/src/preload/index.ts`; preserve sender validation, sandboxing, context
   isolation, and CSP.
 - GitHub collaboration requires provider-owned authentication through `gh`.
   Reuse the typed main-process transport; keep credentials out of the renderer,
@@ -59,9 +59,9 @@ and may download it when absent.
   the #11 cutover lands.
 - GitLab/`glab` is future direction only; do not add it to this cutover.
 - When changing `GitAction`, update the renderer fixture action messages in
-  `tests/renderer/fixtures/control.ts` and affected payloads. The build typechecks
+  `apps/desktop/tests/renderer/fixtures/control.ts` and affected payloads. The build typechecks
   these consumers. Keep fixture APIs out of the production renderer.
-- Edit `src/renderer/src/design-system/tokens.json`, not generated `tokens.css`;
+- Edit `apps/desktop/src/renderer/src/design-system/tokens.json`, not generated `tokens.css`;
   run `npm run tokens:generate` and `npm run tokens:check` after token changes.
   Reuse the shared controls and token roles defined in `DESIGN.md`.
 - Preserve captured-preview validation, confirmation gates, force-with-lease

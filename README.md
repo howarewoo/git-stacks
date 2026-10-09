@@ -65,8 +65,8 @@ npm run bench:performance  # large-repository benchmarks
 npm run build:promotion-helper  # build the atomic no-replace rename helper
 ```
 
-The root `postinstall` hook runs `node node_modules/electron/install.js`,
-including after `pnpm install`, to ensure Electron's binary is installed.
+The `apps/desktop` `postinstall` hook runs `node -e "require('electron/install.js')"`,
+including after `npm install` and `npm ci`, to ensure Electron's binary is installed in the workspace.
 
 `npm run dev`, `npm run build`, `npm test`, `npm run package`, and `npm run
 dist` all build the clone promotion helper first, so a C compiler must be
@@ -76,12 +76,39 @@ packaged app as `resources/promote`; nothing is compiled at runtime, and a build
 that cannot compile it fails instead of shipping a build that would fall back to
 an unsafe rename. `npm run package` and `npm run dist` finish by running the
 helper from inside the packaged app, so a build that left it out fails there.
+
+### Monorepo architecture and Turborepo
+
+The repository is structured as an npm workspaces monorepo managed by Turborepo (`turbo.json`):
+
+- **`apps/desktop`**: The Electron application (main process, React renderer, preload bridge, native clone-promotion helper, packaging scripts, and integration smoke tests).
+- **`packages/shared`**: Pure TypeScript shared domain types, capabilities, guards, settings, and performance constants. Consumed by other workspaces via subpath exports (e.g. `@git-stacks/shared/types`, `@git-stacks/shared/guards`) and bundled directly into application builds.
+
+Root `npm` commands orchestrate tasks across workspaces with Turborepo (`turbo run <task> --`):
+
+- **Node 24 / npm lock policy**: Node `>=24.0.0` and npm with `package-lock.json` committed. Installs use `npm ci` to preserve pinned dependencies across workspaces.
+- **Task dependencies and prerequisites**: Task ordering is defined in `turbo.json`. Build prerequisites (`build:promotion-helper`, `typecheck`, `provision:git-runtime`) execute in topological order without duplicate invocations.
+- **Caching and invalidation**: Build and typecheck tasks (`build`, `build:gallery`, `typecheck`, `tokens:check`) are cached in `.turbo/cache`. `build:gallery` depends on `^typecheck` so shared package edits invalidate the gallery cache. Both `build` and `build:gallery` hash `NODE_ENV`. Host- and environment-dependent tests (`test`, `test:live`, `test:desktop`, `test:update-flow`) have caching disabled (`cache: false`). Sensitive secrets are scoped strictly to the uncached tasks that need them (`test:live`, `package`, `dist`).
+- **Workspace targeting**: Run a task across all workspaces from the root, or target a specific package using Turbo filters:
+  ```sh
+  npx turbo run build --filter=git-stacks              # build desktop only (runs prerequisites)
+  npx turbo run typecheck --filter=@git-stacks/shared  # typecheck shared only
+  ```
+  Raw npm workspace scripts (e.g. `npm run build -w apps/desktop`) are low-level bundle-only commands that skip task prerequisites such as `typecheck`, `build:promotion-helper`, and `provision:git-runtime`; use Turbo-filtered invocations so dependency graphs run in topological order.
+- **Argument forwarding**: Forward CLI flags to underlying tasks using `--`:
+  ```sh
+  npm run test:live -- --help                         # forward --help to live test CLI
+  ```
+  To run a focused Node test by name pattern (after prerequisites `typecheck` and `build:promotion-helper` have run):
+  ```sh
+  npx tsx --test --test-name-pattern="clone" --import apps/desktop/tests/setup/owned-cli-boundary.cjs apps/desktop/tests/*.test.ts
+  ```
 The signed release workflow compiles on a runner for each target platform and
 puts the Visual Studio toolchain on `PATH` for its Windows runner, which does
 not have `cl` by default.
 
 When changing `GitAction`, update the renderer fixture's action messages in
-`tests/renderer/fixtures/control.ts` and affected test payloads. `npm run build`
+`apps/desktop/tests/renderer/fixtures/control.ts` and affected test payloads. `npm run build`
 typechecks these test consumers as well as the application.
 
 Stale-preview publishing tests assert rejection and unchanged local and remote
@@ -113,7 +140,7 @@ explicitly enabled for HTML/SVG formatting.
 Biome formats JavaScript, TypeScript, JSX/TSX, JSON, and CSS here. Tailwind CSS
 directives are enabled; HTML and SVG formatting use Biome's experimental full
 support. It honors `.gitignore` and excludes `package-lock.json`, `.impeccable/`,
-and generated `src/renderer/src/design-system/tokens.css`. Validate the latter
+and generated `apps/desktop/src/renderer/src/design-system/tokens.css`. Validate the latter
 with `npm run tokens:check`; edit `tokens.json` and regenerate rather than
 formatting the generated CSS.
 
@@ -125,12 +152,12 @@ Use the Biome editor extension for on-save formatting with the same configuratio
 ### Shared persistence and IPC boundaries
 
 Main-process handlers register through the local `ipcMain` wrapper in
-`src/main/index.ts`. It validates the sender before invoking a handler and keeps
+`apps/desktop/src/main/index.ts`. It validates the sender before invoking a handler and keeps
 untrusted requests out of the failure log. Register new handlers through that
 wrapper, not directly through Electron's `ipcMain`. Verify changes to this
 boundary with the [packaged desktop smoke](#packaged-desktop-smoke).
 
-`src/main/review-journal.ts` owns common-directory journal paths, versioned reads,
+`apps/desktop/src/main/review-journal.ts` owns common-directory journal paths, versioned reads,
 and owner-only, synced atomic writes for review drafts, snapshots, and viewed
 files. Feature modules retain entry validation, retention limits, and locking;
 drafts must not evict unsent words to make room for another record.
@@ -139,7 +166,7 @@ drafts must not evict unsent words to make room for another record.
 
 TanStack Query owns renderer-side desktop read results and ordinary mutation
 lifecycles. Both the production renderer and fixture gallery use
-`createRendererQueryClient` from `src/renderer/src/lib/query-client.ts`. UI
+`createRendererQueryClient` from `apps/desktop/src/renderer/src/lib/query-client.ts`. UI
 selection and unsent form edits stay local; Git, filesystem, credentials, and
 GitHub transport remain behind the typed `DesktopAPI` in main.
 
@@ -586,16 +613,16 @@ remain on screen under the new host's name.
 ### Verifying the notification center
 
 ```sh
-npx tsx --test tests/notifications.test.ts
-GIT_STACKS_NOTIFICATION_EVIDENCE="$PWD/test-results/notifications" node tests/notifications.e2e.cjs
+npx tsx --test apps/desktop/tests/notifications.test.ts
+GIT_STACKS_NOTIFICATION_EVIDENCE="$PWD/test-results/notifications" node apps/desktop/tests/notifications.e2e.cjs
 ```
 
-`tests/notifications.test.ts` drives the module over a real TLS socket with a
+`apps/desktop/tests/notifications.test.ts` drives the module over a real TLS socket with a
 certificate generated for the run and pinned in the transport it is given, so
 verification is on; one test proves it by presenting a second, untrusted
 certificate for the same address and observing the refusal.
 
-`tests/notifications.e2e.cjs` launches the built Electron app against that same
+`apps/desktop/tests/notifications.e2e.cjs` launches the built Electron app against that same
 kind of controlled host, trusts only that run's certificate, and drives the real
 window: it opens a recent repository, turns the module on in Settings,
 authorizes through the consent dialog, and then reads the requests the host
@@ -616,7 +643,7 @@ different control, or that the window cannot account for at all, is reported
 rather than repeated.
 
 Both launches — the initial one and the restarted process — start through the
-isolated desktop fixture, `tests/fixtures/isolated-desktop.cjs`, which runs as
+isolated desktop fixture, `apps/desktop/tests/fixtures/isolated-desktop.cjs`, which runs as
 the Electron main entry instead of the production main file. The fixture
 replaces every `safeStorage` entry point the compiled product uses with a
 synthetic AES-256-GCM sealing key confined to the run's own fixture root, forces
@@ -1036,7 +1063,7 @@ Those two names are the only place on the moving release where a publication
 overwrites what was there, and an upload that is interrupted between them leaves
 a manifest with no signature, a signature with no manifest, or the two
 describing different releases. So publication is ordered, and
-`scripts/release-update-publish.ts` is the only thing that performs it:
+`apps/desktop/scripts/release-update-publish.ts` is the only thing that performs it:
 
 1. **Bank the sequence.** The manifest and its signature are uploaded once more
    under names derived from that sequence — `history-stable-000000000007.json`
@@ -1086,7 +1113,7 @@ carries one. Nothing in the workflow generates a key, and every step that needs
 one fails closed without it: a key this repository made up would verify against
 nothing an installed build trusts, and a manifest signed by a key no build
 carries could be installed by no one. The repository itself holds no key
-material — `resources/update-trusted-keys.json` is committed empty, because a
+material — `apps/desktop/resources/update-trusted-keys.json` is committed empty, because a
 public key committed here would be trusted by every packaged build built from
 it. Each channel's sequence is read back from the manifest that channel already
 publishes, so it only ever rises, and each installer is published under a plain
@@ -1355,7 +1382,7 @@ installation. Rotating it is therefore a shipped change with an overlap window,
 not a switch someone can throw on an installed app, and it takes three releases
 in this order:
 
-1. **The new public key is committed** to `resources/update-history-keys.json`
+1. **The new public key is committed** to `apps/desktop/resources/update-history-keys.json`
    and injected into this release through `UPDATE_SIGNING_ADDITIONAL_KEY_ID`,
    `UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY`, `UPDATE_SIGNING_ADDITIONAL_VALID_FROM`
    and `UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL` — all four or none, or the
@@ -1371,7 +1398,7 @@ in this order:
    its validity window is never consulted at all, so the old key stops verifying
    then rather than whenever someone notices.
 
-`resources/update-history-keys.json` is what makes step 3 possible. A build only
+`apps/desktop/resources/update-history-keys.json` is what makes step 3 possible. A build only
 carries the keys that are current, so once the old key is retired nothing in the
 app can authenticate the manifests it signed — and the release that retired it
 could not read the history it was replacing, which would stop the channel
@@ -1400,7 +1427,7 @@ characters on the screen and never markup. There is no Markdown renderer in
 this app and no sanitiser standing in for one: nothing parses a value into
 elements, and nothing writes one with `innerHTML`.
 
-`scripts/update-flow-smoke.mjs` proves that in the real window rather than
+`apps/desktop/scripts/update-flow-smoke.mjs` proves that in the real window rather than
 asserting it about the source. It commits a subject that is
 `<img src=x onerror="…"> <script>…</script> <b>bold</b>`, opens the repository
 in the running app — where the branch card shows that subject as its commit
@@ -1411,7 +1438,7 @@ appeared, and nothing the payload says ran. The commit list in **History** uses
 the same React child for the same value; that view is not exercised by this
 run, and the proof is of the surface in the screenshot. Release notes and refusal messages
 arriving over a release signature are held to the same rule, in
-`tests/release-boundary.test.ts`.
+`apps/desktop/tests/release-boundary.test.ts`.
 
 ## Onboarding
 
@@ -1442,7 +1469,7 @@ is one atomic rename that refuses to replace anything already there:
 - Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`
 
 Node exposes none of these, so they are reached through a small helper,
-[`native/promote-repository.c`](native/promote-repository.c), compiled for the
+[`apps/desktop/native/promote-repository.c`](apps/desktop/native/promote-repository.c), compiled for the
 host by `npm run build:promotion-helper` and shipped beside the Git runtime as
 `resources/promote` in the packaged app. It does one syscall and then exits; it
 never looks at the destination before renaming, so there is no window between
@@ -1497,7 +1524,7 @@ remote URL: the app-signed transport is used directly from the main process.
 
 Git Stacks is used on repositories far larger than the ones it was built
 against. The budgets below are exported from
-[`src/shared/performance.ts`](src/shared/performance.ts) and are the single
+[`packages/shared/src/performance.ts`](packages/shared/src/performance.ts) and are the single
 value used by the main process, the renderer, the tests, and the benchmark
 harness. There is no second copy of a budget anywhere.
 
@@ -1695,15 +1722,15 @@ These are the extreme cases the app states rather than hanging or crashing on.
 
 ## Renderer verification
 
-These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
+These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
 
 ### Approved migration references
 
 The immutable #131 Stacks reference is
-[`approved-stacks-demo.html`](tests/renderer/references/ui-131/approved-stacks-demo.html),
+[`approved-stacks-demo.html`](apps/desktop/tests/renderer/references/ui-131/approved-stacks-demo.html),
 downloaded from the [approved original demo](https://github.com/user-attachments/files/33138100/Git-Stacks-Large-Repo-Demo.html).
 Its SHA-256 is `972d767ffb2607ea0dc91288255adb4160dd393116da6cab4cc807cbd4d13f7d`.
-The [original parity plan](tests/renderer/references/ui-131/original-parity-plan.md)
+The [original parity plan](apps/desktop/tests/renderer/references/ui-131/original-parity-plan.md)
 has SHA-256 `6fbd6fe294b3cffbd897d229ee8f30030e7bc0ea88cd2a1d56a69c5df8383c88`.
 The demo is a visual reference only; its simulated or disabled controls are not
 feature-parity evidence and its runtime is not imported by production.
@@ -1769,14 +1796,14 @@ Initial index adoption with a known typed CLI account does not duplicate prefere
 reads; credential rotation still retires the existing authority-keyed queries.
 
 After source changes, run Node24/npm `npm run typecheck`, the selected root
-tests `tests/graph-workbench.test.ts`, `tests/graph-preferences.test.ts`,
-`tests/graph-fixtures.test.ts`, `tests/pr-graph.test.ts`, and
-`tests/pr-index.test.ts`, then the renderer `graph-workbench.spec.ts` suite.
+tests `apps/desktop/tests/graph-workbench.test.ts`, `apps/desktop/tests/graph-preferences.test.ts`,
+`apps/desktop/tests/graph-fixtures.test.ts`, `apps/desktop/tests/pr-graph.test.ts`, and
+`apps/desktop/tests/pr-index.test.ts`, then the renderer `graph-workbench.spec.ts` suite.
 The focused commands are:
 
 ```sh
-npx tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/graph-workbench.test.ts tests/graph-preferences.test.ts tests/graph-fixtures.test.ts tests/pr-graph.test.ts tests/pr-index.test.ts
-GALLERY_PORT=5241 npx playwright test tests/renderer/graph-workbench.spec.ts --workers=1
+npx tsx --test --import ./apps/desktop/tests/setup/owned-cli-boundary.cjs apps/desktop/tests/graph-workbench.test.ts apps/desktop/tests/graph-preferences.test.ts apps/desktop/tests/graph-fixtures.test.ts apps/desktop/tests/pr-graph.test.ts apps/desktop/tests/pr-index.test.ts
+GALLERY_PORT=5241 npm run test:ui -- tests/renderer/graph-workbench.spec.ts --workers=1
 ```
 
 Inspect light/dark at 1000×700, 1440×940, and 1920×1080 and a 720×470
@@ -1785,7 +1812,7 @@ bounded presentation, not native Git success, VoiceOver, OS zoom, or final
 Electron timing/heap acceptance.
 
 Graph budgets live alongside unchanged existing budgets in
-`src/shared/performance.ts`: at most 64 mounted outline rows, 32 detailed graph
+`packages/shared/src/performance.ts`: at most 64 mounted outline rows, 32 detailed graph
 nodes, a 20-endpoint path page, and four selected detail bodies retained in
 main. The final production Electron gate measures at least 20 warm samples:
 input-to-paint p95 ≤250ms and projection plus layout ≤100ms, excluding network.
@@ -1854,7 +1881,7 @@ Also exercise `ancestry-requires-restack` with the inspector shown and hidden
 and tall `shell-no-repository` content at the minimum window. Branch identities
 must remain readable beside state badges, onboarding must start within its
 local scroll region, and Settings must leave the selected controls reachable.
-`tests/renderer/onboarding.spec.ts` covers clipboard refusal and retiring copy
+`apps/desktop/tests/renderer/onboarding.spec.ts` covers clipboard refusal and retiring copy
 confirmation when the command changes. Review intentional visual differences
 before updating macOS baselines; keep run-specific screenshots and results out
 of `DESIGN.md`.
@@ -1925,7 +1952,7 @@ npm run format:check
 
 The gallery can also be built with `npm run build:gallery`. Its output is `out/renderer-fixtures`, outside the production renderer entry point. `test:controls` loads that output in an isolated Electron window.
 
-Run `npx playwright test` locally for one combined visual/behavioral HTML report (separate invocations replace the previous report). Axe attachments retain violations and incomplete checks; rendered contrast measurements are report annotations. The `Accessibility checks` workflow runs the behavioural renderer suite (axe, contrast, keyboard, focus, 200% zoom, reduced motion) plus the shared keyboard/state-label unit tests on every push and pull request. Pixel baselines are macOS-only and stay a local gate. The committed images come from more than one macOS point release, so the exact platform, architecture, and pinned Playwright Chromium an image was recorded under are stated per run rather than asserted here for all of them; patch-level system-font drift is a reviewed failure, not masked.
+Run `npm run test:ui` locally (or `npx playwright test --config apps/desktop/playwright.config.ts` from root, or `npx playwright test` inside `apps/desktop`) for one combined visual/behavioral HTML report (separate invocations replace the previous report). Axe attachments retain violations and incomplete checks; rendered contrast measurements are report annotations. The `Accessibility checks` workflow runs the behavioural renderer suite (axe, contrast, keyboard, focus, 200% zoom, reduced motion) plus the shared keyboard/state-label unit tests on every push and pull request. Pixel baselines are macOS-only and stay a local gate. The committed images come from more than one macOS point release, so the exact platform, architecture, and pinned Playwright Chromium an image was recorded under are stated per run rather than asserted here for all of them; patch-level system-font drift is expected and tested through the programmatic design-system tokens check.
 
 Baselines are committed images, and the pull request records the exact platform, architecture, and verification run evidence each image came from rather than maintaining transient author-only capture notes here.
 
@@ -1938,9 +1965,9 @@ npm run package
 npm run test:desktop
 ```
 
-The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `release/linux-unpacked/git-stacks` on Linux; Windows is unsupported until its process-tree cleanup can be verified. `node scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates a disposable repository and local bare remote, isolates the Chromium user data, the temporary directory, the Git configuration and the gh configuration inside the workspace, strips inherited Git/GitHub and credential-shaped environment variables, and cleans the temporary workspace. On macOS the app inherits the host home directory, because the system only spawns the app's sandboxed helper processes against the home the password database reports: with a synthetic `HOME` the browser process never brings those helpers up and stops answering on its own DevTools endpoint, so the smoke can never reach the renderer. Nothing the app, git or gh reads comes from that home — user data is the redirected `--user-data-dir`, and `GIT_CONFIG_NOSYSTEM=1` with an empty `GIT_CONFIG_GLOBAL` and a disposable `GH_CONFIG_DIR` keep the machine's own Git identity, credential helpers and GitHub login out of the fixture. A `browserType.connectOverCDP` timeout on the first `/json/version` request is that dead endpoint, not a slow start. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
+The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `release/linux-unpacked/git-stacks` on Linux; Windows is unsupported until its process-tree cleanup can be verified. `node apps/desktop/scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates a disposable repository and local bare remote, isolates the Chromium user data, the temporary directory, the Git configuration and the gh configuration inside the workspace, strips inherited Git/GitHub and credential-shaped environment variables, and cleans the temporary workspace. On macOS the app inherits the host home directory, because the system only spawns the app's sandboxed helper processes against the home the password database reports: with a synthetic `HOME` the browser process never brings those helpers up and stops answering on its own DevTools endpoint, so the smoke can never reach the renderer. Nothing the app, git or gh reads comes from that home — user data is the redirected `--user-data-dir`, and `GIT_CONFIG_NOSYSTEM=1` with an empty `GIT_CONFIG_GLOBAL` and a disposable `GH_CONFIG_DIR` keep the machine's own Git identity, credential helpers and GitHub login out of the fixture. A `browserType.connectOverCDP` timeout on the first `/json/version` request is that dead endpoint, not a slow start. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
 
-The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
+The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks (minimize/restore document visibility and bounds, maximize/unmaximize) are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
 
 The branch-creation check selects the branch identity independently of appended
 picker status annotations, then verifies the checkout, branch tip, and recorded
@@ -1952,7 +1979,7 @@ refresh rather than sampling its transient disabled state once. The existing
 
 ### IPC sender validation
 
-The same packaged smoke proves the `validateSender` boundary in `src/main/index.ts` through the real Electron IPC path, never a renderer double or an exported guard. The authorized main frame calls read-only bridge methods first and is expected to be answered, then:
+The same packaged smoke proves the `validateSender` boundary in `apps/desktop/src/main/index.ts` through the real Electron IPC path, never a renderer double or an exported guard. The authorized main frame calls read-only bridge methods first and is expected to be answered, then:
 
 - a second hidden window the smoke itself creates, in the same shipped main process, with the shipped preload and the shipped `webPreferences`, loading the same `app://` document, sends the same calls and must be refused as an untrusted request while the authorized frame keeps answering and `repositories.json`/`settings.json` stay byte-identical;
 - a `data:` document loaded with `webContents.loadURL` into the shipped window's own main frame — a capability no renderer holds, since the smoke's navigation check proves the renderer's own attempts to leave the origin are refused — must be refused as an untrusted origin from the very sender and frame the app trusts.
@@ -1963,10 +1990,10 @@ Both refusals are checked against the handler's own precondition (`repository:re
 
 ```sh
 npm run build
-node tests/inbox.e2e.cjs [shots-dir]
+node apps/desktop/tests/inbox.e2e.cjs [shots-dir]
 ```
 
-The smoke launches the real Electron main process and preload bridge — never a renderer fixture double — against a synthetic GitHub host this script owns, over verified TLS (`NODE_EXTRA_CA_CERTS`, no verification is disabled). The fixture certificate, repositories, tokens, `settings.json`/`repositories.json`, Chromium profile, and Git/gh configuration all live in the owned temporary root, so no ambient credential, personal repository, or OS secret store can reach the run. Credential sealing is provided by the shared external fixture at `tests/fixtures/isolated-desktop.cjs`, which replaces every native `safeStorage` entry point before the production main module loads and keeps Chromium on `--use-mock-keychain`/`--password-store=basic`; if that guard cannot be proven, the fixture refuses to load the production main. It observes, in the live window: the six Inbox groups with the counts the host answered, the `/` chord reaching the queue's search field, a matchless search reaching the filtered-empty state rather than an empty queue, clearing restoring the rows, a row opening its own repository's Review with no Git action, a row for another registered repository adopting that repository, and a saved filter surviving a real process restart. The synthetic host is the only authority: nothing here writes to GitHub.
+The smoke launches the real Electron main process and preload bridge — never a renderer fixture double — against a synthetic GitHub host this script owns, over verified TLS (`NODE_EXTRA_CA_CERTS`, no verification is disabled). The fixture certificate, repositories, tokens, `settings.json`/`repositories.json`, Chromium profile, and Git/gh configuration all live in the owned temporary root, so no ambient credential, personal repository, or OS secret store can reach the run. Credential sealing is provided by the shared external fixture at `apps/desktop/apps/desktop/tests/fixtures/isolated-desktop.cjs`, which replaces every native `safeStorage` entry point before the production main module loads and keeps Chromium on `--use-mock-keychain`/`--password-store=basic`; if that guard cannot be proven, the fixture refuses to load the production main. It observes, in the live window: the six Inbox groups with the counts the host answered, the `/` chord reaching the queue's search field, a matchless search reaching the filtered-empty state rather than an empty queue, clearing restoring the rows, a row opening its own repository's Review with no Git action, a row for another registered repository adopting that repository, and a saved filter surviving a real process restart. The synthetic host is the only authority: nothing here writes to GitHub.
 
 The provider CLI must independently trust the fixture's TLS issuer. `NODE_EXTRA_CA_CERTS` configures Node, not `gh`'s certificate verification; Node reaching the synthetic host is not proof that the CLI can. If the CLI rejects the certificate, record this smoke as blocked before Inbox data loads. Do not disable TLS verification or install the disposable issuer into a personal OS trust store to force a pass.
 
@@ -1979,7 +2006,7 @@ npm run build
 npm run test:update-flow
 ```
 
-`scripts/update-flow-smoke.mjs` launches the built app — real main process, real preload, real renderer — through the shared [isolated desktop fixture](#isolated-desktop-fixture), which is the Electron main entry rather than `out/main/index.js`: it installs a synthetic AES-256-GCM sealing backend, proves no native `safeStorage` method is still reachable, and only then imports the production main with `--use-mock-keychain` and `--password-store=basic`, so if that proof fails the production module is never loaded at all. One disposable temporary root holds the repository the app opens, the Chromium profile, the Git and gh configuration, the fixture's sealing key and this run's generated TLS material; it is removed on every way out of the run — success, failure or signal — and `--keep` retains it for inspection. Inherited git and gh state, GitHub credentials, secret-shaped variables, `SSH_AUTH_SOCK`, the `NODE_OPTIONS`, `NODE_TLS_*`, `NODE_EXTRA_*` and `ELECTRON_*` overrides are dropped before the app is launched; that repository is also initialised and committed under the same held environment, so no host git identity, template, `GIT_DIR` or signing key decides what the app is shown first.
+`apps/desktop/scripts/update-flow-smoke.mjs` launches the built app — real main process, real preload, real renderer — through the shared [isolated desktop fixture](#isolated-desktop-fixture), which is the Electron main entry rather than `apps/desktop/out/main/index.js`: it installs a synthetic AES-256-GCM sealing backend, proves no native `safeStorage` method is still reachable, and only then imports the production main with `--use-mock-keychain` and `--password-store=basic`, so if that proof fails the production module is never loaded at all. One disposable temporary root holds the repository the app opens, the Chromium profile, the Git and gh configuration, the fixture's sealing key and this run's generated TLS material; it is removed on every way out of the run — success, refusal or failure.
 
 macOS has the app inherit the host home, as the other desktop runs do, because its sandboxed helper processes only come up against the home the password database reports — so `HOME` is the one path this run does not own, and the paths git and gh read are held to the run's own files instead. The app reports what its Git environment can already do by running `git config` from that home, which a home that is itself a Git repository would answer from its own local configuration. **That arrangement is unsupported and refused**: before the app starts, the run asks git whether it discovers a repository at that directory — including worktrees, bare repositories, and Git directories — without querying any configuration value, and stops with a prerequisite error if it does. Only Git's expected non-repository result permits launch; other probe failures stop the run. The run never queries that repository's configuration and never acts on it; on such a machine it does not run.
 
@@ -1987,22 +2014,22 @@ The run then reads the launched process's own environment back out of the app's 
 
 ### Isolated desktop fixture
 
-`tests/fixtures/isolated-desktop.cjs` launches the real production main, preload, and renderer (`out/main/index.js`), with the Electron main entry replaced by the fixture itself:
+`apps/desktop/tests/fixtures/isolated-desktop.cjs` launches the real production main, preload, and renderer (`apps/desktop/out/main/index.js`), with the Electron main entry replaced by the fixture itself:
 
 ```sh
 node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
-  tests/fixtures/isolated-desktop.cjs \
+  apps/desktop/tests/fixtures/isolated-desktop.cjs \
   --use-mock-keychain --password-store=basic \
   --user-data-dir=<owned-temp-root>/user-data \
   --fixture-root <owned-temp-root> \
-  --main out/main/index.js
+  --main apps/desktop/out/main/index.js
 ```
 
 Keep the fixture file first and Chromium startup switches before any `--` separator. The fixture patches the shared native `safeStorage` object in place, preserving Electron's non-configurable export getter and existing import aliases; it never calls the original methods. Keep sandboxing enabled.
 
 Before the production main module is imported, the fixture replaces every `safeStorage` entry point the compiled product uses with a local AES-256-GCM implementation keyed by `<fixture-root>/synthetic-key.bin` (mode 0600), so sealed credentials never touch the operating system's store and a wrong key fails to open them. The key persists only inside the caller-owned fixture root across fixture restarts; it is never printed, and neither is any plaintext. Chromium's own key store is forced to `--use-mock-keychain` and `--password-store=basic` before the app is imported. If any of that cannot be proven, the fixture exits before the production main is loaded. A launch is under the fixture when `<fixture-root>/fixture.json` is present. Passive: it exists only because the fixture created it. The fixture changes no production source, adds no production env switch, and is never referenced by packaged code; accepting the real OS key store remains a separate, external gate, and packaged-desktop acceptance stays with `npm run test:desktop`.
 
-`scripts/packaged-desktop-smoke.mjs` exercises the same synthetic backend in the shipped (unsigned development) package: it pauses the main entry at `--inspect-brk`, installs the helper's fixture before the first production statement, then resumes. That run is synthetic-store evidence only; it never claims the real OS keychain or a signed install.
+`apps/desktop/scripts/packaged-desktop-smoke.mjs` exercises the same synthetic backend in the shipped (unsigned development) package: it pauses the main entry at `--inspect-brk`, installs the helper's fixture before the first production statement, then resumes. That run is synthetic-store evidence only; it never claims the real OS keychain or a signed install.
 
 ### Updating visual baselines
 
@@ -2017,9 +2044,9 @@ Screenshot tests wait for fonts and stable fixture state, use fixed data/timesta
 
 ### Changing tokens and components
 
-After editing `src/renderer/src/design-system/tokens.json`, run `npm run tokens:generate` and `npm run tokens:check`. Follow [DESIGN.md](DESIGN.md) for token roles and component rules.
+After editing `apps/desktop/src/renderer/src/design-system/tokens.json`, run `npm run tokens:generate` and `npm run tokens:check`. Follow [DESIGN.md](DESIGN.md) for token roles and component rules.
 
-The renderer owns its shadcn `base-nova` library in `src/renderer/src/components/ui`, backed by `@base-ui/react`. Import the local wrappers in views rather than recreating primitive behavior. Keep token-based styling, CVA variants, and the existing `cn()` helper; there is no shadcn CLI runtime dependency.
+The renderer owns its shadcn `base-nova` library in `apps/desktop/src/renderer/src/components/ui`, backed by `@base-ui/react`. Import the local wrappers in views rather than recreating primitive behavior. Keep token-based styling, CVA variants, and the existing `cn()` helper; there is no shadcn CLI runtime dependency.
 
 - Compose Base UI triggers with `render`, not Radix `asChild`. `DialogContent` accepts Base UI `initialFocus` and `finalFocus`; guarded roots refuse implicit dismissal through `onOpenChange`'s `details.cancel()`.
 - `Select` accepts `options` and a string-valued `onValueChange`; `''` can be a real option, not a missing value. Field selects fill their container; use `className="w-auto"` for content-sized inline toolbar selects.
@@ -2105,7 +2132,7 @@ Add a file of your own when a step needs a working change; what the app reads is
 
 A member is recorded as `branch.<name>.parent`; the app walks those links to the default branch and groups branches by the first ancestor below it, so each further branch needs a new name and the previous branch as its parent, and only such a chain reaches one stack — build it past 200 members (`LIST_PAGE_SIZE`) when you intend to exercise the paged-list parts of steps 3 and 4. Open the fixture with **Add local repository** on the no-repository pane or by dropping the folder on the window — adoption never writes to the repository — then delete the run root and nothing else.
 
-**Readers.** `Mod` is `Cmd` on macOS and `Ctrl` on Windows ([`src/shared/shortcuts.ts`](src/shared/shortcuts.ts)); press each `Mod` chord to confirm it reaches the app, because a reader can keep a chord for itself. The branch tree, the stack rail, History, and every dialog handle the keyboard in the app, and a reader's reading mode — NVDA browse mode, Narrator scan mode — spends arrows, Home, End, and Enter on its own cursor, so run those checks in the reader's interaction or focus mode and use the reading mode to read what the app announces. Record which mode each observation was made in; an announcement that differs between the two modes is recorded, not treated as a defect.
+**Readers.** `Mod` is `Cmd` on macOS and `Ctrl` on Windows ([`packages/shared/src/shortcuts.ts`](packages/shared/src/shortcuts.ts)); press each `Mod` chord to confirm it reaches the app, because a reader can keep a chord for itself. The branch tree, the stack rail, History, and every dialog handle the keyboard in the app, and a reader's reading mode — NVDA browse mode, Narrator scan mode — spends arrows, Home, End, and Enter on its own cursor, so run those checks in the reader's interaction or focus mode and use the reading mode to read what the app announces. Record which mode each observation was made in; an announcement that differs between the two modes is recorded, not treated as a defect.
 
 1. Confirm the record above names this platform, this build, and this reader, and that the reader is in the configuration you recorded. Then Tab to **Add local repository**, confirm the reader announces its name and role, and record what the operating system's folder picker announces, where focus lands once the workbench opens, and whether the repository's name and path are spoken.
 2. **Destination navigation.** With no pointer, arrow through the Workspace destinations rail and activate each of the ten destinations. After each switch, confirm focus lands on the destination's heading and the change is spoken through the polite live region. Also verify the direct routes: `/` focuses the in-view filter, `Mod+K` opens the command palette with its own search focused, and the view shortcuts reach every destination: `Mod+1`–`Mod+8` for Branches through Diagnostics, `Mod+9` for PR Inbox, and `Mod+0` for GitHub Notifications.
@@ -2122,7 +2149,7 @@ Real GitHub mutations require a separately designated test repository and explic
 
 ## Disposable GitHub end-to-end suite
 
-`tests/live` is the suite that runs against a real GitHub instead of a double in
+`apps/desktop/tests/live` is the suite that runs against a real GitHub instead of a double in
 process: real Git, a real HTTPS transport, and a repository that exists for the
 length of one run. It exists for the behaviour mocks cannot prove — a native
 stack created twice, a merge requested twice, a review written against a
@@ -2130,7 +2157,7 @@ comparison that moved, a check the host reports differently than we expect.
 
 ```sh
 npm run test:live                  # the controlled target: no credentials, no network
-npx tsx tests/live/cli.ts --list   # every scenario, its title, and what it needs
+npx tsx apps/desktop/tests/live/cli.ts --list   # every scenario, its title, and what it needs
 ```
 
 ### The controlled target
@@ -2365,7 +2392,7 @@ and local paths.
 Exit codes are `0` passed, `1` a scenario or cleanup failed, `2` the run was
 refused before it started.
 
-`npx tsx tests/live/cli.ts --recover <receipt>` is what a run that was killed
+`npx tsx apps/desktop/tests/live/cli.ts --recover <receipt>` is what a run that was killed
 before its own cleanup needs. It reads that run's receipt, asks the host to
 confirm the id and the marker for everything the receipt names, and removes only
 those; a receipt naming something the host does not confirm is reported and left
@@ -2373,7 +2400,7 @@ alone.
 
 ### The committed schema fixture
 
-`tests/fixtures/live-github-observed-schema.json` is the contract the mock
+`apps/desktop/tests/fixtures/live-github-observed-schema.json` is the contract the mock
 fixtures are held to. It records the shape the host was observed to answer —
 paths and JSON types only, no values, no repository name, no identifier — and
 `schema/observed-responses-match-the-committed-fixture` fails when a field the
@@ -2455,7 +2482,7 @@ Which handles it is willing to delete is decided by the id and the marker the
 receipt records, so a look-alike repository is left alone, and a resource whose
 repository is still standing is reported rather than counted as removed.
 
-`runRecoveryAgainstControlledHost` in `tests/live/cli.ts` creates a controlled TLS
+`runRecoveryAgainstControlledHost` in `apps/desktop/tests/live/cli.ts` creates a controlled TLS
 host, a marked repository, and a receipt naming its id, then invokes the actual
 `--recover` command. Its regression checks the command outcome and reads the
 repository back from the host. Run the recovery regression alongside the controlled
@@ -2729,14 +2756,14 @@ GitHub.
 
 ### Line identity contract
 
-`ReviewLine` in `src/shared/review.ts` is the contract other review work anchors
+`ReviewLine` in `packages/shared/src/review.ts` is the contract other review work anchors
 to. A line carries its `side` (`base`, `head`, or `null` for a marker), its number
 on that side, an `anchor` (the file path plus the line's text with its diff marker
 removed), and a `context` (the anchor plus up to two neighbouring lines of the
 same hunk each side). A hunk reuses the local staging surface's `hunkId` scheme.
 
 A line number is an address, not an identity. `resolveReviewAnchor` in
-`src/main/review.ts` re-resolves a stored `ReviewLineRef` against a freshly read
+`apps/desktop/src/main/review.ts` re-resolves a stored `ReviewLineRef` against a freshly read
 file set: **exact** when a unique same-side anchor and its neighbourhood are intact,
 **moved** when the line's own text survives once but its neighbourhood changed (the
 reason says where it went), and **unresolved** with a reason a reviewer can act on
@@ -2990,8 +3017,8 @@ GitHub pull requests do not retain complete version history for arbitrary force-
 Run snapshot unit and integration tests with:
 
 ```sh
-npx tsx --test tests/review-snapshots.test.ts
-npx playwright test tests/renderer/review-snapshots.spec.ts
+npx tsx --test apps/desktop/tests/review-snapshots.test.ts
+npm run test:ui -- tests/renderer/review-snapshots.spec.ts
 ```
 
 ## PR Inbox
@@ -3011,7 +3038,7 @@ Group membership is a pure function of GitHub-reported facts. The signed-in view
 | **Drafts**            | Open and a draft, whoever opened it. Drafts are never in a review group.                                                                                                                               |
 | **Recently merged**   | Merged within the recent window (30 days by default), measured from the read's own clock.                                                                                                              |
 
-Only one overlap is intentional: **My PRs — approved** and **Needs my response**. The two answer different questions — what the reviewers decided, and who owes the next turn — so a pull request that was approved and then commented on is genuinely both. Every other pair is disjoint; `inboxGroupOverlapsAllowed` names the one allowed pair and `tests/pr-inbox.test.ts` holds the rest closed across the full cross-product of state, draft, author, request, decision, last turn, and merge instant.
+Only one overlap is intentional: **My PRs — approved** and **Needs my response**. The two answer different questions — what the reviewers decided, and who owes the next turn — so a pull request that was approved and then commented on is genuinely both. Every other pair is disjoint; `inboxGroupOverlapsAllowed` names the one allowed pair and `apps/desktop/tests/pr-inbox.test.ts` holds the rest closed across the full cross-product of state, draft, author, request, decision, last turn, and merge instant.
 
 ### Rows, search, and saved filters
 
@@ -3050,7 +3077,7 @@ Leaving the destination cancels the read it started. The queue reads on open and
 Run the Inbox tests with:
 
 ```sh
-npx tsx --test tests/pr-inbox.test.ts tests/pr-inbox-views.test.ts tests/pr-inbox-service.test.ts
+npx tsx --test apps/desktop/tests/pr-inbox.test.ts apps/desktop/tests/pr-inbox-views.test.ts apps/desktop/tests/pr-inbox-service.test.ts
 ```
 
 The `pr-inbox-structured` gallery scenario adds long titles, same-number PRs in two repositories, saved-view criteria and zero/truncated count facts. Exercise the real renderer with `GALLERY_PORT=5238 npm run test:ui -- tests/renderer/pr-inbox.spec.ts --workers=1`; the suite includes restoration after remount, unavailable-fact exclusions, read-only repository-qualified navigation, accessibility and desktop/200% reflow sizes.
@@ -3067,4 +3094,4 @@ Selected reads capture their repository generation before the initial authority 
 
 Conflict reporting compares established qualified edge targets: an explicit `refs/remotes/origin/main` parent agrees with a GitHub `main` target resolving to that same ref. A PR target also agrees with its source-confirmed `github-head` local/origin ref association without merging their provenance edges. Same-named unassociated local refs, other remotes, fork heads, or unknown head repositories do not establish equivalence. Ambiguous or missing edges retain their source evidence rather than inventing a ref alias.
 
-Focused model and transport checks: `npx tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/pr-graph.test.ts tests/pr-index.test.ts tests/github.test.ts`.
+Focused model and transport checks: `npx tsx --test --import ./apps/desktop/tests/setup/owned-cli-boundary.cjs apps/desktop/tests/pr-graph.test.ts apps/desktop/tests/pr-index.test.ts apps/desktop/tests/github.test.ts`.

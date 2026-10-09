@@ -58,7 +58,7 @@ jobs:
           UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
           UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         run: |
-          test "$RELEASE_TAG" = "v$(node -p 'require("./package.json").version')"
+          test "$RELEASE_TAG" = "v$(node -p 'require("./apps/desktop/package.json").version')"
           if [[ '${{ matrix.platform }}' != linux ]]; then
             test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD"
           fi
@@ -111,6 +111,7 @@ jobs:
         # happens to inject. Everything after this is about the key.
         run: npm test
       - name: Inject the release update key into this build
+        working-directory: apps/desktop
         shell: bash
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
@@ -132,6 +133,7 @@ jobs:
         # half is never written, printed, or uploaded.
         run: npx tsx scripts/release-trusted-keys.ts inject
       - name: Refuse a build that would ship with no release key
+        working-directory: apps/desktop
         shell: bash
         env:
           UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
@@ -147,7 +149,7 @@ jobs:
       - name: Hand the injected key set to the publishing job
         shell: bash
         run: |
-          cp resources/update-trusted-keys.json "injected-key-set-${{ matrix.platform }}-${{ matrix.arch }}.json"
+          cp apps/desktop/resources/update-trusted-keys.json "injected-key-set-${{ matrix.platform }}-${{ matrix.arch }}.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: update-key-set-${{ matrix.platform }}-${{ matrix.arch }}
@@ -168,7 +170,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           shopt -s nullglob
-          apps=(release/mac*/"Git Stacks.app")
+          apps=(apps/desktop/release/mac*/"Git Stacks.app")
           test "${#apps[@]}" -eq 1
           codesign --verify --deep --strict --verbose=2 "${apps[0]}"
           codesign -dv --verbose=4 "${apps[0]}" 2>&1 | grep -Fq 'Authority=Developer ID Application:'
@@ -178,7 +180,7 @@ jobs:
         if: matrix.platform == 'win32'
         shell: pwsh
         run: |
-          $artifacts = @(Get-ChildItem release -Filter *.exe)
+          $artifacts = @(Get-ChildItem apps/desktop/release -Filter *.exe)
           if ($artifacts.Count -eq 0) { throw 'No signed installer found' }
           foreach ($artifact in $artifacts) {
             if ((Get-AuthenticodeSignature $artifact.FullName).Status -ne 'Valid') {
@@ -224,9 +226,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          images=(release/*.dmg)
+          images=(apps/desktop/release/*.dmg)
           test "${#images[@]}" -eq 1
-          apps=(release/mac*/"Git Stacks.app")
+          apps=(apps/desktop/release/mac*/"Git Stacks.app")
           test "${#apps[@]}" -eq 1
           codesign --verify --deep --strict --verbose=2 "${apps[0]}"
           test "$(codesign -dv --verbose=2 "${apps[0]}" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
@@ -338,7 +340,7 @@ jobs:
         run: |
           mkdir signed-release
           shopt -s nullglob
-          artifacts=(release/*.dmg release/*.exe release/*.AppImage)
+          artifacts=(apps/desktop/release/*.dmg apps/desktop/release/*.exe apps/desktop/release/*.AppImage)
           test "${#artifacts[@]}" -gt 0
           cp "${artifacts[@]}" signed-release/
       - name: Record what this runner packaged
@@ -347,7 +349,7 @@ jobs:
         # file is for; it does not guess it from a file name, and it will not
         # publish a manifest that is missing a build from this matrix.
         run: |
-          npx tsx scripts/release-update-manifest.ts describe \
+          npx tsx apps/desktop/scripts/release-update-manifest.ts describe \
             --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}' \
             --dir signed-release --out "descriptors/${{ matrix.platform }}-${{ matrix.arch }}.json"
       - name: State the Linux support policy this release ships
@@ -391,7 +393,7 @@ jobs:
           # test, or a runner that skipped it all leave no proof, and the step
           # fails rather than passing on silence.
           GIT_STACKS_POLICY_PROOF="$RUNNER_TEMP/linux-policy.proved" \
-            npx tsx --test tests/update-linux-policy.test.ts
+            npx tsx --test apps/desktop/tests/update-linux-policy.test.ts
           test -s "$RUNNER_TEMP/linux-policy.proved" || {
             echo "::error::the Linux policy check left no proof, so this step proved nothing"
             exit 1
@@ -537,6 +539,7 @@ jobs:
           path: injected-key-sets
           merge-multiple: true
       - name: Inject the release update key again, and prove it is the key the builds carry
+        working-directory: apps/desktop
         shell: bash
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
@@ -551,7 +554,7 @@ jobs:
         run: |
           npx tsx scripts/release-trusted-keys.ts inject
           shopt -s nullglob
-          shipped=(injected-key-sets/*.json)
+          shipped=(../../injected-key-sets/*.json)
           test "${#shipped[@]}" -gt 0
           for keyset in "${shipped[@]}"; do
             if ! cmp -s "$keyset" resources/update-trusted-keys.json; then
@@ -561,6 +564,7 @@ jobs:
           done
           echo "the key set matches all ${#shipped[@]} packaged builds"
       - name: Mint, sign and verify this channel's update manifest
+        working-directory: apps/desktop
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -603,12 +607,12 @@ jobs:
           if [ -n "$ROLLBACK_OF" ]; then ROLLBACK=(--rollback-of "$ROLLBACK_OF"); fi
           npx tsx scripts/release-update-manifest.ts build \
             --channel "$CHANNEL" --version "$VERSION" \
-            --descriptors descriptors --artifact-dir signed-release \
-            --out-dir channel-feed --stage-dir channel-assets \
+            --descriptors ../../descriptors --artifact-dir ../../signed-release \
+            --out-dir ../../channel-feed --stage-dir ../../channel-assets \
             --repo "$REPOSITORY" --notes "${RELEASE_NOTES:-Git Stacks $VERSION ($CHANNEL).}" \
             ${ROLLBACK[@]+"${ROLLBACK[@]}"}
-          npx tsx scripts/release-update-sign.ts --channel "$CHANNEL" --manifest "channel-feed/update-$CHANNEL.json"
-          npx tsx scripts/release-update-verify.ts --channel "$CHANNEL" --manifest "channel-feed/update-$CHANNEL.json" --artifact-dir channel-assets
+          npx tsx scripts/release-update-sign.ts --channel "$CHANNEL" --manifest "../../channel-feed/update-$CHANNEL.json"
+          npx tsx scripts/release-update-verify.ts --channel "$CHANNEL" --manifest "../../channel-feed/update-$CHANNEL.json" --artifact-dir ../../channel-assets
       - name: Verify the provenance of every artifact about to be published
         shell: bash
         env:
@@ -622,6 +626,7 @@ jobs:
             gh attestation verify "$artifact" --repo "$REPOSITORY"
           done
       - name: Publish the signed channel feed
+        working-directory: apps/desktop
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -661,7 +666,7 @@ jobs:
           # and proved. Nothing is deleted, and nothing a client needs is only
           # reachable after it exists somewhere that is never rewritten.
           npx tsx scripts/release-update-publish.ts --channel "$CHANNEL" --repo "$REPOSITORY" \
-            --feed channel-feed --installers channel-assets
+            --feed ../../channel-feed --installers ../../channel-assets
 
   supply-chain:
     # The dependency inventory for the packaged app, and a stop on a known
