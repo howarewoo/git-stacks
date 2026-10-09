@@ -97,7 +97,8 @@ import {
 } from './components/workspace-navigation'
 import { ReviewView, type ReviewCommands } from './components/review-view'
 import { ConflictResolver } from './components/conflict-resolver'
-import { HistoryView, OperationBanner, StackView } from './components/repository-views'
+import { HistoryView, OperationBanner } from './components/repository-views'
+import { GraphWorkbench } from './components/graph-workbench'
 import { GitRuntimeDialog } from './components/git-runtime-dialog'
 import { SettingsDialog } from './components/settings-dialog'
 import { GitHubCliStatusDialog } from './components/github-cli-status'
@@ -2097,7 +2098,7 @@ function App() {
     () => (snapshot ? capabilityAttentionCount(capabilityReport(snapshot.capabilities)) : 0),
     [snapshot],
   )
-  const detailsVisible = showDetails && (workspaceView === 'branches' || workspaceView === 'stacks')
+  const detailsVisible = showDetails && workspaceView === 'branches'
   const openWorkflow = (request: WorkflowRequest) => {
     if (!snapshot || isBusy) return
     setActionError(null)
@@ -2873,15 +2874,21 @@ function App() {
       </div>
       {snapshot && (workspaceView === 'branches' || workspaceView === 'stacks') ? (
         <Button
-          aria-controls={detailsVisible ? 'branch-inspector' : undefined}
-          aria-expanded={detailsVisible}
-          aria-label={detailsVisible ? 'Hide details pane' : 'Show details pane'}
+          aria-controls={
+            showDetails
+              ? workspaceView === 'stacks'
+                ? 'graph-inspector'
+                : 'branch-inspector'
+              : undefined
+          }
+          aria-expanded={showDetails}
+          aria-label={showDetails ? 'Hide details pane' : 'Show details pane'}
           className="toolbar-control toolbar-details-toggle"
           onClick={() => setShowDetails((value) => !value)}
           size="sm"
           variant="secondary"
         >
-          {detailsVisible ? (
+          {showDetails ? (
             <PanelRightClose aria-hidden="true" className="size-4" />
           ) : (
             <PanelRightOpen aria-hidden="true" className="size-4" />
@@ -3312,11 +3319,16 @@ function App() {
       )
     if (workspaceView === 'stacks')
       return (
-        <StackView
+        <GraphWorkbench
           actionError={actionError}
           onClearActionError={() => setActionError(null)}
           snapshot={snapshot}
           authority={authority}
+          account={
+            cliStatus?.state === 'authenticated' && cliStatus.login
+              ? { host: cliStatus.host, login: cliStatus.login }
+              : null
+          }
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}
@@ -3324,9 +3336,11 @@ function App() {
             setReviewNumber(number)
             setWorkspaceView('review')
           }}
-          onSelect={(branch) => setSelectedBranchRef(branch.ref)}
           search={search}
+          onSearchChange={setSearch}
           onCreate={openBranchDialog}
+          inspectorVisible={showDetails}
+          onToggleInspector={() => setShowDetails((value) => !value)}
         />
       )
     return (

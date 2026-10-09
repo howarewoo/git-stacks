@@ -28,6 +28,7 @@
  *   node scripts/packaged-desktop-smoke.mjs [--app <path>] [--timeout <seconds>] [--keep]
  */
 
+import { deepStrictEqual } from 'node:assert'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createWriteStream, existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
@@ -817,12 +818,23 @@ const READ_ONLY_PROBE = `(async () => {
       return { label, resolved: false, message: String(error?.message ?? error) }
     }
   }
+  const expectedScope = {
+    repositoryPath: '/synthetic/graph-smoke', host: 'github.com',
+    repository: 'smoke-owner/graph-smoke', account: 'smoke-account',
+  }
   return {
     href: location.href,
     bridge: typeof window.desktop?.recentRepositories,
     calls: [
       await report('recentRepositories', () => window.desktop.recentRepositories()),
       await report('refresh', () => window.desktop.refresh()),
+      await report('graphPreferences', () => window.desktop.graphPreferences()),
+      await report('saveGraphPreferences', () => window.desktop.saveGraphPreferences({
+        preset: 'all-open', text: 'boundary smoke', author: '', status: 'all',
+        collapse: false, name: 'Boundary smoke',
+      }, expectedScope)),
+      await report('resetGraphPreferences', () => window.desktop.resetGraphPreferences(expectedScope)),
+      await report('prIndexRefresh', () => window.desktop.prIndex({ refresh: true })),
     ],
   }
 })()`
@@ -1073,7 +1085,13 @@ async function connectRenderer(devtools) {
  * write at all is visible rather than only a value the app itself would notice.
  */
 function protectedState(userData) {
-  return ['repositories.json', 'settings.json']
+  const graphDirectory = join(userData, 'graph-preferences')
+  const graphFiles = existsSync(graphDirectory)
+    ? readdirSync(graphDirectory)
+        .sort()
+        .map((name) => join('graph-preferences', name))
+    : []
+  return ['repositories.json', 'settings.json', ...graphFiles]
     .map((name) => {
       const path = join(userData, name)
       return existsSync(path)
@@ -2196,6 +2214,222 @@ async function run(options) {
           `The GitHub CLI status dialog did not name the account it read: ${await dialog.innerText()}`,
         )
         await page.keyboard.press('Escape')
+
+        await check('trusted PR index refresh rejects malformed options', async () => {
+          for (const options of [
+            null,
+            {},
+            { refresh: 'yes' },
+            { refresh: true, repository: 'foreign' },
+          ]) {
+            const refusal = await page.evaluate(async (value) => {
+              try {
+                return { resolved: true, value: await window.desktop.prIndex(value) }
+              } catch (error) {
+                return { resolved: false, message: String(error.message) }
+              }
+            }, options)
+            assert(
+              !refusal.resolved &&
+                /PR index options must contain only a boolean refresh flag/.test(refusal.message),
+              'Malformed PR index refresh options were not refused by the trusted handler',
+            )
+          }
+          return 'null, missing flag, non-boolean flag and renderer authority fields refused'
+        })
+        await check('graph preferences roundtrip through trusted scoped native IPC', async () => {
+          const originalOrigin = git(workspace, ['remote', 'get-url', 'origin'])
+          const preferences = {
+            preset: 'review-requested',
+            text: 'native smoke',
+            author: 'smoke-account',
+            status: 'ready',
+            collapse: true,
+            name: 'Native smoke view',
+          }
+          const scope = {
+            repositoryPath: canonicalRepo,
+            host: 'github.com',
+            repository: 'smoke-owner/graph-smoke',
+            account: 'smoke-account',
+          }
+          // Only the origin metadata changes. No fetch/push runs until the disposable local
+          // origin is restored; all account reads still reach this run's controlled API.
+          git(workspace, [
+            'remote',
+            'set-url',
+            'origin',
+            'https://github.com/smoke-owner/graph-smoke.git',
+          ])
+          try {
+            const empty = await page.evaluate(() => window.desktop.graphPreferences())
+            deepStrictEqual(
+              empty.scope,
+              scope,
+              'Trusted getter publishes only the captured public scope',
+            )
+            deepStrictEqual(
+              empty,
+              { state: 'ready', preferences: null, scope },
+              'Fresh qualified graph scope',
+            )
+            const saved = await page.evaluate(
+              ({ value, expectedScope }) =>
+                window.desktop.saveGraphPreferences(value, expectedScope),
+              { value: preferences, expectedScope: scope },
+            )
+            deepStrictEqual(
+              saved,
+              { state: 'ready', preferences, scope },
+              'Trusted graph preference save',
+            )
+            deepStrictEqual(
+              await page.evaluate(() => window.desktop.graphPreferences()),
+              saved,
+              'Trusted graph preference read after save',
+            )
+            const directory = join(probe.userData, 'graph-preferences')
+            const files = readdirSync(directory)
+            assertEqual(files.length, 1, 'Only one synthetic preference scope was persisted')
+            const persisted = JSON.parse(readFileSync(join(directory, files[0]), 'utf8'))
+            assertEqual(
+              persisted.scope,
+              JSON.stringify(['github.com', 'smoke-owner/graph-smoke', 'smoke-account']),
+              'Main-owned preference scope',
+            )
+            deepStrictEqual(
+              persisted.preferences,
+              preferences,
+              'Persisted native preference payload',
+            )
+            const beforeInvalid = protectedState(probe.userData)
+            for (const invalid of [
+              { ...preferences, account: 'foreign-account' },
+              { ...preferences, collapse: 'yes' },
+              { ...preferences, text: 'x'.repeat(257) },
+            ]) {
+              const refusal = await page.evaluate(
+                async ({ value, expectedScope }) => {
+                  try {
+                    return {
+                      resolved: true,
+                      value: await window.desktop.saveGraphPreferences(value, expectedScope),
+                    }
+                  } catch (error) {
+                    return { resolved: false, message: String(error.message) }
+                  }
+                },
+                { value: invalid, expectedScope: scope },
+              )
+              assert(
+                !refusal.resolved && /Invalid graph preferences/.test(refusal.message),
+                'Invalid graph preference payload was not refused',
+              )
+              assertEqual(
+                protectedState(probe.userData),
+                beforeInvalid,
+                'Invalid preference payload changed persisted state',
+              )
+            }
+            for (const expectedScope of [
+              { ...scope, repository: 'smoke-owner/other-graph' },
+              { ...scope, repositoryPath: `${canonicalRepo}-foreign` },
+              { ...scope, account: 'foreign-account' },
+            ]) {
+              const refused = await page.evaluate(
+                async ({ value, expectedScope }) => ({
+                  save: await window.desktop.saveGraphPreferences(value, expectedScope),
+                  reset: await window.desktop.resetGraphPreferences(expectedScope),
+                }),
+                { value: preferences, expectedScope },
+              )
+              for (const result of [refused.save, refused.reset]) {
+                assertEqual(
+                  result.state,
+                  'unavailable',
+                  'Mismatched write scope must be unavailable',
+                )
+                assertEqual(
+                  result.preferences,
+                  null,
+                  'Mismatched write scope must not return preferences',
+                )
+                assertEqual(
+                  result.scope,
+                  null,
+                  'Mismatched write scope must not publish another scope',
+                )
+              }
+              assertEqual(
+                protectedState(probe.userData),
+                beforeInvalid,
+                'Mismatched save/reset scope changed persisted bytes',
+              )
+            }
+            // Test sender refusal while a real scoped file exists, including reset/save attempts.
+            await inspector.call(MAIN_UNTRUSTED, 'open', ORIGIN)
+            try {
+              const refused = await inspector.call(MAIN_UNTRUSTED, 'probe', ORIGIN)
+              assertRefused(refused, /Untrusted application request\.?/u)
+              assertEqual(
+                protectedState(probe.userData),
+                beforeInvalid,
+                'Untrusted graph calls changed scoped preferences',
+              )
+            } finally {
+              await inspector.call(MAIN_UNTRUSTED, 'close', ORIGIN)
+            }
+            git(workspace, [
+              'remote',
+              'set-url',
+              'origin',
+              'https://github.com/smoke-owner/other-graph.git',
+            ])
+            deepStrictEqual(
+              await page.evaluate(() => window.desktop.graphPreferences()),
+              {
+                state: 'ready',
+                preferences: null,
+                scope: { ...scope, repository: 'smoke-owner/other-graph' },
+              },
+              'Another qualified repository must not read saved graph preferences',
+            )
+            git(workspace, [
+              'remote',
+              'set-url',
+              'origin',
+              'https://github.com/smoke-owner/graph-smoke.git',
+            ])
+            deepStrictEqual(
+              await page.evaluate(() => window.desktop.graphPreferences()),
+              saved,
+              'Returning to the qualified scope preserves preferences',
+            )
+            deepStrictEqual(
+              await page.evaluate(
+                (expectedScope) => window.desktop.resetGraphPreferences(expectedScope),
+                scope,
+              ),
+              { state: 'ready', preferences: null, scope },
+              'Trusted graph reset',
+            )
+            deepStrictEqual(
+              await page.evaluate(() => window.desktop.graphPreferences()),
+              { state: 'ready', preferences: null, scope },
+              'Graph read after reset',
+            )
+            assertEqual(readdirSync(directory).length, 0, 'Reset removed the synthetic scoped file')
+            // Retain one synthetic file so the final foreign-origin reset probe protects real bytes.
+            await page.evaluate(
+              ({ value, expectedScope }) =>
+                window.desktop.saveGraphPreferences(value, expectedScope),
+              { value: preferences, expectedScope: scope },
+            )
+          } finally {
+            git(workspace, ['remote', 'set-url', 'origin', originalOrigin])
+          }
+          return 'trusted save/read/reset, invalid payload refusal, main-derived account/repository scope and untrusted save/reset refusal'
+        })
       } finally {
         // Removing the controlled executable is the fault injection: the fixture
         // answers any `gh` that is not it with ENOENT, exactly as a machine
@@ -2476,10 +2710,18 @@ async function run(options) {
     })
 
     await check('main answers the app origin and refuses a foreign one', async () => {
-      // A repository is open by now, so both read-only calls are answered by their handlers: the
-      // refusal that follows is the origin check alone.
+      // Local Git is open, so refresh reaches its handler while PR indexing truthfully refuses
+      // the local-only origin. The refusal that follows must instead be the origin guard alone.
       const authorized = await page.evaluate(READ_ONLY_PROBE)
       for (const call of authorized.calls) {
+        if (call.label === 'prIndexRefresh') {
+          assert(
+            !call.resolved &&
+              /A GitHub origin remote is required for PR indexing/.test(call.message),
+            `Trusted PR index refresh did not reach its origin precondition: ${call.message}`,
+          )
+          continue
+        }
         assert(call.resolved, `The authorized frame could not call ${call.label}: ${call.message}`)
       }
       const protectedBefore = protectedState(probe.userData)

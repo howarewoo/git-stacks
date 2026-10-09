@@ -1,3 +1,6 @@
+import type { PullRequestIndex } from '../../../src/shared/pr-index'
+import type { GraphPreferences } from '../../../src/shared/graph-preferences'
+import type { GraphChange } from './graph'
 import type {
   FileView,
   GitAction,
@@ -33,6 +36,11 @@ export type FixtureCall =
   | 'recentRepositories'
   | 'openRepository'
   | 'refresh'
+  | 'prIndex'
+  | 'prIndexDetail'
+  | 'graphPreferences'
+  | 'saveGraphPreferences'
+  | 'resetGraphPreferences'
   | 'runAction'
   | 'fileView'
   | 'conflictView'
@@ -127,6 +135,8 @@ export interface FixtureScenario {
    * second repository open the first one's workspace.
    */
   readonly snapshotsByPath?: Readonly<Record<string, RepositorySnapshot>>
+  readonly prIndex?: PullRequestIndex
+  readonly graphPreferences?: GraphPreferences
   /**
    * The settings file this window reads and the GitHub CLI status behind it.
    *
@@ -284,6 +294,10 @@ export interface FixtureControl {
   pushFreshness(value: RemoteFreshness): void
   /** Pushes a background snapshot, as a filesystem watcher's refresh does. */
   pushSnapshot(value: RepositorySnapshot): void
+  /** Publishes a typed progressive or retained index without a mutation. */
+  pushPrIndex(value: PullRequestIndex): void
+  /** Changes source head, same-head base, or status and publishes the new index. */
+  changeGraphPr(number: number, change: GraphChange): void
   /** Simulates dropping folders onto the window, dispatching to preload listeners. */
   dropRepository?(paths: string[]): void
   /**

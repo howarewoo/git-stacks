@@ -14,15 +14,21 @@ for (const destination of ['pullRequests', 'stacks'] as const) {
   test(`${destination} PR links open readonly Review rather than management`, async ({ page }) => {
     await openGallery(page, { scenario: 'review-stacked' })
     await switchDestination(page, destination)
-    const link =
-      destination === 'pullRequests'
-        ? page.getByRole('button', { name: /^Open pull request #42 / })
-        : page.getByRole('button', {
-            name: '#42 Give the review workspace its own cancellation ids',
-            exact: true,
-          })
-    await link.focus()
-    await link.press('Enter')
+    if (destination === 'pullRequests') {
+      const link = page.getByRole('button', { name: /^Open pull request #42 / })
+      await link.focus()
+      await link.press('Enter')
+    } else {
+      await page
+        .locator('[data-graph-outline-row]')
+        .filter({ hasText: '#42' })
+        .locator('button')
+        .first()
+        .click()
+      const reviewLink = page.getByRole('button', { name: 'Review #42', exact: true })
+      await reviewLink.focus()
+      await page.keyboard.press('Enter')
+    }
     await expect(page.locator('.review-view')).toContainText(
       '#42 Give the review workspace its own cancellation ids',
     )
@@ -340,17 +346,19 @@ test('native-only Stacks keeps full readonly submitted membership with wrapping 
     },
   )
   await switchDestination(page, 'stacks')
-  await expect(page.getByText('Build a stack from a branch', { exact: true })).toBeVisible()
-  await page.locator('.stack-submitted-order > summary').click()
-  await expect(page.locator('.stack-submitted-order li')).toHaveCount(40)
-  const selected = page.locator('.stack-submitted-order button').filter({ hasText: '#136' })
+  const disclosure = page.locator('.graph-reconciliation')
+  await disclosure.locator(':scope > summary').click()
+  const submitted = disclosure.locator('.graph-submitted-order')
+  await expect(submitted.locator('li')).toHaveCount(40)
+  const selected = submitted.locator('button').filter({ hasText: '#136' })
+  await expect(selected).toContainText('Keep the selected late layer reachable')
   expect(
     await selected.evaluate((button) => {
-      const disclosure = button.closest('.stack-submitted-order')
-      if (!disclosure) throw new Error('Submitted disclosure unavailable')
+      const container = button.closest('.graph-reconciliation')
+      if (!container) throw new Error('Submitted disclosure unavailable')
       return (
-        button.getBoundingClientRect().width <= disclosure.clientWidth &&
-        disclosure.scrollWidth <= disclosure.clientWidth
+        button.getBoundingClientRect().width <= container.clientWidth &&
+        container.scrollWidth <= container.clientWidth
       )
     }),
   ).toBe(true)

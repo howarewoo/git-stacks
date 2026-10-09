@@ -172,8 +172,7 @@ test.describe('Local branch deletion', () => {
       window.fixture.pushSnapshot({
         ...snapshot,
         branches: [
-          ...snapshot.branches,
-          ...parents.map((branch) =>
+          ...snapshot.branches.map((branch) =>
             branch.ref === parents[0].ref
               ? { ...branch, upstream: remoteParent.name, upstreamRef: remoteParent.ref }
               : branch,
@@ -231,19 +230,23 @@ test.describe('Local branch deletion', () => {
     await selectBranch(page, branches[0].name).check()
     await selectBranch(page, branches[1].name).check()
     await page.evaluate(
-      async ([current, remaining]) => {
+      async ([current, missing, remaining]) => {
         const snapshot = await window.desktop.refresh()
         window.fixture.pushSnapshot({
           ...snapshot,
           currentBranch: current.name,
-          branches: [
-            ...snapshot.branches.map((branch) => ({ ...branch, current: false })),
-            { ...current, current: true },
-            remaining,
-          ],
+          branches: snapshot.branches
+            .filter((branch) => branch.ref !== missing.ref)
+            .map((branch) =>
+              branch.ref === current.ref
+                ? { ...current, current: true }
+                : branch.ref === remaining.ref
+                  ? remaining
+                  : { ...branch, current: false },
+            ),
         })
       },
-      [branches[0], branches[2]],
+      [branches[0], branches[1], branches[2]],
     )
     await settle(page)
     await expect(selectBranch(page, branches[0].name)).not.toBeChecked()

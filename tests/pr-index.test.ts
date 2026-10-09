@@ -183,7 +183,6 @@ for (const retirement of ['adopt', 'invalidate'] as const) {
     })
   }
 }
-
 test('host budget parks later pages without claiming complete scope or losing confirmed topology', async () => {
   let calls = 0
   let fail = false
@@ -395,4 +394,50 @@ test('retired final authority response cannot invalidate replacement source fact
   await assert.rejects(selected)
   assert.equal(index.current()?.repository, '/tmp/replacement')
   assert.equal(index.current()?.complete, true)
+})
+
+test('explicit refresh reads new source facts and selected detail while cached load preserves identity', async () => {
+  let source = pr(1)
+  let pageReads = 0
+  let detailReads = 0
+  const viewers: (string | null)[] = []
+  const index = new ProgressivePullRequestIndex(
+    async () => {
+      pageReads++
+      return {
+        pullRequests: [{ ...source }],
+        viewer: 'account-one',
+        next: null,
+        conservative: false,
+      }
+    },
+    async () => 'authority-one',
+    (state) => viewers.push(state.viewer),
+    () => true,
+  )
+  await index.load('/tmp/repo', 'github.com', 'https://github.com/acme/widgets')
+  await index.selected(1, async () => {
+    detailReads++
+    return { ...source, body: 'before' }
+  })
+  source = { ...source, draft: true, base: 'h20' }
+  const cached = await index.load('/tmp/repo', 'github.com', 'https://github.com/acme/widgets')
+  assert.equal(pageReads, 1)
+  assert.equal(cached.pullRequests[0].draft, false)
+  viewers.length = 0
+  const refreshed = await index.refresh(
+    '/tmp/repo',
+    'github.com',
+    'https://github.com/acme/widgets',
+  )
+  assert.equal(pageReads, 2)
+  assert.equal(refreshed.pullRequests[0].draft, true)
+  assert.equal(refreshed.pullRequests[0].base, 'h20')
+  assert.ok(viewers.every((viewer) => viewer === 'account-one'))
+  const detail = await index.selected(1, async () => {
+    detailReads++
+    return { ...source, body: 'after' }
+  })
+  assert.equal(detailReads, 2)
+  assert.equal(detail.body, 'after')
 })

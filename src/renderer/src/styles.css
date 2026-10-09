@@ -3153,8 +3153,7 @@ textarea.conflict-content {
   margin: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
 }
 
-.history-view,
-.stacks-view {
+.history-view {
   display: flex;
   height: 100%;
   min-height: 0;
@@ -3162,15 +3161,7 @@ textarea.conflict-content {
   overflow: hidden;
 }
 
-.stacks-view .gs-reconciliation {
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: 42%;
-  overflow-y: auto;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
-}
-.history-view .list-toolbar,
-.stacks-view .list-toolbar {
+.history-view .list-toolbar {
   justify-content: space-between;
   flex-wrap: wrap;
 }
@@ -3279,163 +3270,6 @@ textarea.conflict-content {
 
 .commit-inspector .code-diff {
   max-height: none;
-}
-
-.stack-workspace-header {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--gs-semantic-space-3);
-  padding: var(--gs-semantic-space-4) var(--gs-semantic-space-5);
-  border-bottom: 1px solid var(--line);
-}
-.stack-workspace-header label {
-  color: var(--ink-soft);
-  font-size: var(--gs-semantic-type-label-size);
-  line-height: var(--gs-semantic-type-label-line);
-  font-weight: 600;
-}
-.stack-workspace-header .workflow-select {
-  width: 100%;
-}
-.stack-workspace-header > span {
-  width: 100%;
-}
-.stack-workspace-header p {
-  margin: 0;
-  color: var(--ink-soft);
-  font-size: var(--gs-semantic-type-body-size);
-  line-height: var(--gs-semantic-type-body-line);
-}
-.stack-github-note {
-  padding: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
-  border-bottom: 1px solid var(--line);
-}
-
-.stack-order-note {
-  margin: 0;
-  padding: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
-  color: var(--gs-semantic-text-secondary);
-  font-size: var(--gs-semantic-type-metadata-size);
-  line-height: var(--gs-semantic-type-metadata-line);
-}
-
-.stack-branch-ref {
-  font-family: var(--gs-semantic-font-mono);
-}
-.stack-members {
-  min-height: 0;
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 var(--gs-semantic-space-5) var(--gs-semantic-space-5);
-}
-.stack-member {
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line);
-}
-.stack-member:last-child {
-  border-bottom: 0;
-}
-.stack-member-heading {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.stack-member-name {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 100%;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--ink);
-  text-align: left;
-}
-.stack-member-name strong {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-size: var(--gs-semantic-type-label-size);
-  font-weight: 600;
-  line-height: var(--gs-semantic-type-label-line);
-}
-.stack-member-name svg {
-  flex: 0 0 auto;
-  color: var(--accent);
-}
-.stack-member-name:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 3px;
-}
-.stack-member-name:hover {
-  color: var(--accent-strong);
-}
-.stack-member-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--gs-semantic-space-2) var(--gs-semantic-space-3);
-  margin: var(--gs-semantic-space-2) 0;
-  color: var(--gs-semantic-text-secondary);
-  font-size: var(--gs-semantic-type-metadata-size);
-  line-height: var(--gs-semantic-type-metadata-line);
-}
-.stack-member-meta span {
-  overflow-wrap: anywhere;
-}
-.stack-pr-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-}
-.stack-pr-row > button:first-child {
-  height: auto;
-  max-width: 100%;
-  padding: 0;
-  white-space: normal;
-  text-align: left;
-  justify-content: flex-start;
-}
-
-.stack-layer-details,
-.stack-submitted-order {
-  color: var(--gs-semantic-text-secondary);
-  font-size: var(--gs-semantic-type-metadata-size);
-}
-
-.stack-layer-details summary,
-.stack-submitted-order summary {
-  cursor: pointer;
-  padding: 4px 0;
-}
-
-.stack-submitted-order {
-  flex: 0 0 auto;
-  max-height: 180px;
-  overflow: auto;
-  padding: var(--gs-semantic-space-1) var(--gs-semantic-space-5);
-}
-
-.stack-submitted-order li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-}
-
-.stack-submitted-order li > button {
-  height: auto;
-  min-width: 0;
-  max-width: 100%;
-  flex-shrink: 1;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  text-align: left;
-  justify-content: flex-start;
 }
 
 .review-stack-fact-note {
@@ -4825,5 +4659,422 @@ textarea.conflict-content {
 
   .review-body {
     min-height: 360px;
+  }
+}
+
+/* Repository PR/ref discovery: bounded outline, reduced graph, truthful inspector. */
+.graph-workbench {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--gs-semantic-space-3);
+  overflow: auto;
+  padding: var(--gs-semantic-space-4);
+  container-type: inline-size;
+}
+.graph-page-heading,
+.graph-workbench-footer,
+.graph-camera,
+.graph-saved-controls,
+.graph-path-paging {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gs-semantic-space-2);
+  flex-wrap: wrap;
+}
+.graph-page-heading h1 {
+  margin: 0;
+  font-size: var(--gs-semantic-type-heading-size);
+}
+.graph-page-heading p,
+.graph-work-area header p,
+.graph-saved p,
+.graph-inspector-content p {
+  margin: var(--gs-semantic-space-2) 0;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+.graph-presets {
+  display: flex;
+  gap: var(--gs-semantic-space-1);
+  flex-wrap: wrap;
+}
+.graph-filters {
+  display: flex;
+  align-items: end;
+  gap: var(--gs-semantic-space-3);
+  flex-wrap: wrap;
+}
+.graph-filters label,
+.graph-saved-controls label,
+.graph-paths label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gs-semantic-space-1);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+.graph-filters label:first-child {
+  flex: 1;
+  min-width: 180px;
+}
+.graph-filters .graph-collapse {
+  flex-direction: row;
+  align-items: center;
+  align-self: center;
+}
+.graph-workbench input:not([type="checkbox"]) {
+  height: 36px;
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-content);
+  color: var(--gs-semantic-text-primary);
+  padding: 0 var(--gs-semantic-space-3);
+}
+.graph-workbench input:focus-visible,
+.graph-outline-row > button:focus-visible,
+.graph-node:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 2px;
+}
+.graph-index-status,
+.graph-workbench-footer,
+.graph-work-area footer {
+  font-size: var(--gs-semantic-type-metadata-size);
+  color: var(--gs-semantic-text-secondary);
+}
+.graph-index-status {
+  padding: var(--gs-semantic-space-2) var(--gs-semantic-space-3);
+  background: var(--gs-semantic-surface-inset);
+  border-radius: var(--gs-semantic-radius-control);
+}
+.graph-saved summary,
+.graph-paths summary,
+.graph-reconciliation summary {
+  cursor: pointer;
+  font-size: var(--gs-semantic-type-label-size);
+  padding: var(--gs-semantic-space-2) 0;
+}
+.graph-work-area {
+  display: grid;
+  grid-template-columns: 260px minmax(280px, 1fr) 280px;
+  gap: var(--gs-semantic-space-3);
+  flex: 0 0 auto;
+  grid-auto-rows: 480px;
+}
+.graph-work-area > section,
+.graph-inspector {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-content);
+  overflow: hidden;
+}
+.graph-work-area header {
+  padding: var(--gs-semantic-space-3);
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+.graph-work-area h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--gs-semantic-space-2);
+  margin: 0;
+  font-size: var(--gs-semantic-type-label-size);
+  font-weight: 600;
+}
+.graph-work-area footer {
+  padding: var(--gs-semantic-space-2) var(--gs-semantic-space-3);
+  border-top: 1px solid var(--gs-semantic-border-decorative);
+}
+.graph-outline-scroll {
+  overflow: auto;
+  flex: 1;
+  min-height: 220px;
+  max-height: 760px;
+}
+.graph-outline-row {
+  left: 0;
+  right: 0;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  padding: var(--gs-semantic-space-2);
+}
+.graph-outline-row > button:first-child {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-radius: var(--gs-semantic-radius-control);
+  text-align: left;
+  color: var(--gs-semantic-text-primary);
+  padding: var(--gs-semantic-space-1);
+  cursor: pointer;
+}
+.graph-outline-row > button[aria-pressed="true"] {
+  background: var(--gs-semantic-selection-background);
+}
+.graph-outline-row > button:hover {
+  background: var(--gs-semantic-surface-hover);
+}
+.graph-row-title {
+  display: flex;
+  gap: var(--gs-semantic-space-2);
+  align-items: flex-start;
+}
+.graph-row-title svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.graph-row-title strong {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: var(--gs-semantic-type-label-line);
+  font-size: var(--gs-semantic-type-label-size);
+}
+.graph-outline-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  margin-top: var(--gs-semantic-space-1);
+}
+.graph-camera {
+  padding: var(--gs-semantic-space-2);
+  justify-content: flex-start;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+.graph-viewport {
+  overflow: auto;
+  flex: 1;
+  min-height: 250px;
+  background: var(--gs-semantic-surface-inset);
+}
+.graph-world {
+  position: relative;
+}
+.graph-edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.graph-edge {
+  fill: none;
+  stroke: var(--gs-semantic-selection-border);
+  stroke-width: 1.5;
+}
+.graph-edge-local-parent {
+  stroke-dasharray: 6 4;
+  stroke: var(--gs-semantic-text-secondary);
+}
+.graph-edge-ancestry,
+.graph-edge-unknown {
+  stroke-dasharray: 2 4;
+  stroke: var(--gs-semantic-text-secondary);
+}
+.graph-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gs-semantic-space-2);
+  width: 244px;
+  height: 142px;
+  padding: var(--gs-semantic-space-3);
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-content);
+  color: var(--gs-semantic-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+.graph-node:hover {
+  background: var(--gs-semantic-surface-hover);
+}
+.graph-node[aria-pressed="true"] {
+  background: var(--gs-semantic-selection-background);
+  border-color: var(--gs-semantic-selection-border);
+}
+.graph-node-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--gs-semantic-space-2);
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+.graph-node-identity .badge {
+  margin-left: auto;
+}
+.graph-node > strong {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
+}
+.graph-node code {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+.graph-node small {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  overflow: hidden;
+}
+.graph-paths {
+  padding: 0 var(--gs-semantic-space-3);
+  border-top: 1px solid var(--gs-semantic-border-decorative);
+  max-height: 280px;
+  overflow: auto;
+}
+.graph-paths ul {
+  list-style: none;
+  padding: 0;
+}
+.graph-paths li {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  padding: var(--gs-semantic-space-1) 0;
+}
+.graph-paths li button {
+  white-space: normal;
+  text-align: left;
+  height: auto;
+  justify-content: flex-start;
+}
+.graph-paths small {
+  font-size: var(--gs-semantic-type-metadata-size);
+  color: var(--gs-semantic-text-secondary);
+}
+.graph-inspector-content {
+  padding: var(--gs-semantic-space-3);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.graph-inspector-content h3 {
+  font-size: var(--gs-semantic-type-label-size);
+  margin: var(--gs-semantic-space-4) 0 var(--gs-semantic-space-2);
+}
+.graph-inspector-content h3:first-child {
+  margin-top: 0;
+}
+.graph-inspector-content dl {
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+.graph-inspector-content dd {
+  margin: 0 0 var(--gs-semantic-space-2);
+}
+.graph-evidence {
+  list-style: none;
+  padding: 0;
+  font-size: var(--gs-semantic-type-metadata-size);
+}
+.graph-evidence li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gs-semantic-space-1);
+  padding: var(--gs-semantic-space-2) 0;
+  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+}
+.graph-local-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gs-semantic-space-2);
+}
+.graph-description {
+  white-space: pre-wrap;
+}
+.graph-submitted-order button {
+  max-width: 100%;
+  height: auto;
+  justify-content: flex-start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.graph-notice {
+  margin: 0;
+  padding: var(--gs-semantic-space-3);
+  font-size: var(--gs-semantic-type-metadata-size);
+  color: var(--gs-semantic-text-secondary);
+}
+.graph-inspector-toggle {
+  display: none;
+}
+@container (max-width: 1050px) {
+  .graph-work-area {
+    grid-template-columns: 240px minmax(280px, 1fr);
+    grid-template-rows: 480px auto;
+  }
+  .graph-inspector {
+    display: none;
+  }
+  .graph-inspector-toggle {
+    display: inline-flex;
+  }
+  .graph-inspector-open {
+    display: flex;
+    grid-column: 1 / -1;
+    max-height: 400px;
+  }
+  .graph-work-area:has(.graph-paths[open]) {
+    grid-template-rows: 650px auto;
+  }
+}
+@container (max-width: 630px) {
+  .graph-work-area {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 360px 480px auto;
+  }
+  .graph-outline-scroll {
+    max-height: 264px;
+  }
+  .graph-focused {
+    min-height: 430px;
+  }
+  .graph-workbench-footer {
+    align-items: flex-start;
+  }
+  .graph-work-area:has(.graph-paths[open]) {
+    grid-template-rows: 360px 650px auto;
+  }
+}
+.graph-work-area-inspector-hidden {
+  grid-template-columns: 260px minmax(280px, 1fr);
+}
+.graph-work-area-inspector-hidden .graph-inspector {
+  display: none;
+}
+@container (max-width: 630px) {
+  .graph-work-area-inspector-hidden {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.graph-focused > header,
+.graph-camera,
+.graph-paths,
+.graph-work-area footer {
+  flex-shrink: 0;
+}
+.graph-viewport {
+  min-height: 120px;
+}
+.graph-work-area:has(.graph-paths[open]) {
+  grid-auto-rows: 650px;
+}
+@container (max-width: 1050px) {
+  .graph-inspector-open {
+    min-height: 300px;
+    max-height: 400px;
   }
 }

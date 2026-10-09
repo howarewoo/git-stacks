@@ -1,3 +1,10 @@
+import type { PullRequestIndex } from '../../../src/shared/pr-index'
+import {
+  parseGraphPreferences,
+  type GraphPreferences,
+  type GraphPreferencesResult,
+} from '../../../src/shared/graph-preferences'
+import { changeGraphIndex, graphDetail } from './graph'
 import type { UpdateStatus } from '../../../src/shared/update'
 import { REVIEW_STACK_METADATA_LIMIT } from '../../../src/shared/performance'
 import type {
@@ -294,6 +301,65 @@ export function installFixtureControl(options: {
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
 
   let scenario = scenarioFor(options.scenario)
+  let servedPrIndex = scenario.prIndex
+  const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
+  let active: RepositorySnapshot | null = scenario.snapshot
+  let servedCliStatus: GitHubCliStatus | null = null
+  const graphPreferenceState = new Map<string, GraphPreferences>()
+  const graphPreferenceScope = (): string | null => {
+    const remote = active?.remoteUrl?.match(
+      /^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u,
+    )
+    const cli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+    const account = cli ? (cli.state === 'authenticated' ? cli.login : null) : servedPrIndex?.viewer
+    return active && remote && account
+      ? JSON.stringify({
+          repositoryPath: active.path,
+          host: remote[1].toLowerCase(),
+          repository: remote[2].toLowerCase(),
+          account: account.toLowerCase(),
+        })
+      : null
+  }
+  const graphPreferenceKey = (scope: string): string => {
+    const { host, repository, account } = JSON.parse(scope)
+    return JSON.stringify([host, repository, account])
+  }
+  const matchesGraphPreferenceScope = (
+    actual: string | null,
+    expected: NonNullable<GraphPreferencesResult['scope']>,
+  ): boolean => {
+    if (!actual || !expected) return false
+    const scope = JSON.parse(actual)
+    return (
+      scope.repositoryPath === expected.repositoryPath &&
+      scope.host === expected.host &&
+      scope.repository === expected.repository &&
+      scope.account === expected.account
+    )
+  }
+  const seedGraphPreferences = (): void => {
+    const scope = graphPreferenceScope()
+    if (scope && scenario.graphPreferences && !graphPreferenceState.has(graphPreferenceKey(scope)))
+      graphPreferenceState.set(graphPreferenceKey(scope), { ...scenario.graphPreferences })
+  }
+  seedGraphPreferences()
+  const graphPreferenceResult = (scope: string | null): GraphPreferencesResult =>
+    scope
+      ? {
+          state: 'ready',
+          scope: JSON.parse(scope),
+          preferences: graphPreferenceState.has(graphPreferenceKey(scope))
+            ? { ...graphPreferenceState.get(graphPreferenceKey(scope))! }
+            : null,
+        }
+      : {
+          state: 'unavailable',
+          scope: null,
+          preferences: null,
+          message:
+            'Saved graph preferences require a known current repository and authenticated account.',
+        }
   startsPending = new Set(scenario.pending ?? [])
 
   /** One destination path as a copied terminal command writes it. */
@@ -427,7 +493,6 @@ export function installFixtureControl(options: {
    * scenario's answers without remounting anything, so the App keeps the
    * repository it already opened until it opens or refreshes one itself.
    */
-  let active: RepositorySnapshot | null = scenario.snapshot
 
   const disabledNotifications = (): NotificationInbox => ({
     host: notificationSettings.github.host,
@@ -475,7 +540,6 @@ export function installFixtureControl(options: {
    * behind the host it is pointed at. `null` means the scenario's own
    * declaration still answers, which is the state a scenario starts in.
    */
-  let servedCliStatus: GitHubCliStatus | null = null
   /** The one window listening for the session to change outside it. */
   let cliStatusListener: ((status: GitHubCliStatus) => void) | null = null
 
@@ -579,6 +643,56 @@ export function installFixtureControl(options: {
     return { ...before, ...after, reference, state, message }
   }
   const desktop: DesktopAPI = {
+    graphPreferences: () => {
+      record('graphPreferences', [])
+      return admittedAnswer('graphPreferences', () => graphPreferenceResult(graphPreferenceScope()))
+    },
+    saveGraphPreferences: (value, expectedScope) => {
+      record('saveGraphPreferences', [value, expectedScope])
+      const scope = graphPreferenceScope()
+      const admitted = matchesGraphPreferenceScope(scope, expectedScope)
+      const preferences = parseGraphPreferences(value)
+      return answer('saveGraphPreferences', () => {
+        if (!preferences) throw new Error('Invalid graph preferences.')
+        if (!admitted || !scope || scope !== graphPreferenceScope())
+          return graphPreferenceResult(null)
+        graphPreferenceState.set(graphPreferenceKey(scope), { ...preferences })
+        return graphPreferenceResult(scope)
+      })
+    },
+    resetGraphPreferences: (expectedScope) => {
+      record('resetGraphPreferences', [expectedScope])
+      const scope = graphPreferenceScope()
+      const admitted = matchesGraphPreferenceScope(scope, expectedScope)
+      return answer('resetGraphPreferences', () => {
+        if (!admitted || !scope || scope !== graphPreferenceScope())
+          return graphPreferenceResult(null)
+        graphPreferenceState.delete(graphPreferenceKey(scope))
+        return graphPreferenceResult(scope)
+      })
+    },
+    prIndex: (options) => {
+      record('prIndex', options === undefined ? [] : [options])
+      const admitted = servedPrIndex
+      return answer('prIndex', () => {
+        if (!admitted) throw new Error('PR index capability unavailable in this fixture.')
+        return admitted
+      })
+    },
+    onPrIndex: (listener) => {
+      prIndexListeners.add(listener)
+      return () => {
+        prIndexListeners.delete(listener)
+      }
+    },
+    prIndexDetail: (number) => {
+      record('prIndexDetail', [number])
+      const admitted = servedPrIndex
+      return answer('prIndexDetail', () => {
+        if (!admitted) throw new Error('PR detail capability unavailable in this fixture.')
+        return graphDetail(admitted, number)
+      })
+    },
     recentRepositories: () => {
       record('recentRepositories', [])
       return answer('recentRepositories', () => [...scenario.recentRepositories])
@@ -1911,6 +2025,8 @@ export function installFixtureControl(options: {
     },
     setScenario(name) {
       scenario = scenarioFor(name)
+      servedPrIndex = scenario.prIndex
+      seedGraphPreferences()
       // This double is installed once and outlives any number of scenario
       // changes. Only the answers change here: the mounted window keeps the
       // repository it opened, its destination, and its reads in flight, so
@@ -2023,7 +2139,16 @@ export function installFixtureControl(options: {
       push('repository:remote-status', value)
     },
     pushSnapshot(value) {
+      active = value
       push('repository:background-snapshot', value)
+    },
+    pushPrIndex(value) {
+      servedPrIndex = value
+      for (const listener of prIndexListeners) listener(value)
+    },
+    changeGraphPr(number, change) {
+      if (!servedPrIndex) throw new Error('No graph index is installed.')
+      control.pushPrIndex(changeGraphIndex(servedPrIndex, number, change))
     },
     dropRepository(paths) {
       for (const listener of dropListeners) listener(paths)

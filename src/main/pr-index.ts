@@ -1,5 +1,6 @@
 import type { PullRequestIndex } from '../shared/pr-index'
 import type { PullRequest } from '../shared/types'
+import { GRAPH_SELECTED_CACHE_LIMIT } from '../shared/performance'
 import { CommandCancelled, isCancelled, parseRemote } from './git-core'
 import { githubErrorMessage } from './github'
 
@@ -76,6 +77,12 @@ export class ProgressivePullRequestIndex {
         complete: false,
         message: 'PR indexing was cancelled',
       })
+  }
+  /** Explicit user refresh supersedes pages/details without pretending the account changed. */
+  refresh(repository: string, host: string, origin: string): Promise<PullRequestIndex> {
+    this.cancel()
+    this.detail.clear()
+    return this.load(repository, host, origin)
   }
 
   /** The first response is published and returned without waiting for later pages. */
@@ -290,7 +297,8 @@ export class ProgressivePullRequestIndex {
     if (generation === this.generation) {
       this.detail.delete(number)
       this.detail.set(number, value)
-      if (this.detail.size > 4) this.detail.delete(this.detail.keys().next().value!)
+      if (this.detail.size > GRAPH_SELECTED_CACHE_LIMIT)
+        this.detail.delete(this.detail.keys().next().value!)
     }
     return value
   }

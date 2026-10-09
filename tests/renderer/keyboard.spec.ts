@@ -1,4 +1,5 @@
 import { expect, type Locator, test } from '@playwright/test'
+import { GRAPH_OUTLINE_ROW_LIMIT } from '../../src/shared/performance'
 import {
   failNextDoubleCall,
   getDispatchedActions,
@@ -532,68 +533,65 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(rows.nth(1)).toHaveAttribute('aria-current', 'true')
   })
 
-  test('stack rail members form a list and move with arrow keys', async ({ page }) => {
+  test('graph outline rows form a list and move with arrow keys', async ({ page }) => {
     await openGallery(page, { scenario: 'shell-connected' })
     await switchDestination(page, 'stacks')
 
-    const rail = page.getByRole('list', { name: 'Stack branches, children above parents' })
-    await expect(rail).toBeVisible()
-    const members = rail.getByRole('listitem')
-    expect(await members.count()).toBeGreaterThan(0)
+    const outline = page.getByRole('list', { name: 'Matching items and prerequisite context' })
+    await expect(outline).toBeVisible()
 
-    const names = rail.locator('.stack-member-name')
-    await names.first().focus()
+    const rows = outline.locator('[data-graph-outline-row] > button')
+    await rows.first().focus()
     await page.keyboard.press('ArrowDown')
-    await expect(names.nth(1)).toBeFocused()
+    await expect(rows.nth(1)).toBeFocused()
+    await page.keyboard.press('ArrowUp')
+    await expect(rows.first()).toBeFocused()
   })
 
-  test('stack rail Home and End reach both ends of a stack longer than one page', async ({
+  test('graph outline Home and End reach both ends of a stack longer than one page', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'branches-deep-chain' })
     await switchDestination(page, 'stacks')
 
-    const rail = page.getByRole('list', { name: 'Stack branches, children above parents' })
-    await expect(rail).toBeVisible()
-    const names = rail.locator('.stack-member-name')
-    const first = rail.getByRole('button', { name: /^feature\/deep-0619,/ })
-    const last = rail.getByRole('button', { name: /^feature\/deep-0001,/ })
+    const outline = page.getByRole('list', { name: 'Matching items and prerequisite context' })
+    await expect(outline).toBeVisible()
+    await page.getByRole('checkbox', { name: 'Collapse linear runs' }).uncheck()
+
+    const rows = outline.locator('[data-graph-outline-row]')
+    const buttons = outline.locator('[data-graph-outline-row] > button')
+    const first = buttons.filter({ hasText: '#41 Cover checkout validation' })
+    const last = buttons.filter({ hasText: 'refs/heads/main' })
+    const precedingLast = buttons.filter({ hasText: 'refs/heads/feature/deep-0001' })
     await expect(first).toBeVisible()
     await expect(last).toHaveCount(0)
+    expect(await rows.count()).toBeLessThanOrEqual(GRAPH_OUTLINE_ROW_LIMIT)
 
-    // Two reveals slide the rail's mounted window past the last member.
-    const reveal = page.getByRole('button', { name: /more stack branches/i }).first()
-    await reveal.click()
-    await settle(page)
-    await reveal.click()
-    await settle(page)
-    await expect(last).toHaveCount(0)
-
-    // The window has really slid: the rail's first member is unmounted too, so
-    // an arrow assertion has to name the member rather than its position in
-    // whatever the window happens to be mounting.
-    await expect(first).toHaveCount(0)
-    const mounted = await mountedRowNames(names)
-    expect(mounted.length).toBeGreaterThan(200)
-
-    // One ArrowDown lands on the second mounted member and leaves the window
-    // exactly where it was, instead of sliding back to the top of the rail.
-    await names.first().focus()
+    await first.focus()
     await page.keyboard.press('ArrowDown')
-    await expect(rail.getByRole('button', { name: mounted[1] })).toBeFocused()
-    expect(await mountedRowNames(names)).toEqual(mounted)
-    await expect(first).toHaveCount(0)
+    await expect(outline.locator('[data-outline-position="1"]')).toBeFocused()
     await page.keyboard.press('ArrowUp')
-    await expect(rail.getByRole('button', { name: mounted[0] })).toBeFocused()
-    // End still names the last member of the whole rail, not the last member of
-    // the window, and reveals the page that mounts it.
-    await page.keyboard.press('End')
-    await expect(last).toBeFocused()
-    await page.keyboard.press('Home')
     await expect(first).toBeFocused()
 
+    await page.keyboard.press('End')
+    await expect(last).toBeFocused()
+    expect(await rows.count()).toBeLessThanOrEqual(GRAPH_OUTLINE_ROW_LIMIT)
+    await expect(first).toHaveCount(0)
+    await expect(last).toBeVisible()
+
+    await page.keyboard.press('ArrowUp')
+    await expect(precedingLast).toBeFocused()
+    await expect(first).toHaveCount(0)
+    await page.keyboard.press('ArrowDown')
+    await expect(last).toBeFocused()
+
+    await page.keyboard.press('Home')
+    await expect(first).toBeFocused()
+    expect(await rows.count()).toBeLessThanOrEqual(GRAPH_OUTLINE_ROW_LIMIT)
+    await expect(last).toHaveCount(0)
+
     expect(
-      await names.evaluateAll(
+      await buttons.evaluateAll(
         (elements) => elements.filter((element) => element.getAttribute('tabindex') === '0').length,
       ),
     ).toBe(1)
