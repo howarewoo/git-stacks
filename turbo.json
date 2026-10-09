@@ -67,13 +67,13 @@
       "cache": false,
       "dependsOn": ["build:promotion-helper"],
       "persistent": true,
-      "passThroughEnv": ["GH_*", "GITHUB_*", "GIT_*", "SSH_*"]
+      "passThroughEnv": ["GH_*", "GITHUB_*", "GIT_*", "SSH_*", "XDG_CONFIG_HOME"]
     },
     "start": {
       "cache": false,
       "dependsOn": ["build:promotion-helper"],
       "persistent": true,
-      "passThroughEnv": ["GH_*", "GITHUB_*", "GIT_*", "SSH_*"]
+      "passThroughEnv": ["GH_*", "GITHUB_*", "GIT_*", "SSH_*", "XDG_CONFIG_HOME"]
     },
     "gallery": {
       "cache": false,
@@ -106,11 +106,11 @@
     },
     "test:palette:electron": {
       "cache": false,
-      "dependsOn": ["build:gallery"]
+      "dependsOn": ["build"]
     },
     "test:inbox:electron": {
       "cache": false,
-      "dependsOn": ["build:gallery"]
+      "dependsOn": ["build"]
     },
     "test:desktop": {
       "cache": false,
