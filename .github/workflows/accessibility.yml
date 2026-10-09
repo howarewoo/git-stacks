@@ -27,17 +27,17 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
       - name: Unit checks for the shared keyboard and state-label contracts
-        run: npx tsx --test tests/tree-navigation.test.ts tests/components.test.ts
+        run: npx tsx --test apps/desktop/tests/tree-navigation.test.ts apps/desktop/tests/components.test.ts
       - name: Typecheck
         run: npm run typecheck
       - name: axe audits, contrast, keyboard routes, and 200% zoom
         # The a11y suite runs against the real renderer fixtures served by Vite.
         # Pixel baselines are darwin-only and stay a local gate (npm run test:visual).
-        run: xvfb-run -a npx playwright test --grep-invert @visual
+        run: xvfb-run -a npm run test:ui
       - name: Upload the Playwright report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: accessibility-report
-          path: playwright-report/
+          path: apps/desktop/playwright-report/
           if-no-files-found: warn

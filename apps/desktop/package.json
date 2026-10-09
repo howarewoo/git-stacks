@@ -1,0 +1,105 @@
+{
+  "name": "git-stacks",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "A local-first desktop workbench for Git branches and stacked pull requests",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "postinstall": "node -e \"require('electron/install.js')\"",
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/*.test.ts",
+    "test:live": "tsx tests/live/cli.ts --controlled",
+    "bench:performance": "tsx scripts/perf/run-benchmarks.ts",
+    "gallery": "vite --config tests/renderer/vite.config.ts",
+    "build:gallery": "vite build --config tests/renderer/vite.config.ts",
+    "test:ui": "playwright test --grep-invert @visual",
+    "test:visual": "playwright test --grep @visual",
+    "test:visual:update": "playwright test --grep @visual --update-snapshots",
+    "test:controls": "electron --headless --no-sandbox --disable-gpu scripts/design-system-controls-smoke.cjs",
+    "test:desktop": "node scripts/packaged-desktop-smoke.mjs",
+    "test:update-flow": "node scripts/update-flow-smoke.mjs",
+    "test:palette:electron": "node tests/command-palette.e2e.cjs",
+    "test:inbox:electron": "node tests/inbox.e2e.cjs",
+    "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
+    "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
+    "package": "electron-builder --dir --publish never && npm run verify:packaged-git-runtime",
+    "dist": "electron-builder --publish never && npm run verify:packaged-git-runtime",
+    "build:promotion-helper": "node scripts/build-promotion-helper.mjs",
+    "provision:git-runtime": "node scripts/provision-git-runtime.mjs",
+    "verify:git-runtime": "node scripts/verify-git-runtime.mjs",
+    "verify:packaged-git-runtime": "node scripts/verify-packaged-git-runtime.mjs"
+  },
+  "build": {
+    "appId": "dev.gitstacks.desktop",
+    "productName": "Git Stacks",
+    "directories": {
+      "output": "release"
+    },
+    "files": ["out/main/**/*", "out/preload/**/*", "out/renderer/**/*", "package.json"],
+    "extraResources": [
+      {
+        "from": "resources/git",
+        "to": "git",
+        "filter": ["**/*", "!.provision/**"]
+      },
+      {
+        "from": "resources/promote",
+        "to": "promote",
+        "filter": ["**/*"]
+      }
+    ],
+    "afterPack": "scripts/refresh-win-git-runtime.cjs",
+    "mac": {
+      "icon": "resources/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "identity": "Developer ID Application",
+      "sign": "scripts/sign-mac-git-runtime.cjs",
+      "signIgnore": "Contents/Resources/git/",
+      "target": ["dmg"]
+    },
+    "win": {
+      "icon": "resources/icon.ico",
+      "target": ["nsis"]
+    },
+    "linux": {
+      "icon": "resources/icon.png",
+      "target": ["AppImage"],
+      "category": "Development"
+    }
+  },
+  "dependencies": {
+    "@base-ui/react": "1.8.0",
+    "@git-stacks/shared": "*",
+    "@tanstack/react-form": "1.33.5",
+    "@tanstack/react-query": "5.104.1",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.47.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tailwind-merge": "3.7.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@electron/asar": "3.4.1",
+    "@electron/osx-sign": "1.3.3",
+    "@playwright/test": "1.63.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "26.6.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3",
+    "electron-vite": "5.0.0",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "7.3.6"
+  }
+}

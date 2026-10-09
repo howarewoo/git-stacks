@@ -70,7 +70,7 @@ Detailed behavior and limitations remain in the [README](README.md), including
 - Large repositories use bounded reads and incremental presentation. A partial
   preview must not be presented as complete or authorize a bulk action over
   omitted data. Existing numerical budgets are owned by
-  [`src/shared/performance.ts`](src/shared/performance.ts); see
+  [`packages/shared/src/performance.ts`](packages/shared/src/performance.ts); see
   [Performance budgets](README.md#performance-budgets) for their measurement.
 - The product is a desktop Git/GitHub workbench, not a mobile/web client or a CRM.
   The visual reference does not expand the runtime product scope.

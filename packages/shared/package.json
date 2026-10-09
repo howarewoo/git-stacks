@@ -1,0 +1,35 @@
+{
+  "name": "@git-stacks/shared",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./capabilities": "./src/capabilities.ts",
+    "./conflict": "./src/conflict.ts",
+    "./graph-preferences": "./src/graph-preferences.ts",
+    "./graph-workbench": "./src/graph-workbench.ts",
+    "./guards": "./src/guards.ts",
+    "./host": "./src/host.ts",
+    "./notifications": "./src/notifications.ts",
+    "./performance": "./src/performance.ts",
+    "./pr-graph": "./src/pr-graph.ts",
+    "./pr-inbox": "./src/pr-inbox.ts",
+    "./pr-index": "./src/pr-index.ts",
+    "./pull-request-checks": "./src/pull-request-checks.ts",
+    "./review-snapshots": "./src/review-snapshots.ts",
+    "./review-threads": "./src/review-threads.ts",
+    "./review": "./src/review.ts",
+    "./settings": "./src/settings.ts",
+    "./shortcuts": "./src/shortcuts.ts",
+    "./types": "./src/types.ts",
+    "./update": "./src/update.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "typescript": "7.0.2"
+  }
+}

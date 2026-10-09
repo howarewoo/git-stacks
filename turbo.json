@@ -1,0 +1,142 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "stream",
+  "agentGuidance": false,
+  "cacheDir": ".turbo/cache",
+  "globalPassThroughEnv": [
+    "CC",
+    "CI",
+    "DISPLAY",
+    "ELECTRON_DISABLE_SANDBOX",
+    "GALLERY_PORT",
+    "GIT_EXEC_PATH",
+    "GIT_STACKS_*",
+    "GIT_TEMPLATE_DIR",
+    "INCLUDE",
+    "LIB",
+    "LIBPATH",
+    "NODE_EXTRA_CA_CERTS",
+    "PLAYWRIGHT_PORT",
+    "TEST_PORT"
+  ],
+  "tasks": {
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    },
+    "build:promotion-helper": {
+      "cache": false,
+      "outputs": ["resources/promote/**"]
+    },
+    "provision:git-runtime": {
+      "cache": false,
+      "outputs": ["resources/git/**"]
+    },
+    "verify:git-runtime": {
+      "cache": false,
+      "dependsOn": ["provision:git-runtime"]
+    },
+    "verify:packaged-git-runtime": {
+      "cache": false
+    },
+    "tokens:generate": {
+      "cache": false,
+      "outputs": ["src/renderer/src/design-system/tokens.css"]
+    },
+    "tokens:check": {
+      "inputs": [
+        "src/renderer/src/design-system/tokens.json",
+        "src/renderer/src/design-system/tokens.css",
+        "src/renderer/src/design-system/generate-tokens.mjs"
+      ],
+      "outputs": []
+    },
+    "build": {
+      "dependsOn": ["^build", "typecheck", "build:promotion-helper"],
+      "env": ["NODE_ENV"],
+      "inputs": ["$TURBO_DEFAULT$", "!release/**", "!out/renderer-fixtures/**"],
+      "outputs": ["out/main/**", "out/preload/**", "out/renderer/**"]
+    },
+    "build:gallery": {
+      "dependsOn": ["^typecheck"],
+      "env": ["NODE_ENV"],
+      "inputs": ["$TURBO_DEFAULT$", "!out/main/**", "!out/preload/**", "!out/renderer/**"],
+      "outputs": ["out/renderer-fixtures/**"]
+    },
+    "dev": {
+      "cache": false,
+      "dependsOn": ["build:promotion-helper"],
+      "persistent": true,
+      "passThroughEnv": ["GH_*", "GITHUB_*", "GIT_*", "SSH_*", "XDG_CONFIG_HOME"]
+    },
+    "start": {
+      "cache": false,
+      "dependsOn": ["build:promotion-helper"],
+      "persistent": true,
+      "passThroughEnv": ["GH_*", "GITHUB_*", "GIT_*", "SSH_*", "XDG_CONFIG_HOME"]
+    },
+    "gallery": {
+      "cache": false,
+      "persistent": true
+    },
+    "test": {
+      "cache": false,
+      "dependsOn": ["typecheck", "build:promotion-helper", "provision:git-runtime"],
+      "passThroughEnv": ["GIT_*", "SSH_*"]
+    },
+    "test:live": {
+      "cache": false,
+      "passThroughEnv": ["GH_*", "GITHUB_*", "GIT_*", "SSH_*"]
+    },
+    "test:controls": {
+      "cache": false,
+      "dependsOn": ["build", "build:gallery"]
+    },
+    "test:ui": {
+      "cache": false,
+      "dependsOn": ["build:gallery"]
+    },
+    "test:visual": {
+      "cache": false,
+      "dependsOn": ["build:gallery"]
+    },
+    "test:visual:update": {
+      "cache": false,
+      "dependsOn": ["build:gallery"]
+    },
+    "test:palette:electron": {
+      "cache": false,
+      "dependsOn": ["build"]
+    },
+    "test:inbox:electron": {
+      "cache": false,
+      "dependsOn": ["build"]
+    },
+    "test:desktop": {
+      "cache": false,
+      "dependsOn": ["package"],
+      "passThroughEnv": ["GIT_*", "SSH_*"]
+    },
+    "test:update-flow": {
+      "cache": false,
+      "dependsOn": ["build"],
+      "passThroughEnv": ["GIT_*", "SSH_*"]
+    },
+    "bench:performance": {
+      "cache": false,
+      "passThroughEnv": ["GIT_*", "SSH_*"]
+    },
+    "package": {
+      "cache": false,
+      "dependsOn": ["build", "provision:git-runtime", "verify:git-runtime"],
+      "outputs": ["release/**"],
+      "passThroughEnv": ["CSC_*", "APPLE_*"]
+    },
+    "dist": {
+      "cache": false,
+      "dependsOn": ["build", "provision:git-runtime", "verify:git-runtime"],
+      "outputs": ["release/**"],
+      "passThroughEnv": ["CSC_*", "APPLE_*"]
+    }
+  }
+}
