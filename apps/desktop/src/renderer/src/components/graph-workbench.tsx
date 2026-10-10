@@ -6,8 +6,19 @@ import {
   type GraphPreferencesResult,
   type GraphPreferencesPublicScope,
 } from '@git-stacks/shared/graph-preferences'
-import { GitBranch, GitPullRequest, Minus, Plus, RefreshCw, Maximize2 } from 'lucide-react'
-import type { RepositorySnapshot, PullRequest, DesktopAPI } from '@git-stacks/shared/types'
+import {
+  ArrowLeftRight,
+  ExternalLink,
+  GitBranch,
+  GitPullRequest,
+  Layers,
+  Maximize2,
+  Minus,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react'
+import type { Branch, RepositorySnapshot, PullRequest, DesktopAPI } from '@git-stacks/shared/types'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import { projectPrGraph, type PrGraphNode, type PrGraphSource } from '@git-stacks/shared/pr-graph'
 import {
@@ -133,6 +144,9 @@ export interface GraphWorkbenchProps {
   search: string
   onSearchChange?: (text: string) => void
   onCreate: () => void
+  onCheckout?: (ref: string, name: string) => void
+  onOpenPr?: (branch?: Branch) => void
+  onDeleteBranch?: (branch: Branch) => void
   actionError: string | null
   onClearActionError: () => void
   inspectorVisible?: boolean
@@ -148,6 +162,9 @@ export function GraphWorkbench({
   onReviewNumber,
   search,
   onCreate,
+  onCheckout,
+  onOpenPr,
+  onDeleteBranch,
   actionError,
   onClearActionError,
   inspectorVisible,
@@ -1152,13 +1169,35 @@ export function GraphWorkbench({
                       <code>{selectedPr.base}</code>
                     </dd>
                   </dl>
-                  <Button
-                    variant="accent"
-                    size="sm"
-                    onClick={() => onReviewNumber(selectedPr.number)}
-                  >
-                    Review #{selectedPr.number}
-                  </Button>
+                  <div className="graph-pr-actions">
+                    <Button
+                      variant="accent"
+                      size="sm"
+                      onClick={() => onReviewNumber(selectedPr.number)}
+                    >
+                      Review #{selectedPr.number}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={blocked}
+                      tooltip="Preview checks, reviews, and merge or close options for this pull request. Nothing changes until confirmed."
+                      onClick={() => onRequest({ kind: 'pr', number: selectedPr.number })}
+                    >
+                      Manage pull request…
+                    </Button>
+                    {selectedPr.url ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        tooltip={`Open #${selectedPr.number} in your browser.`}
+                        onClick={() => void desktop?.openExternal?.(selectedPr.url)}
+                      >
+                        <ExternalLink className="size-3.5" />
+                        Open on GitHub
+                      </Button>
+                    ) : null}
+                  </div>
                   <p role="status">{detailState}</p>
                   {detail?.body ? (
                     <details>
@@ -1229,6 +1268,23 @@ export function GraphWorkbench({
                     {local.needsRestack ? ' · restack required' : ''}
                   </p>
                   <div className="graph-local-actions">
+                    {!local.current ? (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={
+                          blocked || Boolean(actionBlockReason(snapshot.capabilities, 'switch'))
+                        }
+                        tooltip={
+                          actionBlockReason(snapshot.capabilities, 'switch') ??
+                          'Switch the working tree to this branch. Guarded uncommitted changes route through carry/stash options.'
+                        }
+                        onClick={() => onCheckout?.(local.ref, local.name)}
+                      >
+                        <ArrowLeftRight className="size-3.5" />
+                        Switch to branch
+                      </Button>
+                    ) : null}
                     <Button
                       size="sm"
                       disabled={
@@ -1242,7 +1298,7 @@ export function GraphWorkbench({
                     >
                       Set parent…
                     </Button>
-                    {(['restack', 'publish', 'merge'] as const).map((operation) => (
+                    {(['restack', 'sync', 'publish', 'merge'] as const).map((operation) => (
                       <Button
                         key={operation}
                         size="sm"
@@ -1250,14 +1306,30 @@ export function GraphWorkbench({
                           blocked ||
                           Boolean(actionBlockReason(snapshot.capabilities, 'executeStack')) ||
                           (operation !== 'restack' && !snapshot.github.available) ||
-                          (operation === 'merge' &&
-                            (!selectedPr ||
-                              selectedPr.state !== 'OPEN' ||
-                              selectedPr.base !== snapshot.defaultBranch))
+                          (operation === 'merge' && (!selectedPr || selectedPr.state !== 'OPEN'))
                         }
                         tooltip={
                           actionBlockReason(snapshot.capabilities, 'executeStack') ??
-                          'Existing captured preview and confirmation gates determine the actual scope.'
+                          (operation === 'merge'
+                            ? !snapshot.github.available
+                              ? snapshot.github.message ||
+                                'Connect an authenticated GitHub repository to merge pull requests.'
+                              : !selectedPr
+                                ? 'A pull request is required to preview downstack merge.'
+                                : selectedPr.state !== 'OPEN'
+                                  ? 'Only open pull requests can be merged.'
+                                  : 'Existing captured preview and confirmation gates determine the actual downstack scope.'
+                            : operation === 'sync'
+                              ? !snapshot.github.available
+                                ? snapshot.github.message ||
+                                  'Connect an authenticated GitHub repository to sync stacks.'
+                                : 'Preview synchronizing this stack with trunk and updating remote branches.'
+                              : operation === 'publish'
+                                ? !snapshot.github.available
+                                  ? snapshot.github.message ||
+                                    'Connect an authenticated GitHub repository to publish stacks.'
+                                  : 'Push reviewed stack tips and update their pull requests without rebasing.'
+                                : 'Existing captured preview and confirmation gates determine the actual scope.')
                         }
                         onClick={() => onRequest({ kind: 'stack', branch: local.name, operation })}
                       >
@@ -1265,16 +1337,242 @@ export function GraphWorkbench({
                           ? 'Preview merge…'
                           : operation === 'publish'
                             ? 'Publish…'
-                            : 'Restack…'}
+                            : operation === 'sync'
+                              ? 'Sync…'
+                              : 'Restack…'}
                       </Button>
                     ))}
                   </div>
+                  {local.name !== snapshot.defaultBranch ? (
+                    <details className="graph-surgery-disclosure">
+                      <summary>Edit stack layers</summary>
+                      <div className="graph-surgery-actions">
+                        {(() => {
+                          const parent = local.recordedParent ?? local.parent ?? null
+                          const above = snapshot.branches.find(
+                            (b) =>
+                              !b.remote &&
+                              (b.recordedParent === local.name || b.parent === local.name),
+                          )
+                          const common =
+                            blocked ||
+                            Boolean(actionBlockReason(snapshot.capabilities, 'executeSurgery'))
+                          return (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={common}
+                                tooltip={
+                                  actionBlockReason(snapshot.capabilities, 'executeSurgery') ??
+                                  'Preview a new layer on this branch, replaying the layers above it onto it.'
+                                }
+                                onClick={() =>
+                                  onRequest({
+                                    kind: 'surgery',
+                                    request: { kind: 'insert', branch: local.name, name: '' },
+                                  })
+                                }
+                              >
+                                <Layers className="size-3.5" />
+                                Insert layer above…
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={common || !parent}
+                                tooltip={
+                                  actionBlockReason(snapshot.capabilities, 'executeSurgery') ??
+                                  (parent
+                                    ? `Preview reparenting ${local.name} onto ${parent} and replaying the layers above it.`
+                                    : 'This layer already sits directly on the stack trunk.')
+                                }
+                                onClick={() =>
+                                  parent
+                                    ? onRequest({
+                                        kind: 'surgery',
+                                        request: {
+                                          kind: 'move',
+                                          branch: local.name,
+                                          target: parent,
+                                        },
+                                      })
+                                    : undefined
+                                }
+                              >
+                                Move layer down…
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={common || !above}
+                                tooltip={
+                                  actionBlockReason(snapshot.capabilities, 'executeSurgery') ??
+                                  (above
+                                    ? `Preview moving ${local.name} above ${above.name} and replaying both layers.`
+                                    : 'No layer sits above this one.')
+                                }
+                                onClick={() =>
+                                  above
+                                    ? onRequest({
+                                        kind: 'surgery',
+                                        request: {
+                                          kind: 'move',
+                                          branch: local.name,
+                                          target: above.name,
+                                        },
+                                      })
+                                    : undefined
+                                }
+                              >
+                                Move layer up…
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={common || Boolean(above)}
+                                tooltip={
+                                  actionBlockReason(snapshot.capabilities, 'executeSurgery') ??
+                                  (above
+                                    ? 'Reorder the layers above this one first: removing a middle layer has to replay them, and the preview shows it.'
+                                    : 'Preview deleting this local branch, retargeting nothing above it, and closing its pull request.')
+                                }
+                                onClick={() =>
+                                  onRequest({
+                                    kind: 'surgery',
+                                    request: { kind: 'remove', branch: local.name },
+                                  })
+                                }
+                              >
+                                Remove layer…
+                              </Button>
+                            </>
+                          )
+                        })()}
+                      </div>
+                    </details>
+                  ) : null}
+                  <div className="graph-local-branch-actions">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={
+                        blocked ||
+                        local.name === snapshot.defaultBranch ||
+                        Boolean(actionBlockReason(snapshot.capabilities, 'renameBranch'))
+                      }
+                      tooltip={
+                        actionBlockReason(snapshot.capabilities, 'renameBranch') ??
+                        (local.name === snapshot.defaultBranch
+                          ? 'The default branch cannot be renamed here.'
+                          : 'Rename this local branch. Remote tracking and open pull requests may need updating.')
+                      }
+                      onClick={() => onRequest({ kind: 'rename', branch: local })}
+                    >
+                      Rename local branch…
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={
+                        blocked || Boolean(actionBlockReason(snapshot.capabilities, 'setUpstream'))
+                      }
+                      tooltip={
+                        actionBlockReason(snapshot.capabilities, 'setUpstream') ??
+                        'Choose which remote branch this branch pushes to and pulls from. Local config only; no commits move.'
+                      }
+                      onClick={() => onRequest({ kind: 'upstream', branch: local })}
+                    >
+                      Set upstream…
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={
+                        blocked ||
+                        local.current ||
+                        local.name === snapshot.defaultBranch ||
+                        Boolean(actionBlockReason(snapshot.capabilities, 'deleteBranch'))
+                      }
+                      tooltip={
+                        actionBlockReason(snapshot.capabilities, 'deleteBranch') ??
+                        (local.name === snapshot.defaultBranch
+                          ? 'The default branch cannot be deleted.'
+                          : local.current
+                            ? 'Cannot delete the checked-out branch — switch away first.'
+                            : 'Delete this local branch. Remotes and pull requests are kept.')
+                      }
+                      onClick={() => onDeleteBranch?.(local)}
+                    >
+                      <Trash2 className="size-3.5" />
+                      Delete local branch…
+                    </Button>
+                    {!selectedPr && local.current ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={
+                          blocked ||
+                          !snapshot.github.available ||
+                          Boolean(actionBlockReason(snapshot.capabilities, 'createPr'))
+                        }
+                        tooltip={
+                          actionBlockReason(snapshot.capabilities, 'createPr') ??
+                          (!snapshot.github.available
+                            ? snapshot.github.message ||
+                              'Connect an authenticated GitHub repository to create pull requests.'
+                            : 'Review creating a PR from this branch’s published upstream.')
+                        }
+                        onClick={() => onOpenPr?.(local)}
+                      >
+                        Create pull request…
+                      </Button>
+                    ) : null}
+                  </div>
                 </>
               ) : (
-                <p className="graph-notice">
-                  No actual local branch established. Remote facts are inspectable; local mutation
-                  controls are unavailable. Selecting never checks out or fetches refs.
-                </p>
+                <div className="graph-remote-actions">
+                  <p className="graph-notice">
+                    No actual local branch established. Remote facts are inspectable; local mutation
+                    controls are unavailable. Selecting never checks out or fetches refs.
+                  </p>
+                  {selectedNode.branch ? (
+                    <div className="graph-local-actions">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={
+                          blocked || Boolean(actionBlockReason(snapshot.capabilities, 'switch'))
+                        }
+                        tooltip={
+                          actionBlockReason(snapshot.capabilities, 'switch') ??
+                          'Create a local tracking branch and switch to it.'
+                        }
+                        onClick={() =>
+                          onCheckout?.(selectedNode.branch!.ref, selectedNode.branch!.name)
+                        }
+                      >
+                        Switch to remote branch (track)
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={
+                          blocked ||
+                          Boolean(actionBlockReason(snapshot.capabilities, 'deleteRemoteBranch'))
+                        }
+                        tooltip={
+                          actionBlockReason(snapshot.capabilities, 'deleteRemoteBranch') ??
+                          'Preview deleting this branch on its remote.'
+                        }
+                        onClick={() => onDeleteBranch?.(selectedNode.branch!)}
+                      >
+                        <Trash2 className="size-3.5" />
+                        Delete remote branch…
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
               )}
             </div>
           ) : (
@@ -1292,9 +1590,28 @@ export function GraphWorkbench({
         ) : null}
         {snapshot.nativeStacks?.map((native) => (
           <section key={native.id}>
-            <h3>
-              Submitted native #{native.number} · {native.status}
-            </h3>
+            <div className="graph-native-header">
+              <h3>
+                Submitted native #{native.number} · {native.status}
+              </h3>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={blocked || !snapshot.github.available}
+                onClick={() =>
+                  onRequest({
+                    kind: 'confirm',
+                    title: `Unstack native stack #${native.number}?`,
+                    description: `This removes the native stack container on GitHub for stack #${native.number}. Individual pull requests are kept; their chained bases and review discussions remain unchanged.`,
+                    label: `Unstack native stack #${native.number}`,
+                    action: { type: 'unstackNativeStack', stackNumber: native.number },
+                    destructive: true,
+                  })
+                }
+              >
+                Unstack #{native.number}…
+              </Button>
+            </div>
             <ol className="graph-submitted-order">
               {[...native.pullRequests]
                 .sort((a, b) => a.position - b.position)
