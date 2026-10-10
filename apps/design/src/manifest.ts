@@ -51,7 +51,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   {
     id: 'button',
     usage:
-      'Use for an explicit action; use an anchor for navigation and a selection control for persistent choices.',
+      'Choose default for the main task, secondary for supporting actions or Cancel, ghost for repeated row actions, and subtle for optional utilities. Accent emphasizes context; use SegmentedControl or RadioGroup for persistent choices.',
     name: 'Button',
     group: 'Actions',
     summary:

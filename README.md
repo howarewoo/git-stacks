@@ -2076,16 +2076,34 @@ Canonical ownership is `packages/ui/src/components/ui`, `packages/ui/src/lib`, a
 The catalog shell uses the shared `SidebarProvider`, off-canvas `Sidebar`, and `SidebarTrigger` for desktop collapse and the built-in sheet below 768px; it does not maintain a parallel catalog open/close state. Shared search and appearance controls stay above the independently scrolling index. Category disclosure follows the shadcn Base UI composition: `SidebarGroupLabel render={<CollapsibleTrigger />}` with `CollapsibleContent` around `SidebarGroupContent`. Search exposes matching categories; choosing a component opens its category, closes the narrow sheet, scrolls to the destination, and transfers focus. The current anchor is marked after Back/Forward. Command navigation includes Foundations and Git compositions. Empty search results offer Clear search.
 
 The current-section marker follows scrolling independently of the hash: scrolling
-does not add history entries or move focus. Filtering rebuilds tracking around
-the mounted entries; empty results have no current marker. Verify the marker
-after scrolling across adjacent sections, filtering, clearing, resizing, and
-Back/Forward, as well as after an intentional anchor click.
+does not add history entries or move focus. Query changes align the results
+heading while retaining search focus, including short and empty result sets.
+Clearing restores the previous section's viewport position; choosing a result
+navigates to that destination instead. Filtering rebuilds tracking around the
+mounted entries; empty results have no current marker. Verify position, focus,
+and the marker after filtering, refinement, clearing, resizing, Back/Forward,
+and intentional anchor navigation.
 
 Start with the interaction links existing specimens for inspection, value
 selection, captured-scope confirmation, and status/recovery. Every manifest entry
 has required `usage` guidance visible above its specimen; anatomy, keyboard and
 token details remain optional disclosures. Verify recipe links by pointer and
 keyboard, including destination focus and narrow-sidebar closure.
+
+The Button specimen includes a draft toolbar, supporting dialog actions, and
+an exactly-one-selected view example to distinguish task actions from persistent
+choices. Button, Field/Input, Select, Dialog, and Alert Dialog disclosures include
+live adoption examples and copyable source. Their source is imported from the same
+typed TSX files in `apps/design/src/examples` that render the previews, so catalog
+typechecking covers the displayed compositions. Copy reports success or refusal
+inline and leaves the code selectable. Use the shared UI styles and the existing
+Tailwind source configuration when adopting a composition; production forms and
+Git operations still follow the shared contracts and captured-preview gates below.
+
+Foundations displays neutral, action, selection, feedback, and diff color pairs
+using generated semantic CSS variables, plus actual boundary and focus controls.
+Inspect both themes and narrow reflow when changing those specimens; no palette
+values belong in the catalog.
 
 The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
  

@@ -202,7 +202,7 @@ body {
 
 .catalog-introduction > p,
 .design-entry > p,
-.design-entry > details p {
+.design-entry > details > p {
   max-width: 72ch;
   margin: var(--gs-semantic-space-3) 0;
 }
@@ -235,10 +235,15 @@ body {
 
 .catalog-results {
   margin-top: var(--gs-semantic-space-8);
+  scroll-margin-top: var(--gs-semantic-space-6);
   color: var(--gs-semantic-text-secondary);
   font-size: var(--gs-semantic-type-metadata-size);
   line-height: var(--gs-semantic-type-metadata-line);
   font-variant-numeric: tabular-nums;
+}
+
+.catalog-matches[data-filtered] {
+  min-height: 100dvh;
 }
 
 .design-entry {
@@ -296,6 +301,22 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--gs-semantic-space-2);
+}
+
+.catalog-composition {
+  display: grid;
+  gap: var(--gs-semantic-space-3);
+  padding-top: var(--gs-semantic-space-4);
+}
+
+.catalog-composition h3 {
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
+  font-weight: 600;
+}
+
+.catalog-composition p {
+  max-width: 72ch;
 }
 
 .design-entry > details {
@@ -367,17 +388,27 @@ body {
 }
 
 .foundation-colors {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: var(--gs-semantic-space-2);
-  flex-wrap: wrap;
 }
 
 .foundation-colors > div {
-  flex: 1 1 140px;
+  display: grid;
+  align-content: start;
+  gap: var(--gs-semantic-space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: var(--gs-semantic-space-4);
   border-radius: var(--gs-semantic-radius-control);
   font-size: var(--gs-semantic-type-label-size);
   line-height: var(--gs-semantic-type-label-line);
+}
+
+.foundation-colors code,
+.foundation-colors span {
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
 }
 
 .foundation-values {

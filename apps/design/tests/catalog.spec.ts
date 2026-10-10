@@ -93,6 +93,44 @@ test('search anchors and keyboard command navigation', async ({ page }) => {
   await expect(page.locator('#checkbox')).toBeFocused()
 })
 
+test('search presents results without stealing focus and restores the reading section on clear', async ({
+  page,
+}) => {
+  await page.goto('/#field')
+  const navigation = page.getByRole('navigation', { name: 'Component catalog', exact: true })
+  await expect(navigation.locator('a[aria-current="location"]')).toHaveAttribute('href', '#field')
+  const search = page.getByRole('textbox', { name: 'Search components' })
+  const originalTop = await page
+    .locator('#field')
+    .evaluate((section) => section.getBoundingClientRect().top)
+  for (const query of ['button', 'button group', 'no-such-component']) {
+    await search.fill(query)
+    await expect(search).toBeFocused()
+    await expect(page.locator('#catalog-results')).toBeInViewport()
+    await expect
+      .poll(() =>
+        page.locator('#catalog-results').evaluate((node) => node.getBoundingClientRect().top),
+      )
+      .toBeLessThan(50)
+  }
+  await search.fill('')
+  await expect(search).toBeFocused()
+  await expect
+    .poll(async () =>
+      Math.abs(
+        (await page.locator('#field').evaluate((section) => section.getBoundingClientRect().top)) -
+          originalTop,
+      ),
+    )
+    .toBeLessThan(2)
+
+  await search.fill('one-time password')
+  await navigation.getByRole('link', { name: 'Input OTP', exact: true }).click()
+  await expect(page.locator('#input-otp')).toBeFocused()
+  await expect(page.locator('#input-otp')).toBeInViewport()
+  await expect(page).toHaveURL(/#input-otp$/)
+})
+
 test('current section follows scrolling and filtered mounts without changing navigation history', async ({
   page,
 }) => {

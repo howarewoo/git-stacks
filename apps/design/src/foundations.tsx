@@ -97,27 +97,116 @@ const foundationUsage: Record<string, Record<string, string>> = {
   },
 }
 
+type ColorRole = {
+  [Group in
+    | 'surface'
+    | 'text'
+    | 'action'
+    | 'selection'
+    | 'feedback'
+    | 'diff']: `${Group}.${keyof (typeof tokens.semantic)[Group] & string}`
+}['surface' | 'text' | 'action' | 'selection' | 'feedback' | 'diff']
+
+const colorGroups: {
+  title: string
+  pairs: { label: string; background: ColorRole; foreground: ColorRole }[]
+}[] = [
+  {
+    title: 'Neutral hierarchy',
+    pairs: [
+      { label: 'Workspace canvas', background: 'surface.canvas', foreground: 'text.primary' },
+      { label: 'Content surface', background: 'surface.content', foreground: 'text.primary' },
+      { label: 'Inset grouping', background: 'surface.inset', foreground: 'text.secondary' },
+      { label: 'Row hover', background: 'surface.hover', foreground: 'text.primary' },
+    ],
+  },
+  {
+    title: 'Actions and selection',
+    pairs: [
+      {
+        label: 'Primary action',
+        background: 'action.primary',
+        foreground: 'action.primary-foreground',
+      },
+      { label: 'Secondary action', background: 'action.secondary', foreground: 'text.primary' },
+      {
+        label: 'Meaningful selection',
+        background: 'selection.background',
+        foreground: 'selection.text',
+      },
+    ],
+  },
+  {
+    title: 'Labelled feedback',
+    pairs: [
+      {
+        label: 'Information',
+        background: 'feedback.info-surface',
+        foreground: 'feedback.info-text',
+      },
+      {
+        label: 'Success',
+        background: 'feedback.success-surface',
+        foreground: 'feedback.success-text',
+      },
+      {
+        label: 'Warning',
+        background: 'feedback.warning-surface',
+        foreground: 'feedback.warning-text',
+      },
+      { label: 'Error', background: 'feedback.error-surface', foreground: 'feedback.error-text' },
+      {
+        label: 'Merged',
+        background: 'feedback.merged-surface',
+        foreground: 'feedback.merged-text',
+      },
+    ],
+  },
+  {
+    title: 'Diff roles',
+    pairs: [
+      { label: 'Addition', background: 'diff.add-surface', foreground: 'diff.add-text' },
+      { label: 'Deletion', background: 'diff.remove-surface', foreground: 'diff.remove-text' },
+      { label: 'Hunk identity', background: 'surface.content', foreground: 'diff.hunk-text' },
+    ],
+  },
+]
+
+function colorVariable(role: ColorRole) {
+  return `var(--gs-semantic-${role.replace('.', '-')})`
+}
+
 export function Foundations() {
   const semantic = tokens.semantic
   return (
     <section id="foundations" className="design-entry" tabIndex={-1}>
       <h2>Foundations</h2>
       <p>Canonical roles, generated from one shared token source.</p>
-      <div className="foundation-colors">
-        {Object.entries(semantic.feedback)
-          .filter(([name]) => name.endsWith('surface'))
-          .map(([name]) => (
-            <div
-              key={name}
-              style={{
-                background: `var(--gs-semantic-feedback-${name})`,
-                color: `var(--gs-semantic-feedback-${name.replace('surface', 'text')})`,
-              }}
-            >
-              {name}
-            </div>
-          ))}
-      </div>
+      <p>
+        Each sample pairs readable foreground with its owning surface. Theme changes update both
+        roles.
+      </p>
+      {colorGroups.map((group) => (
+        <div className="foundation-color-group" key={group.title}>
+          <h3>{group.title}</h3>
+          <div className="foundation-colors">
+            {group.pairs.map((pair) => (
+              <div
+                key={pair.label}
+                style={{
+                  background: colorVariable(pair.background),
+                  color: colorVariable(pair.foreground),
+                }}
+              >
+                <strong>{pair.label}</strong>
+                <code>semantic.{pair.foreground}</code>
+                <span>on</span>
+                <code>semantic.{pair.background}</code>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
       {(['space', 'radius', 'elevation', 'motion', 'density', 'z'] as const).map((role) => (
         <div key={role}>
           <h3>{role === 'z' ? 'Layers' : role}</h3>
@@ -164,13 +253,24 @@ export function Foundations() {
           </dl>
         </div>
       ))}
-      <h3>Focus</h3>
-      <UI.Button variant="secondary">Tab here to inspect focus</UI.Button>
-      <p>
-        Focus ring: <code>semantic.focus.ring</code>. Essential controls retain visible boundaries,
-        explicit labels and focus rings in both themes. Motion respects the system reduced-motion
-        preference.
-      </p>
+      <h3>Essential boundaries and focus</h3>
+      <div className="catalog-composition">
+        <UI.Field
+          id="foundation-boundary"
+          label="Essential control boundary"
+          description="semantic.border.essential separates an editable control from its surface."
+        >
+          <UI.Input defaultValue="feature/quiet-graph" />
+        </UI.Field>
+        <UI.Button variant="secondary" className="justify-self-start">
+          Tab here to inspect focus
+        </UI.Button>
+        <p>
+          <code>semantic.focus.ring</code> marks keyboard focus, not selection. Essential boundaries
+          remain visible before focus; the ring appears when navigating with the keyboard. Motion
+          respects the system reduced-motion preference.
+        </p>
+      </div>
     </section>
   )
 }

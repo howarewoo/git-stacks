@@ -1,4 +1,11 @@
-import { useEffect, useState, type ComponentType, type CSSProperties } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ComponentType,
+  type CSSProperties,
+} from 'react'
 import {
   Button,
   Collapsible,
@@ -42,6 +49,7 @@ import { formSpecimens } from './form-specimens'
 import { displaySpecimens } from './display-specimens'
 import { overlaySpecimens } from './overlay-specimens'
 import { Foundations, GitCompositions, TypographySpecimen } from './foundations'
+import { AdoptionExample } from './adoption-examples'
 
 const ADOPTION_RECIPES = [
   {
@@ -113,6 +121,8 @@ function CatalogWorkspace() {
     () =>
       COMPONENT_MANIFEST.find((entry) => entry.id === location.hash.slice(1))?.group ?? 'Actions',
   )
+  const searchOrigin = useRef<{ id: string; top: number } | null>(null)
+  const resultsRef = useRef<HTMLParagraphElement>(null)
   useEffect(() => {
     const syncAnchor = () => {
       const id = location.hash.slice(1) || 'foundations'
@@ -155,8 +165,35 @@ function CatalogWorkspace() {
   const visible = COMPONENT_MANIFEST.filter((entry) =>
     `${entry.name} ${entry.group} ${entry.summary}`.toLowerCase().includes(query),
   )
+  function updateSearch(value: string) {
+    if (!query && value.trim()) {
+      const section = document.getElementById(activeId)
+      if (section) searchOrigin.current = { id: activeId, top: section.getBoundingClientRect().top }
+    }
+    setSearch(value)
+  }
+  useLayoutEffect(() => {
+    if (query) {
+      resultsRef.current?.scrollIntoView({ block: 'start', behavior: 'instant' })
+      return
+    }
+    const origin = searchOrigin.current
+    searchOrigin.current = null
+    if (!origin) return
+    const section = document.getElementById(origin.id)
+    if (section) {
+      window.scrollBy({
+        top: section.getBoundingClientRect().top - origin.top,
+        behavior: 'instant',
+      })
+    }
+  }, [query])
   useEffect(() => {
-    const sections = Array.from(document.querySelectorAll<HTMLElement>('#catalog > section[id]'))
+    const sections = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '#catalog > section[id], .catalog-matches > section[id]',
+      ),
+    )
     setActiveId((current) =>
       sections.some((section) => section.id === current) ? current : (sections[0]?.id ?? ''),
     )
@@ -184,7 +221,7 @@ function CatalogWorkspace() {
           if (group) setExpandedGroup(group)
         },
         {
-          rootMargin: `-${readingLine}px 0px -${window.innerHeight - readingLine - 1}px 0px`,
+          rootMargin: `${-readingLine}px 0px ${readingLine + 1 - window.innerHeight}px 0px`,
           // Crossing a section boundary must include positive area, not just a touching edge.
           threshold: Number.EPSILON,
         },
@@ -200,6 +237,8 @@ function CatalogWorkspace() {
     }
   }, [query])
   function navigate(id: string) {
+    // Explicit navigation wins over restoring the pre-search reading position.
+    searchOrigin.current = null
     setSearch('')
     setCommandOpen(false)
     setOpenMobile(false)
@@ -227,7 +266,7 @@ function CatalogWorkspace() {
             aria-label="Search components"
             placeholder="Search components"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => updateSearch(event.target.value)}
           />
           <Button
             variant="secondary"
@@ -423,63 +462,66 @@ function CatalogWorkspace() {
             <GitCompositions />
           </>
         )}
-        <p className="catalog-results" role="status">
-          {visible.length} component entries
-        </p>
-        {visible.map((entry) => {
-          const Specimen = SPECIMENS[entry.id]
-          return (
-            <section
-              id={entry.id}
-              tabIndex={-1}
-              key={entry.id}
-              className="design-entry"
-              data-component={entry.id}
-            >
-              <div className="design-entry-heading">
-                <h2>{entry.name}</h2>
-                <span>{entry.group}</span>
-              </div>
-              <p className="design-entry-summary">{entry.summary}</p>
-              <p className="design-entry-usage">{entry.usage}</p>
-              <div className="design-specimen" data-specimen={entry.id}>
-                <Specimen />
-              </div>
-              <details>
-                <summary>Usage, anatomy, keyboard and tokens</summary>
-                <dl>
-                  <dt>Anatomy and API</dt>
-                  <dd>{entry.anatomy}</dd>
-                  <dt>Keyboard and accessibility</dt>
-                  <dd>{entry.keyboard}</dd>
-                  <dt>Canonical tokens</dt>
-                  <dd className="design-token-list">
-                    {entry.tokens.map((token) => (
-                      <code key={token}>{token}</code>
-                    ))}
-                  </dd>
-                </dl>
-                <pre className="design-code">{entry.importExample}</pre>
-                <p>{entry.reconciledWith}</p>
-                {entry.catalogOnlyNotice && <p>{entry.catalogOnlyNotice}</p>}
-                <a href={entry.upstreamDoc} target="_blank" rel="noreferrer">
-                  Upstream {entry.name} documentation
-                </a>
-              </details>
-            </section>
-          )
-        })}
-        {visible.length === 0 && (
-          <Empty className="catalog-empty">
-            <EmptyHeader>
-              <EmptyTitle>No components match</EmptyTitle>
-              <EmptyDescription>Clear search to restore the catalog.</EmptyDescription>
-            </EmptyHeader>
-            <Button variant="secondary" onClick={() => setSearch('')}>
-              Clear search
-            </Button>
-          </Empty>
-        )}
+        <div className="catalog-matches" data-filtered={query ? 'true' : undefined}>
+          <p id="catalog-results" ref={resultsRef} className="catalog-results" role="status">
+            {visible.length} component entries
+          </p>
+          {visible.map((entry) => {
+            const Specimen = SPECIMENS[entry.id]
+            return (
+              <section
+                id={entry.id}
+                tabIndex={-1}
+                key={entry.id}
+                className="design-entry"
+                data-component={entry.id}
+              >
+                <div className="design-entry-heading">
+                  <h2>{entry.name}</h2>
+                  <span>{entry.group}</span>
+                </div>
+                <p className="design-entry-summary">{entry.summary}</p>
+                <p className="design-entry-usage">{entry.usage}</p>
+                <div className="design-specimen" data-specimen={entry.id}>
+                  <Specimen />
+                </div>
+                <details>
+                  <summary>Usage, anatomy, keyboard and tokens</summary>
+                  <dl>
+                    <dt>Anatomy and API</dt>
+                    <dd>{entry.anatomy}</dd>
+                    <dt>Keyboard and accessibility</dt>
+                    <dd>{entry.keyboard}</dd>
+                    <dt>Canonical tokens</dt>
+                    <dd className="design-token-list">
+                      {entry.tokens.map((token) => (
+                        <code key={token}>{token}</code>
+                      ))}
+                    </dd>
+                  </dl>
+                  <pre className="design-code">{entry.importExample}</pre>
+                  <AdoptionExample id={entry.id} />
+                  <p>{entry.reconciledWith}</p>
+                  {entry.catalogOnlyNotice && <p>{entry.catalogOnlyNotice}</p>}
+                  <a href={entry.upstreamDoc} target="_blank" rel="noreferrer">
+                    Upstream {entry.name} documentation
+                  </a>
+                </details>
+              </section>
+            )
+          })}
+          {visible.length === 0 && (
+            <Empty className="catalog-empty">
+              <EmptyHeader>
+                <EmptyTitle>No components match</EmptyTitle>
+                <EmptyDescription>Clear search to restore the catalog.</EmptyDescription>
+              </EmptyHeader>
+              <Button variant="secondary" onClick={() => updateSearch('')}>
+                Clear search
+              </Button>
+            </Empty>
+          )}
+        </div>
         <footer>
           Shared source: packages/ui. Catalog fixtures: apps/design. Automated checks are not
           accessibility certification.
