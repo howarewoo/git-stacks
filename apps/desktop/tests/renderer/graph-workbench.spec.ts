@@ -800,3 +800,228 @@ test('Refresh index requests a real forced source read and keeps qualified selec
   expect(calls.filter((call) => call.call === 'prIndex').at(-1)?.args).toEqual([{ refresh: true }])
   expect(calls.filter((call) => call.call === 'runAction')).toHaveLength(0)
 })
+
+test('graph inspector PR actions route to workflow dialogs and link outward', async ({ page }) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('#1')
+  await page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: '#1 Change 1' })
+    .locator('button')
+    .first()
+    .click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(inspector.getByRole('button', { name: 'Review #1', exact: true })).toBeVisible()
+  const manageBtn = inspector.getByRole('button', { name: 'Manage pull request…', exact: true })
+  await expect(manageBtn).toBeVisible()
+  await manageBtn.click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('#1')
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await inspector.getByRole('button', { name: 'Open on GitHub', exact: true }).click()
+  expect(
+    (await getDoubleCalls(page)).filter((call) => call.call === 'openExternal').at(-1)?.args,
+  ).toEqual(['https://github.com/fixture/graph-workbench/pull/1'])
+  await page.evaluate(() =>
+    window.fixture.failNext('openExternal', 'Host validation refused this link.'),
+  )
+  await inspector.getByRole('button', { name: 'Open on GitHub', exact: true }).click()
+  await expect(page.getByText('Host validation refused this link.', { exact: true })).toBeVisible()
+})
+
+test('graph inspector exposes restack, sync, publish, merge and surgery actions for local branches', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  await page.getByRole('button', { name: 'Current branch', exact: true }).click()
+  await page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: 'refs/heads/graph/change-1' })
+    .locator('button')
+    .first()
+    .click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(inspector.getByRole('button', { name: 'Restack…', exact: true })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Sync…', exact: true })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Publish…', exact: true })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Preview merge…', exact: true })).toBeVisible()
+
+  await inspector.getByRole('button', { name: 'Restack…', exact: true }).click()
+  const restackDialog = page.getByRole('dialog')
+  await expect(restackDialog).toBeVisible()
+  expect(
+    (await getDoubleCalls(page)).filter((call) => call.call === 'stackPreview').at(-1)?.args,
+  ).toEqual(['restack', 'graph/change-1'])
+  await restackDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  const surgeryDisclosure = inspector.getByRole('button', {
+    name: 'Edit stack layers',
+    exact: true,
+  })
+  await expect(surgeryDisclosure).toBeVisible()
+  await expect(surgeryDisclosure).toHaveAttribute('aria-expanded', 'false')
+  await surgeryDisclosure.focus()
+  await surgeryDisclosure.press('Enter')
+  await expect(surgeryDisclosure).toHaveAttribute('aria-expanded', 'true')
+  const insertBtn = inspector.getByRole('button', { name: 'Insert layer above…', exact: true })
+  await expect(insertBtn).toBeVisible()
+  await insertBtn.click()
+  let surgeryDialog = page.getByRole('dialog')
+  await expect(surgeryDialog).toBeVisible()
+  expect(
+    (await getDoubleCalls(page)).filter((call) => call.call === 'surgeryPreview').at(-1)?.args,
+  ).toEqual([{ kind: 'insert', branch: 'graph/change-1', name: '' }])
+  await surgeryDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(insertBtn).toBeFocused()
+
+  // Move layer up
+  const moveUpBtn = inspector.getByRole('button', { name: 'Move layer up…', exact: true })
+  await expect(moveUpBtn).toBeVisible()
+  await moveUpBtn.click()
+  surgeryDialog = page.getByRole('dialog')
+  await expect(surgeryDialog).toBeVisible()
+  await surgeryDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  // Remove layer
+  const removeBtn = inspector.getByRole('button', { name: 'Remove layer…', exact: true })
+  await expect(removeBtn).toBeVisible()
+  await removeBtn.click()
+  surgeryDialog = page.getByRole('dialog')
+  await expect(surgeryDialog).toBeVisible()
+  await surgeryDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect(
+    (await getDoubleCalls(page)).filter((call) => call.call === 'surgeryPreview').at(-1)?.args,
+  ).toEqual([{ kind: 'remove', branch: 'graph/change-1' }])
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
+})
+
+test('graph inspector distinguishes remote-only refs from local branches with appropriate track and delete actions', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  const snapshot = scenarios['graph-250'].snapshot!
+  await page.evaluate(
+    (source) =>
+      window.fixture.pushSnapshot({
+        ...source,
+        branches: [
+          ...source.branches,
+          {
+            name: 'origin/upstream-topic',
+            ref: 'refs/remotes/origin/upstream-topic',
+            remote: true,
+            current: false,
+            parent: null,
+            parentSource: null,
+            parentBehind: null,
+            upstream: null,
+            upstreamRef: null,
+            needsRestack: false,
+            ahead: 0,
+            behind: 0,
+            subject: 'Remote-only branch subject',
+            updatedAt: '2026-10-09T00:00:00.000Z',
+            oid: 'abcdef1234567890abcdef1234567890abcdef12',
+            pr: null,
+          },
+        ],
+      }),
+    snapshot,
+  )
+  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('upstream-topic')
+  const row = page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: 'refs/remotes/origin/upstream-topic' })
+    .first()
+  await expect(row).toBeVisible()
+  await row.locator('button').first().click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(
+    inspector.getByText(
+      'No actual local branch established. Remote facts are inspectable; local mutation controls are unavailable.',
+    ),
+  ).toBeVisible()
+  await expect(
+    inspector.getByRole('button', { name: 'Switch to remote branch (track)', exact: true }),
+  ).toBeVisible()
+  await expect(
+    inspector.getByRole('button', { name: 'Delete remote branch…', exact: true }),
+  ).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Restack…' })).toHaveCount(0)
+})
+
+test('graph workbench native unstack states member-removal scope and permits cancellation', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'review-long-stack' })
+  const snapshot = scenarios['review-long-stack'].snapshot!
+  await page.evaluate(
+    (source) =>
+      window.fixture.pushSnapshot({
+        ...source,
+        github: { ...source.github, available: true },
+        nativeStackPreviewAvailable: true,
+      }),
+    snapshot,
+  )
+  await switchDestination(page, 'stacks')
+  const disclosure = page.locator('.graph-reconciliation')
+  await disclosure.locator(':scope > summary').click()
+  const unstackBtn = disclosure.getByRole('button', { name: /Unstack #/ }).first()
+  await expect(unstackBtn).toBeVisible()
+  await unstackBtn.click()
+  const confirmDialog = page.getByRole('dialog')
+  await expect(confirmDialog).toBeVisible()
+  await expect(confirmDialog).toContainText('Unstack pull requests from native stack')
+  await expect(confirmDialog).toContainText('Already-merged pull requests can remain')
+  await confirmDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
+})
+
+test('moving a selected layer down previews its predecessor parent without changing checkout', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('#2')
+  await page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: '#2 Change 2' })
+    .locator('button')
+    .first()
+    .click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await inspector.getByRole('button', { name: 'Edit stack layers', exact: true }).click()
+  await inspector.getByRole('button', { name: 'Move layer down…', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  expect(
+    (await getDoubleCalls(page)).filter((call) => call.call === 'surgeryPreview').at(-1)?.args,
+  ).toEqual([{ kind: 'move', branch: 'graph/change-2', target: 'main' }])
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
+  await expect(page.locator('.graph-workbench > footer')).toContainText(
+    'Current checkout: graph/change-1',
+  )
+})
+
+test('retained PR-list creation opens from a click without treating the event as a branch', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'pullRequests')
+  await page.getByRole('button', { name: 'Create PR', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await expect(page.getByRole('dialog')).toContainText('graph/change-1')
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
+})
