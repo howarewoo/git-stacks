@@ -4845,9 +4845,53 @@ textarea.conflict-content {
   padding: var(--gs-semantic-space-2) 0;
   border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
+.graph-pr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gs-semantic-space-2);
+  margin-top: var(--gs-semantic-space-2);
+}
 .graph-local-actions {
   display: flex;
   flex-wrap: wrap;
+  gap: var(--gs-semantic-space-2);
+}
+.graph-surgery-disclosure {
+  margin-top: var(--gs-semantic-space-2);
+}
+.graph-surgery-disclosure summary {
+  font-size: var(--gs-semantic-type-metadata-size);
+  color: var(--gs-semantic-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.graph-surgery-disclosure summary:hover {
+  color: var(--gs-semantic-text-primary);
+}
+.graph-surgery-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gs-semantic-space-1);
+  padding-top: var(--gs-semantic-space-2);
+}
+.graph-surgery-actions .gs-button {
+  justify-content: flex-start;
+}
+.graph-local-branch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gs-semantic-space-2);
+  margin-top: var(--gs-semantic-space-2);
+}
+.graph-remote-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gs-semantic-space-2);
+}
+.graph-native-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--gs-semantic-space-2);
 }
 .graph-description {

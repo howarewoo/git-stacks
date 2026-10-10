@@ -800,3 +800,118 @@ test('Refresh index requests a real forced source read and keeps qualified selec
   expect(calls.filter((call) => call.call === 'prIndex').at(-1)?.args).toEqual([{ refresh: true }])
   expect(calls.filter((call) => call.call === 'runAction')).toHaveLength(0)
 })
+
+test('graph inspector PR actions route to workflow dialogs and link outward', async ({ page }) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('#1')
+  await page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: '#1 Change 1' })
+    .locator('button')
+    .first()
+    .click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(inspector.getByRole('button', { name: 'Review #1', exact: true })).toBeVisible()
+  const manageBtn = inspector.getByRole('button', { name: 'Manage pull request…', exact: true })
+  await expect(manageBtn).toBeVisible()
+  await manageBtn.click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('#1')
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
+test('graph inspector exposes restack, sync, publish, merge and surgery actions for local branches', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  await page.getByRole('button', { name: 'Current branch', exact: true }).click()
+  await page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: 'refs/heads/graph/change-1' })
+    .locator('button')
+    .first()
+    .click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(inspector.getByRole('button', { name: 'Restack…', exact: true })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Sync…', exact: true })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Publish…', exact: true })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Preview merge…', exact: true })).toBeVisible()
+
+  await inspector.getByRole('button', { name: 'Restack…', exact: true }).click()
+  const restackDialog = page.getByRole('dialog')
+  await expect(restackDialog).toBeVisible()
+  await restackDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  // Expand surgery disclosure
+  const surgerySummary = inspector.locator('summary', { hasText: 'Edit stack layers' })
+  await expect(surgerySummary).toBeVisible()
+  await surgerySummary.click()
+  const insertBtn = inspector.getByRole('button', { name: 'Insert layer above…', exact: true })
+  await expect(insertBtn).toBeVisible()
+  await insertBtn.click()
+  const surgeryDialog = page.getByRole('dialog')
+  await expect(surgeryDialog).toBeVisible()
+  await surgeryDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
+test('graph inspector distinguishes remote-only refs from local branches with appropriate track and delete actions', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  const snapshot = scenarios['graph-250'].snapshot!
+  await page.evaluate(
+    (source) =>
+      window.fixture.pushSnapshot({
+        ...source,
+        branches: [
+          ...source.branches,
+          {
+            name: 'origin/upstream-topic',
+            ref: 'refs/remotes/origin/upstream-topic',
+            remote: true,
+            current: false,
+            parent: null,
+            parentSource: null,
+            parentBehind: null,
+            upstream: null,
+            upstreamRef: null,
+            needsRestack: false,
+            ahead: 0,
+            behind: 0,
+            subject: 'Remote-only branch subject',
+            updatedAt: '2026-10-09T00:00:00.000Z',
+            oid: 'abcdef1234567890abcdef1234567890abcdef12',
+            pr: null,
+          },
+        ],
+      }),
+    snapshot,
+  )
+  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('upstream-topic')
+  const row = page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: 'refs/remotes/origin/upstream-topic' })
+    .first()
+  await expect(row).toBeVisible()
+  await row.locator('button').first().click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(
+    inspector.getByText(
+      'No actual local branch established. Remote facts are inspectable; local mutation controls are unavailable.',
+    ),
+  ).toBeVisible()
+  await expect(
+    inspector.getByRole('button', { name: 'Switch to remote branch (track)', exact: true }),
+  ).toBeVisible()
+  await expect(
+    inspector.getByRole('button', { name: 'Delete remote branch…', exact: true }),
+  ).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Restack…' })).toHaveCount(0)
+})

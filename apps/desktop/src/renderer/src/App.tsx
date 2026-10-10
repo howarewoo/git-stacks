@@ -3339,6 +3339,9 @@ function App() {
           search={search}
           onSearchChange={setSearch}
           onCreate={openBranchDialog}
+          onCheckout={requestCheckoutBranch}
+          onOpenPr={openPrDialog}
+          onDeleteBranch={(branch) => openDeleteDialog([branch])}
           inspectorVisible={showDetails}
           onToggleInspector={() => setShowDetails((value) => !value)}
         />
@@ -3594,6 +3597,56 @@ function App() {
               >
                 <Upload className="size-3.5" />
                 Publish stack…
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  !snapshot.github.available ||
+                  Boolean(shapeReason('executeStack'))
+                }
+                tooltip={
+                  shapeReason('executeStack') ??
+                  (!snapshot.github.available
+                    ? snapshot.github.message ||
+                      'Connect an authenticated GitHub repository to sync stacks.'
+                    : 'Preview synchronizing this stack with trunk and updating remote branches.')
+                }
+                onClick={() =>
+                  openWorkflow({ kind: 'stack', operation: 'sync', branch: selectedBranch.name })
+                }
+              >
+                <GitBranch className="size-3.5" />
+                Sync stack…
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  !snapshot.github.available ||
+                  !selectedPullRequest ||
+                  selectedPullRequest.state !== 'OPEN' ||
+                  Boolean(shapeReason('executeStack'))
+                }
+                tooltip={
+                  shapeReason('executeStack') ??
+                  (!snapshot.github.available
+                    ? snapshot.github.message ||
+                      'Connect an authenticated GitHub repository to merge pull requests.'
+                    : !selectedPullRequest
+                      ? 'A pull request is required to preview downstack merge.'
+                      : selectedPullRequest.state !== 'OPEN'
+                        ? 'Only open pull requests can be merged.'
+                        : 'Existing captured preview and confirmation gates determine the actual downstack scope.')
+                }
+                onClick={() =>
+                  openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
+                }
+              >
+                <GitPullRequest className="size-3.5" />
+                Preview merge…
               </Button>
               <details className="detail-disclosure">
                 <summary>Edit stack layers</summary>
