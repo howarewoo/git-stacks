@@ -1,5 +1,19 @@
 # Git Stacks
 
+<!-- impeccable:product-schema 1 -->
+
+## Platform
+
+web
+
+## Users
+
+Developers working with Git and GitHub who manage dependent changes as stacked
+pull requests and want a desktop workflow without learning a new stack-management
+CLI.
+
+## Product Purpose
+
 Git Stacks is an open-source, local-first desktop alternative to Graphite's
 pull-request management for developers working with Git and GitHub. Its core
 workflow is managing dependent changes as stacked pull requests: organizing
@@ -9,11 +23,19 @@ requiring users to install or learn a new stack-management CLI.
 The desktop app owns that workflow while repositories remain usable with ordinary
 Git tools. Local changes, history, and stashes support the pull-request workflow.
 
+## Operating Context
+
+The product is a local-first Electron desktop application with a React web-rendered
+interface, not a browser or mobile client. The platform value describes its UI
+technology, not its distribution or supported operating systems.
+
 This document describes approved product scope, not verified platform or host
 capabilities. [README.md](README.md#current-runtime) documents the runtime that
 reads GitHub through the required GitHub CLI.
 
-## Core workflows
+## Capabilities and Constraints
+
+### Core workflows
 
 - **Open a repository:** add an existing local repository, drop a folder, or search
   accessible GitHub repositories and clone one. Adding a repository is read-only;
@@ -40,7 +62,7 @@ Detailed behavior and limitations remain in the [README](README.md), including
 [onboarding](README.md#onboarding), [stack synchronization](README.md#stack-synchronization-and-recovery),
 [stack surgery](README.md#stack-surgery), and the [review workspace](README.md#review-workspace).
 
-## Product constraints and boundaries
+### Product constraints and boundaries
 
 - Repositories remain ordinary Git repositories, interoperable with terminals,
   editors, and other Git clients. Opening one is not a conversion step, and the
@@ -78,7 +100,7 @@ Detailed behavior and limitations remain in the [README](README.md), including
   [Platform support](README.md#platform-support) for the update matrix and
   [Packaged desktop smoke](README.md#packaged-desktop-smoke) for verification limits.
 
-## Future provider direction
+### Future provider direction
 
 GitLab may use the same authentication model through `glab`, but is not supported
 or part of the GitHub cutover. Reuse the typed main-process boundary without a
