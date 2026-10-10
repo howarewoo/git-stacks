@@ -50,7 +50,6 @@ body {
   flex-shrink: 0;
   gap: var(--gs-semantic-space-2);
   padding-bottom: var(--gs-semantic-space-4);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
 
 .design-nav [data-slot="sidebar-header"] > h1 {
@@ -149,7 +148,6 @@ body {
 .catalog-introduction details {
   margin-top: var(--gs-semantic-space-5);
   padding-top: var(--gs-semantic-space-4);
-  border-top: 1px solid var(--gs-semantic-border-decorative);
 }
 
 .catalog-introduction details p,
@@ -180,7 +178,6 @@ body {
   padding-top: var(--gs-semantic-space-6);
   padding-bottom: var(--gs-semantic-space-8);
   min-width: 0;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
 
 .design-entry-heading {
@@ -315,7 +312,6 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: var(--gs-semantic-space-4);
   padding: var(--gs-semantic-space-4) 0;
-  border-block: 1px solid var(--gs-semantic-border-decorative);
   font-size: var(--gs-semantic-type-metadata-size);
   line-height: var(--gs-semantic-type-metadata-line);
 }
@@ -334,22 +330,39 @@ body {
   overflow-wrap: anywhere;
 }
 
+.git-compositions {
+  display: grid;
+  gap: var(--gs-semantic-space-3);
+}
+
+.git-compositions > h2,
+.git-compositions > p {
+  margin: 0;
+}
+
+.git-compositions > h3 {
+  margin: var(--gs-semantic-space-3) 0 0;
+}
+
+.git-compositions > button {
+  justify-self: start;
+}
+
 .git-graph {
   display: grid;
   gap: var(--gs-semantic-space-3);
 }
 
 .git-row {
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-item);
   padding: var(--gs-semantic-space-3);
+  background: var(--gs-semantic-surface-inset);
   display: grid;
   gap: var(--gs-semantic-space-2);
 }
 
 .git-row[data-inspected="true"] {
   background: var(--gs-semantic-selection-background);
-  border-color: var(--gs-semantic-selection-border);
 }
 
 .diff-preview {
@@ -428,7 +441,6 @@ body {
   }
 
   .design-nav [data-slot="sidebar-header"] {
-    border-bottom: 0;
     padding-bottom: 0;
   }
 
@@ -472,4 +484,15 @@ body {
   .design-specimen {
     padding: var(--gs-semantic-space-4);
   }
+}
+
+.design-card-composition {
+  display: grid;
+  gap: var(--gs-semantic-space-3);
+  padding-bottom: var(--gs-semantic-space-1);
+}
+
+.design-secondary-card {
+  margin-inline-start: var(--gs-semantic-space-4);
+  transform: translateY(var(--gs-semantic-space-1));
 }

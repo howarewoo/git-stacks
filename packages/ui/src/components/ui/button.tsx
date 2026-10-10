@@ -12,7 +12,7 @@ const buttonVariants = cva(
         default:
           'bg-[var(--gs-component-button-primary-background)] text-[var(--gs-component-button-primary-foreground)] hover:bg-[var(--gs-component-button-primary-hover)] active:bg-[var(--gs-component-button-primary-pressed)]',
         secondary:
-          'border border-[var(--gs-component-button-secondary-border)] bg-[var(--gs-component-button-secondary-background)] text-[var(--gs-component-button-secondary-foreground)] hover:bg-[var(--gs-semantic-action-secondary-hover)] active:bg-[var(--gs-semantic-surface-hover)]',
+          'bg-[var(--gs-component-button-secondary-background)] text-[var(--gs-component-button-secondary-foreground)] hover:bg-[var(--gs-semantic-action-secondary-hover)] active:bg-[var(--gs-semantic-surface-hover)]',
         outline:
           'border border-[var(--gs-component-button-secondary-border)] bg-[var(--gs-component-button-secondary-background)] text-[var(--gs-component-button-secondary-foreground)] hover:bg-[var(--gs-semantic-action-secondary-hover)] active:bg-[var(--gs-semantic-surface-hover)]',
         ghost:
@@ -20,11 +20,11 @@ const buttonVariants = cva(
         subtle:
           'bg-[var(--gs-semantic-surface-inset)] text-[var(--gs-semantic-text-secondary)] hover:bg-[var(--gs-semantic-surface-hover)] hover:text-[var(--gs-semantic-text-primary)]',
         accent:
-          'bg-[var(--gs-semantic-selection-text)] text-[var(--gs-semantic-text-inverse)] hover:bg-[var(--gs-semantic-selection-border)]',
+          'bg-[var(--gs-semantic-selection-background)] text-[var(--gs-semantic-selection-text)] hover:bg-[var(--gs-semantic-feedback-info-surface)] active:bg-[var(--gs-semantic-selection-background)]',
         danger:
-          'border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
+          'bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
         destructive:
-          'border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
+          'bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
         link: 'h-auto rounded-none p-0 text-[var(--gs-component-button-link)] underline decoration-[var(--gs-semantic-selection-border)] underline-offset-4 hover:decoration-[var(--gs-component-button-link)]',
         unstyled: '',
       },
@@ -33,9 +33,9 @@ const buttonVariants = cva(
         sm: 'min-h-[var(--gs-semantic-density-control-compact)] px-3',
         default: 'min-h-[var(--gs-semantic-density-control-standard)] px-4',
         lg: 'min-h-[var(--gs-semantic-density-control-standard)] px-5',
-        icon: 'size-11',
-        'icon-sm': 'size-9',
-        'icon-xs': 'size-7',
+        icon: 'size-11 rounded-full',
+        'icon-sm': 'size-11 rounded-full',
+        'icon-xs': 'size-11 rounded-full',
       },
     },
     defaultVariants: {
@@ -83,7 +83,12 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
             isDisabled ? (
               <span
                 role="group"
-                className="inline-flex shrink-0 scroll-m-1 rounded-[var(--gs-semantic-radius-control)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]"
+                className={cn(
+                  'inline-flex shrink-0 scroll-m-1 outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]',
+                  size?.startsWith('icon')
+                    ? 'rounded-full'
+                    : 'rounded-[var(--gs-semantic-radius-control)]',
+                )}
                 tabIndex={0}
                 aria-label={typeof hint === 'string' ? hint : props['aria-label']}
               >

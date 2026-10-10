@@ -41,7 +41,7 @@ export const UPSTREAM_RECONCILIATION = {
     'Existing desktop Button, Badge, Checkbox, Dialog, Dropdown Menu, Field, Hover Card, Input, Radio Group, Select, Textarea and Tooltip APIs are preserved, not replaced by generated defaults.',
     'Command uses cmdk; Calendar uses DayPicker; Chart uses Recharts; Carousel uses Embla; Resizable uses react-resizable-panels; Input OTP uses input-otp; conversation recipes use @shadcn/react where their upstream implementation requires it.',
     'Data Table adapts the TanStack recipe to installed v9 with string-record columns, sorting and pagination. Date Picker exposes an owned single-date convenience API. Direction is exported as Direction with an explicit direction prop.',
-    'Typography adds canonical compact heading/body/label/metadata/code roles beside upstream content styles. Recipe colors, radii, focus and motion use the canonical Quiet Workbench foundations.',
+    'Typography adds canonical compact heading/body/label/metadata/code roles beside upstream content styles. Recipes use a soft rounded card system with solid neutral surfaces, ink primary actions, pastel microaccents, circular icon controls, and explicit spacing. Whitespace and tonal contrast separate groups; structural outlines are absent. Sparse diffuse shadows and secondary-card offsets support purposeful layers without changing operational workflows.',
     'Examples are catalog-only local simulations, not desktop product features or Git/GitHub transports.',
   ],
 } as const
@@ -144,7 +144,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'SidebarProvider, Sidebar, SidebarHeader, SidebarContent, SidebarGroup, SidebarMenu, SidebarFooter',
     keyboard:
       'Tab visits links and SidebarTrigger; Ctrl/⌘ B toggles collapse. Narrow viewports use a focus-managed Sheet.',
-    tokens: ['semantic.surface.content', 'semantic.border.decorative', 'semantic.radius.item'],
+    tokens: ['semantic.surface.content', 'semantic.surface.inset', 'semantic.radius.item'],
     importExample:
       "import { Sidebar, SidebarContent, SidebarMenu } from '@git-stacks/ui/components/sidebar'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/sidebar',
@@ -478,7 +478,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'Structured content container with header, title, description, content, and footer sections.',
     anatomy: 'Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter',
     keyboard: 'Presents grouped information; children receive keyboard focus in logical order.',
-    tokens: ['semantic.surface.content', 'semantic.border.decorative', 'semantic.radius.item'],
+    tokens: ['semantic.surface.content', 'semantic.elevation.small', 'semantic.radius.workbench'],
     importExample:
       "import { Card, CardHeader, CardTitle, CardContent } from '@git-stacks/ui/components/card'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/card',

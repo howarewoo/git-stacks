@@ -53,7 +53,6 @@ pre {
   flex: 0 0 44px;
   align-items: center;
   gap: 10px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-canvas);
   padding: 0 14px 0 0;
   -webkit-app-region: drag;
@@ -148,7 +147,6 @@ pre {
   flex: 0 0 auto;
   align-items: center;
   gap: var(--gs-semantic-space-2);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-content);
   padding: var(--gs-semantic-space-2) var(--gs-semantic-space-4);
 }
@@ -166,21 +164,9 @@ pre {
   gap: 8px;
 }
 
-.toolbar-actions button,
-.toolbar-control {
-  border-radius: var(--gs-semantic-radius-control);
-}
-
 .toolbar-control-slot {
   display: inline-flex;
   align-items: center;
-}
-
-.toolbar-divider {
-  width: 1px;
-  height: 22px;
-  margin: 0 3px;
-  background: var(--gs-semantic-border-decorative);
 }
 
 .toolbar-search {
@@ -252,7 +238,6 @@ pre {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-workbench);
   background: var(--gs-semantic-surface-content);
 }
@@ -262,7 +247,6 @@ pre {
   min-height: 72px;
   align-items: center;
   gap: var(--gs-semantic-space-2);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-4);
 }
@@ -274,7 +258,6 @@ pre {
   flex: 0 0 32px;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--gs-semantic-selection-border);
   border-radius: 10px;
   background: var(--gs-semantic-selection-background);
   color: var(--gs-semantic-selection-text);
@@ -285,7 +268,7 @@ pre {
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gs-semantic-space-1);
 }
 
 .repo-name,
@@ -330,12 +313,11 @@ pre {
 }
 
 .workspace-nav {
-  gap: 0;
+  gap: var(--gs-semantic-space-3);
 }
 
-.nav-section-bordered {
+.nav-section-separated {
   margin-top: 12px;
-  border-top: 1px solid var(--gs-semantic-border-decorative);
   padding-top: 12px;
 }
 
@@ -492,7 +474,7 @@ pre {
 .recent-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gs-semantic-space-1);
 }
 
 .recent-item,
@@ -574,7 +556,6 @@ pre {
   flex-direction: column;
   align-items: stretch;
   gap: var(--gs-semantic-space-1);
-  border-top: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-2) var(--gs-semantic-space-4);
   color: var(--gs-semantic-text-secondary);
@@ -647,7 +628,6 @@ pre {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-workbench);
   background: var(--gs-semantic-surface-content);
 }
@@ -676,7 +656,7 @@ pre {
   flex-wrap: wrap;
   justify-content: space-between;
   gap: var(--gs-semantic-space-3);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
 }
 
@@ -745,9 +725,7 @@ pre {
   padding: var(--gs-semantic-space-3) var(--gs-semantic-space-3) var(--gs-semantic-space-3)
     calc(8px + var(--branch-depth) * 32px);
   text-align: left;
-  transition:
-    background var(--gs-semantic-motion-fast) var(--gs-semantic-motion-ease),
-    border-color var(--gs-semantic-motion-fast) var(--gs-semantic-motion-ease);
+  transition: background var(--gs-semantic-motion-fast) var(--gs-semantic-motion-ease);
 }
 
 /* The tree row is the focusable widget: one tab stop, one visible focus ring. */
@@ -789,7 +767,6 @@ pre {
 }
 
 .branch-row-selected {
-  border-color: var(--accent-line);
   background: var(--accent-wash);
 }
 
@@ -989,7 +966,6 @@ pre {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-workbench);
   background: var(--gs-semantic-surface-content);
 }
@@ -1020,7 +996,6 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: var(--gs-semantic-space-3);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-4) var(--gs-semantic-space-5);
 }
@@ -1061,7 +1036,6 @@ pre {
   display: flex;
   flex-direction: column;
   gap: var(--gs-semantic-space-3);
-  border-top: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-4) 0;
 }
 
@@ -1099,7 +1073,6 @@ pre {
 }
 
 .restack-notice {
-  border: 1px solid var(--warning-line);
   border-radius: var(--gs-semantic-radius-control);
   background: var(--warning-wash);
   color: var(--warning);
@@ -1121,11 +1094,15 @@ pre {
 .sync-stat-grid > div {
   display: grid;
   grid-template-columns: 16px 1fr;
-  gap: 0 5px;
-  border: 1px solid var(--line);
+  gap: var(--gs-semantic-space-1) var(--gs-semantic-space-2);
   border-radius: var(--gs-semantic-radius-control);
-  background: var(--surface);
+  background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-3);
+  box-shadow: var(--gs-semantic-elevation-small);
+}
+
+.sync-stat-grid > div:last-child {
+  transform: translateY(var(--gs-semantic-space-1));
 }
 
 .sync-stat-grid svg {
@@ -1281,7 +1258,6 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: var(--gs-semantic-space-2) var(--gs-semantic-space-3);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-3) 0;
 }
 
@@ -1329,7 +1305,6 @@ pre {
   align-items: flex-start;
   justify-content: center;
   overflow-y: auto;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-workbench);
   background: var(--gs-semantic-surface-content);
   padding: var(--gs-semantic-space-8);
@@ -1350,7 +1325,6 @@ pre {
   height: 56px;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--accent-line);
   border-radius: 15px;
   background: var(--accent-wash);
   color: var(--accent-strong);
@@ -1377,7 +1351,6 @@ pre {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  border: 1px solid var(--warning-line);
   border-radius: 7px;
   background: var(--warning-wash);
   color: var(--warning);
@@ -1400,7 +1373,6 @@ pre {
 .onboarding-recents {
   width: 100%;
   margin-top: var(--gs-semantic-space-6);
-  border-top: 1px solid var(--line);
   padding-top: 16px;
   text-align: left;
 }
@@ -1426,11 +1398,10 @@ pre {
 
 .onboarding-recent {
   width: 100%;
-  border: 1px solid transparent;
 }
 
 .onboarding-recent:hover {
-  border-color: var(--line);
+  background: var(--gs-semantic-surface-hover);
 }
 
 /* Onboarding: the actions that start a repository, and the facts about this
@@ -1490,21 +1461,17 @@ pre {
   gap: var(--gs-semantic-space-1);
   width: 100%;
   padding: var(--gs-semantic-space-3);
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-item);
-  background: var(--gs-semantic-surface-content);
+  background: var(--gs-semantic-surface-inset);
   text-align: left;
-  transition:
-    background 150ms ease,
-    border-color 150ms ease;
+  transition: background 150ms ease;
 }
 
 .onboarding-result:hover {
-  border-color: var(--gs-semantic-border-essential);
+  background: var(--gs-semantic-surface-hover);
 }
 
 .onboarding-result[aria-pressed="true"] {
-  border-color: var(--gs-semantic-selection-border);
   background: var(--gs-semantic-selection-background);
 }
 
@@ -1528,7 +1495,6 @@ pre {
   display: grid;
   gap: 12px;
   min-width: 0;
-  border-top: 1px solid var(--gs-semantic-border-decorative);
   padding-top: 12px;
 }
 
@@ -1623,7 +1589,6 @@ pre {
   z-index: 10;
   max-width: 340px;
   padding: 8px 10px;
-  box-shadow: 0 5px 18px rgba(35, 42, 55, 0.1);
 }
 
 .browser-disclaimer svg {
@@ -1654,9 +1619,8 @@ pre {
 .change-section {
   min-width: 0;
   align-self: start;
-  border: 1px solid var(--gs-semantic-border-essential);
   border-radius: var(--gs-semantic-radius-item);
-  background: var(--gs-semantic-surface-content);
+  background: var(--gs-semantic-surface-inset);
   overflow: hidden;
 }
 
@@ -1664,7 +1628,6 @@ pre {
   display: flex;
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-3);
 }
@@ -1703,12 +1666,7 @@ pre {
   min-height: var(--gs-semantic-density-row-compact);
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   padding: 6px 12px;
-}
-
-.file-row:last-child {
-  border-bottom: 0;
 }
 
 .file-row:hover {
@@ -1807,7 +1765,6 @@ pre {
 
 .commit-panel {
   flex: 0 0 auto;
-  border-top: 1px solid var(--gs-semantic-border-essential);
   background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-4) var(--gs-semantic-space-5);
 }
@@ -1848,7 +1805,7 @@ pre {
   flex: 1;
   min-height: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gs-semantic-space-1);
   overflow-y: auto;
   padding: 12px 16px 16px;
 }
@@ -1888,7 +1845,7 @@ pre {
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gs-semantic-space-1);
 }
 
 .pr-copy strong {
@@ -1915,7 +1872,7 @@ pre {
   flex: 0 0 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 4px;
+  gap: var(--gs-semantic-space-2);
 }
 
 .pr-row > svg {
@@ -1944,7 +1901,6 @@ pre {
   flex-direction: column;
   gap: 2px;
   overflow: auto;
-  border-inline-end: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-inset);
   padding: 12px 8px;
 }
@@ -2023,7 +1979,6 @@ pre {
   flex-wrap: wrap;
   align-items: end;
   gap: 12px;
-  border-block-end: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-4) var(--gs-semantic-space-5);
 }
 
@@ -2084,8 +2039,9 @@ pre {
 .pr-inbox-criteria fieldset {
   min-width: 0;
   margin: 0;
-  border: 1px solid var(--gs-semantic-border-essential);
+  border: 0;
   border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-inset);
   padding: 8px;
 }
 
@@ -2185,8 +2141,6 @@ pre {
     align-items: center;
     max-height: 120px;
     gap: var(--gs-semantic-space-2);
-    border-inline-end: 0;
-    border-block-end: 1px solid var(--gs-semantic-border-decorative);
   }
 
   .pr-inbox-rail .pr-inbox-rail-heading {
@@ -2273,15 +2227,14 @@ pre {
 .capability-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
+  gap: var(--gs-semantic-space-3);
   margin-bottom: var(--gs-semantic-space-4);
 }
 
 .capability-fact {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  border: 1px solid var(--gs-semantic-border-decorative);
+  gap: var(--gs-semantic-space-2);
   border-radius: var(--gs-semantic-radius-control);
   background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-3);
@@ -2311,7 +2264,6 @@ pre {
   min-width: 0;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-3) 0;
 }
 
@@ -2335,7 +2287,7 @@ pre {
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gs-semantic-space-1);
 }
 
 .capability-copy strong {
@@ -2374,7 +2326,6 @@ pre {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-3) 0;
 }
 
@@ -2538,7 +2489,6 @@ pre {
   margin-top: 1px;
 }
 .workflow-blockers {
-  border: 1px solid var(--danger-line);
   border-radius: 7px;
   background: var(--danger-wash);
   padding: var(--gs-semantic-space-3);
@@ -2582,7 +2532,6 @@ pre {
 }
 .pr-lifecycle {
   margin-top: 12px;
-  border-top: 1px solid var(--line);
   padding-top: 12px;
 }
 .pr-lifecycle > .workflow-row {
@@ -2603,10 +2552,6 @@ pre {
   align-items: flex-start;
   gap: var(--gs-semantic-space-3);
   padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-}
-.stack-preview-list li:last-child {
-  border-bottom: 0;
 }
 .stack-preview-list li > svg {
   flex: 0 0 auto;
@@ -2643,7 +2588,6 @@ pre {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-  border-bottom: 1px solid var(--gs-semantic-border-essential);
   background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
 }
@@ -2679,7 +2623,6 @@ pre {
   min-width: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  border-top: 1px solid var(--gs-semantic-border-essential);
   background: var(--gs-semantic-surface-content);
 }
 
@@ -2689,7 +2632,7 @@ pre {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--gs-semantic-space-3);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
   padding: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
 }
 
@@ -2698,7 +2641,7 @@ pre {
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--gs-semantic-space-2);
 }
 
 .inspector-title strong {
@@ -2738,7 +2681,6 @@ pre {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-  border-top: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
 }
 
@@ -2788,7 +2730,6 @@ pre {
   max-height: 380px;
   min-width: 0;
   margin: 0;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-control);
   background: var(--gs-semantic-surface-inset);
   padding: 12px 14px;
@@ -2855,9 +2796,8 @@ pre {
   min-width: 0;
   flex-direction: column;
   gap: 6px;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-control);
-  background: var(--gs-semantic-surface-content);
+  background: var(--gs-semantic-surface-inset);
   padding: 8px;
 }
 
@@ -3007,7 +2947,6 @@ textarea.conflict-content {
   display: grid;
   min-width: 0;
   gap: 8px;
-  border: 1px solid var(--gs-semantic-border-essential);
   border-radius: var(--gs-semantic-radius-item);
   background: var(--gs-semantic-surface-inset);
   padding: 12px;
@@ -3038,7 +2977,6 @@ textarea.conflict-content {
   display: grid;
   margin: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
   gap: var(--gs-semantic-space-3);
-  border: 1px solid var(--gs-semantic-border-essential);
   border-radius: var(--gs-semantic-radius-item);
   background: var(--gs-semantic-surface-inset);
   padding: 12px;
@@ -3088,7 +3026,6 @@ textarea.conflict-content {
 }
 
 .history-row-selected {
-  border-color: var(--gs-component-row-selected-border);
   background: var(--gs-component-row-selected-background);
 }
 
@@ -3155,7 +3092,7 @@ textarea.conflict-content {
   flex: 1;
   flex-direction: column;
   overflow: hidden;
-  border-top: 1px solid var(--gs-semantic-border-essential);
+  background: var(--gs-semantic-surface-inset);
 }
 
 .commit-inspector .code-region {
@@ -3196,7 +3133,6 @@ textarea.conflict-content {
   min-width: 0;
   align-items: center;
   gap: 10px;
-  border: 1px solid var(--gs-semantic-selection-border);
   border-radius: var(--gs-semantic-radius-item);
   background: var(--gs-semantic-selection-background);
   color: var(--gs-semantic-text-primary);
@@ -3508,7 +3444,6 @@ textarea.conflict-content {
   flex-direction: column;
   gap: 6px;
   padding: var(--gs-semantic-space-4) var(--gs-semantic-space-5) var(--gs-semantic-space-3);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
 
 .review-headline-title {
@@ -3578,7 +3513,6 @@ textarea.conflict-content {
   align-items: center;
   gap: 8px;
   padding: var(--gs-semantic-space-2) var(--gs-semantic-space-5);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-inset);
 }
 
@@ -3635,7 +3569,6 @@ textarea.conflict-content {
 }
 
 .review-stack-members li {
-  border-inline-start: 1px solid var(--gs-semantic-border-essential);
   padding-inline-start: 8px;
 }
 
@@ -3692,7 +3625,6 @@ textarea.conflict-content {
   align-items: center;
   gap: 8px 12px;
   padding: var(--gs-semantic-space-2) var(--gs-semantic-space-5);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-content);
 }
 
@@ -3746,7 +3678,7 @@ textarea.conflict-content {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
 }
 
 .review-context [hidden],
@@ -3868,7 +3800,7 @@ textarea.conflict-content {
   flex-direction: column;
   gap: var(--gs-semantic-space-3);
   padding: 10px 12px;
-  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
   overflow: auto;
 }
 
@@ -3907,7 +3839,6 @@ textarea.conflict-content {
   align-items: center;
   gap: 8px;
   padding: 8px;
-  border: 1px solid var(--gs-semantic-accent-border);
   border-radius: var(--gs-semantic-radius-control);
   background: var(--gs-semantic-accent-subtle);
 }
@@ -3988,13 +3919,11 @@ textarea.conflict-content {
   flex-direction: column;
   gap: var(--gs-semantic-space-2);
   padding: var(--gs-semantic-space-3);
-  border: 1px dashed var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-control);
   background: var(--gs-semantic-surface-inset);
 }
 
 .review-draft-selected {
-  border-color: var(--gs-semantic-accent-border);
   background: var(--gs-semantic-accent-subtle);
 }
 
@@ -4011,7 +3940,6 @@ textarea.conflict-content {
   flex-direction: column;
   gap: var(--gs-semantic-space-2);
   padding: var(--gs-semantic-space-3) 0;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
 
 .review-thread-resolved {
@@ -4067,7 +3995,6 @@ textarea.conflict-content {
   flex-direction: column;
   gap: 8px;
   padding: var(--gs-semantic-space-4) 0 0;
-  border-top: 1px solid var(--gs-semantic-border-decorative);
 }
 
 .review-submit-summary {
@@ -4091,7 +4018,7 @@ textarea.conflict-content {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  border-inline-end: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
 }
 
 .review-tree-header {
@@ -4100,7 +4027,6 @@ textarea.conflict-content {
   flex-direction: column;
   gap: 8px;
   padding: 12px 12px 10px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
 
 .review-tree-header > strong {
@@ -4148,7 +4074,6 @@ textarea.conflict-content {
 
 .review-tree-row-selected,
 .review-tree-row-selected:hover {
-  border-color: var(--gs-semantic-border-focus);
   background: var(--gs-semantic-selection-background);
   color: var(--gs-semantic-text-primary);
 }
@@ -4214,7 +4139,7 @@ textarea.conflict-content {
   justify-content: space-between;
   gap: 8px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
 }
 
 .review-diff-position {
@@ -4272,7 +4197,6 @@ textarea.conflict-content {
   flex-direction: column;
   overflow: auto;
   padding-bottom: 4px;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-control);
   background: var(--gs-semantic-surface-inset);
   font-family: var(--gs-semantic-font-mono);
@@ -4331,7 +4255,7 @@ textarea.conflict-content {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  border-inline-start: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-inset);
 }
 
 .review-commit-list {
@@ -4628,14 +4552,12 @@ textarea.conflict-content {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border: 1px solid var(--gs-semantic-border-decorative);
   border-radius: var(--gs-semantic-radius-item);
-  background: var(--gs-semantic-surface-content);
+  background: var(--gs-semantic-surface-inset);
   overflow: hidden;
 }
 .graph-work-area header {
   padding: var(--gs-semantic-space-3);
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
 .graph-work-area h2 {
   display: flex;
@@ -4647,7 +4569,6 @@ textarea.conflict-content {
 }
 .graph-work-area footer {
   padding: var(--gs-semantic-space-2) var(--gs-semantic-space-3);
-  border-top: 1px solid var(--gs-semantic-border-decorative);
 }
 .graph-outline-scroll {
   overflow: auto;
@@ -4658,7 +4579,6 @@ textarea.conflict-content {
 .graph-outline-row {
   left: 0;
   right: 0;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-2);
 }
 .graph-outline-row > button:first-child {
@@ -4706,7 +4626,6 @@ textarea.conflict-content {
 .graph-camera {
   padding: var(--gs-semantic-space-2);
   justify-content: flex-start;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   font-variant-numeric: tabular-nums;
   font-size: var(--gs-semantic-type-metadata-size);
 }
@@ -4791,7 +4710,6 @@ textarea.conflict-content {
 }
 .graph-paths {
   padding: 0 var(--gs-semantic-space-3);
-  border-top: 1px solid var(--gs-semantic-border-decorative);
   max-height: 280px;
   overflow: auto;
 }
@@ -4802,7 +4720,6 @@ textarea.conflict-content {
 .graph-paths li {
   display: flex;
   flex-direction: column;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
   padding: var(--gs-semantic-space-1) 0;
 }
 .graph-paths li button {
@@ -4843,7 +4760,6 @@ textarea.conflict-content {
   flex-direction: column;
   gap: var(--gs-semantic-space-1);
   padding: var(--gs-semantic-space-2) 0;
-  border-bottom: 1px solid var(--gs-semantic-border-decorative);
 }
 .graph-local-actions {
   display: flex;

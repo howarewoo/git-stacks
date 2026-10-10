@@ -31,7 +31,7 @@
   --color-popover: var(--gs-semantic-surface-content);
   --color-popover-foreground: var(--gs-semantic-text-primary);
   --color-primary: var(--gs-semantic-action-primary);
-  --color-primary-foreground: var(--gs-semantic-text-inverse);
+  --color-primary-foreground: var(--gs-semantic-action-primary-foreground);
   --color-secondary: var(--gs-semantic-surface-inset);
   --color-secondary-foreground: var(--gs-semantic-text-secondary);
   --color-muted: var(--gs-semantic-surface-inset);
@@ -46,7 +46,7 @@
   --color-sidebar: var(--gs-semantic-surface-content);
   --color-sidebar-foreground: var(--gs-semantic-text-primary);
   --color-sidebar-primary: var(--gs-semantic-action-primary);
-  --color-sidebar-primary-foreground: var(--gs-semantic-text-inverse);
+  --color-sidebar-primary-foreground: var(--gs-semantic-action-primary-foreground);
   --color-sidebar-accent: var(--gs-semantic-selection-background);
   --color-sidebar-accent-foreground: var(--gs-semantic-selection-text);
   --color-sidebar-border: var(--gs-semantic-border-decorative);
@@ -56,6 +56,10 @@
   --radius-md: var(--gs-semantic-radius-control);
   --radius-lg: var(--gs-semantic-radius-item);
   --radius-xl: var(--gs-semantic-radius-workbench);
+  --shadow-sm: var(--gs-semantic-elevation-small);
+  --shadow-md: var(--gs-semantic-elevation-medium);
+  --shadow-lg: var(--gs-semantic-elevation-large);
+  --shadow-xl: var(--gs-semantic-elevation-large);
 }
 
 :root {
@@ -158,11 +162,9 @@ textarea,
 @keyframes dialog-in {
   from {
     opacity: 0;
-    scale: 0.98;
   }
   to {
     opacity: 1;
-    scale: 1;
   }
 }
 

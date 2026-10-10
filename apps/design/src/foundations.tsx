@@ -173,7 +173,7 @@ export function GitCompositions() {
   const [reply, setReply] = useState('')
   const [comments, setComments] = useState<string[]>([])
   return (
-    <section id="git-compositions" className="design-entry" tabIndex={-1}>
+    <section id="git-compositions" className="design-entry git-compositions" tabIndex={-1}>
       <h2>Git compositions</h2>
       <p>
         Deterministic local simulations. No Git, GitHub, repository access, or desktop bridge. PR
@@ -194,7 +194,7 @@ export function GitCompositions() {
               marginInlineStart: branch.parent === null ? 0 : branch.parent === 41 ? 20 : 40,
             }}
           >
-            <div>
+            <div className="design-specimen-row">
               <span>
                 {branch.parent ? `PR #${branch.parent} → ` : 'main → '}PR #{branch.id}
               </span>
@@ -283,7 +283,7 @@ export function GitCompositions() {
         Capture local deletion preview
       </UI.Button>
       {captured && (
-        <div>
+        <div className="grid gap-3">
           <pre className="design-code">
             {
               'git branch -d fix/focus-return\ngit branch -d fix/long-ref-name-with-many-segments-and-a-very-long-description\n// Captured display only'

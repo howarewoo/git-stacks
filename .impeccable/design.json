@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-09-24T00:00:00Z",
+  "generatedAt": "2026-10-10T00:00:00Z",
   "title": "Design System: Git Stacks",
   "extensions": {
     "colorMeta": {
@@ -75,7 +75,7 @@
         ]
       },
       "ink-hover": {
-        "role": "primary",
+        "role": "neutral",
         "displayName": "Workbench Ink Hover",
         "tonalRamp": [
           "oklch(15% 0.0264 257.5)",
@@ -89,7 +89,7 @@
         ]
       },
       "ink-pressed": {
-        "role": "primary",
+        "role": "neutral",
         "displayName": "Workbench Ink Pressed",
         "tonalRamp": [
           "oklch(15% 0.0137 258.4)",
@@ -159,7 +159,7 @@
         ]
       },
       "selection-strong": {
-        "role": "primary",
+        "role": "accent",
         "displayName": "Repository Blue",
         "tonalRamp": [
           "oklch(15% 0.0847 263.9)",
@@ -419,17 +419,17 @@
       {
         "name": "small",
         "value": "var(--gs-semantic-elevation-small)",
-        "purpose": "Low-elevation detail."
+        "purpose": "Sparing broad diffuse low-opacity depth for complete cards and secondary synchronization facts."
       },
       {
         "name": "medium",
         "value": "var(--gs-semantic-elevation-medium)",
-        "purpose": "Floating cards, hover cards, and tooltips."
+        "purpose": "Broad diffuse low-opacity depth for floating menus, hover cards, and tooltips."
       },
       {
         "name": "large",
         "value": "var(--gs-semantic-elevation-large)",
-        "purpose": "Dialog surfaces and other high-elevation overlays."
+        "purpose": "Diffuse low-opacity dialog layering."
       }
     ],
     "motion": [
@@ -477,15 +477,15 @@
       "refersTo": "button-primary",
       "description": "Primary action for a decisive local workbench operation.",
       "html": "<button class=\"ds-btn-primary\" type=\"button\">Create branch</button>",
-      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: var(--gs-component-button-primary-background); color: var(--gs-component-button-primary-foreground); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-primary:hover { background: var(--gs-component-button-primary-hover); } .ds-btn-primary:active { background: var(--gs-component-button-primary-pressed); } .ds-btn-primary:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px; border: 0; border-radius: var(--gs-semantic-radius-control); background: var(--gs-component-button-primary-background); color: var(--gs-component-button-primary-foreground); font: 500 13px/1.35 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-primary:hover { background: var(--gs-component-button-primary-hover); } .ds-btn-primary:active { background: var(--gs-component-button-primary-pressed); } .ds-btn-primary:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Secondary Button",
       "kind": "button",
       "refersTo": "button-secondary",
-      "description": "Secondary action with an essential boundary and quiet hover.",
+      "description": "Neutral secondary action distinguished by solid inset tone, without a default outline.",
       "html": "<button class=\"ds-btn-secondary\" type=\"button\">Cancel</button>",
-      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid var(--gs-component-button-secondary-border); border-radius: 6px; background: var(--gs-component-button-secondary-background); color: var(--gs-component-button-secondary-foreground); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-secondary:hover { background: var(--gs-component-button-secondary-hover); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
+      "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: var(--gs-semantic-radius-control); background: var(--gs-component-button-secondary-background); color: var(--gs-component-button-secondary-foreground); font: 500 13px/1.35 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-secondary:hover { background: var(--gs-component-button-secondary-hover); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Ghost Button",
@@ -493,15 +493,15 @@
       "refersTo": "button-ghost",
       "description": "Low-emphasis action that reveals an inset hover surface.",
       "html": "<button class=\"ds-btn-ghost\" type=\"button\">View details</button>",
-      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--gs-semantic-text-secondary); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1), color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-ghost:hover { background: var(--gs-semantic-surface-inset); color: var(--gs-semantic-text-primary); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: var(--gs-semantic-radius-control); background: transparent; color: var(--gs-semantic-text-secondary); font: 500 13px/1.35 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1), color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-ghost:hover { background: var(--gs-semantic-surface-inset); color: var(--gs-semantic-text-primary); } .ds-btn-ghost:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Accent Button",
       "kind": "button",
       "refersTo": "button-accent",
-      "description": "Repository Blue action for a selected or navigational context.",
+      "description": "Pastel microaccent for a selected or navigational context, not a saturated primary block.",
       "html": "<button class=\"ds-btn-accent\" type=\"button\">Open selection</button>",
-      "css": ".ds-btn-accent { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: var(--gs-semantic-selection-text); color: var(--gs-semantic-text-inverse); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-accent:hover { background: var(--gs-semantic-selection-border); } .ds-btn-accent:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
+      "css": ".ds-btn-accent { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: var(--gs-semantic-radius-control); background: var(--gs-semantic-selection-background); color: var(--gs-semantic-selection-text); font: 500 13px/1.35 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-accent:hover { background: var(--gs-semantic-feedback-info-surface); } .ds-btn-accent:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Danger Button",
@@ -509,7 +509,7 @@
       "refersTo": "button-danger",
       "description": "Destructive action with a labelled error surface and text.",
       "html": "<button class=\"ds-btn-danger\" type=\"button\">Delete branch</button>",
-      "css": ".ds-btn-danger { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 1px solid var(--gs-semantic-feedback-error-text); border-radius: 6px; background: var(--gs-semantic-feedback-error-surface); color: var(--gs-semantic-feedback-error-text); font: 500 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-danger:hover { background: var(--gs-semantic-feedback-error-surface); } .ds-btn-danger:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
+      "css": ".ds-btn-danger { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 12px; border: 0; border-radius: var(--gs-semantic-radius-control); background: var(--gs-semantic-feedback-error-surface); color: var(--gs-semantic-feedback-error-text); font: 500 13px/1.35 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; transition: background-color 180ms cubic-bezier(0.2, 0, 0, 1); } .ds-btn-danger:hover { background: var(--gs-semantic-feedback-error-surface); } .ds-btn-danger:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Field",
@@ -517,7 +517,7 @@
       "refersTo": "field",
       "description": "Text field for branch names, paths, and other repository values.",
       "html": "<input class=\"ds-field\" type=\"text\" placeholder=\"feature/tokens\" aria-label=\"Branch name\">",
-      "css": ".ds-field { box-sizing: border-box; width: 100%; height: 36px; padding: 8px 12px; border: 1px solid var(--gs-component-field-border); border-radius: 6px; background: var(--gs-component-field-background); color: var(--gs-component-field-text); font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-field::placeholder { color: var(--gs-component-field-placeholder); } .ds-field:hover { border-color: var(--gs-component-field-border); } .ds-field:focus { border-color: var(--gs-component-field-focus-border); outline: 0; box-shadow: 0 0 0 2px var(--gs-component-field-focus-ring); } .ds-field:disabled { cursor: not-allowed; background: var(--gs-component-field-disabled-background); opacity: 0.65; }"
+      "css": ".ds-field { box-sizing: border-box; width: 100%; height: 36px; padding: 8px 12px; border: 1px solid var(--gs-component-field-border); border-radius: var(--gs-semantic-radius-control); background: var(--gs-component-field-background); color: var(--gs-component-field-text); font: 400 13px/1.35 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-field::placeholder { color: var(--gs-component-field-placeholder); } .ds-field:hover { border-color: var(--gs-component-field-border); } .ds-field:focus { border-color: var(--gs-component-field-focus-border); outline: 0; box-shadow: 0 0 0 2px var(--gs-component-field-focus-ring); } .ds-field:disabled { cursor: not-allowed; background: var(--gs-component-field-disabled-background); opacity: 0.65; }"
     },
     {
       "name": "Success Badge",
@@ -525,23 +525,23 @@
       "refersTo": "badge-success",
       "description": "Text-labelled success status for checks and completed states.",
       "html": "<span class=\"ds-badge-success\">Ready</span>",
-      "css": ".ds-badge-success { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--gs-semantic-feedback-success-text); border-radius: 999px; background: var(--gs-component-badge-success-background); color: var(--gs-component-badge-success-text); font: 500 11px/16px Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-badge-success:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
+      "css": ".ds-badge-success { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 0; border-radius: var(--gs-semantic-radius-pill); background: var(--gs-component-badge-success-background); color: var(--gs-component-badge-success-text); font: 500 12px/1.4 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-badge-success:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     },
     {
       "name": "Dialog",
       "kind": "card",
       "refersTo": "dialog-overlay",
       "description": "Elevated confirmation surface above the local-first workbench shell.",
-      "html": "<div class=\"ds-dialog-layer\"><section class=\"ds-dialog\" role=\"dialog\" aria-label=\"Confirm operation\"><h2>Confirm operation</h2><p>Review the captured preview before continuing.</p><button class=\"ds-dialog-close\" type=\"button\" aria-label=\"Close dialog\">\u00d7</button></section></div>",
-      "css": ".ds-dialog-layer { position: relative; min-height: 220px; } .ds-dialog-layer::before { content: \"\"; position: absolute; inset: 0; background: rgba(20, 24, 32, 0.34); } .ds-dialog { position: relative; width: min(100% - 32px, 512px); margin: 32px auto; padding: 20px; border: 1px solid var(--gs-semantic-border-essential); border-radius: 12px; background: var(--gs-semantic-surface-content); color: var(--gs-semantic-text-primary); box-shadow: var(--gs-semantic-elevation-large); } .ds-dialog h2 { margin: 0 32px 8px 0; font: 500 20px/1.25 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog p { margin: 0; color: var(--gs-semantic-text-secondary); font: 400 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog-close { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--gs-semantic-text-secondary); font-size: 20px; } .ds-dialog-close:hover { background: var(--gs-semantic-surface-inset); color: var(--gs-semantic-text-primary); } .ds-dialog-close:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
+      "html": "<div class=\"ds-dialog-layer\"><section class=\"ds-dialog\" role=\"dialog\" aria-label=\"Confirm operation\"><h2>Confirm operation</h2><p>Review the captured preview before continuing.</p><button class=\"ds-dialog-close\" type=\"button\" aria-label=\"Close dialog\">×</button></section></div>",
+      "css": ".ds-dialog-layer { position: relative; min-height: 220px; } .ds-dialog-layer::before { content: \"\"; position: absolute; inset: 0; background: rgba(20, 24, 32, 0.34); } .ds-dialog { position: relative; width: min(100% - 32px, 512px); margin: 32px auto; padding: 20px; border: 0; border-radius: var(--gs-semantic-radius-workbench); background: var(--gs-semantic-surface-content); color: var(--gs-semantic-text-primary); box-shadow: var(--gs-semantic-elevation-large); } .ds-dialog h2 { margin: 0 32px 8px 0; font: 500 20px/1.25 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog p { margin: 0; color: var(--gs-semantic-text-secondary); font: 400 13px/1.35 Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; } .ds-dialog-close { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; border: 0; border-radius: var(--gs-semantic-radius-control); background: transparent; color: var(--gs-semantic-text-secondary); font-size: 20px; } .ds-dialog-close:hover { background: var(--gs-semantic-surface-inset); color: var(--gs-semantic-text-primary); } .ds-dialog-close:focus-visible { outline: 2px solid var(--gs-component-button-focus-ring); outline-offset: 1px; }"
     }
   ],
   "narrative": {
     "northStar": "The Quiet Workbench",
-    "overview": "Git Stacks is a quiet, precise desktop workbench for navigating branches, stacks, pull requests, changes, history, and stashes. The system adapts the cool-gray canvas, rounded white work surfaces, ink-colored primary actions, and restrained blue selection of the Journey CRM Dashboard reference into a local-first Git and GitHub product. Journey is a visual and material reference only: Git Stacks does not introduce CRM stages, analytics cards, or a web client.\n\nThe visual language is intentionally restrained. Workbench Ink makes primary actions and navigation feel decisive; Repository Blue keeps links, selection, focus, checked-out state, and stack edges legible without turning the whole interface into a status field. Rounded surfaces and quiet tonal layers organize dense repository information while preserving the desktop workbench hierarchy.",
+    "overview": "Git Stacks is a quiet, precise desktop workbench with a soft rounded card system for navigating branches, stacks, pull requests, changes, history, and stashes. Clean, uncluttered layouts and generous whitespace establish hierarchy through confident typography, spacing, scale, and alignment. A light cool-gray canvas, white cards, and near-black type form the neutral foundation; the dark theme preserves the same hierarchy with corresponding neutral tones. Pastel microaccents support small indicators, progress, selection, and labelled semantic status, never large saturated decorative fills. Borders and dividers are a last resort, and decorative elements are almost absent. Clarity wins over decoration.\n\nWorkbench Ink anchors primary actions and readable text. Repository Blue supports links, focus, selection, checked-out state, and meaningful graph edges; independent labelled semantic colors communicate Git states. Large rounded cards group complete existing domain objects. Sparing broad, diffuse, low-opacity shadows and small offsets on secondary cards support spatial hierarchy and interactivity without turning operational lists, diffs, forms, or safety dialogs into decoration. No gradients or glass are introduced.",
     "keyCharacteristics": [
       "Cool-gray workspace canvas with white content surfaces and inset grouping surfaces.",
-      "Workbench Ink primary actions and navigation with Repository Blue selection and links.",
+      "Neutral ink primary actions, with pastel microaccents for small meaningful selection, indicators, and labelled status details.",
       "Independent, text-labelled Git states for selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diffs.",
       "Compact information density for branch, pull-request, stash, history, and diff rows.",
       "Local-first, keyboard-accessible, operation-safe behavior with no external font or network dependency."
@@ -554,7 +554,7 @@
       },
       {
         "name": "The Essential Boundary Rule",
-        "body": "semantic.border.decorative is for decorative dividers only. Inputs, controls, and meaningful graphics that need a non-text boundary use semantic.border.essential or semantic.focus.ring.",
+        "body": "Separate UI groups with spacing and solid tonal surface differences first. Borders are a last resort for separation: surfaces, cards, rows, section headers, and status badges do not receive decorative outlines by default. Inputs, editable controls, keyboard focus, meaningful graph/diff lines, and deliberately connected controls retain a visible boundary where discoverability requires it, using semantic.border.essential or semantic.focus.ring. Keep border tokens meaningful; do not hide every border with a global override. Use sparse diffuse card shadows only where they serve layering or interactivity, never gradients or glass.",
         "section": "colors"
       },
       {
@@ -563,26 +563,37 @@
         "section": "typography"
       },
       {
-        "name": "The Flat-By-Default Rule",
-        "body": "Surfaces are flat at rest. Use a shadow only when a component is floating, transient, or deliberately elevated; do not use decorative shadows to imply Git state.",
-        "section": "elevation"
+        "name": "The Purposeful Layering Rule",
+        "body": "Use diffuse depth sparingly to clarify a real card or floating layer. Secondary cards may use a 4px spatial offset with disciplined internal alignment: the catalog inspection/checkout composition and real synchronization facts demonstrate this. Do not rotate operational Git rows, diffs, forms, or safety dialogs, obscure actions, or imply Git state through shadow. Never introduce sharp or dramatic shadows, glass, or decorative gradients.",
+        "section": "depth"
+      },
+      {
+        "name": "The Related Spacing Rule",
+        "body": "Unrelated siblings must not touch. Use 8px between related controls and label/help/error content, 12px between fields and fact groups, and 16–24px between major sections. Shared surface content and card footer actions supply explicit gaps; catalog compositions separate identity/action rows, conversation drafts, and captured-result feedback. Dense metadata may use 4px, but not zero-gap action clusters. Deliberately connected button groups, segments, tables, code cells, and graph joins retain their connected geometry.",
+        "section": "layout"
       }
     ],
     "dos": [
-      "Do use Workbench Ink for primary actions and navigation, with Repository Blue reserved for links, selection, focus, and meaningful identity accents.",
+      "Do use neutral Workbench Ink for primary actions and text, with pastel microaccents and contrast-correct labelled semantic colors for small meaningful states.",
       "Do keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.",
-      "Do use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.",
+      "Do use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the user-retained rounded 12/16/24px geometry with supported 999px pills.",
       "Do use semantic.border.essential for essential boundaries, semantic.focus.ring for keyboard focus, and text/icon descriptions alongside every Git status.",
-      "Do use npm run tokens:generate followed by npm run tokens:check after editing apps/desktop/src/renderer/src/design-system/tokens.json; never hand-edit generated tokens.css.",
-      "Do keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation."
+      "Do define primitive, semantic, and component tokens in packages/ui/src/tokens/tokens.json; treat tokens.css as generated output, never a second manually maintained palette.",
+      "Do keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation.",
+      "Do share production controls, typography and foundations through @git-stacks/ui; catalog specimens demonstrate this implementation rather than defining a second visual policy. Keep larger content typography distinct from compact application roles.",
+      "Do keep essential boundaries at ≥3:1 against their adjacent surface in both themes; the dark essential-border primitive is #657185 so shared editable controls retain this distinction.",
+      "Do keep normal text and placeholders at ≥4.5:1 and large text at ≥3:1; use weights 400/500/600, left-aligned readable copy, and the compact 14px/1.5 body role.",
+      "Do use simple Lucide icons consistently, add labels for ambiguous actions, place feedback near its field, and use progressive disclosure rather than repeated guidance or metadata.",
+      "Do prioritize spacing and solid tonal contrast over borders for grouping; preserve essential editing, focus, and meaningful graphic boundaries instead of applying blanket border suppression."
     ],
     "donts": [
       "Don't globally replace --accent with ink; selection, links, checked-out state, and stack graphics remain Repository Blue, while merged pull requests remain violet.",
       "Don't use color alone for status, lifecycle, review, checks, unknown/unavailable data, or diff meaning.",
       "Don't use decorative semantic.border.decorative dividers as a substitute for essential control boundaries or meaningful graphics.",
       "Don't add external font loading, font files from chat artifacts, a second manually maintained palette, CRM runtime behavior, or new Git/IPC/navigation semantics.",
-      "Don't claim that every existing component consumes all density or radius tokens; migrate each consumer as its owning issue changes it.",
-      "Don't use shadows to imply Git state; reserve depth for floating, transient, or elevated surfaces."
+      "Don't add arbitrary shape overrides, excessive pills, decorative gradients, glass, sharp dramatic shadows, or gratuitous nested boxes. Preserve generous rounded cards and circular icon controls.",
+      "Don't use ornamental scale, bounce, parallax, or excessive motion; purposeful state transitions use 100–250ms and preserve meaning with reduced motion.",
+      "Don't use shadows or card offsets to imply Git state, invent metrics, or obscure operational controls. Purposeful secondary layering must preserve focus, scrolling, and action reachability."
     ]
   }
 }

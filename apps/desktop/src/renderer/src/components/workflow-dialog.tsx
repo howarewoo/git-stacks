@@ -561,7 +561,7 @@ function PrLinkedIssuesSection({
   const linkedNumbers = new Set(links.map((l) => l.number))
 
   return (
-    <div className="workflow-section border-t border-[var(--gs-semantic-border-subtle)] pt-4 mt-4">
+    <div className="workflow-section pt-4 mt-4">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Link2 className="size-4 text-[var(--gs-semantic-text-secondary)]" />
@@ -594,7 +594,7 @@ function PrLinkedIssuesSection({
           {links.map((link) => (
             <div
               key={link.number}
-              className="flex items-center justify-between gap-2 p-2 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
+              className="flex items-center justify-between gap-2 p-2 rounded bg-[var(--gs-semantic-surface-inset)] text-xs"
             >
               <div className="flex items-center gap-2 min-w-0">
                 <Badge variant={link.state === 'OPEN' ? 'success' : 'secondary'}>
@@ -627,7 +627,7 @@ function PrLinkedIssuesSection({
       ) : null}
 
       {pendingUnlink ? (
-        <div className="p-3 mb-3 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-essential)] text-xs">
+        <div className="p-3 mb-3 rounded bg-[var(--gs-semantic-surface-inset)] text-xs">
           <p className="font-medium text-[var(--gs-semantic-text-primary)] mb-1">
             Remove closing reference for issue #{pendingUnlink.number}?
           </p>
@@ -678,7 +678,7 @@ function PrLinkedIssuesSection({
       ) : null}
 
       {pendingClosingLink ? (
-        <div className="p-3 mb-3 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-essential)] text-xs">
+        <div className="p-3 mb-3 rounded bg-[var(--gs-semantic-surface-inset)] text-xs">
           <p className="font-medium text-[var(--gs-semantic-text-primary)] mb-1">
             Close #{pendingClosingLink.number} when pull request is merged?
           </p>
@@ -774,13 +774,13 @@ function PrLinkedIssuesSection({
         ) : null}
 
         {searchResults.length > 0 ? (
-          <div className="flex flex-col gap-2 max-h-48 overflow-y-auto p-2 rounded border border-[var(--gs-semantic-border-subtle)] bg-[var(--gs-semantic-surface-sunken)]">
+          <div className="flex flex-col gap-2 max-h-48 overflow-y-auto p-2 rounded bg-[var(--gs-semantic-surface-inset)]">
             {searchResults.map((issue) => {
               const isAlreadyLinked = linkedNumbers.has(issue.number)
               return (
                 <div
                   key={issue.number}
-                  className="flex items-center justify-between gap-2 p-2 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
+                  className="flex items-center justify-between gap-2 p-2 rounded text-xs"
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <Badge variant={issue.state === 'OPEN' ? 'success' : 'secondary'}>

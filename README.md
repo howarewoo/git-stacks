@@ -2081,6 +2081,8 @@ Representative light/dark screenshots use the committed Playwright Chromium on L
 
 Theme checks must wait for computed styles to settle after the theme attribute changes; reduced motion shortens CSS transitions but does not make them synchronous.
 
+Use `CATALOG_PORT=<unused-port>` for isolated catalog test allocations; its runner starts the actual catalog on that port. Desktop renderer tests already support `GALLERY_PORT=<unused-port>`. Keep visual baseline updates limited to the host platform.
+
 Turbo tracks shared source as an input of both consumers. Design-specific tasks override native prerequisites. Desktop declares the bundled UI workspace as a development dependency: Vite embeds the production controls it uses, while electron-builder does not copy the shared recipe source and unused recipe dependency graph into its production Node modules. Catalog fixtures stay outside the desktop output allowlist.
 
 ### Shared component contracts

@@ -9,18 +9,31 @@ const rows = [
 ]
 export const displaySpecimens = {
   card: () => (
-    <UI.Card>
-      <UI.CardHeader>
-        <UI.CardTitle>Branch inspection</UI.CardTitle>
-        <UI.CardDescription>Local example, independent of checkout.</UI.CardDescription>
-      </UI.CardHeader>
-      <UI.CardContent>
-        <code>feature/quiet-graph</code>
-      </UI.CardContent>
-      <UI.CardFooter>
-        <UI.Button render={<a href="#git-compositions" />}>Inspect composition</UI.Button>
-      </UI.CardFooter>
-    </UI.Card>
+    <div className="design-card-composition">
+      <UI.Card>
+        <UI.CardHeader>
+          <UI.CardTitle>Branch inspection</UI.CardTitle>
+          <UI.CardDescription>Local example, independent of checkout.</UI.CardDescription>
+        </UI.CardHeader>
+        <UI.CardContent>
+          <code>feature/quiet-graph</code>
+        </UI.CardContent>
+        <UI.CardFooter>
+          <UI.Button render={<a href="#git-compositions" />}>Inspect composition</UI.Button>
+        </UI.CardFooter>
+      </UI.Card>
+      <UI.Card className="design-secondary-card">
+        <UI.CardHeader>
+          <UI.CardTitle>Local checkout</UI.CardTitle>
+          <UI.CardDescription>
+            Inspecting another branch does not change checkout.
+          </UI.CardDescription>
+        </UI.CardHeader>
+        <UI.CardContent>
+          <code>main</code>
+        </UI.CardContent>
+      </UI.Card>
+    </div>
   ),
   badge: () => (
     <div className="design-specimen-row">
