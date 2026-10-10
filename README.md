@@ -1798,6 +1798,12 @@ disabled reason.
 Native unstack removes unmerged members; merged members may keep the container
 alive, so its confirmation does not promise complete dissolution.
 
+These graph controls consume `@git-stacks/ui` directly. **Edit stack layers**
+uses the shared keyboard-operable `Collapsible` and `Button` composition; opening
+it remains presentation-only, and its actions keep the existing preview,
+confirmation and operation locks. The standalone catalog is not shipped in the
+desktop bundle.
+
 Index, selected-detail, and preference reads belong to the existing TanStack Query
 client. Keys include checkout origin and CLI authority, plus observed qualified
 index identity. A push cancels a late read and updates scoped query data; authored
