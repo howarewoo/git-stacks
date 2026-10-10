@@ -93,7 +93,7 @@ function RepairRow({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <li className="gs-reconciliation-repair grid gap-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] p-3">
+    <li className="gs-reconciliation-repair grid gap-2 rounded-[var(--gs-semantic-radius-item)] bg-[var(--gs-semantic-surface-inset)] p-3">
       <Checkbox
         id={`repair-${repair.kind}-${repair.branch ?? repair.pullRequest ?? 'stack'}`}
         checked={checked}
@@ -333,7 +333,7 @@ function StackRow({
     mutationFn: (url: string) => window.desktop.openExternal(url),
   })
   return (
-    <li className="gs-reconciliation-stack grid gap-2 rounded-[var(--gs-semantic-radius-panel)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-3">
+    <li className="gs-reconciliation-stack grid gap-2 rounded-[var(--gs-semantic-radius-workbench)] bg-[var(--gs-semantic-surface-content)] px-3 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <strong className="text-[length:var(--gs-semantic-type-label-size)] text-[var(--gs-semantic-text-primary)]">
           {stack.stackNumber === null ? 'Local stack' : `GitHub stack #${stack.stackNumber}`}

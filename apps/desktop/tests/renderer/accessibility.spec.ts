@@ -230,10 +230,6 @@ test.describe('Automated accessibility audits and contrast', () => {
           label: 'repository search field',
           locator: getViewFilterInput(page),
         },
-        {
-          label: 'Fetch secondary toolbar button',
-          locator: page.getByRole('button', { name: 'Fetch', exact: true }),
-        },
       ])
       recordContrast(readings)
       assertControlBorderContrast(readings)

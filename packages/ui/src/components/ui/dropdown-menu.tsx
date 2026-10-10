@@ -66,7 +66,7 @@ const DropdownMenuContent = React.forwardRef<HTMLDivElement, DropdownMenuContent
           ref={ref}
           data-slot="dropdown-menu-content"
           className={cn(
-            'min-w-48 max-h-[var(--available-height)] overflow-y-auto rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-1 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-medium)] outline-none',
+            'min-w-48 max-h-[var(--available-height)] overflow-y-auto rounded-[var(--gs-semantic-radius-item)] bg-[var(--gs-component-overlay-background)] p-1 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-medium)] outline-none',
             className,
           )}
           {...props}
@@ -188,7 +188,7 @@ function DropdownMenuSubContent({ className, ...props }: MenuPrimitive.Popup.Pro
         <MenuPrimitive.Popup
           data-slot="dropdown-menu-sub-content"
           className={cn(
-            'min-w-40 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-1 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-medium)] outline-none',
+            'min-w-40 rounded-[var(--gs-semantic-radius-item)] bg-[var(--gs-component-overlay-background)] p-1 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-medium)] outline-none',
             className,
           )}
           {...props}

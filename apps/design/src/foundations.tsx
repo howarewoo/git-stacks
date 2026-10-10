@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import * as UI from '@git-stacks/ui'
 import tokens from '@git-stacks/ui/tokens.json'
 
@@ -73,27 +73,140 @@ export function TypographySpecimen() {
   )
 }
 
+const foundationUsage: Record<string, Record<string, string>> = {
+  space: {
+    '1': 'Dense metadata',
+    '2': 'Related controls and help',
+    '3': 'Fields and fact groups',
+    '4': 'Section rhythm',
+    '5': 'Workbench content inset',
+    '6': 'Major section separation',
+    '8': 'Generous section separation',
+    '10': 'Page breathing room',
+  },
+  radius: {
+    control: 'Buttons and editable controls',
+    item: 'Rows and grouped items',
+    workbench: 'Work surfaces and dialogs',
+    pill: 'Badges and segmented controls',
+  },
+  elevation: {
+    small: 'Complete content cards',
+    medium: 'Floating menus and tooltips',
+    large: 'Dialog layers',
+  },
+}
+
+type ColorRole = {
+  [Group in
+    | 'surface'
+    | 'text'
+    | 'action'
+    | 'selection'
+    | 'feedback'
+    | 'diff']: `${Group}.${keyof (typeof tokens.semantic)[Group] & string}`
+}['surface' | 'text' | 'action' | 'selection' | 'feedback' | 'diff']
+
+const colorGroups: {
+  title: string
+  pairs: { label: string; background: ColorRole; foreground: ColorRole }[]
+}[] = [
+  {
+    title: 'Neutral hierarchy',
+    pairs: [
+      { label: 'Workspace canvas', background: 'surface.canvas', foreground: 'text.primary' },
+      { label: 'Content surface', background: 'surface.content', foreground: 'text.primary' },
+      { label: 'Inset grouping', background: 'surface.inset', foreground: 'text.secondary' },
+      { label: 'Row hover', background: 'surface.hover', foreground: 'text.primary' },
+    ],
+  },
+  {
+    title: 'Actions and selection',
+    pairs: [
+      {
+        label: 'Primary action',
+        background: 'action.primary',
+        foreground: 'action.primary-foreground',
+      },
+      { label: 'Secondary action', background: 'action.secondary', foreground: 'text.primary' },
+      {
+        label: 'Meaningful selection',
+        background: 'selection.background',
+        foreground: 'selection.text',
+      },
+    ],
+  },
+  {
+    title: 'Labelled feedback',
+    pairs: [
+      {
+        label: 'Information',
+        background: 'feedback.info-surface',
+        foreground: 'feedback.info-text',
+      },
+      {
+        label: 'Success',
+        background: 'feedback.success-surface',
+        foreground: 'feedback.success-text',
+      },
+      {
+        label: 'Warning',
+        background: 'feedback.warning-surface',
+        foreground: 'feedback.warning-text',
+      },
+      { label: 'Error', background: 'feedback.error-surface', foreground: 'feedback.error-text' },
+      {
+        label: 'Merged',
+        background: 'feedback.merged-surface',
+        foreground: 'feedback.merged-text',
+      },
+    ],
+  },
+  {
+    title: 'Diff roles',
+    pairs: [
+      { label: 'Addition', background: 'diff.add-surface', foreground: 'diff.add-text' },
+      { label: 'Deletion', background: 'diff.remove-surface', foreground: 'diff.remove-text' },
+      { label: 'Hunk identity', background: 'surface.content', foreground: 'diff.hunk-text' },
+    ],
+  },
+]
+
+function colorVariable(role: ColorRole) {
+  return `var(--gs-semantic-${role.replace('.', '-')})`
+}
+
 export function Foundations() {
   const semantic = tokens.semantic
   return (
     <section id="foundations" className="design-entry" tabIndex={-1}>
       <h2>Foundations</h2>
       <p>Canonical roles, generated from one shared token source.</p>
-      <div className="foundation-colors">
-        {Object.entries(semantic.feedback)
-          .filter(([name]) => name.endsWith('surface'))
-          .map(([name]) => (
-            <div
-              key={name}
-              style={{
-                background: `var(--gs-semantic-feedback-${name})`,
-                color: `var(--gs-semantic-feedback-${name.replace('surface', 'text')})`,
-              }}
-            >
-              {name}
-            </div>
-          ))}
-      </div>
+      <p>
+        Each sample pairs readable foreground with its owning surface. Theme changes update both
+        roles.
+      </p>
+      {colorGroups.map((group) => (
+        <div className="foundation-color-group" key={group.title}>
+          <h3>{group.title}</h3>
+          <div className="foundation-colors">
+            {group.pairs.map((pair) => (
+              <div
+                key={pair.label}
+                style={{
+                  background: colorVariable(pair.background),
+                  color: colorVariable(pair.foreground),
+                }}
+              >
+                <strong>{pair.label}</strong>
+                <code>semantic.{pair.foreground}</code>
+                <span>on</span>
+                <code>semantic.{pair.background}</code>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
       {(['space', 'radius', 'elevation', 'motion', 'density', 'z'] as const).map((role) => (
         <div key={role}>
           <h3>{role === 'z' ? 'Layers' : role}</h3>
@@ -105,19 +218,59 @@ export function Foundations() {
                     semantic.{role}.{name}
                   </code>
                 </dt>
-                <dd>{tokenValue(value)}</dd>
+                <dd>
+                  {role === 'space' && (
+                    <div className="foundation-preview" aria-hidden="true">
+                      <span
+                        className="foundation-space"
+                        style={{ width: `var(--gs-semantic-space-${name})` }}
+                      />
+                    </div>
+                  )}
+                  {role === 'radius' && (
+                    <div className="foundation-preview" aria-hidden="true">
+                      <span
+                        className="foundation-shape"
+                        style={{ borderRadius: `var(--gs-semantic-radius-${name})` }}
+                      />
+                    </div>
+                  )}
+                  {role === 'elevation' && (
+                    <div className="foundation-preview" aria-hidden="true">
+                      <span
+                        className="foundation-layer"
+                        style={{ boxShadow: `var(--gs-semantic-elevation-${name})` }}
+                      />
+                    </div>
+                  )}
+                  <span>{tokenValue(value)}</span>
+                  {foundationUsage[role]?.[name] && (
+                    <p className="foundation-usage">{foundationUsage[role][name]}</p>
+                  )}
+                </dd>
               </div>
             ))}
           </dl>
         </div>
       ))}
-      <h3>Focus</h3>
-      <UI.Button variant="secondary">Tab here to inspect focus</UI.Button>
-      <p>
-        Focus ring: <code>semantic.focus.ring</code>. Essential controls retain visible boundaries,
-        explicit labels and focus rings in both themes. Motion respects the system reduced-motion
-        preference.
-      </p>
+      <h3>Essential boundaries and focus</h3>
+      <div className="catalog-composition">
+        <UI.Field
+          id="foundation-boundary"
+          label="Essential control boundary"
+          description="semantic.border.essential separates an editable control from its surface."
+        >
+          <UI.Input defaultValue="feature/quiet-graph" />
+        </UI.Field>
+        <UI.Button variant="secondary" className="justify-self-start">
+          Tab here to inspect focus
+        </UI.Button>
+        <p>
+          <code>semantic.focus.ring</code> marks keyboard focus, not selection. Essential boundaries
+          remain visible before focus; the ring appears when navigating with the keyboard. Motion
+          respects the system reduced-motion preference.
+        </p>
+      </div>
     </section>
   )
 }
@@ -164,6 +317,8 @@ const branches = [
     restack: 'Conflict',
   },
 ] as const
+
+const deletionScope = [branches[1], branches[3]]
 export function GitCompositions() {
   const [inspected, setInspected] = useState<number>(41)
   const [checkedOut, setCheckedOut] = useState('main')
@@ -172,8 +327,9 @@ export function GitCompositions() {
   const [result, setResult] = useState('No operation performed')
   const [reply, setReply] = useState('')
   const [comments, setComments] = useState<string[]>([])
+  const cancelRef = useRef<HTMLButtonElement>(null)
   return (
-    <section id="git-compositions" className="design-entry" tabIndex={-1}>
+    <section id="git-compositions" className="design-entry git-compositions" tabIndex={-1}>
       <h2>Git compositions</h2>
       <p>
         Deterministic local simulations. No Git, GitHub, repository access, or desktop bridge. PR
@@ -184,38 +340,51 @@ export function GitCompositions() {
         Checked out: <code>{checkedOut}</code> · inspected: PR #{inspected}
       </p>
       <div className="git-graph" role="list" aria-label="Branching pull request graph">
-        {branches.map((branch) => (
+        {[branches[0], branches[1], branches[3], branches[2]].map((branch) => (
           <div
             role="listitem"
             key={branch.id}
             className="git-row"
             data-inspected={inspected === branch.id}
-            style={{
-              marginInlineStart: branch.parent === null ? 0 : branch.parent === 41 ? 20 : 40,
-            }}
+            data-depth={branch.parent === null ? 0 : branch.parent === 41 ? 1 : 2}
           >
-            <div>
-              <span>
-                {branch.parent ? `PR #${branch.parent} → ` : 'main → '}PR #{branch.id}
+            <span className="git-ancestry" aria-hidden="true">
+              <span className="git-node" />
+            </span>
+            <div className="git-identity">
+              <div className="git-ref">
+                <code>{branch.branch}</code>
+                {checkedOut === branch.branch && <UI.Badge variant="accent">Checked out</UI.Badge>}
+              </div>
+              <span className="git-parent">
+                {branch.parent ? `PR #${branch.parent} → ` : 'main → '}PR #{branch.id} ·{' '}
+                {branch.author}
               </span>
+            </div>
+            <div className="git-actions">
               <UI.Button
+                size="sm"
                 variant={inspected === branch.id ? 'accent' : 'ghost'}
+                aria-pressed={inspected === branch.id}
                 onClick={() => setInspected(branch.id)}
               >
                 Inspect #{branch.id}
               </UI.Button>
+              <UI.Button size="sm" variant="secondary" onClick={() => setCheckedOut(branch.branch)}>
+                Simulate checkout #{branch.id}
+              </UI.Button>
             </div>
-            <code>{branch.branch}</code>
-            <div className="design-specimen-row">
-              <span>{branch.author}</span>
-              <UI.Badge>{branch.lifecycle}</UI.Badge>
+            <div className="git-facts">
+              <UI.Badge variant={branch.lifecycle === 'Merged' ? 'merged' : 'secondary'}>
+                {branch.lifecycle}
+              </UI.Badge>
               <UI.Badge
                 variant={
                   branch.checks === 'Passing'
                     ? 'success'
                     : branch.checks === 'Failing'
                       ? 'danger'
-                      : 'warning'
+                      : 'secondary'
                 }
               >
                 Checks: {branch.checks}
@@ -223,9 +392,6 @@ export function GitCompositions() {
               <span>Review: {branch.review}</span>
               <span>Restack: {branch.restack}</span>
             </div>
-            <UI.Button variant="secondary" onClick={() => setCheckedOut(branch.branch)}>
-              Simulate checkout #{branch.id}
-            </UI.Button>
           </div>
         ))}
       </div>
@@ -283,33 +449,50 @@ export function GitCompositions() {
         Capture local deletion preview
       </UI.Button>
       {captured && (
-        <div>
+        <div className="grid gap-3">
           <pre className="design-code">
-            {
-              'git branch -d fix/focus-return\ngit branch -d fix/long-ref-name-with-many-segments-and-a-very-long-description\n// Captured display only'
-            }
+            {`${deletionScope.map(({ branch }) => `git branch -d ${branch}`).join('\n')}\n// Captured display only`}
           </pre>
           <UI.AlertDialog>
             <UI.AlertDialogTrigger render={<UI.Button variant="danger" />}>
               Review destructive simulation
             </UI.AlertDialogTrigger>
-            <UI.AlertDialogContent>
+            <UI.AlertDialogContent
+              className="max-h-[calc(100dvh-32px)] overflow-y-auto"
+              initialFocus={cancelRef}
+            >
               <UI.AlertDialogHeader>
                 <UI.AlertDialogTitle>Delete two local example branches?</UI.AlertDialogTitle>
                 <UI.AlertDialogDescription>
-                  Captured scope: #42 and #44. This changes only a local result label. Type DELETE
-                  to enable confirmation.
+                  Local simulation only; no Git operation will run. PR #43 is outside this scope.
+                  Remote state is unavailable; no remote operation is offered.
                 </UI.AlertDialogDescription>
               </UI.AlertDialogHeader>
-              <UI.Field id="destructive-confirmation" label="Confirmation">
+              <ul className="confirmation-scope" aria-label="Captured branches">
+                {deletionScope.map(({ id, branch, parent }) => (
+                  <li key={id}>
+                    <span>
+                      PR #{id}
+                      {id === 44 ? ` · descendant of #${parent}` : ''}
+                    </span>
+                    <code>{branch}</code>
+                  </li>
+                ))}
+              </ul>
+              <UI.Field
+                id="destructive-confirmation"
+                label="Confirmation"
+                description="Type DELETE to enable the simulation."
+              >
                 <UI.Input
                   value={confirmation}
                   onChange={(event) => setConfirmation(event.target.value)}
                 />
               </UI.Field>
               <UI.AlertDialogFooter>
-                <UI.AlertDialogCancel>Cancel</UI.AlertDialogCancel>
+                <UI.AlertDialogCancel ref={cancelRef}>Cancel</UI.AlertDialogCancel>
                 <UI.AlertDialogAction
+                  variant="danger"
                   disabled={confirmation !== 'DELETE'}
                   onClick={() => {
                     setResult(

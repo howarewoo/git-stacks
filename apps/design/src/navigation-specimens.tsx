@@ -5,23 +5,51 @@ import { GitBranch, Bold, Italic } from 'lucide-react'
 export const navigationSpecimens = {
   button: function Buttons() {
     const [count, setCount] = useState(0)
+    const [working, setWorking] = useState(false)
+    const [previewOpen, setPreviewOpen] = useState(false)
+    const [shortcutsOpen, setShortcutsOpen] = useState(false)
+    const [view, setView] = useState<'split' | 'unified'>('split')
+    const [draftResult, setDraftResult] = useState('No example draft saved.')
     return (
       <>
-        <div className="design-specimen-row">
-          {(['default', 'secondary', 'ghost', 'subtle', 'accent', 'danger', 'link'] as const).map(
-            (variant) => (
-              <UI.Button key={variant} variant={variant} onClick={() => setCount(count + 1)}>
-                {variant}
-              </UI.Button>
-            ),
-          )}
-        </div>
+        <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+          {(
+            [
+              ['default', 'Complete the main task, such as saving a draft.'],
+              ['secondary', 'Offer a supporting action or Cancel beside the primary action.'],
+              ['ghost', 'Keep repeated row or toolbar actions quiet until hover or focus.'],
+              ['subtle', 'Expose optional help or utilities on a quiet, always-visible surface.'],
+              [
+                'accent',
+                'Emphasize meaningful context, not a second primary action. Use a selection control for a persistent choice.',
+              ],
+              ['danger', 'Confirm a destructive action after naming its scope and consequences.'],
+              ['link', 'Navigate to another location with a real anchor and destination.'],
+            ] as const
+          ).map(([variant, guidance]) => (
+            <div key={variant} className="grid grid-cols-[7rem_1fr] items-center gap-3">
+              <dt>
+                <UI.Button variant={variant} onClick={() => setCount((value) => value + 1)}>
+                  {variant}
+                </UI.Button>
+              </dt>
+              <dd className="m-0 text-sm text-muted-foreground">{guidance}</dd>
+            </div>
+          ))}
+        </dl>
         <div className="design-specimen-row">
           <UI.Button disabled tooltip="Captured preview is unavailable">
             Unavailable
           </UI.Button>
-          <UI.Button loading tooltip="Local simulation in progress">
-            Fetching
+          <UI.Button
+            loading={working}
+            tooltip="Start a local simulation; no Git or network work"
+            onClick={() => setWorking(true)}
+          >
+            Fetch example
+          </UI.Button>
+          <UI.Button variant="secondary" disabled={!working} onClick={() => setWorking(false)}>
+            Finish simulation
           </UI.Button>
           <UI.IconButton
             label="Inspect branch"
@@ -32,6 +60,87 @@ export const navigationSpecimens = {
           </UI.IconButton>
         </div>
         <output aria-live="polite">Local activations: {count}</output>
+        <output aria-live="polite">
+          {working
+            ? 'Working — finish the local simulation to return to idle.'
+            : 'Idle — ready to simulate.'}
+        </output>
+        <section className="catalog-composition" aria-label="Draft toolbar example">
+          <h3>Choose by purpose, not by color</h3>
+          <p>
+            One primary action completes the task. Secondary supports it; ghost keeps repeated
+            actions quiet; subtle makes optional help discoverable. This draft stays in the catalog.
+          </p>
+          <div className="design-specimen-row" role="group" aria-label="Example draft actions">
+            <UI.Button
+              onClick={() => setDraftResult('Example draft saved locally in this specimen.')}
+            >
+              Save example draft
+            </UI.Button>
+            <UI.Button variant="secondary" onClick={() => setPreviewOpen(true)}>
+              Preview example draft
+            </UI.Button>
+            <UI.Button variant="ghost" onClick={() => setDraftResult('Example preview refreshed.')}>
+              Refresh example
+            </UI.Button>
+            <UI.Button
+              variant="subtle"
+              aria-expanded={shortcutsOpen}
+              aria-controls="example-draft-shortcuts"
+              onClick={() => setShortcutsOpen((open) => !open)}
+            >
+              {shortcutsOpen ? 'Hide shortcuts' : 'Show shortcuts'}
+            </UI.Button>
+          </div>
+          <p id="example-draft-shortcuts" hidden={!shortcutsOpen}>
+            Tab moves between actions; Enter or Space activates the focused button.
+          </p>
+          <output aria-live="polite">{draftResult}</output>
+          <UI.Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+            <UI.DialogContent>
+              <UI.DialogHeader>
+                <UI.DialogTitle>Preview example draft</UI.DialogTitle>
+                <UI.DialogDescription>
+                  Supporting actions stay secondary. Saving affects this local specimen only.
+                </UI.DialogDescription>
+              </UI.DialogHeader>
+              <p>Preserve independent inspection and checkout.</p>
+              <UI.DialogFooter>
+                <UI.Button variant="secondary" onClick={() => setPreviewOpen(false)}>
+                  Cancel
+                </UI.Button>
+                <UI.Button
+                  onClick={() => {
+                    setDraftResult('Example draft saved locally in this specimen.')
+                    setPreviewOpen(false)
+                  }}
+                >
+                  Save example draft
+                </UI.Button>
+              </UI.DialogFooter>
+            </UI.DialogContent>
+          </UI.Dialog>
+        </section>
+        <section className="catalog-composition" aria-label="Persistent selection example">
+          <h3>A choice is not an action</h3>
+          <p>
+            Use SegmentedControl for an exactly-one-selected view. Its accent marks the current
+            choice; it does not mean a task has run.
+          </p>
+          <UI.SegmentedControl
+            label="Example diff layout"
+            className="justify-self-start"
+            value={view}
+            onValueChange={setView}
+            options={[
+              { value: 'split', label: 'Split' },
+              { value: 'unified', label: 'Unified' },
+            ]}
+          />
+          <output aria-live="polite">
+            {view === 'split' ? 'Split' : 'Unified'} example view selected.
+          </output>
+        </section>
       </>
     )
   },

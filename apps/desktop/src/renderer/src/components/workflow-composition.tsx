@@ -124,7 +124,7 @@ export function OperationFacts({
   return (
     <dl
       className={cn(
-        'm-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-3',
+        'm-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 rounded-[var(--gs-semantic-radius-item)] bg-[var(--gs-semantic-surface-inset)] p-3',
         className,
       )}
     >
@@ -170,7 +170,7 @@ export function OperationSteps({
       {steps.map((step) => (
         <li
           key={step.branch}
-          className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-2.5"
+          className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 px-3 py-2.5"
         >
           <GitBranch
             aria-hidden="true"
@@ -326,12 +326,7 @@ export function WorkflowActions({
   className?: string
 }) {
   return (
-    <div
-      className={cn(
-        'flex flex-wrap items-center justify-end gap-2 border-t border-[var(--gs-semantic-border-essential)] pt-3',
-        className,
-      )}
-    >
+    <div className={cn('flex flex-wrap items-center justify-end gap-2 pt-3', className)}>
       {children}
     </div>
   )
@@ -378,7 +373,7 @@ export function PublishProgressPanel({
         {progress.steps.map((step, index) => (
           <li
             key={`${step.kind}-${step.branch ?? 'stack'}-${index}`}
-            className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-2"
+            className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 px-3 py-2"
           >
             <Badge
               variant={step.status === 'failed' ? 'danger' : 'secondary'}
@@ -490,7 +485,7 @@ export function MergeOutcomePanel({
           return (
             <li
               key={layer.pullRequest}
-              className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] px-3 py-2"
+              className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 px-3 py-2"
             >
               <Badge variant={presentation.tone} className="mt-0.5 shrink-0">
                 {presentation.label}

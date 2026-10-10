@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Check, ChevronDown, LoaderCircle, MoreHorizontal, RefreshCw } from 'lucide-react'
+import { Check, ChevronDown, MoreHorizontal, RefreshCw } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button, IconButton } from '../components/ui/button'
 import { Checkbox } from '../components/ui/checkbox'
@@ -63,11 +63,7 @@ export function FoundationsSpecimen() {
         </SurfaceHeader>
         <div className="controls-specimen-row">
           <Button loading={saving} onClick={() => setSaving(true)}>
-            {saving ? (
-              <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
-            ) : (
-              <Check aria-hidden="true" className="size-4" />
-            )}
+            <Check aria-hidden="true" className="size-4" />
             Save branch
           </Button>
           <Button onClick={() => setSaving(false)} variant="secondary">

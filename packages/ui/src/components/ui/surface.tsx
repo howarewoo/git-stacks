@@ -6,7 +6,7 @@ export function Surface({ className, ...props }: React.HTMLAttributes<HTMLElemen
   return (
     <section
       className={cn(
-        'rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)] p-5 shadow-[var(--gs-semantic-elevation-small)]',
+        'grid gap-4 rounded-[var(--gs-semantic-radius-workbench)] bg-[var(--gs-semantic-surface-content)] p-5',
         className,
       )}
       {...props}
@@ -98,7 +98,7 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        'gs-empty-state grid justify-items-center gap-2 rounded-[var(--gs-semantic-radius-item)] border border-dashed border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-8 text-center',
+        'gs-empty-state grid justify-items-center gap-2 rounded-[var(--gs-semantic-radius-item)] bg-[var(--gs-semantic-surface-inset)] p-8 text-center',
         className,
       )}
       {...props}

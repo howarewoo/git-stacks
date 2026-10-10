@@ -74,7 +74,7 @@ components:
     backgroundColor: '{colors.ink-pressed}'
     textColor: '{colors.surface}'
   button-secondary:
-    backgroundColor: '{colors.surface}'
+    backgroundColor: '{colors.surface-inset}'
     textColor: '{colors.ink}'
     padding: '0 12px'
     height: '36px'
@@ -86,8 +86,8 @@ components:
     textColor: '{colors.text-secondary}'
     padding: '0 12px'
   button-accent:
-    backgroundColor: '{colors.selection-strong}'
-    textColor: '{colors.surface}'
+    backgroundColor: '{colors.selection}'
+    textColor: '{colors.selection-strong}'
     padding: '0 12px'
   button-danger:
     backgroundColor: '{colors.error-surface}'
@@ -128,31 +128,31 @@ components:
 
 **Creative North Star: "The Quiet Workbench"**
 
-Git Stacks is a quiet, precise desktop workbench for navigating branches, stacks, pull requests, changes, history, and stashes. The system adapts the cool-gray canvas, rounded white work surfaces, ink-colored primary actions, and restrained blue selection of the [Journey CRM Dashboard reference by Jack R. / RonDesignLab](https://dribbble.com/shots/24659454-Customer-Journey-CRM-Dashboard) into a local-first Git and GitHub product. Journey is a visual and material reference only: Git Stacks does not introduce CRM stages, analytics cards, or a web client.
+Git Stacks is a quiet, precise desktop workbench with a soft rounded card system for navigating branches, stacks, pull requests, changes, history, and stashes. Clean, uncluttered layouts and generous whitespace establish hierarchy through confident typography, spacing, scale, and alignment. A light cool-gray canvas, white cards, and near-black type form the neutral foundation; the dark theme preserves the same hierarchy with corresponding neutral tones. Pastel microaccents support small indicators, progress, selection, and labelled semantic status, never large saturated decorative fills. Borders and dividers are a last resort, and decorative elements are almost absent. Clarity wins over decoration.
 
-The visual language is intentionally restrained. Workbench Ink makes primary actions and navigation feel decisive; Repository Blue keeps links, selection, focus, checked-out state, and stack edges legible without turning the whole interface into a status field. Rounded surfaces and quiet tonal layers organize dense repository information while preserving the desktop workbench hierarchy.
+Workbench Ink anchors primary actions and readable text. Repository Blue supports links, focus, selection, checked-out state, and meaningful graph edges; independent labelled semantic colors communicate Git states. Large rounded cards group complete existing domain objects. Sparing broad, diffuse, low-opacity shadows and small offsets on secondary cards support spatial hierarchy and interactivity without turning operational lists, diffs, forms, or safety dialogs into decoration. No gradients or glass are introduced.
 
 **Key Characteristics:**
 
 - Cool-gray workspace canvas with white content surfaces and inset grouping surfaces.
-- Workbench Ink primary actions and navigation with Repository Blue selection and links.
+- Neutral ink primary actions, with pastel microaccents for small meaningful selection, indicators, and labelled status details.
 - Independent, text-labelled Git states for selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diffs.
 - Compact information density for branch, pull-request, stash, history, and diff rows.
 - Local-first, keyboard-accessible, operation-safe behavior with no external font or network dependency.
 
 ## Colors
 
-The palette is a cool-gray workbench with quiet semantic feedback. Workbench Ink and Repository Blue are the two named anchor colors; status colors remain independent and always appear with a text label or icon.
+The palette is a restrained cool-gray and white workbench with near-black primary type and actions. Pastel surface accents carry small meaningful states with contrast-correct text.
 
 ### Primary
 
-- **Workbench Ink** (`semantic.action.primary`): primary text, primary actions, navigation, and high-emphasis surfaces. Hover uses `semantic.action.primary-hover`; pressed uses `semantic.action.primary-pressed`.
-- **Repository Blue** (`semantic.selection.text`): links, selection text and borders, focus-adjacent identity, checked-out state, and meaningful blue graphics. It is not a replacement for Workbench Ink primary actions.
+- **Workbench Ink** (`semantic.action.primary` and `semantic.text.primary`): neutral primary action fill and readable primary type, with the theme's contrast-correct `semantic.action.primary-foreground`. Hover and pressed use the existing ink roles in both themes.
+- **Repository Blue** (`semantic.action.link` and selection roles): links, focus, subtle selection, checked-out state, and meaningful graphics, not a large saturated action fill.
 
 ### Secondary
 
 - **Muted Slate** (`semantic.text.secondary`): secondary readable text and metadata. It remains readable on the canvas and work surfaces rather than being treated as disabled text.
-- **Repository Blue** (`semantic.action.link`): the semantic link and selection accent, distinct from primary action ink.
+- **Repository Blue** (`semantic.action.link`): a restrained link and meaningful-selection accent, not a second primary action hierarchy.
 
 ### Tertiary
 
@@ -165,7 +165,7 @@ The palette is a cool-gray workbench with quiet semantic feedback. Workbench Ink
 - **Work Surface** (`semantic.surface.content`): content, controls, and dialog surfaces.
 - **Inset Surface** (`semantic.surface.inset`): grouped content and secondary controls.
 - **Row Hover** (`semantic.surface.hover`): quiet hover state.
-- **Decorative Divider** (`semantic.border.decorative`): separators that do not carry essential control meaning.
+- **Decorative Divider** (`semantic.border.decorative`): a last-resort separator only when spacing and solid tonal contrast cannot make a grouping clear; never a default panel outline.
 - **Essential Border** (`semantic.border.essential`): field and control boundaries that must remain visible.
 
 ### Feedback and Git states
@@ -174,12 +174,12 @@ The palette is a cool-gray workbench with quiet semantic feedback. Workbench Ink
 - **Success Green**: `semantic.feedback.success-surface` with `semantic.feedback.success-text`.
 - **Warning Amber**: `semantic.feedback.warning-surface` with `semantic.feedback.warning-text`.
 - **Error Garnet**: `semantic.feedback.error-surface` with `semantic.feedback.error-text`.
-- **Merged Violet**: `semantic.feedback.merged-surface` with `semantic.feedback.merged-text`, a Git Stacks adaptation of the Journey violet role.
+- **Merged Violet**: `semantic.feedback.merged-surface` with `semantic.feedback.merged-text`, reserved for the labelled merged Git state.
 - **Diff roles**: addition `semantic.diff.add-text` on `semantic.diff.add-surface`, deletion `semantic.diff.remove-text` on `semantic.diff.remove-surface`, and hunk `semantic.diff.hunk-text`.
 
 **The Meaning Before Color Rule.** Every selection, checked-out branch, pull-request lifecycle, checks state, review decision, restack requirement, and diff role has an explicit text or icon meaning. Unknown or unavailable GitHub data uses the neutral unknown role and an explicit unavailable label; it is never represented as none, zero, or passing.
 
-**The Essential Boundary Rule.** `semantic.border.decorative` is for decorative dividers only. Inputs, controls, and meaningful graphics that need a non-text boundary use `semantic.border.essential` or `semantic.focus.ring`.
+**The Essential Boundary Rule.** Separate UI groups with spacing and solid tonal surface differences first. Borders are a last resort for separation: surfaces, cards, rows, section headers, and status badges do not receive decorative outlines by default. Inputs, editable controls, keyboard focus, meaningful graph/diff lines, and deliberately connected controls retain a visible boundary where discoverability requires it, using `semantic.border.essential` or `semantic.focus.ring`. Keep border tokens meaningful; do not hide every border with a global override. Use sparse diffuse card shadows only where they serve layering or interactivity, never gradients or glass.
 
 ## Typography
 
@@ -206,30 +206,33 @@ Diff text retains its compact 12px / 1.6 code rhythm. Single-letter file-status 
 
 Git Stacks is a desktop workbench, not a mobile or web client. The existing shell uses a three-pane composition: repository navigation, primary work area, and details. Dense branch, pull-request, stash, history, and diff rows use the compact rhythm; forms and primary work surfaces use standard density. Controls are 36px compact or 44px standard, and rows are 44px compact or 56px standard, with content allowed to grow when necessary.
 
-The spacing system follows a 4px rhythm with 4, 8, 12, 16, 20, 24, 32, and 40px steps. The foundation radius scale reserves 12px for controls, 16px for nested items, and 24px for work surfaces and dialogs, while pills use 999px. These are target roles, not a claim that every existing component already consumes them. The existing renderer breakpoints at 1040px and 1199px adapt the shell to narrower desktop renderer widths; the native product remains centered on the 1000×700 minimum and 1440×940 default window sizes.
+The spacing system follows a 4px rhythm with 4, 8, 12, 16, 20, 24, 32, and 40px steps. The user explicitly retains the more rounded geometry: 12px controls, 16px items, and 24px work surfaces/dialogs. Existing 999px pills remain for supported badges and segmented controls, and genuine circular affordances remain circular; do not introduce additional ornamental pills. Renderer breakpoints at 1040px and 1199px adapt the shell to narrower desktop widths; the native product retains its 1000×700 minimum and 1440×940 default window sizes, with no generic page-width cap on desktop panes.
+
+Whitespace and proximity do most of the organizational work. Give forms, toolbar action clusters, and major sections breathing room without expanding compact Git lists or code cells. Do not replace every removed border with another colored box: prefer a heading, a clear gap, and a simple reading order before adding a tonal surface.
 
 Shell panes use 12px canvas gutters at default and wide desktop sizes and 8px gutters below 1200px. Repository and inspector headers have a 72px minimum; list headers share that minimum and grow when controls wrap. Main headers, primary content sections, and inspector sections use consistent 20px horizontal insets; dense code cells retain their own compact geometry. Branch identities use the 13px monospace label role, supporting copy uses 12px metadata, and workspace titles use the 20px heading role. Keep related controls and helper copy 8px apart, field and fact groups 12px apart, and larger sections 16px apart.
+**The Related Spacing Rule.** Unrelated siblings must not touch. Use 8px between related controls and label/help/error content, 12px between fields and fact groups, and 16–24px between major sections. Shared surface content and card footer actions supply explicit gaps; catalog compositions separate identity/action rows, conversation drafts, and captured-result feedback. Dense metadata may use 4px, but not zero-gap action clusters. Deliberately connected button groups, segments, tables, code cells, and graph joins retain their connected geometry.
 When the branch pane is 600px wide or narrower, branch identities occupy their own line above state badges, while checks and ahead/behind metrics stack at the row's trailing edge. Use the pane's width, not the window's width, so hiding the inspector restores the wider row composition. Long headings, field help, review paths, and comment identities wrap inside their owning surface rather than overflowing it.
-Each section owns one heading and one presentation of its status or guidance. Do not repeat the same explanation in a dialog introduction, operation summary, and facts block; retain exact captured identities, full safety boundaries, confirmation requirements, and recovery details. Omit empty facts capsules. Checks and submitted conversation threads use dividers within their owning surface rather than nested cards.
+Each section owns one heading and one presentation of its status or guidance. Do not repeat the same explanation in a dialog introduction, operation summary, and facts block; retain exact captured identities, full safety boundaries, confirmation requirements, and recovery details. Omit empty facts capsules. Checks and submitted conversation threads use spacing within their owning surface rather than redundant dividers or nested cards.
 Motion uses 120ms fast, 180ms standard, and 240ms deliberate transitions with `cubic-bezier(0.2, 0, 0, 1)` easing. The generated reduced-motion rule maps each duration to `0.01ms`; status text and operation locks remain when animation is removed.
 
 Overlay content is layered above the shell through the named z-index scale: base `0`, content `1`, floating `10`, overlay `60`, and popover `70`. Overlay surfaces do not compete with arbitrary per-view z-index values.
 
 ## Elevation & Depth
 
-Depth is primarily tonal: the cool-gray canvas, white work surfaces, and inset surfaces separate regions without making every row a card. Shadows are reserved for transient or elevated layers.
+Depth starts with whitespace, grouping, and neutral background contrast. Complete content cards are independently understandable; broad, diffuse, low-opacity shadows are used sparingly for purposeful card and floating layers, not every row.
 
 ### Shadow Vocabulary
 
-- **Small** (`semantic.elevation.small`): low-elevation detail.
-- **Medium** (`semantic.elevation.medium`): floating cards, hover cards, and tooltips.
-- **Large** (`semantic.elevation.large`): dialog surfaces and other high-elevation overlays.
+- **Small** (`semantic.elevation.small`): `0 8px 32px rgba(23, 28, 36, 0.06)` for complete shared cards and secondary synchronization facts.
+- **Medium** (`semantic.elevation.medium`): `0 12px 40px rgba(23, 28, 36, 0.08)` for actual floating menus, hover cards, and tooltips.
+- **Large** (`semantic.elevation.large`): `0 16px 56px rgba(23, 28, 36, 0.10)` for dialog layers.
 
-**The Flat-By-Default Rule.** Surfaces are flat at rest. Use a shadow only when a component is floating, transient, or deliberately elevated; do not use decorative shadows to imply Git state.
+**The Purposeful Layering Rule.** Use diffuse depth sparingly to clarify a real card or floating layer. Secondary cards may use a 4px spatial offset with disciplined internal alignment: the catalog inspection/checkout composition and real synchronization facts demonstrate this. Do not rotate operational Git rows, diffs, forms, or safety dialogs, obscure actions, or imply Git state through shadow. Never introduce sharp or dramatic shadows, glass, or decorative gradients.
 
 ## Shapes
 
-The foundation radius scale targets 12px for controls, 16px for nested items, and 24px for work surfaces and dialogs, with 999px pills. Shared controls now bind directly to those semantic radius tokens; borders are quiet and structural: essential controls use the stronger border, while decorative dividers remain low contrast. Clipping and overflow behavior follow the work surface rather than arbitrary view-specific decoration.
+Retain the generous rounded identity: 12px text controls, 16px items, 24px work surfaces/dialogs and complete cards, with supported 999px pill badges and segmented controls. Icon buttons are circular with generous 44px targets; existing utility-specific corners and genuine circles remain valid. Use the canvas, content, and inset tones with explicit spacing to distinguish panels and sections in both themes. Essential editable controls keep visible 1px boundaries; generic surfaces, section headers, rows, and feedback badges do not. Clipping follows the owning work surface.
 
 ## Components
 
@@ -244,22 +247,23 @@ The shared [shadcn/ui](https://ui.shadcn.com/)-style component library lives in 
 
 ### Buttons
 
-- **Shape:** Shared `Button`, `Input`, `Select`, and `Textarea` use the 12px semantic control radius. `IconButton` uses 16px or 20px Lucide icons and the compact/standard target sizes.
-- **Primary (`default`):** Workbench Ink background with white text; hover uses ink-hover and active uses ink-pressed.
-- **Secondary:** White background, essential border, Workbench Ink text, and inset hover background.
-- **Ghost:** Secondary text with inset hover and primary text on hover.
-- **Subtle:** Inset background with secondary text, shifting to row-hover and primary text on hover.
-- **Accent:** Repository Blue background with white text and selection-border hover.
-- **Danger:** Error surface, error text, and an essential error-colored border.
-- **Link:** Repository Blue underlined text with a selection-colored underline.
-- **Sizes:** `sm` is 36px high, `default` and `lg` are 44px high, and `icon` / `icon-sm` are 44px / 36px square controls. Coarse pointers receive a 44px minimum target through the renderer's pointer media query.
-- **States:** `focus-visible` uses a 2px Repository Blue focus ring with a surface-colored offset; `loading` sets `aria-busy` and prevents another dispatch; disabled controls remain non-interactive while their wrapper stays keyboard-discoverable.
+- **Shape:** Text `Button`, `Input`, `Select`, and `Textarea` retain the 12px semantic control radius. `IconButton` is circular, uses simple 16px or 20px Lucide icons, and has a 44px target.
+- **Primary (`default`):** Solid neutral Workbench Ink with the theme's contrast-correct inverse foreground and existing ink hover/pressed roles. Use for the main task's completion action, not every available action.
+- **Secondary:** Solid inset background and Workbench Ink text, with row-hover fill on hover; no default outline. Use for supporting actions and Cancel beside the primary action. Explicit `outline` variants remain available when a boundary is necessary for discoverability.
+- **Ghost:** Secondary text with inset hover and primary text on hover. Use for repeated row or toolbar actions that should not compete with the main task.
+- **Subtle:** Inset background with secondary text, shifting to row-hover and primary text on hover. Use for optional help and utilities that need a visible resting surface, not as another name for a supporting task action.
+- **Accent:** A restrained pastel selection surface with contrast-correct selection text; keep saturated color out of large action blocks and avoid competing primary actions. Accent does not supply selection behavior: use `SegmentedControl`, `RadioGroup`, or another shared selection control for a persistent choice.
+- **Danger:** Solid error surface and error text without a redundant error-colored outline. Use for destructive actions after their scope and consequences have been stated; the final confirmation retains this role.
+- **Link:** Repository Blue underlined text with a selection-colored underline. Navigation retains an anchor's real destination and browser behavior.
+- **Sizes:** Text `sm` is 36px high; text `default` and `lg` are 44px high. All icon sizes provide a circular 44px target. Coarse pointers retain a 44px minimum target through the renderer's pointer media query.
+- **States:** `focus-visible` uses a 2px Repository Blue focus ring with a surface-colored offset. `loading` overlays a decorative busy indicator while retaining the original content's footprint and accessible name, sets `aria-busy`, and prevents another dispatch. Keep caller labels and icons stable across the transition; do not add a second spinner. Reduced motion retains a static visible busy marker. Disabled controls remain non-interactive while their tooltip wrapper stays keyboard-discoverable.
+- **Semantics:** Use `nativeButton={false}` when rendering an anchor through `Button`; retain its real `href` and link behavior. Use `danger` for destructive actions, including their final confirmation, rather than making a destructive action look like a routine primary action.
 
 ### Badges
 
-- **Neutral (`secondary`):** Inset background, essential border, and secondary text.
+- **Neutral (`secondary`):** Solid inset background and secondary text, without a default border.
 - **Outline:** Transparent background with essential border and secondary text.
-- **Accent:** Selection background, selection border, and selection text.
+- **Accent:** Solid selection background and selection text, without a redundant outline.
 - **Info / Success / Warning / Danger / Merged:** Their named feedback background/text pairs. Every badge includes a text label; color is not the state itself.
 - **Default:** Neutral inset background and secondary text; the legacy `default` name is retained as a neutral badge alias rather than inheriting primary-action ink.
 
@@ -273,14 +277,18 @@ The shared [shadcn/ui](https://ui.shadcn.com/)-style component library lives in 
 
 ### Navigation
 
-- **Style:** The shell uses quiet text and count metadata with a selected state separate from checked-out state. Active navigation uses the selection role, while primary action emphasis remains Workbench Ink.
+- **Style:** The shell uses quiet text and count metadata with a selected state separate from checked-out state. Active navigation uses the subtle selection role; primary actions use neutral Workbench Ink.
 - **Keyboard:** Global `:focus-visible` treatment is available for keyboard navigation and controls. Disabled or unavailable actions retain a text or tooltip explanation. Disabled menu items may receive arrow-key focus so their reason remains discoverable, but cannot activate.
 - **Grouping:** Repository groups Branches, Stacks, Working changes, History, and Stashes. GitHub groups Pull requests, Review, PR Inbox, and GitHub Notifications. Workspace holds Diagnostics. These headings organize one continuous keyboard route; arrows, Home, and End skip the headings without activating a destination.
 - **Search placement:** The global command palette lives in the title bar; the repository toolbar keeps its distinct in-view filter, synchronization actions, and details toggle. The toolbar stays on one row at the native minimum width and wraps at narrower zoomed widths.
 - **Repository context:** The open-folder control switches repositories; the current recent repository is explicitly marked. Remote and default-branch facts live in the keyboard-operable Repository info disclosure rather than competing with navigation. Connection and runtime controls use separate readable footer rows.
 - **Inspector hierarchy:** Branch identity and state come first, followed by stack position, the primary stack workflow, synchronization facts, pull-request context, and branch actions. Insert, move, remove, and parent-edit actions remain available under Edit stack layers; opening the disclosure never mutates Git, and each action retains its existing preview, confirmation, and operation locks.
 - **Shared navigation controls:** Sidebar items and tabs use the label type role, compact/standard density, control radius, and token motion. Selection is flat, with the named selection surface and primary text; hover uses the surface-hover role, never an opacity-derived palette. `TabsList` supports `controlSize="compact"` or `"standard"` independently of horizontal/vertical orientation. Line tabs mark selection with a blue underline or vertical edge instead of a shadow.
-- **Catalog navigation:** Keep search and appearance controls visible above the independently scrolling desktop catalog index. Below 900px, disclose that index through Browse components so the catalog itself remains visible on arrival. Anchor navigation marks the destination, transfers focus to it, and closes the narrow index. Inline specimens must not move the page before interaction.
+- **Catalog navigation:** Use `SidebarProvider`, the built-in off-canvas `Sidebar`, and `SidebarTrigger` for whole-sidebar collapse; do not maintain a second catalog open/close state. Search and appearance controls sit above the independently scrolling index. Below the shared 768px sidebar breakpoint, Browse components opens its sheet. Choosing an anchor closes the sheet, marks the destination, and transfers focus. Visible-section tracking updates the current marker and exposes its category during scrolling without changing the hash, history, or focus; filtering and resizing rebuild that tracking. Category disclosure composes `SidebarGroupLabel` with `CollapsibleTrigger`; search exposes matching categories, and navigation opens the active component's category. Command navigation includes Foundations and Git compositions as well as components. Inline specimens must not move the page before interaction.
+- **Catalog guidance:** Keep the full searchable inventory, with a visible usage sentence explaining the intended interaction and relevant alternatives on every entry. Pair control variants with concise intended-use guidance and canonical spacing, radius, and elevation values with visual examples. A compact task-to-recipe guide links inspection, value selection, captured-scope confirmation, and status/recovery to existing specimens; it is optional navigation, not a tour or a new product workflow. Its shared link controls retain link semantics and destination focus. Git examples use compact, aligned rows in one rounded group; ancestry connectors support explicit parent labels, and checked-out identity stays labelled independently of inspection.
+- **Catalog adoption examples:** Keep copyable source identical to the typed component shown beside it. Include state ownership, labels, help/error relationships, loading outcomes, and cancellation boundaries rather than imports alone. Keep consequential examples explicitly local; they do not substitute for production captured previews or mutation gates.
+- **Catalog search context:** Query changes align the result heading without transferring focus from search. Short and empty results retain enough reading area for the same alignment. Clearing restores the pre-search section's viewport position; explicitly choosing a destination takes precedence over restoration.
+- **Foundation palette examples:** Show foreground/background pairs for neutral surfaces, actions, selection, labelled feedback, and diffs through the generated theme roles. Essential-boundary and keyboard-focus examples use actual shared controls. Token identities remain readable at narrow catalog widths.
 
 ### Keyboard and screen-reader contract
 
@@ -295,16 +303,17 @@ The shared [shadcn/ui](https://ui.shadcn.com/)-style component library lives in 
 
 ### Cards / Containers
 
-- **Corner Style:** Workbench surfaces use the 24px token scale; existing specimen and shared utility surfaces retain their current utility-specific radius.
-- **Shadow Strategy:** Tonal separation at rest; medium or large shadow only for floating and dialog layers.
+- **Corner Style:** Workbench surfaces retain the 24px token; items use 16px and controls use 12px, with incumbent utility-specific corners preserved.
+- **Shadow Strategy:** Whitespace and neutral background separation first; sparing broad, diffuse, low-opacity shadows for independently understandable cards and floating layers, never sharp outlines or dramatic elevation.
 
 - **Internal Padding:** Use the 4px spacing rhythm, with 16px and 24px steps for work-surface and section rhythm.
 
 ### Dialogs
 
-- **Overlay:** Fixed inset overlay at the `component.overlay` z-index with the dedicated overlay scrim role.
-- **Content:** White surface, essential border, 24px workbench radius, 20px padding, and large elevation shadow at the overlay token's z-index. Height is viewport-constrained and scrollable so footer actions remain reachable when zoomed.
+- **Overlay:** Fixed inset overlay at the `component.overlay` z-index with `component.overlay.scrim` (`semantic.surface.scrim`): neutral-dark `rgba(20, 24, 32, 0.34)` in both themes. Dialog, Alert Dialog, Sheet, and Drawer share this role; never derive a backdrop from theme-dependent text color.
+- **Content:** Solid neutral card surface, no structural outline, retained 24px workbench radius, 20px padding, and diffuse low-opacity elevation at the overlay token's z-index. Height is viewport-constrained and scrollable so footer actions remain reachable when zoomed.
 - **Compositions:** `WorkflowFrame`, `OperationContext`, and `WorkflowActions` give ordinary forms, reviewed operations, and destructive confirmations shared spacing and action roles. `Field` and `TypedConfirmation` retain domain-specific validation.
+- **Confirmation identity:** Keep captured branch names, relationships, and excluded scope inside the confirmation surface, not only behind its overlay. Long identities wrap; the modal scrolls within the viewport. Catalog simulations retain their explicit no-Git/no-remote-operation boundary.
 - **Close and focus:** The Base UI focus trap returns focus to the initiating control. Reviewed and destructive workflow dialogs start on Cancel. Escape/backdrop cannot discard entered work or interrupt an active mutation; explicit Cancel is distinct from aborting Git. A nested selection popup consumes Escape before the enclosing dialog. In the conflict resolver, a whole-file draft cannot silently be replaced by a later region choice: switching back requires an explicit discard, while implicit dismissal preserves unstaged choices and drafts. An external merge-tool handoff likewise requires explicit draft discard; a failed action stays visible inside the modal without removing the draft. External staging or abort does not unmount an edited resolver: keep the draft available to copy, block stale mutations, and offer an explicit discard-and-close decision. A failed initial load has a dismissing Close control, not an implicit retry.
 - **State:** `PhaseStatus` presents loading, ready, blocked, submitting, rejected, partial, success, and failure from existing operation data. Important errors remain inline; successful notices are polite and dismissible. Rejected previews require a successful reload before another dispatch. Inspector diffs and oversized stage text are bounded while read, and stage panes cap rendered characters so even a long single line remains visible with an explicit preview label. Side selection and worktree staging preserve complete bytes rather than applying preview text. A binary stage remains binary even when its first preview bytes contain no NUL.
 - **Recovery:** The persistent operation banner remains outside workspace-specific views. Continue respects conflict blockers; Skip and Abort retain their explicit loss warnings and existing Git actions. Progress uses actual completed and remaining branches. Aborting a stack surgery restores this repository only, and its report names every pull request base change, close, and native stack membership that already reached GitHub and therefore stands; the recovery surface never implies that a remote change was undone.
@@ -349,9 +358,9 @@ The shared [shadcn/ui](https://ui.shadcn.com/)-style component library lives in 
 
 ### Hover Cards and Tooltips
 
-- **Hover card:** White overlay, 12px utility radius, medium elevation, 16px padding, and popover z-index 70.
+- **Hover card:** Solid overlay, retained item radius, modest transient elevation, 16px padding, and popover z-index 70.
 - **Delayed opening:** A repository hover card opens only while its trigger is hovered or contains focus. A pending timer must not reopen it after navigation or a dialog has taken the interaction.
-- **Tooltip:** Workbench Ink background, white text, 6px utility radius, 8px/12px padding, and medium elevation at popover z-index 70. Open content has the tooltip role and is associated with its trigger through `aria-describedby`; Escape dismisses it without moving focus. Essential labels and error text never depend on a tooltip.
+- **Tooltip:** Neutral inverse surface and text, retained control radius, 8px/12px padding, and modest transient elevation at popover z-index 70. Open content has the tooltip role and is associated with its trigger through `aria-describedby`; Escape dismisses it without moving focus. Essential labels and error text never depend on a tooltip.
 
 ### Git and Diff States
 
@@ -818,14 +827,17 @@ Concrete guardrails for the existing system and the user-confirmed Quiet Workben
 
 ### Do:
 
-- **Do** use Workbench Ink for primary actions and navigation, with Repository Blue reserved for links, selection, focus, and meaningful identity accents.
+- **Do** use neutral Workbench Ink for primary actions and text, with pastel microaccents and contrast-correct labelled semantic colors for small meaningful states.
 - **Do** keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.
-- **Do** use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.
+- **Do** use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the user-retained rounded 12/16/24px geometry with supported 999px pills.
 - **Do** use `semantic.border.essential` for essential boundaries, `semantic.focus.ring` for keyboard focus, and text/icon descriptions alongside every Git status.
 - **Do** define primitive, semantic, and component tokens in `packages/ui/src/tokens/tokens.json`; treat `tokens.css` as generated output, never a second manually maintained palette.
 - **Do** keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation.
 - **Do** share production controls, typography and foundations through `@git-stacks/ui`; catalog specimens demonstrate this implementation rather than defining a second visual policy. Keep larger content typography distinct from compact application roles.
-- **Do** keep essential boundaries at ≥3:1 against their adjacent surface in both themes; the dark essential-border primitive is `#657185` so shared fields and overlays retain this distinction.
+- **Do** keep essential boundaries at ≥3:1 against their adjacent surface in both themes; the dark essential-border primitive is `#657185` so shared editable controls retain this distinction.
+- **Do** keep normal text and placeholders at ≥4.5:1 and large text at ≥3:1; use weights 400/500/600, left-aligned readable copy, and the compact 14px/1.5 body role.
+- **Do** use simple Lucide icons consistently, add labels for ambiguous actions, place feedback near its field, and use progressive disclosure rather than repeated guidance or metadata.
+- **Do** prioritize spacing and solid tonal contrast over borders for grouping; preserve essential editing, focus, and meaningful graphic boundaries instead of applying blanket border suppression.
 
 ### Don't:
 
@@ -833,8 +845,9 @@ Concrete guardrails for the existing system and the user-confirmed Quiet Workben
 - **Don't** use color alone for status, lifecycle, review, checks, unknown/unavailable data, or diff meaning.
 - **Don't** use decorative `semantic.border.decorative` dividers as a substitute for essential control boundaries or meaningful graphics.
 - **Don't** add external font loading, font files from chat artifacts, a second manually maintained palette, CRM runtime behavior, or new Git/IPC/navigation semantics.
-- **Don't** claim that every existing component consumes all density or radius tokens; migrate each consumer as its owning issue changes it.
-- **Don't** use shadows to imply Git state; reserve depth for floating, transient, or elevated surfaces.
+- **Don't** add arbitrary shape overrides, excessive pills, decorative gradients, glass, sharp dramatic shadows, or gratuitous nested boxes. Preserve generous rounded cards and circular icon controls.
+- **Don't** use ornamental scale, bounce, parallax, or excessive motion; purposeful state transitions use 100–250ms and preserve meaning with reduced motion.
+- **Don't** use shadows or card offsets to imply Git state, invent metrics, or obscure operational controls. Purposeful secondary layering must preserve focus, scrolling, and action reachability.
 
 ## Styling constraints and exceptions
 

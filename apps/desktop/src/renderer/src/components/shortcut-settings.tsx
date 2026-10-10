@@ -145,7 +145,7 @@ export function ShortcutEditor({
             <h2 className="m-0 text-[length:var(--gs-semantic-type-label-size)] font-semibold leading-[1.35] text-[var(--gs-semantic-text-primary)]">
               {groupName}
             </h2>
-            <div className="divide-y divide-[var(--gs-semantic-border-essential)] rounded-[var(--gs-semantic-radius-control)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-content)]">
+            <div className="grid gap-2 rounded-[var(--gs-semantic-radius-control)] bg-[var(--gs-semantic-surface-content)]">
               {defs.map((def) => {
                 const chord = bindings[def.id] ?? def.defaultChord
                 const isRecording = recordingId === def.id
@@ -199,7 +199,7 @@ export function ShortcutEditor({
         ))}
       </div>
 
-      <div className="flex items-center justify-end border-t border-[var(--gs-semantic-border-essential)] pt-3">
+      <div className="flex items-center justify-end pt-3">
         <Button
           size="sm"
           variant="ghost"

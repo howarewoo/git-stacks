@@ -93,6 +93,73 @@ test('search anchors and keyboard command navigation', async ({ page }) => {
   await expect(page.locator('#checkbox')).toBeFocused()
 })
 
+test('search presents results without stealing focus and restores the reading section on clear', async ({
+  page,
+}) => {
+  await page.goto('/#field')
+  const navigation = page.getByRole('navigation', { name: 'Component catalog', exact: true })
+  await expect(navigation.locator('a[aria-current="location"]')).toHaveAttribute('href', '#field')
+  const search = page.getByRole('textbox', { name: 'Search components' })
+  const originalTop = await page
+    .locator('#field')
+    .evaluate((section) => section.getBoundingClientRect().top)
+  for (const query of ['button', 'button group', 'no-such-component']) {
+    await search.fill(query)
+    await expect(search).toBeFocused()
+    await expect(page.locator('#catalog-results')).toBeInViewport()
+    await expect
+      .poll(() =>
+        page.locator('#catalog-results').evaluate((node) => node.getBoundingClientRect().top),
+      )
+      .toBeLessThan(50)
+  }
+  await search.fill('')
+  await expect(search).toBeFocused()
+  await expect
+    .poll(async () =>
+      Math.abs(
+        (await page.locator('#field').evaluate((section) => section.getBoundingClientRect().top)) -
+          originalTop,
+      ),
+    )
+    .toBeLessThan(2)
+
+  await search.fill('one-time password')
+  await navigation.getByRole('link', { name: 'Input OTP', exact: true }).click()
+  await expect(page.locator('#input-otp')).toBeFocused()
+  await expect(page.locator('#input-otp')).toBeInViewport()
+  await expect(page).toHaveURL(/#input-otp$/)
+})
+
+test('current section follows scrolling and filtered mounts without changing navigation history', async ({
+  page,
+}) => {
+  await page.goto('/')
+  const navigation = page.getByRole('navigation', { name: 'Component catalog', exact: true })
+  const current = navigation.locator('a[aria-current="location"]')
+  await navigation.getByRole('link', { name: 'Button', exact: true }).click()
+  await navigation.getByRole('link', { name: 'Button Group', exact: true }).click()
+  await expect(current).toHaveAttribute('href', '#button-group')
+  await expect(page.locator('#button-group')).toBeFocused()
+  const historyLength = await page.evaluate(() => history.length)
+  await page.locator('#checkbox').evaluate((section) => section.scrollIntoView({ block: 'start' }))
+  await expect(current).toHaveAttribute('href', '#checkbox')
+  await expect(page).toHaveURL(/#button-group$/)
+  expect(await page.evaluate(() => history.length)).toBe(historyLength)
+  await page.goBack()
+  await expect(page).toHaveURL(/#button$/)
+  await expect(current).toHaveAttribute('href', '#button')
+  await page.getByRole('textbox', { name: 'Search components' }).fill('one-time password')
+  await page.locator('#input-otp').evaluate((section) => section.scrollIntoView({ block: 'start' }))
+  await expect(current).toHaveAttribute('href', '#input-otp')
+  await page.getByRole('textbox', { name: 'Search components' }).fill('no-such-component')
+  await expect(current).toHaveCount(0)
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click()
+  await navigation.getByRole('link', { name: 'Git compositions', exact: true }).click()
+  await expect(current).toHaveAttribute('href', '#git-compositions')
+  await expect(page.locator('#git-compositions')).toBeFocused()
+})
+
 test('inline command selection does not displace catalog arrival', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('[data-specimen="command"]')).toBeAttached()
@@ -369,14 +436,11 @@ test('automated accessibility and measured essential boundaries and focus contra
     await expectFocusContrast(page.getByRole('button', { name: 'Tab here to inspect focus' }))
     await page.getByRole('button', { name: 'Branch actions', exact: true }).focus()
     await page.keyboard.press('ArrowDown')
-    const menu = page.locator('[data-slot="dropdown-menu-content"]')
-    expect((await contrast(menu, 'borderTopColor')).ratio).toBeGreaterThanOrEqual(3)
     await expectFocusContrast(page.getByRole('menuitem', { name: 'Inspect branch', exact: true }))
     await page.keyboard.press('Escape')
     await page.getByRole('button', { name: 'Open inspection dialog' }).focus()
     await page.keyboard.press('Enter')
     const dialog = page.getByRole('dialog', { name: 'Branch inspection' })
-    expect((await contrast(dialog, 'borderTopColor')).ratio).toBeGreaterThanOrEqual(3)
     await expectFocusContrast(dialog.getByRole('textbox', { name: 'Ref', exact: true }))
     expect(
       (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())

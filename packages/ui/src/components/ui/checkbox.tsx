@@ -49,7 +49,7 @@ export const Checkbox = React.forwardRef<HTMLElement, CheckboxProps>(
             aria-invalid={error ? true : props['aria-invalid']}
             className="group inline-flex size-5 shrink-0 items-center justify-center rounded-[4px] border border-[var(--gs-component-field-border)] bg-[var(--gs-component-field-background)] outline-none transition-colors data-[checked]:border-[var(--gs-semantic-selection-border)] data-[checked]:bg-[var(--gs-semantic-selection-border)] data-[indeterminate]:border-[var(--gs-semantic-selection-border)] data-[indeterminate]:bg-[var(--gs-semantic-selection-border)] focus-visible:ring-2 focus-visible:ring-[var(--gs-component-field-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60 aria-[invalid=true]:border-[var(--gs-semantic-feedback-error-text)]"
           >
-            <CheckboxPrimitive.Indicator className="pointer-events-none text-[var(--gs-semantic-text-inverse)]">
+            <CheckboxPrimitive.Indicator className="pointer-events-none text-[var(--gs-semantic-action-primary-foreground)]">
               <Check aria-hidden="true" className="size-3.5 group-data-[indeterminate]:hidden" />
               <Minus
                 aria-hidden="true"

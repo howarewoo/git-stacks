@@ -89,7 +89,7 @@ export const Select = React.forwardRef<HTMLButtonElement, SelectProps>(
         >
           <SelectPrimitive.Popup
             data-slot="select-content"
-            className="max-h-[var(--available-height)] min-w-[var(--anchor-width)] max-w-[var(--available-width)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-1 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-medium)] outline-none"
+            className="max-h-[var(--available-height)] min-w-[var(--anchor-width)] max-w-[var(--available-width)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[var(--gs-semantic-radius-item)] bg-[var(--gs-component-overlay-background)] p-1 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-medium)] outline-none"
           >
             <SelectPrimitive.List>
               {options.map((option) => (
