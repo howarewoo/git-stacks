@@ -4859,15 +4859,6 @@ textarea.conflict-content {
 .graph-surgery-disclosure {
   margin-top: var(--gs-semantic-space-2);
 }
-.graph-surgery-disclosure summary {
-  font-size: var(--gs-semantic-type-metadata-size);
-  color: var(--gs-semantic-text-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-.graph-surgery-disclosure summary:hover {
-  color: var(--gs-semantic-text-primary);
-}
 .graph-surgery-actions {
   display: flex;
   flex-direction: column;

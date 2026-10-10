@@ -9,6 +9,7 @@ import {
 import {
   ArrowLeftRight,
   ExternalLink,
+  ChevronDown,
   GitBranch,
   GitPullRequest,
   Layers,
@@ -36,9 +37,14 @@ import {
   GRAPH_PATH_PAGE_SIZE,
 } from '@git-stacks/shared/performance'
 import { actionBlockReason } from '@git-stacks/shared/capabilities'
-import { Button } from './ui/button'
-import { Badge } from './ui/badge'
-import { Select } from './ui/select'
+import { Button } from '@git-stacks/ui/components/button'
+import { Badge } from '@git-stacks/ui/components/badge'
+import { Select } from '@git-stacks/ui/components/select'
+import {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from '@git-stacks/ui/components/collapsible'
 import { ReconciliationPanel } from './reconciliation-view'
 import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
 import type { RunAction, WorkflowRequest } from './workflow-dialog'
@@ -1347,9 +1353,12 @@ export function GraphWorkbench({
                     ))}
                   </div>
                   {local.name !== snapshot.defaultBranch ? (
-                    <details className="graph-surgery-disclosure">
-                      <summary>Edit stack layers</summary>
-                      <div className="graph-surgery-actions">
+                    <Collapsible className="graph-surgery-disclosure">
+                      <CollapsibleTrigger render={<Button size="sm" variant="ghost" />}>
+                        Edit stack layers
+                        <ChevronDown aria-hidden="true" className="size-3.5" />
+                      </CollapsibleTrigger>
+                      <CollapsibleContent className="graph-surgery-actions">
                         {(() => {
                           const immediateParentName = local.recordedParent ?? local.parent ?? null
                           const immediateParent = immediateParentName
@@ -1464,8 +1473,8 @@ export function GraphWorkbench({
                             </>
                           )
                         })()}
-                      </div>
-                    </details>
+                      </CollapsibleContent>
+                    </Collapsible>
                   ) : null}
                   <div className="graph-local-branch-actions">
                     <Button

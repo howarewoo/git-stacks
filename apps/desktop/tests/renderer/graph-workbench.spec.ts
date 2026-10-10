@@ -859,10 +859,15 @@ test('graph inspector exposes restack, sync, publish, merge and surgery actions 
   await restackDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
 
-  // Expand surgery disclosure
-  const surgerySummary = inspector.locator('summary', { hasText: 'Edit stack layers' })
-  await expect(surgerySummary).toBeVisible()
-  await surgerySummary.click()
+  const surgeryDisclosure = inspector.getByRole('button', {
+    name: 'Edit stack layers',
+    exact: true,
+  })
+  await expect(surgeryDisclosure).toBeVisible()
+  await expect(surgeryDisclosure).toHaveAttribute('aria-expanded', 'false')
+  await surgeryDisclosure.focus()
+  await surgeryDisclosure.press('Enter')
+  await expect(surgeryDisclosure).toHaveAttribute('aria-expanded', 'true')
   const insertBtn = inspector.getByRole('button', { name: 'Insert layer above…', exact: true })
   await expect(insertBtn).toBeVisible()
   await insertBtn.click()
@@ -873,6 +878,7 @@ test('graph inspector exposes restack, sync, publish, merge and surgery actions 
   ).toEqual([{ kind: 'insert', branch: 'graph/change-1', name: '' }])
   await surgeryDialog.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(insertBtn).toBeFocused()
 
   // Move layer up
   const moveUpBtn = inspector.getByRole('button', { name: 'Move layer up…', exact: true })
@@ -995,7 +1001,7 @@ test('moving a selected layer down previews its predecessor parent without chang
     .first()
     .click()
   const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
-  await inspector.locator('summary', { hasText: 'Edit stack layers' }).click()
+  await inspector.getByRole('button', { name: 'Edit stack layers', exact: true }).click()
   await inspector.getByRole('button', { name: 'Move layer down…', exact: true }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   expect(
