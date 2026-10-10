@@ -55,7 +55,7 @@ const execFileAsync = promisify(execFile)
 /**
  * What the live suite is allowed to be trusted about, outside a scenario run.
  *
- * The scenarios themselves are exercised by `npx tsx tests/live/cli.ts
+ * The scenarios themselves are exercised by `pnpm exec tsx tests/live/cli.ts
  * --controlled`. What that run cannot prove about itself is what happens when it
  * is misconfigured, when a fault is staged at the adapter boundary, and when
  * cleanup is asked to remove something it cannot prove it owns. Those are the

@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
 // Overridable so parallel worktrees never share (or fight over) one gallery
-// server: `GALLERY_PORT=5236 npx playwright test`. `TEST_PORT` is what the
+// server: `GALLERY_PORT=5236 pnpm exec playwright test`. `TEST_PORT` is what the
 // repository's own tooling sets, and `PLAYWRIGHT_PORT` lets a second browser
 // run coexist with an already-running server.
 const PORT = Number(
@@ -55,7 +55,7 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium-darwin', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: `npx vite --config tests/renderer/vite.config.ts --port ${PORT} --strictPort`,
+    command: `pnpm exec vite --config tests/renderer/vite.config.ts --port ${PORT} --strictPort`,
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

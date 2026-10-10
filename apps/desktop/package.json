@@ -7,7 +7,6 @@
   "main": "./out/main/index.js",
   "type": "module",
   "scripts": {
-    "postinstall": "node -e \"require('electron/install.js')\"",
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
     "build": "electron-vite build",
@@ -27,8 +26,8 @@
     "test:inbox:electron": "node tests/inbox.e2e.cjs",
     "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
     "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
-    "package": "electron-builder --dir --publish never && npm run verify:packaged-git-runtime",
-    "dist": "electron-builder --publish never && npm run verify:packaged-git-runtime",
+    "package": "electron-builder --dir --publish never && pnpm run verify:packaged-git-runtime",
+    "dist": "electron-builder --publish never && pnpm run verify:packaged-git-runtime",
     "build:promotion-helper": "node scripts/build-promotion-helper.mjs",
     "provision:git-runtime": "node scripts/provision-git-runtime.mjs",
     "verify:git-runtime": "node scripts/verify-git-runtime.mjs",
@@ -74,7 +73,7 @@
   },
   "dependencies": {
     "@base-ui/react": "1.8.0",
-    "@git-stacks/shared": "*",
+    "@git-stacks/shared": "workspace:*",
     "@tanstack/react-form": "1.33.5",
     "@tanstack/react-query": "5.104.1",
     "class-variance-authority": "0.7.1",

@@ -55,10 +55,12 @@ async function waitFor(description, expression, timeout = 3000) {
 
 async function main() {
   if (!existsSync(rendererPath)) {
-    throw new Error(`Missing fixture renderer at ${rendererPath}; run npm run build:gallery first.`)
+    throw new Error(
+      `Missing fixture renderer at ${rendererPath}; run pnpm run build:gallery first.`,
+    )
   }
   if (!existsSync(recoveryPath)) {
-    throw new Error(`Missing packaged renderer at ${recoveryPath}; run npm run build first.`)
+    throw new Error(`Missing packaged renderer at ${recoveryPath}; run pnpm run build first.`)
   }
 
   await app.whenReady()

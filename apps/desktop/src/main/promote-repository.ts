@@ -29,7 +29,7 @@ let resourcesRoot: string | null = null
 /**
  * Points the promotion at this build's resources directory. The main process
  * configures it next to the Git runtime; without it the helper is resolved
- * beside the source tree, which is where `npm test` and `npm run dev` find it.
+ * beside the source tree, which is where `pnpm test` and `pnpm run dev` find it.
  */
 export function configurePromotionHelper(root: string | null): void {
   resourcesRoot = root

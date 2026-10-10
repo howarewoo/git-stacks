@@ -19,16 +19,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends xvfb xauth
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run build
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
       - name: Measure real desktop startup and interaction with bounded fixtures
         # Xvfb provides an actual Chromium paint surface on the Linux runner.
         # Fixtures use the runner's own git; no clone, token, or private repository.
-        run: xvfb-run -a npm run bench:performance
+        run: xvfb-run -a pnpm run bench:performance
       - name: Upload trend data
         if: always()
         uses: actions/upload-artifact@v4

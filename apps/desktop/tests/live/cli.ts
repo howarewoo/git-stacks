@@ -657,7 +657,7 @@ function recoveryCommand(receiptPath: string): string {
     receipt === '..' || receipt.startsWith('../') || receipt.startsWith('..\\')
       ? absoluteReceipt
       : receipt
-  return `npm exec --workspace=git-stacks -- tsx tests/live/cli.ts --recover ${quoteShellArg(recoveryPath)}`
+  return `pnpm --filter git-stacks exec tsx tests/live/cli.ts --recover ${quoteShellArg(recoveryPath)}`
 }
 
 /** What a recovery run removed, and everything it did not, in a form a person reads. */

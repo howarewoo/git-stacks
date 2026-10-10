@@ -1,4 +1,3 @@
-#!/usr/bin/env -S npx tsx
 /**
  * Signs one channel's manifest with the project's release key and writes the
  * detached signature envelope beside it.
@@ -17,7 +16,7 @@
  * The signature covers the manifest's exact bytes as they are on disk, including
  * the trailing newline, because those are the bytes the app fetches and hashes.
  *
- *   UPDATE_SIGNING_KEY="$(cat key.pem)" npx tsx scripts/release-update-sign.ts \
+ *   UPDATE_SIGNING_KEY="$(cat key.pem)" pnpm exec tsx scripts/release-update-sign.ts \
  *     --channel stable --manifest channel-feed/update-stable.json
  */
 import { createPrivateKey, sign, type KeyObject } from 'node:crypto'

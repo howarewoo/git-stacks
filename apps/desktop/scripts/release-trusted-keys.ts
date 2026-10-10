@@ -1,4 +1,3 @@
-#!/usr/bin/env -S npx tsx
 /**
  * Puts the project's release update key into the build that is about to be
  * packaged, and proves the two halves belong together first.
@@ -10,14 +9,14 @@
  * public half from the UPDATE_SIGNING_PUBLIC_KEY repository secret, proves it
  * against the private half in UPDATE_SIGNING_KEY by signing a fixed challenge
  * and verifying it, and only then writes resources/update-trusted-keys.json for
- * `npm run dist` to compile in.
+ * `pnpm run dist` to compile in.
  *
  * The private half is read, used, and never written, printed, or logged. A
  * mismatch between the two secrets stops the release rather than shipping a
  * build whose own updater could never trust the manifests published beside it.
  *
- *   UPDATE_SIGNING_KEY=… UPDATE_SIGNING_PUBLIC_KEY=… npx tsx scripts/release-trusted-keys.ts inject
- *   UPDATE_SIGNING_PUBLIC_KEY=… npx tsx scripts/release-trusted-keys.ts check-injected
+ *   UPDATE_SIGNING_KEY=… UPDATE_SIGNING_PUBLIC_KEY=… pnpm exec tsx scripts/release-trusted-keys.ts inject
+ *   UPDATE_SIGNING_PUBLIC_KEY=… pnpm exec tsx scripts/release-trusted-keys.ts check-injected
  *
  * `check-injected` is the other half of the release: it reads the key set back
  * the way a packaged build reads it and refuses a build that would ship with
@@ -291,7 +290,7 @@ if (command === 'check-injected') {
 
 if (command !== 'inject') {
   fail(
-    'usage: release-trusted-keys.ts inject [--out <path>] | check-injected [--out <path>]. `inject` runs before `npm run dist` so the packaged build carries the key it will verify releases with; `check-injected` refuses a build that would ship without it.',
+    'usage: release-trusted-keys.ts inject [--out <path>] | check-injected [--out <path>]. `inject` runs before `pnpm run dist` so the packaged build carries the key it will verify releases with; `check-injected` refuses a build that would ship without it.',
   )
 }
 

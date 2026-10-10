@@ -40,11 +40,12 @@ jobs:
           # from any branch, and the code that runs must be the default branch's.
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Prove the checkout is the tree that was fetched
         # What this actually proves, stated plainly because the difference matters:
         # HEAD is the commit the trusted ref resolved to and the working tree was not
@@ -63,7 +64,7 @@ jobs:
           }
           git diff --quiet HEAD -- || { echo '::error::the working tree was changed'; exit 1; }
       - name: Run the live suite against a controlled GitHub over real Git and TLS
-        run: npx tsx apps/desktop/tests/live/cli.ts --controlled
+        run: pnpm --filter git-stacks exec tsx tests/live/cli.ts --controlled
 
   # The authorized target. It creates a repository under a named account, runs
   # the same scenarios against real GitHub, and deletes what it created.
@@ -87,10 +88,11 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          cache: pnpm
       - name: Refuse to run without an authorized disposable account
         # Before anything is installed, let alone created. The suite itself also
         # refuses an unset owner or token, but a repository with no
@@ -133,7 +135,7 @@ jobs:
             echo "::error::refusing to run: dispatched from $DISPATCH_REF, and this workflow reaches the environment's credentials"
             exit 1
           fi
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
       - name: Run the live suite against the authorized disposable repository
         # The run id names every resource it creates and is stamped on each one,
         # so a leftover from a killed run is attributable and deletable. The
@@ -156,7 +158,7 @@ jobs:
           # a record of a leftover that nobody can act on. This directory outlives the
           # job, and the recovery job below reads it.
           GIT_STACKS_LIVE_GITHUB_RECEIPT: ${{ runner.temp }}/../git-stacks-live-receipts/${{ github.run_id }}-${{ github.run_attempt }}.json
-        run: npx tsx apps/desktop/tests/live/cli.ts --github
+        run: pnpm --filter git-stacks exec tsx tests/live/cli.ts --github
       - name: Publish the sanitized receipt
         # The receipt is written before each resource is created and updated
         # after every change, so it names what is still standing even when a run
@@ -200,11 +202,12 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Take the receipt this run published
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -228,4 +231,4 @@ jobs:
             echo '::error::this run published no receipt, so nothing can be recovered'
             exit 1
           fi
-          npx tsx apps/desktop/tests/live/cli.ts --recover "$receipt"
+          pnpm --filter git-stacks exec tsx tests/live/cli.ts --recover "$receipt"

@@ -17,24 +17,24 @@ Read [PRODUCT.md](PRODUCT.md) before changing product scope or workflows. Use
 
 ## Development and verification
 
-Run commands from the repository root. Use Node 24, npm, and the committed
-`package-lock.json`, as the README and CI do.
+Run commands from the repository root. Use Node 24, pnpm, and the committed
+`pnpm-lock.yaml`, as the README and CI do.
 
 | Command                | Purpose                                |
 | ---------------------- | -------------------------------------- |
-| `npm ci`               | Install dependencies                   |
-| `npm run dev`          | Run the Electron app                   |
-| `npm run typecheck`    | Check application and test types       |
-| `npm run build`        | Typecheck and build the production app |
-| `npm test`             | Run the root TypeScript test suite     |
-| `npm run format:check` | Check formatting                       |
+| `pnpm install --frozen-lockfile`               | Install dependencies                   |
+| `pnpm run dev`          | Run the Electron app                   |
+| `pnpm run typecheck`    | Check application and test types       |
+| `pnpm run build`        | Typecheck and build the production app |
+| `pnpm test`             | Run the root TypeScript test suite     |
+| `pnpm run format:check` | Check formatting                       |
 
-Development, builds, and `npm test` compile the native clone-promotion helper;
-provide a C compiler or set `CC`. `npm test` also provisions the pinned Git runtime
+Development, builds, and `pnpm test` compile the native clone-promotion helper;
+provide a C compiler or set `CC`. `pnpm test` also provisions the pinned Git runtime
 and may download it when absent.
 
 - Renderer verification is suggested, not mandatory. Consider exercising the real
-  components in the separate gallery and running relevant `npm run test:ui` checks
+  components in the separate gallery and running relevant `pnpm run test:ui` checks
   as described in [Renderer verification](README.md#renderer-verification).
   Visual baselines are macOS-specific. Gallery dispatch proves renderer intent,
   not Git success.
@@ -42,7 +42,7 @@ and may download it when absent.
   the [packaged desktop smoke](README.md#packaged-desktop-smoke); its Windows path
   is not supported. Keep manual assistive-technology evidence separate from automation.
 - For performance changes, use [Performance budgets](README.md#performance-budgets)
-  and `npm run bench:performance` after a build. Budget values belong in
+  and `pnpm run bench:performance` after a build. Budget values belong in
   `packages/shared/src/performance.ts`, not duplicated constants.
 
 ## Implementation boundaries
@@ -62,7 +62,7 @@ and may download it when absent.
   `apps/desktop/tests/renderer/fixtures/control.ts` and affected payloads. The build typechecks
   these consumers. Keep fixture APIs out of the production renderer.
 - Edit `apps/desktop/src/renderer/src/design-system/tokens.json`, not generated `tokens.css`;
-  run `npm run tokens:generate` and `npm run tokens:check` after token changes.
+  run `pnpm run tokens:generate` and `pnpm run tokens:check` after token changes.
   Reuse the shared controls and token roles defined in `DESIGN.md`.
 - Preserve captured-preview validation, confirmation gates, force-with-lease
   checks, and recovery journals when changing Git workflows. Use disposable

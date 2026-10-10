@@ -1,4 +1,3 @@
-#!/usr/bin/env -S npx tsx
 /**
  * Re-reads a channel's published manifest and signature from disk and proves
  * them, before either goes on a release an app will fetch.
@@ -23,7 +22,7 @@
  * pair that disagreed would fail the release for a reason nobody could fix
  * from the log.
  *
- *   npx tsx scripts/release-update-verify.ts --channel stable \
+ *   pnpm exec tsx scripts/release-update-verify.ts --channel stable \
  *     --manifest channel-feed/update-stable.json --artifact-dir channel-assets
  */
 import { createPrivateKey } from 'node:crypto'
