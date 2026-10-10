@@ -1,0 +1,49 @@
+{
+  "name": "@git-stacks/ui",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Shared browser-safe production UI controls, typography, and canonical design tokens for Git Stacks",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    "./index": "./src/index.ts",
+    ".": "./src/index.ts",
+    "./lib/utils": "./src/lib/utils.ts",
+    "./components/*": "./src/components/ui/*.tsx",
+    "./tokens.css": "./src/tokens/tokens.css",
+    "./tokens.json": "./src/tokens/tokens.json",
+    "./styles.css": "./src/styles/foundations.css"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "tokens:generate": "node src/tokens/generate-tokens.mjs",
+    "tokens:check": "node src/tokens/generate-tokens.mjs --check"
+  },
+  "peerDependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "dependencies": {
+    "@base-ui/react": "1.8.0",
+    "@shadcn/react": "0.3.1",
+    "@tanstack/react-table": "^9.2.8",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "cmdk": "1.1.1",
+    "date-fns": "4.4.0",
+    "embla-carousel-react": "8.6.0",
+    "input-otp": "1.4.2",
+    "lucide-react": "1.47.0",
+    "react-day-picker": "9.5.1",
+    "react-resizable-panels": "^4.14.4",
+    "recharts": "2.15.1",
+    "tailwind-merge": "3.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "7.0.2"
+  }
+}

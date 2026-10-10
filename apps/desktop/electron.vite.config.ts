@@ -7,14 +7,14 @@ export default defineConfig({
   main: {
     build: {
       externalizeDeps: {
-        exclude: ['@git-stacks/shared'],
+        exclude: ['@git-stacks/shared', '@git-stacks/ui'],
       },
     },
   },
   preload: {
     build: {
       externalizeDeps: {
-        exclude: ['@git-stacks/shared'],
+        exclude: ['@git-stacks/shared', '@git-stacks/ui'],
       },
       rollupOptions: { output: { format: 'cjs', entryFileNames: 'index.cjs' } },
     },

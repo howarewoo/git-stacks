@@ -1,0 +1,204 @@
+@import "../tokens/tokens.css";
+
+@custom-variant dark {
+  &:where([data-gs-theme="dark"], [data-gs-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where([data-gs-theme="system"], [data-gs-theme="system"] *) {
+      @slot;
+    }
+  }
+}
+
+/* Shared production foundations for Git Stacks browser surfaces.
+   Owned by @git-stacks/ui. Both apps/desktop and apps/design import this
+   file once; neither app duplicates it. Edit here, never copy it. */
+
+@theme inline {
+  --text-sm: var(--gs-semantic-type-body-size);
+  --text-sm--line-height: var(--gs-semantic-type-body-line);
+  --text-xs: var(--gs-semantic-type-metadata-size);
+  --text-xs--line-height: var(--gs-semantic-type-metadata-line);
+
+  /* shadcn/base-nova compatibility roles, bound to the canonical tokens so
+     upstream recipes render the Quiet Workbench palette without a second
+     palette. Do not introduce gallery-only colors here. */
+  --color-background: var(--gs-semantic-surface-canvas);
+  --color-foreground: var(--gs-semantic-text-primary);
+  --color-card: var(--gs-semantic-surface-content);
+  --color-card-foreground: var(--gs-semantic-text-primary);
+  --color-popover: var(--gs-semantic-surface-content);
+  --color-popover-foreground: var(--gs-semantic-text-primary);
+  --color-primary: var(--gs-semantic-action-primary);
+  --color-primary-foreground: var(--gs-semantic-text-inverse);
+  --color-secondary: var(--gs-semantic-surface-inset);
+  --color-secondary-foreground: var(--gs-semantic-text-secondary);
+  --color-muted: var(--gs-semantic-surface-inset);
+  --color-muted-foreground: var(--gs-semantic-text-secondary);
+  --color-accent: var(--gs-semantic-selection-background);
+  --color-accent-foreground: var(--gs-semantic-selection-text);
+  --color-destructive: var(--gs-semantic-feedback-error-text);
+  --color-destructive-foreground: var(--gs-semantic-text-inverse);
+  --color-border: var(--gs-semantic-border-decorative);
+  --color-input: var(--gs-semantic-border-essential);
+  --color-ring: var(--gs-semantic-focus-ring);
+  --color-sidebar: var(--gs-semantic-surface-content);
+  --color-sidebar-foreground: var(--gs-semantic-text-primary);
+  --color-sidebar-primary: var(--gs-semantic-action-primary);
+  --color-sidebar-primary-foreground: var(--gs-semantic-text-inverse);
+  --color-sidebar-accent: var(--gs-semantic-selection-background);
+  --color-sidebar-accent-foreground: var(--gs-semantic-selection-text);
+  --color-sidebar-border: var(--gs-semantic-border-decorative);
+  --color-sidebar-ring: var(--gs-semantic-focus-ring);
+
+  --radius-sm: 8px;
+  --radius-md: var(--gs-semantic-radius-control);
+  --radius-lg: var(--gs-semantic-radius-item);
+  --radius-xl: var(--gs-semantic-radius-workbench);
+}
+
+:root {
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-surface-canvas);
+  font-family: var(--gs-semantic-font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+code,
+pre {
+  font-family: var(--gs-semantic-font-mono);
+}
+
+.gs-empty-state > h2 {
+  margin: 0;
+  font-size: var(--gs-semantic-type-label-size);
+  font-weight: 600;
+  line-height: var(--gs-semantic-type-label-line);
+}
+
+.gs-empty-state > p {
+  margin: 0;
+  font-size: var(--gs-semantic-type-body-size);
+  line-height: var(--gs-semantic-type-body-line);
+}
+
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  /* Tailwind v4 switched buttons to cursor: default; the workbench keeps
+     the pointer affordance on enabled interactive elements. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-selection-background);
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  caret-color: var(--gs-semantic-selection-text);
+}
+
+:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring) !important;
+  outline-offset: 2px !important;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--gs-semantic-border-decorative);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--gs-semantic-border-essential);
+  background-clip: padding-box;
+}
+
+.animate-spin {
+  animation: spin 0.9s linear infinite;
+}
+
+.animate-dialog-in {
+  animation: dialog-in 160ms ease-out both;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    scale: 0.98;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+/* Compact and standard controls share the label role; density changes
+   height and padding, not font size. Coarse pointers get a 44px minimum. */
+@media (pointer: coarse) {
+  .gs-button,
+  .gs-segmented-control button,
+  .gs-checkbox > label,
+  input:not([type="checkbox"]),
+  [data-slot="select-trigger"],
+  textarea {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* The stored "reduce motion" preference. It sits beside the media query
+   above rather than replacing it, so a choice made here holds on a computer
+   that has not asked for reduced motion itself. */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}

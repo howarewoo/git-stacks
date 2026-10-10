@@ -813,8 +813,10 @@ Concrete guardrails for the existing system and the user-confirmed Quiet Workben
 - **Do** keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.
 - **Do** use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.
 - **Do** use `semantic.border.essential` for essential boundaries, `semantic.focus.ring` for keyboard focus, and text/icon descriptions alongside every Git status.
-- **Do** define primitive, semantic, and component tokens in `apps/desktop/src/renderer/src/design-system/tokens.json`; treat `tokens.css` as generated output, never a second manually maintained palette.
+- **Do** define primitive, semantic, and component tokens in `packages/ui/src/tokens/tokens.json`; treat `tokens.css` as generated output, never a second manually maintained palette.
 - **Do** keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation.
+- **Do** share production controls, typography and foundations through `@git-stacks/ui`; catalog specimens demonstrate this implementation rather than defining a second visual policy. Keep larger content typography distinct from compact application roles.
+- **Do** keep essential boundaries at ≥3:1 against their adjacent surface in both themes; the dark essential-border primitive is `#657185` so shared fields and overlays retain this distinction.
 
 ### Don't:
 

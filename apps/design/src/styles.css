@@ -1,0 +1,296 @@
+@import "tailwindcss";
+@import "@git-stacks/ui/styles.css";
+
+/* Design-catalog-specific foundations. Shared production foundations
+   (tokens, base elements, focus, motion, density) live in
+   @git-stacks/ui and are owned there. This file only adds catalog chrome. */
+
+@source "./";
+@source "../../../packages/ui/src";
+
+:root {
+  color: var(--gs-semantic-text-primary);
+  background: var(--gs-semantic-surface-canvas);
+  font-family: var(--gs-semantic-font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+#root {
+  isolation: isolate;
+}
+
+body {
+  min-width: 0;
+  background: var(--gs-semantic-surface-canvas);
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-body-size);
+  line-height: var(--gs-semantic-type-body-line);
+}
+
+.design-shell {
+  display: grid;
+  min-height: 100vh;
+  grid-template-columns: 300px minmax(0, 1fr);
+}
+
+.design-nav {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  border-right: 1px solid var(--gs-semantic-border-decorative);
+  background: var(--gs-semantic-surface-content);
+  padding: var(--gs-semantic-space-4);
+}
+
+.design-main {
+  min-width: 0;
+  max-width: 1100px;
+  padding: var(--gs-semantic-space-6) var(--gs-semantic-space-6) var(--gs-semantic-space-10);
+}
+
+.design-entry {
+  scroll-margin-top: var(--gs-semantic-space-4);
+}
+
+.design-specimen {
+  display: grid;
+  gap: var(--gs-semantic-space-3);
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-item);
+  background: var(--gs-semantic-surface-content);
+  padding: var(--gs-semantic-space-4);
+}
+
+.design-specimen-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gs-semantic-space-2);
+}
+
+.design-token-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gs-semantic-space-1);
+}
+
+.design-code {
+  overflow-x: auto;
+  border-radius: var(--gs-semantic-radius-control);
+  background: var(--gs-semantic-surface-inset);
+  padding: var(--gs-semantic-space-3);
+  font-family: var(--gs-semantic-font-mono);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
+  white-space: pre;
+}
+
+/* Compact density reuses the same roles at the compact control height. */
+:root[data-gs-density="compact"] {
+  --gs-semantic-density-control-standard: var(--gs-semantic-density-control-compact);
+  --gs-semantic-density-row-standard: var(--gs-semantic-density-row-compact);
+}
+
+@media (max-width: 900px) {
+  .design-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .design-nav {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--gs-semantic-border-decorative);
+  }
+}
+
+.design-nav > h1 {
+  font-size: 20px;
+  font-weight: 600;
+}
+.design-nav > p {
+  margin: 8px 0 24px;
+  color: var(--gs-semantic-text-secondary);
+}
+.design-nav > button {
+  margin-top: 12px;
+  width: 100%;
+}
+.catalog-settings {
+  display: grid;
+  gap: 12px;
+  margin: 24px 0;
+}
+.catalog-settings label {
+  display: grid;
+  gap: 6px;
+}
+.design-nav nav a {
+  display: block;
+  padding: 5px 8px;
+  border-radius: var(--gs-semantic-radius-control);
+}
+.design-nav nav a:hover {
+  background: var(--gs-semantic-surface-hover);
+}
+.design-nav nav h2 {
+  margin-top: 24px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.design-main header {
+  margin-bottom: 48px;
+}
+.design-main header h2 {
+  font-size: var(--gs-semantic-type-heading-size);
+  font-weight: 600;
+  line-height: 1.25;
+}
+.design-main p {
+  max-width: 72ch;
+  margin: 12px 0;
+}
+.design-entry {
+  padding-top: 32px;
+  margin-bottom: 32px;
+  min-width: 0;
+}
+.design-entry > h2 {
+  font-size: var(--gs-semantic-type-heading-size);
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.design-entry h3 {
+  font-size: var(--gs-semantic-type-label-size);
+  font-weight: 500;
+  margin: 24px 0 12px;
+}
+.design-entry details {
+  margin-top: 16px;
+}
+.design-entry summary {
+  cursor: pointer;
+  color: var(--gs-semantic-text-link);
+}
+.design-entry dl {
+  margin: 16px 0;
+}
+.design-entry dt {
+  font-weight: 600;
+  margin-top: 12px;
+}
+.design-entry dd {
+  margin-top: 4px;
+  max-width: 72ch;
+}
+.design-token-list code {
+  background: var(--gs-semantic-surface-inset);
+  padding: 4px 6px;
+  overflow-wrap: anywhere;
+}
+.design-specimen > * {
+  min-width: 0;
+}
+.design-main a:not([data-slot="button"]) {
+  color: var(--gs-semantic-text-link);
+  text-underline-offset: 3px;
+  text-decoration: underline;
+}
+.design-main code,
+.git-row code {
+  font-family: var(--gs-semantic-font-mono);
+  overflow-wrap: anywhere;
+}
+.foundation-colors {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.foundation-colors > div {
+  padding: 16px;
+  border-radius: var(--gs-semantic-radius-control);
+}
+.foundation-values {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+.foundation-values > div {
+  min-width: 0;
+}
+.git-graph {
+  display: grid;
+  gap: 12px;
+}
+.git-row {
+  border: 1px solid var(--gs-semantic-border-decorative);
+  border-radius: var(--gs-semantic-radius-item);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+.git-row[data-inspected="true"] {
+  background: var(--gs-semantic-selection-background);
+  border-color: var(--gs-semantic-selection-border);
+}
+.diff-preview {
+  white-space: pre;
+  overflow: auto;
+  font-family: var(--gs-semantic-font-mono);
+  padding: 12px;
+  background: var(--gs-semantic-surface-content);
+}
+.diff-hunk {
+  color: var(--gs-semantic-diff-hunk-text);
+}
+.diff-add {
+  color: var(--gs-semantic-diff-add-text);
+  background: var(--gs-semantic-diff-add-surface);
+}
+.diff-remove {
+  color: var(--gs-semantic-diff-remove-text);
+  background: var(--gs-semantic-diff-remove-surface);
+}
+.numeric-example {
+  font-variant-numeric: tabular-nums;
+}
+.numeric-example td:last-child {
+  text-align: right;
+  padding-left: 24px;
+}
+.skip-link {
+  position: fixed;
+  top: -100px;
+  left: 8px;
+  z-index: 200;
+  padding: 12px;
+  background: var(--gs-semantic-surface-content);
+}
+.skip-link:focus {
+  top: 8px;
+}
+footer {
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--gs-semantic-border-decorative);
+  color: var(--gs-semantic-text-secondary);
+}
+@media (max-width: 900px) {
+  .design-nav nav {
+    max-height: 220px;
+    overflow: auto;
+  }
+  .design-main {
+    padding: 24px 16px;
+  }
+}
