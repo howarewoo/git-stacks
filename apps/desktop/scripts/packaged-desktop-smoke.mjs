@@ -117,7 +117,7 @@ function resolveTarget(explicit) {
   if (!found) {
     throw new Error(
       `No packaged application found. Looked for:\n  ${candidates.join('\n  ')}\n` +
-        'Build one with "npm run package", or pass --app <path to the packaged app>.',
+        'Build one with "pnpm run package", or pass --app <path to the packaged app>.',
     )
   }
   if (!found.endsWith('.app')) return { bundle: null, executable: found }

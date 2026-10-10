@@ -38,10 +38,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-          cache: npm
+          cache: pnpm
       - name: Check release identity and signing prerequisites
         shell: bash
         env:
@@ -82,7 +83,7 @@ jobs:
             echo "::error::$declared of the four UPDATE_SIGNING_ADDITIONAL_* values are set; a rotation is all four or none"
             exit 1
           fi
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
       - name: Put the MSVC toolchain on PATH
         # The clone promotion helper is compiled from source at build time, and a
         # Windows runner does not put MSVC on PATH by itself. Without this the
@@ -109,7 +110,7 @@ jobs:
         # The suite is run against the repository as committed, with the key set
         # empty, so a release can never make a test pass or fail by the key it
         # happens to inject. Everything after this is about the key.
-        run: npm test
+        run: pnpm test
       - name: Inject the release update key into this build
         working-directory: apps/desktop
         shell: bash
@@ -123,7 +124,7 @@ jobs:
           UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY }}
           UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
           UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
-        # Before `npm run dist`, because after it the key is inside the build.
+        # Before `pnpm run dist`, because after it the key is inside the build.
         # The committed key set stays empty: a build that is not made by a
         # release trusts nothing and fetches nothing, which is the honest state
         # of a repository with no release key. This step proves the two secrets
@@ -131,7 +132,7 @@ jobs:
         # verifies it with the public half — and fails closed if either secret is
         # missing, if they disagree, or if the key is not Ed25519. The private
         # half is never written, printed, or uploaded.
-        run: npx tsx scripts/release-trusted-keys.ts inject
+        run: pnpm exec tsx scripts/release-trusted-keys.ts inject
       - name: Refuse a build that would ship with no release key
         working-directory: apps/desktop
         shell: bash
@@ -145,7 +146,7 @@ jobs:
         # The key is inside the build from here on, so an empty or wrong key set
         # is a build that can never verify any manifest. This reads the injected
         # set back and fails rather than shipping that build.
-        run: npx tsx scripts/release-trusted-keys.ts check-injected
+        run: pnpm exec tsx scripts/release-trusted-keys.ts check-injected
       - name: Hand the injected key set to the publishing job
         shell: bash
         run: |
@@ -156,7 +157,7 @@ jobs:
           path: injected-key-set-${{ matrix.platform }}-${{ matrix.arch }}.json
           if-no-files-found: error
           retention-days: 7
-      - run: npm run dist
+      - run: pnpm run dist
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -349,9 +350,9 @@ jobs:
         # file is for; it does not guess it from a file name, and it will not
         # publish a manifest that is missing a build from this matrix.
         run: |
-          npx tsx apps/desktop/scripts/release-update-manifest.ts describe \
+          pnpm --filter git-stacks exec tsx scripts/release-update-manifest.ts describe \
             --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}' \
-            --dir signed-release --out "descriptors/${{ matrix.platform }}-${{ matrix.arch }}.json"
+            --dir ../../signed-release --out "../../descriptors/${{ matrix.platform }}-${{ matrix.arch }}.json"
       - name: State the Linux support policy this release ships
         if: matrix.platform == 'linux'
         shell: bash
@@ -393,7 +394,7 @@ jobs:
           # test, or a runner that skipped it all leave no proof, and the step
           # fails rather than passing on silence.
           GIT_STACKS_POLICY_PROOF="$RUNNER_TEMP/linux-policy.proved" \
-            npx tsx --test apps/desktop/tests/update-linux-policy.test.ts
+            pnpm --filter git-stacks exec tsx --test tests/update-linux-policy.test.ts
           test -s "$RUNNER_TEMP/linux-policy.proved" || {
             echo "::error::the Linux policy check left no proof, so this step proved nothing"
             exit 1
@@ -491,11 +492,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Require the update signing key before anything is published
         shell: bash
         env:
@@ -552,7 +554,7 @@ jobs:
           UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
           UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         run: |
-          npx tsx scripts/release-trusted-keys.ts inject
+          pnpm exec tsx scripts/release-trusted-keys.ts inject
           shopt -s nullglob
           shipped=(../../injected-key-sets/*.json)
           test "${#shipped[@]}" -gt 0
@@ -605,14 +607,14 @@ jobs:
           test "$VERSION" = "$(node -p 'require("./package.json").version')"
           ROLLBACK=()
           if [ -n "$ROLLBACK_OF" ]; then ROLLBACK=(--rollback-of "$ROLLBACK_OF"); fi
-          npx tsx scripts/release-update-manifest.ts build \
+          pnpm exec tsx scripts/release-update-manifest.ts build \
             --channel "$CHANNEL" --version "$VERSION" \
             --descriptors ../../descriptors --artifact-dir ../../signed-release \
             --out-dir ../../channel-feed --stage-dir ../../channel-assets \
             --repo "$REPOSITORY" --notes "${RELEASE_NOTES:-Git Stacks $VERSION ($CHANNEL).}" \
             ${ROLLBACK[@]+"${ROLLBACK[@]}"}
-          npx tsx scripts/release-update-sign.ts --channel "$CHANNEL" --manifest "../../channel-feed/update-$CHANNEL.json"
-          npx tsx scripts/release-update-verify.ts --channel "$CHANNEL" --manifest "../../channel-feed/update-$CHANNEL.json" --artifact-dir ../../channel-assets
+          pnpm exec tsx scripts/release-update-sign.ts --channel "$CHANNEL" --manifest "../../channel-feed/update-$CHANNEL.json"
+          pnpm exec tsx scripts/release-update-verify.ts --channel "$CHANNEL" --manifest "../../channel-feed/update-$CHANNEL.json" --artifact-dir ../../channel-assets
       - name: Verify the provenance of every artifact about to be published
         shell: bash
         env:
@@ -665,7 +667,7 @@ jobs:
           # fetches, and finally both fixed names are read back off the release
           # and proved. Nothing is deleted, and nothing a client needs is only
           # reachable after it exists somewhere that is never rewritten.
-          npx tsx scripts/release-update-publish.ts --channel "$CHANNEL" --repo "$REPOSITORY" \
+          pnpm exec tsx scripts/release-update-publish.ts --channel "$CHANNEL" --repo "$REPOSITORY" \
             --feed ../../channel-feed --installers ../../channel-assets
 
   supply-chain:
@@ -680,19 +682,22 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Refuse a known-vulnerable dependency
         shell: bash
         # High or critical, in any dependency the build and the app ship. A
         # release stops here rather than shipping a known-vulnerable tree.
-        run: npm audit --audit-level=high
+        run: pnpm audit --audit-level=high
       - name: Scan the dependency tree for known vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # pnpm 12 keeps the app graph in the second lockfile YAML document.
+          version: 'v0.75.0'
           scan-type: fs
           scan-ref: .
           scanners: vuln

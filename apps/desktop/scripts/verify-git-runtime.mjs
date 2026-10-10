@@ -32,7 +32,7 @@ function inventoryOrFail(root) {
 
 if (!existsSync(manifestPath)) {
   fail(
-    `no release manifest at ${manifestPath}. Run npm run provision:git-runtime before packaging.`,
+    `no release manifest at ${manifestPath}. Run pnpm run provision:git-runtime before packaging.`,
   )
 }
 

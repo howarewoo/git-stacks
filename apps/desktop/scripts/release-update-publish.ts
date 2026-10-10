@@ -1,4 +1,3 @@
-#!/usr/bin/env -S npx tsx
 /**
  * Publishes one channel's signed update feed, in an order a release can be
  * interrupted in without losing anything.
@@ -31,7 +30,7 @@
  * fetched, and swapping the bytes behind it would break the manifest clients
  * are being offered right now.
  *
- *   npx tsx scripts/release-update-publish.ts --channel stable \
+ *   pnpm exec tsx scripts/release-update-publish.ts --channel stable \
  *     --repo howarewoo/git-stacks --feed channel-feed --installers channel-assets
  */
 import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'

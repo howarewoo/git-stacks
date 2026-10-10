@@ -19,21 +19,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends xvfb xauth
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
+        run: pnpm --filter git-stacks exec playwright install --with-deps chromium
       - name: Unit checks for the shared keyboard and state-label contracts
-        run: npx tsx --test apps/desktop/tests/tree-navigation.test.ts apps/desktop/tests/components.test.ts
+        run: pnpm --filter git-stacks exec tsx --test tests/tree-navigation.test.ts tests/components.test.ts
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm run typecheck
       - name: axe audits, contrast, keyboard routes, and 200% zoom
         # The a11y suite runs against the real renderer fixtures served by Vite.
-        # Pixel baselines are darwin-only and stay a local gate (npm run test:visual).
-        run: xvfb-run -a npm run test:ui
+        # Pixel baselines are darwin-only and stay a local gate (pnpm run test:visual).
+        run: xvfb-run -a pnpm run test:ui
       - name: Upload the Playwright report
         if: always()
         uses: actions/upload-artifact@v4

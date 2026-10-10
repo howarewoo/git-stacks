@@ -27,9 +27,9 @@ import { measureDesktop } from './desktop-interaction.mjs'
  * fixtures. CI fails when a budget is exceeded. Nothing clones a remote or
  * reads a private repository.
  *
- * The desktop measurements require `npm run build` first and a display server.
+ * The desktop measurements require `pnpm run build` first and a display server.
  *
- *   npm run bench:performance -- [--out <dir>] [--keep]
+ *   pnpm run bench:performance [--out <dir>] [--keep]
  */
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..', '..')

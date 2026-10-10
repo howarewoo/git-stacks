@@ -374,7 +374,7 @@ async function startRelease(root) {
 
 async function main() {
   if (!existsSync(join(ROOT, 'out', 'main', 'index.js'))) {
-    throw new Error('The app is not built. Run `npm run build` first.')
+    throw new Error('The app is not built. Run `pnpm run build` first.')
   }
   // One disposable root holds everything this run creates: the repository the
   // app opens, the Chromium profile, the Git and gh configuration, the sealing

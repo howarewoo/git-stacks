@@ -1,4 +1,3 @@
-#!/usr/bin/env -S npx tsx
 /**
  * Builds the update manifest a channel publishes, from the installers this
  * release has just verified.
@@ -27,10 +26,10 @@
  * version that does not name the version it rolls back, so a downgrade is
  * always an explicit, signed decision.
  *
- *   npx tsx scripts/release-update-manifest.ts describe \
+ *   pnpm exec tsx scripts/release-update-manifest.ts describe \
  *     --platform darwin --arch arm64 --dir signed-release --out descriptors/darwin-arm64.json
  *
- *   npx tsx scripts/release-update-manifest.ts build \
+ *   pnpm exec tsx scripts/release-update-manifest.ts build \
  *     --channel stable --version 0.1.0 --descriptors descriptors \
  *     --artifact-dir signed-release --out-dir channel-feed --stage-dir channel-assets \
  *     --repo howarewoo/git-stacks [--notes '…'] [--rollback-of 0.0.9] [--sequence 4] \
