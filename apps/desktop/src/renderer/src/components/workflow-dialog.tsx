@@ -2602,9 +2602,6 @@ export function WorkflowDialog({
                         : 'Continue from the first unfinished step. Finished pushes and pull requests are not repeated.'
                     }
                   >
-                    {busy ? (
-                      <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />
-                    ) : null}
                     Resume submission
                   </Button>
                 </>
@@ -2616,9 +2613,6 @@ export function WorkflowDialog({
                   loading={busy || formSubmitting}
                   tooltip={shapeReason ?? (blocker ? blocker.message : description)}
                 >
-                  {busy || formSubmitting ? (
-                    <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />
-                  ) : null}
                   {actionLabel}
                 </Button>
               )}

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import * as UI from '@git-stacks/ui'
 import tokens from '@git-stacks/ui/tokens.json'
 
@@ -73,6 +73,30 @@ export function TypographySpecimen() {
   )
 }
 
+const foundationUsage: Record<string, Record<string, string>> = {
+  space: {
+    '1': 'Dense metadata',
+    '2': 'Related controls and help',
+    '3': 'Fields and fact groups',
+    '4': 'Section rhythm',
+    '5': 'Workbench content inset',
+    '6': 'Major section separation',
+    '8': 'Generous section separation',
+    '10': 'Page breathing room',
+  },
+  radius: {
+    control: 'Buttons and editable controls',
+    item: 'Rows and grouped items',
+    workbench: 'Work surfaces and dialogs',
+    pill: 'Badges and segmented controls',
+  },
+  elevation: {
+    small: 'Complete content cards',
+    medium: 'Floating menus and tooltips',
+    large: 'Dialog layers',
+  },
+}
+
 export function Foundations() {
   const semantic = tokens.semantic
   return (
@@ -105,7 +129,36 @@ export function Foundations() {
                     semantic.{role}.{name}
                   </code>
                 </dt>
-                <dd>{tokenValue(value)}</dd>
+                <dd>
+                  {role === 'space' && (
+                    <div className="foundation-preview" aria-hidden="true">
+                      <span
+                        className="foundation-space"
+                        style={{ width: `var(--gs-semantic-space-${name})` }}
+                      />
+                    </div>
+                  )}
+                  {role === 'radius' && (
+                    <div className="foundation-preview" aria-hidden="true">
+                      <span
+                        className="foundation-shape"
+                        style={{ borderRadius: `var(--gs-semantic-radius-${name})` }}
+                      />
+                    </div>
+                  )}
+                  {role === 'elevation' && (
+                    <div className="foundation-preview" aria-hidden="true">
+                      <span
+                        className="foundation-layer"
+                        style={{ boxShadow: `var(--gs-semantic-elevation-${name})` }}
+                      />
+                    </div>
+                  )}
+                  <span>{tokenValue(value)}</span>
+                  {foundationUsage[role]?.[name] && (
+                    <p className="foundation-usage">{foundationUsage[role][name]}</p>
+                  )}
+                </dd>
               </div>
             ))}
           </dl>
@@ -164,6 +217,8 @@ const branches = [
     restack: 'Conflict',
   },
 ] as const
+
+const deletionScope = [branches[1], branches[3]]
 export function GitCompositions() {
   const [inspected, setInspected] = useState<number>(41)
   const [checkedOut, setCheckedOut] = useState('main')
@@ -172,6 +227,7 @@ export function GitCompositions() {
   const [result, setResult] = useState('No operation performed')
   const [reply, setReply] = useState('')
   const [comments, setComments] = useState<string[]>([])
+  const cancelRef = useRef<HTMLButtonElement>(null)
   return (
     <section id="git-compositions" className="design-entry git-compositions" tabIndex={-1}>
       <h2>Git compositions</h2>
@@ -184,38 +240,51 @@ export function GitCompositions() {
         Checked out: <code>{checkedOut}</code> · inspected: PR #{inspected}
       </p>
       <div className="git-graph" role="list" aria-label="Branching pull request graph">
-        {branches.map((branch) => (
+        {[branches[0], branches[1], branches[3], branches[2]].map((branch) => (
           <div
             role="listitem"
             key={branch.id}
             className="git-row"
             data-inspected={inspected === branch.id}
-            style={{
-              marginInlineStart: branch.parent === null ? 0 : branch.parent === 41 ? 20 : 40,
-            }}
+            data-depth={branch.parent === null ? 0 : branch.parent === 41 ? 1 : 2}
           >
-            <div className="design-specimen-row">
-              <span>
-                {branch.parent ? `PR #${branch.parent} → ` : 'main → '}PR #{branch.id}
+            <span className="git-ancestry" aria-hidden="true">
+              <span className="git-node" />
+            </span>
+            <div className="git-identity">
+              <div className="git-ref">
+                <code>{branch.branch}</code>
+                {checkedOut === branch.branch && <UI.Badge variant="accent">Checked out</UI.Badge>}
+              </div>
+              <span className="git-parent">
+                {branch.parent ? `PR #${branch.parent} → ` : 'main → '}PR #{branch.id} ·{' '}
+                {branch.author}
               </span>
+            </div>
+            <div className="git-actions">
               <UI.Button
+                size="sm"
                 variant={inspected === branch.id ? 'accent' : 'ghost'}
+                aria-pressed={inspected === branch.id}
                 onClick={() => setInspected(branch.id)}
               >
                 Inspect #{branch.id}
               </UI.Button>
+              <UI.Button size="sm" variant="secondary" onClick={() => setCheckedOut(branch.branch)}>
+                Simulate checkout #{branch.id}
+              </UI.Button>
             </div>
-            <code>{branch.branch}</code>
-            <div className="design-specimen-row">
-              <span>{branch.author}</span>
-              <UI.Badge>{branch.lifecycle}</UI.Badge>
+            <div className="git-facts">
+              <UI.Badge variant={branch.lifecycle === 'Merged' ? 'merged' : 'secondary'}>
+                {branch.lifecycle}
+              </UI.Badge>
               <UI.Badge
                 variant={
                   branch.checks === 'Passing'
                     ? 'success'
                     : branch.checks === 'Failing'
                       ? 'danger'
-                      : 'warning'
+                      : 'secondary'
                 }
               >
                 Checks: {branch.checks}
@@ -223,9 +292,6 @@ export function GitCompositions() {
               <span>Review: {branch.review}</span>
               <span>Restack: {branch.restack}</span>
             </div>
-            <UI.Button variant="secondary" onClick={() => setCheckedOut(branch.branch)}>
-              Simulate checkout #{branch.id}
-            </UI.Button>
           </div>
         ))}
       </div>
@@ -285,31 +351,48 @@ export function GitCompositions() {
       {captured && (
         <div className="grid gap-3">
           <pre className="design-code">
-            {
-              'git branch -d fix/focus-return\ngit branch -d fix/long-ref-name-with-many-segments-and-a-very-long-description\n// Captured display only'
-            }
+            {`${deletionScope.map(({ branch }) => `git branch -d ${branch}`).join('\n')}\n// Captured display only`}
           </pre>
           <UI.AlertDialog>
             <UI.AlertDialogTrigger render={<UI.Button variant="danger" />}>
               Review destructive simulation
             </UI.AlertDialogTrigger>
-            <UI.AlertDialogContent>
+            <UI.AlertDialogContent
+              className="max-h-[calc(100dvh-32px)] overflow-y-auto"
+              initialFocus={cancelRef}
+            >
               <UI.AlertDialogHeader>
                 <UI.AlertDialogTitle>Delete two local example branches?</UI.AlertDialogTitle>
                 <UI.AlertDialogDescription>
-                  Captured scope: #42 and #44. This changes only a local result label. Type DELETE
-                  to enable confirmation.
+                  Local simulation only; no Git operation will run. PR #43 is outside this scope.
+                  Remote state is unavailable; no remote operation is offered.
                 </UI.AlertDialogDescription>
               </UI.AlertDialogHeader>
-              <UI.Field id="destructive-confirmation" label="Confirmation">
+              <ul className="confirmation-scope" aria-label="Captured branches">
+                {deletionScope.map(({ id, branch, parent }) => (
+                  <li key={id}>
+                    <span>
+                      PR #{id}
+                      {id === 44 ? ` · descendant of #${parent}` : ''}
+                    </span>
+                    <code>{branch}</code>
+                  </li>
+                ))}
+              </ul>
+              <UI.Field
+                id="destructive-confirmation"
+                label="Confirmation"
+                description="Type DELETE to enable the simulation."
+              >
                 <UI.Input
                   value={confirmation}
                   onChange={(event) => setConfirmation(event.target.value)}
                 />
               </UI.Field>
               <UI.AlertDialogFooter>
-                <UI.AlertDialogCancel>Cancel</UI.AlertDialogCancel>
+                <UI.AlertDialogCancel ref={cancelRef}>Cancel</UI.AlertDialogCancel>
                 <UI.AlertDialogAction
+                  variant="danger"
                   disabled={confirmation !== 'DELETE'}
                   onClick={() => {
                     setResult(

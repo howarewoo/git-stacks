@@ -5,23 +5,44 @@ import { GitBranch, Bold, Italic } from 'lucide-react'
 export const navigationSpecimens = {
   button: function Buttons() {
     const [count, setCount] = useState(0)
+    const [working, setWorking] = useState(false)
     return (
       <>
-        <div className="design-specimen-row">
-          {(['default', 'secondary', 'ghost', 'subtle', 'accent', 'danger', 'link'] as const).map(
-            (variant) => (
-              <UI.Button key={variant} variant={variant} onClick={() => setCount(count + 1)}>
-                {variant}
-              </UI.Button>
-            ),
-          )}
-        </div>
+        <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
+          {(
+            [
+              ['default', 'The main action for the current task.'],
+              ['secondary', 'Supporting actions beside the main task.'],
+              ['ghost', 'Low-emphasis actions in toolbars and dense rows.'],
+              ['subtle', 'Quiet actions that still need a visible surface.'],
+              ['accent', 'Meaningful selection or a restrained contextual accent.'],
+              ['danger', 'Destructive actions; keep scope and confirmation explicit.'],
+              ['link', 'Text-like actions; use an anchor when navigating.'],
+            ] as const
+          ).map(([variant, guidance]) => (
+            <div key={variant} className="grid grid-cols-[7rem_1fr] items-center gap-3">
+              <dt>
+                <UI.Button variant={variant} onClick={() => setCount((value) => value + 1)}>
+                  {variant}
+                </UI.Button>
+              </dt>
+              <dd className="m-0 text-sm text-muted-foreground">{guidance}</dd>
+            </div>
+          ))}
+        </dl>
         <div className="design-specimen-row">
           <UI.Button disabled tooltip="Captured preview is unavailable">
             Unavailable
           </UI.Button>
-          <UI.Button loading tooltip="Local simulation in progress">
-            Fetching
+          <UI.Button
+            loading={working}
+            tooltip="Start a local simulation; no Git or network work"
+            onClick={() => setWorking(true)}
+          >
+            Fetch example
+          </UI.Button>
+          <UI.Button variant="secondary" disabled={!working} onClick={() => setWorking(false)}>
+            Finish simulation
           </UI.Button>
           <UI.IconButton
             label="Inspect branch"
@@ -32,6 +53,11 @@ export const navigationSpecimens = {
           </UI.IconButton>
         </div>
         <output aria-live="polite">Local activations: {count}</output>
+        <output aria-live="polite">
+          {working
+            ? 'Working — finish the local simulation to return to idle.'
+            : 'Idle — ready to simulate.'}
+        </output>
       </>
     )
   },

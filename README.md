@@ -2073,7 +2073,7 @@ The catalog uses port 5299 and produces `apps/design/dist`, independently of Ele
 
 Canonical ownership is `packages/ui/src/components/ui`, `packages/ui/src/lib`, and `packages/ui/src/tokens`. Shared foundation CSS is `packages/ui/src/styles/foundations.css`; desktop shell CSS stays in desktop. Run shadcn additions from the shared package and retain Base UI `base-nova` configuration. Change the shared token/component, update its specimen and applicable states in `apps/design/src`, and run affected design and desktop checks in the same PR. Catalog fixtures never import desktop private source or use `window.desktop`; desktop integration fixtures remain separate and are not replaced.
 
-The catalog shell itself uses shared `Sidebar` header, content, groups, and menu controls, alongside shared search, buttons, selectors, command navigation, and `Collapsible` for the narrow index. Search and appearance controls stay above the independently scrolling desktop index. At widths below 900px, Browse components reveals the index; choosing an entry closes it, scrolls to that entry, and transfers focus. The current anchor is marked in navigation, including after browser Back/Forward. Empty search results offer Clear search.
+The catalog shell uses the shared `SidebarProvider`, off-canvas `Sidebar`, and `SidebarTrigger` for desktop collapse and the built-in sheet below 768px; it does not maintain a parallel catalog open/close state. Shared search and appearance controls stay above the independently scrolling index. Category disclosure follows the shadcn Base UI composition: `SidebarGroupLabel render={<CollapsibleTrigger />}` with `CollapsibleContent` around `SidebarGroupContent`. Search exposes matching categories; choosing a component opens its category, closes the narrow sheet, scrolls to the destination, and transfers focus. The current anchor is marked after Back/Forward. Command navigation includes Foundations and Git compositions. Empty search results offer Clear search.
 
 The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
  
@@ -2084,6 +2084,19 @@ in light and dark themes, then follow Inspect composition to the local Git
 simulation. Check that each checkout action stays aligned with its branch content
 at wide and narrow widths and that checkout does not change the inspected PR.
 
+The Button specimen pairs variants with selection guidance. Start Fetch example,
+check that the visible busy marker replaces the content without resizing the
+button, then Finish simulation to return to idle. The original accessible name
+stays intact and dispatch is disabled while busy. Exercise reduced motion as well
+as the active spinner. Foundations pair canonical space, radius, and elevation
+values with visual samples and intended-use labels.
+
+In Git compositions, inspect one PR and check out another; verify the row-local
+Checked out label stays independent of the inspected highlight. The scoped
+deletion simulation repeats both captured branch names and their relationship
+inside its Cancel-first confirmation, excludes PR #43, and never calls Git or a
+remote transport. Verify long identities and footer actions at 640×450 reflow.
+
 Theme checks must wait for computed styles to settle after the theme attribute changes; reduced motion shortens CSS transitions but does not make them synchronous.
 
 Use `CATALOG_PORT=<unused-port>` for isolated catalog test allocations; its runner starts the actual catalog on that port. Desktop renderer tests already support `GALLERY_PORT=<unused-port>`. Keep visual baseline updates limited to the host platform.
@@ -2093,6 +2106,7 @@ Turbo tracks shared source as an input of both consumers. Design-specific tasks 
 ### Shared component contracts
 
 - Compose Base UI triggers with `render`, not Radix `asChild`. `DialogContent` accepts Base UI `initialFocus` and `finalFocus`; guarded roots refuse implicit dismissal through `onOpenChange`'s `details.cancel()`.
+- `Button loading` preserves its children in layout and the accessibility tree while showing a decorative busy marker; keep the caller's label/icon stable and do not supply an additional loading spinner. Busy controls expose `aria-busy` and block dispatch. When `Button` renders an anchor, pass `nativeButton={false}` and retain its real `href`; the result remains a link, not an emulated native button.
 - `Select` accepts `options` and a string-valued `onValueChange`; `''` can be a real option, not a missing value. Field selects fill their container; use `className="w-auto"` for content-sized inline toolbar selects.
 - `Tabs` forwards horizontal/vertical orientation to Base UI for matching keyboard navigation and layout. `TabsList` accepts `controlSize="compact"` or `"standard"` (default) and `variant="default"` or `"line"`; trigger typography stays at the label role. Sidebar items, tabs, and command rows retain 44px minimum coarse-pointer targets.
 - `Checkbox` reports booleans through `onCheckedChange` and exposes mixed state through `indeterminate`. Use `RadioGroup` for form choices and `SegmentedControl` for an exactly-one-selected control with nonempty option keys.

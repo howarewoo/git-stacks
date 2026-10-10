@@ -3,9 +3,10 @@ import { Button as ButtonPrimitive } from '@base-ui/react/button'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '../../lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
+import { Spinner } from './spinner'
 
 const buttonVariants = cva(
-  'gs-button inline-flex shrink-0 scroll-m-1 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--gs-semantic-radius-control)] text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--gs-semantic-surface-content)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-55',
+  'gs-button inline-flex shrink-0 scroll-m-1 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--gs-semantic-radius-control)] text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--gs-semantic-surface-content)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-55 data-[loading]:opacity-100',
   {
     variants: {
       variant: {
@@ -46,23 +47,35 @@ const buttonVariants = cva(
 )
 
 export interface ButtonProps
-  extends Omit<ButtonPrimitive.Props, 'className'>,
+  extends Omit<ButtonPrimitive.Props, 'className' | 'children'>,
     VariantProps<typeof buttonVariants> {
   className?: string
+  children?: React.ReactNode | ((state: ButtonPrimitive.State) => React.ReactNode)
   tooltip?: React.ReactNode
   loading?: boolean
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   (
-    { className, variant, size, type = 'button', tooltip, loading = false, disabled, ...props },
+    {
+      className,
+      variant,
+      size,
+      type = 'button',
+      tooltip,
+      loading = false,
+      disabled,
+      children,
+      ...props
+    },
     ref,
   ) => {
-    const hint = tooltip ?? (size === 'icon' || size === 'icon-sm' ? props['aria-label'] : null)
+    const hint = tooltip ?? (size?.startsWith('icon') ? props['aria-label'] : null)
     const isDisabled = disabled || loading
     const button = (
       <ButtonPrimitive
         ref={ref}
+        {...props}
         data-slot="button"
         type={type}
         aria-busy={loading || undefined}
@@ -72,8 +85,14 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
           variant === 'unstyled' ? className : cn(buttonVariants({ variant, size, className }))
         }
         disabled={isDisabled}
-        {...props}
-      />
+      >
+        {typeof children === 'function' ? children({ disabled: Boolean(isDisabled) }) : children}
+        {loading ? (
+          <span data-slot="button-spinner" aria-hidden="true">
+            <Spinner />
+          </span>
+        ) : null}
+      </ButtonPrimitive>
     )
     if (!hint) return button
     return (
@@ -101,7 +120,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         />
         <TooltipContent>
           {hint}
-          {isDisabled && !tooltip ? ' — unavailable' : null}
+          {disabled && !loading && !tooltip ? ' — unavailable' : null}
           {loading ? ' — working' : null}
         </TooltipContent>
       </Tooltip>

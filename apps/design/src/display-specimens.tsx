@@ -19,7 +19,9 @@ export const displaySpecimens = {
           <code>feature/quiet-graph</code>
         </UI.CardContent>
         <UI.CardFooter>
-          <UI.Button render={<a href="#git-compositions" />}>Inspect composition</UI.Button>
+          <UI.Button nativeButton={false} render={<a href="#git-compositions" />}>
+            Inspect composition
+          </UI.Button>
         </UI.CardFooter>
       </UI.Card>
       <UI.Card className="design-secondary-card">
@@ -114,7 +116,7 @@ export const displaySpecimens = {
         <UI.ItemDescription>feature/quiet-graph · Ada · checks unavailable</UI.ItemDescription>
       </UI.ItemContent>
       <UI.ItemActions>
-        <UI.Button render={<a href="#git-compositions" />} variant="secondary">
+        <UI.Button nativeButton={false} render={<a href="#git-compositions" />} variant="secondary">
           Inspect
         </UI.Button>
       </UI.ItemActions>
@@ -264,7 +266,9 @@ export const displaySpecimens = {
         </UI.EmptyDescription>
       </UI.EmptyHeader>
       <UI.EmptyContent>
-        <UI.Button render={<a href="#git-compositions" />}>View branch examples</UI.Button>
+        <UI.Button nativeButton={false} render={<a href="#git-compositions" />}>
+          View branch examples
+        </UI.Button>
       </UI.EmptyContent>
     </UI.Empty>
   ),

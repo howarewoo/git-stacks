@@ -26,24 +26,40 @@ body {
 }
 
 .design-shell {
-  display: grid;
+  display: flex;
   min-height: 100vh;
-  grid-template-columns: 280px minmax(0, 1fr);
   align-items: start;
   gap: var(--gs-semantic-space-3);
   padding: var(--gs-semantic-space-3);
 }
 
 .design-nav {
-  position: sticky;
   top: var(--gs-semantic-space-3);
   height: calc(100dvh - 2 * var(--gs-semantic-space-3));
-  width: 100%;
-  min-width: 0;
-  overflow: hidden;
+}
+
+.design-nav [data-slot="sidebar-inner"] {
   border-radius: var(--gs-semantic-radius-workbench);
   background: var(--gs-semantic-surface-content);
   padding: var(--gs-semantic-space-5);
+}
+
+.design-nav[data-mobile="true"] {
+  top: 0;
+  width: min(100vw, 18rem);
+  height: 100dvh;
+  padding: var(--gs-semantic-space-5);
+  background: var(--gs-semantic-surface-content);
+}
+
+.catalog-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gs-semantic-space-2);
+  margin-bottom: var(--gs-semantic-space-3);
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
 }
 
 .design-nav [data-slot="sidebar-header"] {
@@ -94,14 +110,23 @@ body {
   scrollbar-gutter: stable;
 }
 
-.catalog-navigation-trigger {
-  display: none;
+.catalog-group-trigger {
+  width: 100%;
+  justify-content: space-between;
+  margin-top: var(--gs-semantic-space-2);
+  font-weight: 600;
 }
 
-.design-nav [data-slot="sidebar-group-label"] {
-  margin-top: var(--gs-semantic-space-5);
-  margin-bottom: var(--gs-semantic-space-1);
-  font-weight: 600;
+.catalog-group-trigger > span {
+  display: flex;
+  align-items: center;
+  gap: var(--gs-semantic-space-2);
+  color: var(--gs-semantic-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.catalog-group-trigger[data-panel-open] svg {
+  transform: rotate(180deg);
 }
 
 .design-nav [data-slot="sidebar-menu-button"] {
@@ -335,6 +360,34 @@ body {
   overflow-wrap: anywhere;
 }
 
+.foundation-preview {
+  display: flex;
+  align-items: center;
+  min-height: var(--gs-semantic-space-10);
+  margin-block: var(--gs-semantic-space-3);
+}
+
+.foundation-space {
+  height: var(--gs-semantic-space-3);
+  background: var(--gs-semantic-selection-text);
+}
+
+.foundation-shape,
+.foundation-layer {
+  width: calc(2 * var(--gs-semantic-space-10));
+  height: var(--gs-semantic-space-10);
+  background: var(--gs-semantic-surface-content);
+}
+
+.foundation-layer {
+  border-radius: var(--gs-semantic-radius-control);
+}
+
+.foundation-usage {
+  margin-top: var(--gs-semantic-space-1);
+  color: var(--gs-semantic-text-secondary);
+}
+
 .git-compositions {
   display: grid;
   gap: var(--gs-semantic-space-3);
@@ -355,19 +408,155 @@ body {
 
 .git-graph {
   display: grid;
-  gap: var(--gs-semantic-space-3);
+  container-type: inline-size;
+  background: var(--gs-semantic-surface-content);
+  border-radius: var(--gs-semantic-radius-item);
+  padding: var(--gs-semantic-space-2);
 }
 
 .git-row {
-  border-radius: var(--gs-semantic-radius-item);
-  padding: var(--gs-semantic-space-3);
-  background: var(--gs-semantic-surface-inset);
+  position: relative;
   display: grid;
+  grid-template-columns: var(--gs-semantic-space-8) minmax(0, 1fr) auto;
+  gap: var(--gs-semantic-space-2);
+  align-items: center;
+  border-radius: var(--gs-semantic-radius-control);
+  padding: var(--gs-semantic-space-2);
+}
+
+.git-identity {
+  min-width: 0;
+}
+
+.git-ref,
+.git-actions,
+.git-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--gs-semantic-space-2);
 }
 
-.git-row > button {
-  justify-self: start;
+.git-ref > code {
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
+}
+
+.git-parent,
+.git-facts {
+  color: var(--gs-semantic-text-secondary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
+}
+
+.git-parent {
+  display: block;
+  margin-top: var(--gs-semantic-space-1);
+}
+
+.git-facts {
+  grid-column: 2 / -1;
+}
+
+.git-ancestry {
+  position: relative;
+  align-self: stretch;
+  grid-row: 1 / 3;
+  margin-block: calc(-1 * var(--gs-semantic-space-2));
+}
+
+.git-ancestry::before,
+.git-ancestry::after {
+  position: absolute;
+  content: "";
+  inset-block: 0;
+  inset-inline-start: var(--gs-semantic-space-1);
+  border-inline-start: 1px solid var(--gs-semantic-border-essential);
+}
+
+.git-row:first-child .git-ancestry::before {
+  inset-block-start: 50%;
+}
+
+.git-row:last-child .git-ancestry::before {
+  inset-block-end: 50%;
+}
+
+.git-ancestry::after {
+  display: none;
+  inset-inline-start: var(--gs-semantic-space-4);
+}
+
+.git-row:nth-child(2) .git-ancestry::after {
+  display: block;
+  inset-block-start: 50%;
+}
+
+.git-row[data-depth="2"] .git-ancestry::after {
+  display: block;
+  inset-block-end: 50%;
+}
+
+.git-node {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: var(--gs-semantic-space-1);
+  width: 0;
+  border-block-start: 1px solid var(--gs-semantic-border-essential);
+}
+
+.git-row[data-depth="1"] .git-node {
+  width: var(--gs-semantic-space-3);
+}
+
+.git-row[data-depth="2"] .git-node {
+  inset-inline-start: var(--gs-semantic-space-4);
+  width: var(--gs-semantic-space-3);
+}
+
+.git-node::after {
+  position: absolute;
+  content: "";
+  inset-inline-end: calc(-1 * var(--gs-semantic-space-1));
+  top: calc(-1 * var(--gs-semantic-space-1));
+  width: var(--gs-semantic-space-2);
+  height: var(--gs-semantic-space-2);
+  border: 1px solid var(--gs-semantic-border-essential);
+  border-radius: 50%;
+  background: var(--gs-semantic-surface-content);
+}
+
+@container (max-width: 560px) {
+  .git-row {
+    grid-template-columns: var(--gs-semantic-space-8) minmax(0, 1fr);
+  }
+
+  .git-actions {
+    grid-column: 2;
+    grid-row: 3;
+  }
+
+  .git-ancestry {
+    grid-row: 1 / 4;
+  }
+}
+
+.confirmation-scope {
+  display: grid;
+  gap: var(--gs-semantic-space-3);
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
+}
+
+.confirmation-scope li {
+  display: grid;
+  min-width: 0;
+  gap: var(--gs-semantic-space-1);
+}
+
+.confirmation-scope code {
+  font-family: var(--gs-semantic-font-mono);
+  overflow-wrap: anywhere;
 }
 
 .git-row[data-inspected="true"] {
@@ -438,47 +627,8 @@ body {
 
 @media (max-width: 900px) {
   .design-shell {
-    grid-template-columns: minmax(0, 1fr);
     gap: var(--gs-semantic-space-2);
     padding: var(--gs-semantic-space-2);
-  }
-
-  .design-nav {
-    position: static;
-    height: auto;
-    padding: var(--gs-semantic-space-4);
-  }
-
-  .design-nav [data-slot="sidebar-header"] {
-    padding-bottom: 0;
-  }
-
-  .design-nav [data-slot="sidebar-header"] > p {
-    margin-bottom: var(--gs-semantic-space-1);
-  }
-
-  .catalog-navigation {
-    overflow: visible;
-    padding-top: var(--gs-semantic-space-3);
-    scrollbar-gutter: auto;
-  }
-
-  .catalog-navigation-trigger {
-    display: flex;
-    width: 100%;
-    justify-content: space-between;
-  }
-
-  .catalog-navigation-trigger[data-panel-open] svg {
-    transform: rotate(180deg);
-  }
-
-  .catalog-navigation nav {
-    max-height: 280px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: var(--gs-semantic-space-2) var(--gs-semantic-space-1);
-    margin-top: var(--gs-semantic-space-2);
   }
 
   .design-main {

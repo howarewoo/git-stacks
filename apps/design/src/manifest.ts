@@ -54,7 +54,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     summary:
       'Primary, secondary, ghost, subtle, accent, danger, and link action triggers with loading and disabled tooltip support.',
     anatomy:
-      'Button and IconButton wrap the Base UI Button; Tooltip explains disabled/loading controls.',
+      'Button and IconButton forward the Base UI render contract and accept children as nodes or a function receiving { disabled }. loading disables dispatch and sets aria-busy; a decorative Spinner overlays retained children without changing their geometry or accessible name. Keep caller content stable during loading. IconButton requires label. Caller classes and the unstyled variant retain control of presentation; Tooltip explains disabled or working controls.',
     keyboard:
       'Tab to focus, Space/Enter to activate, Esc dismisses tooltip hint. Coarse pointers receive 44px minimum target.',
     tokens: [
