@@ -1985,10 +1985,13 @@ pnpm run test:desktop
 ```
 
 On Linux, the unpacked Electron package needs its official `chrome-sandbox`
-helper installed with root ownership and mode `4755`. Before an authorized
+helper installed with root ownership and mode `4755`. After the frozen install,
+run `pnpm --filter git-stacks exec install-electron` to materialize the pinned
+official Electron reference distribution without launching the application.
+Before an authorized
 privileged installation, verify that the generated helper is a regular,
 non-symlink file inside the workspace and matches
-`node_modules/electron/dist/chrome-sandbox` byte-for-byte; record its original
+`apps/desktop/node_modules/electron/dist/chrome-sandbox` byte-for-byte; record its original
 ownership and mode. Configure only that generated helper using existing
 administrative permission, then run the smoke script directly against the same
 package so repackaging does not overwrite the setup. Restore the original
