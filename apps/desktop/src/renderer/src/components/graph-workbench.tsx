@@ -19,6 +19,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import type { Branch, RepositorySnapshot, PullRequest, DesktopAPI } from '@git-stacks/shared/types'
+import { branchDeleteReason } from '../lib/branches'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import { projectPrGraph, type PrGraphNode, type PrGraphSource } from '@git-stacks/shared/pr-graph'
 import {
@@ -141,6 +142,7 @@ export interface GraphWorkbenchProps {
   runAction: RunAction
   onRequest: (request: WorkflowRequest) => void
   onReviewNumber: (number: number) => void
+  onOpenExternal: (url: string) => void
   search: string
   onSearchChange?: (text: string) => void
   onCreate: () => void
@@ -160,6 +162,7 @@ export function GraphWorkbench({
   runAction,
   onRequest,
   onReviewNumber,
+  onOpenExternal,
   search,
   onCreate,
   onCheckout,
@@ -1191,7 +1194,7 @@ export function GraphWorkbench({
                         variant="ghost"
                         size="sm"
                         tooltip={`Open #${selectedPr.number} in your browser.`}
-                        onClick={() => void desktop?.openExternal?.(selectedPr.url)}
+                        onClick={() => onOpenExternal(selectedPr.url)}
                       >
                         <ExternalLink className="size-3.5" />
                         Open on GitHub
@@ -1348,7 +1351,19 @@ export function GraphWorkbench({
                       <summary>Edit stack layers</summary>
                       <div className="graph-surgery-actions">
                         {(() => {
-                          const parent = local.recordedParent ?? local.parent ?? null
+                          const immediateParentName = local.recordedParent ?? local.parent ?? null
+                          const immediateParent = immediateParentName
+                            ? snapshot.branches.find(
+                                (b) => !b.remote && b.name === immediateParentName,
+                              )
+                            : null
+                          const isTrunk =
+                            !immediateParentName || immediateParentName === snapshot.defaultBranch
+                          const lowerTarget = immediateParent
+                            ? (immediateParent.recordedParent ??
+                              immediateParent.parent ??
+                              snapshot.defaultBranch)
+                            : null
                           const above = snapshot.branches.find(
                             (b) =>
                               !b.remote &&
@@ -1380,21 +1395,21 @@ export function GraphWorkbench({
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                disabled={common || !parent}
+                                disabled={common || isTrunk || !lowerTarget}
                                 tooltip={
                                   actionBlockReason(snapshot.capabilities, 'executeSurgery') ??
-                                  (parent
-                                    ? `Preview reparenting ${local.name} onto ${parent} and replaying the layers above it.`
-                                    : 'This layer already sits directly on the stack trunk.')
+                                  (isTrunk
+                                    ? 'This layer already sits directly on the stack trunk.'
+                                    : `Preview moving ${local.name} below ${immediateParentName} onto ${lowerTarget} and replaying layers onto it.`)
                                 }
                                 onClick={() =>
-                                  parent
+                                  !isTrunk && lowerTarget
                                     ? onRequest({
                                         kind: 'surgery',
                                         request: {
                                           kind: 'move',
                                           branch: local.name,
-                                          target: parent,
+                                          target: lowerTarget,
                                         },
                                       })
                                     : undefined
@@ -1430,12 +1445,12 @@ export function GraphWorkbench({
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                disabled={common || Boolean(above)}
+                                disabled={common}
                                 tooltip={
                                   actionBlockReason(snapshot.capabilities, 'executeSurgery') ??
                                   (above
-                                    ? 'Reorder the layers above this one first: removing a middle layer has to replay them, and the preview shows it.'
-                                    : 'Preview deleting this local branch, retargeting nothing above it, and closing its pull request.')
+                                    ? 'Preview deleting this local branch, replaying the layers above it onto its parent, and closing its pull request.'
+                                    : 'Preview deleting this local branch and closing its pull request.')
                                 }
                                 onClick={() =>
                                   onRequest({
@@ -1485,28 +1500,26 @@ export function GraphWorkbench({
                     >
                       Set upstream…
                     </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={
-                        blocked ||
-                        local.current ||
-                        local.name === snapshot.defaultBranch ||
-                        Boolean(actionBlockReason(snapshot.capabilities, 'deleteBranch'))
-                      }
-                      tooltip={
-                        actionBlockReason(snapshot.capabilities, 'deleteBranch') ??
-                        (local.name === snapshot.defaultBranch
-                          ? 'The default branch cannot be deleted.'
-                          : local.current
-                            ? 'Cannot delete the checked-out branch — switch away first.'
-                            : 'Delete this local branch. Remotes and pull requests are kept.')
-                      }
-                      onClick={() => onDeleteBranch?.(local)}
-                    >
-                      <Trash2 className="size-3.5" />
-                      Delete local branch…
-                    </Button>
+                    {(() => {
+                      const localDeleteReason =
+                        branchDeleteReason(local, snapshot.defaultBranch) ??
+                        actionBlockReason(snapshot.capabilities, 'deleteBranch')
+                      return (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={blocked || Boolean(localDeleteReason)}
+                          tooltip={
+                            localDeleteReason ??
+                            'Delete this local branch. Remotes and pull requests are kept.'
+                          }
+                          onClick={() => onDeleteBranch?.(local)}
+                        >
+                          <Trash2 className="size-3.5" />
+                          Delete local branch…
+                        </Button>
+                      )
+                    })()}
                     {!selectedPr && local.current ? (
                       <Button
                         size="sm"
@@ -1554,22 +1567,26 @@ export function GraphWorkbench({
                       >
                         Switch to remote branch (track)
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={
-                          blocked ||
-                          Boolean(actionBlockReason(snapshot.capabilities, 'deleteRemoteBranch'))
-                        }
-                        tooltip={
-                          actionBlockReason(snapshot.capabilities, 'deleteRemoteBranch') ??
-                          'Preview deleting this branch on its remote.'
-                        }
-                        onClick={() => onDeleteBranch?.(selectedNode.branch!)}
-                      >
-                        <Trash2 className="size-3.5" />
-                        Delete remote branch…
-                      </Button>
+                      {(() => {
+                        const remoteBranch = selectedNode.branch!
+                        const remoteDeleteReason =
+                          branchDeleteReason(remoteBranch, snapshot.defaultBranch) ??
+                          actionBlockReason(snapshot.capabilities, 'deleteRemoteBranch')
+                        return (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={blocked || Boolean(remoteDeleteReason)}
+                            tooltip={
+                              remoteDeleteReason ?? 'Preview deleting this branch on its remote.'
+                            }
+                            onClick={() => onDeleteBranch?.(remoteBranch)}
+                          >
+                            <Trash2 className="size-3.5" />
+                            Delete remote branch…
+                          </Button>
+                        )
+                      })()}
                     </div>
                   ) : null}
                 </div>
@@ -1601,8 +1618,8 @@ export function GraphWorkbench({
                 onClick={() =>
                   onRequest({
                     kind: 'confirm',
-                    title: `Unstack native stack #${native.number}?`,
-                    description: `This removes the native stack container on GitHub for stack #${native.number}. Individual pull requests are kept; their chained bases and review discussions remain unchanged.`,
+                    title: `Unstack pull requests from native stack #${native.number}?`,
+                    description: `This removes unmerged pull requests from native stack #${native.number} on GitHub. Already-merged pull requests can remain in the container, and the native stack is dissolved if no members remain. Chained branch bases and pull request discussions are kept.`,
                     label: `Unstack native stack #${native.number}`,
                     action: { type: 'unstackNativeStack', stackNumber: native.number },
                     destructive: true,
