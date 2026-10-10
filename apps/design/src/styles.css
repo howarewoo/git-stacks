@@ -218,6 +218,11 @@ body {
   min-width: 0;
 }
 
+.design-specimen[data-specimen="card"] {
+  background: transparent;
+  padding: 0;
+}
+
 .design-specimen-row {
   display: flex;
   flex-wrap: wrap;
@@ -359,6 +364,10 @@ body {
   background: var(--gs-semantic-surface-inset);
   display: grid;
   gap: var(--gs-semantic-space-2);
+}
+
+.git-row > button {
+  justify-self: start;
 }
 
 .git-row[data-inspected="true"] {

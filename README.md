@@ -2079,6 +2079,11 @@ The dated `apps/design/src/manifest.ts` records all 63 components plus Typograph
  
 Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
+When verifying the Card specimen, inspect both cards against the catalog canvas
+in light and dark themes, then follow Inspect composition to the local Git
+simulation. Check that each checkout action stays aligned with its branch content
+at wide and narrow widths and that checkout does not change the inspected PR.
+
 Theme checks must wait for computed styles to settle after the theme attribute changes; reduced motion shortens CSS transitions but does not make them synchronous.
 
 Use `CATALOG_PORT=<unused-port>` for isolated catalog test allocations; its runner starts the actual catalog on that port. Desktop renderer tests already support `GALLERY_PORT=<unused-port>`. Keep visual baseline updates limited to the host platform.
