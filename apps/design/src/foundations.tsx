@@ -76,7 +76,7 @@ export function TypographySpecimen() {
 export function Foundations() {
   const semantic = tokens.semantic
   return (
-    <section id="foundations" className="design-entry">
+    <section id="foundations" className="design-entry" tabIndex={-1}>
       <h2>Foundations</h2>
       <p>Canonical roles, generated from one shared token source.</p>
       <div className="foundation-colors">
@@ -173,7 +173,7 @@ export function GitCompositions() {
   const [reply, setReply] = useState('')
   const [comments, setComments] = useState<string[]>([])
   return (
-    <section id="git-compositions" className="design-entry">
+    <section id="git-compositions" className="design-entry" tabIndex={-1}>
       <h2>Git compositions</h2>
       <p>
         Deterministic local simulations. No Git, GitHub, repository access, or desktop bridge. PR

@@ -233,10 +233,11 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     group: 'Navigation',
     summary:
       'Layered sections of content displayed one at a time, switching between view modes or review tabs.',
-    anatomy: 'Tabs, TabsList, TabsTrigger, TabsContent wrap Base UI tabs.',
+    anatomy:
+      'Tabs, TabsList, TabsTrigger, TabsContent wrap Base UI tabs. TabsList supports default/line variants and controlSize="compact" | "standard" (default). Tabs supports horizontal/vertical orientation.',
     keyboard:
-      'Left/Right arrows move between tabs and automatically activate panel or activate on Enter/Space depending on manual activation.',
-    tokens: ['semantic.surface.inset', 'semantic.selection.background', 'semantic.radius.pill'],
+      'Left/Right arrows move between horizontal tabs; Up/Down move between vertical tabs. Tabs automatically activate panels or activate on Enter/Space with manual activation.',
+    tokens: ['semantic.surface.inset', 'semantic.selection.background', 'semantic.radius.control'],
     importExample:
       "import { Tabs, TabsList, TabsTrigger, TabsContent } from '@git-stacks/ui/components/tabs'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/tabs',

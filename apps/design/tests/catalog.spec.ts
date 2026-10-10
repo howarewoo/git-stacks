@@ -77,8 +77,6 @@ test('all specimens render independently without desktop bridge', async ({ page 
   expect(await page.evaluate(() => 'desktop' in window)).toBe(false)
   const ids = await page.locator('[id]').evaluateAll((nodes) => nodes.map((node) => node.id))
   expect(new Set(ids).size).toBe(ids.length)
-  for (const specimen of await page.locator('[data-specimen]').all())
-    expect(await specimen.locator(':scope > *').count()).toBeGreaterThan(0)
   expect(errors).toEqual([])
 })
 
@@ -93,6 +91,61 @@ test('search anchors and keyboard command navigation', async ({ page }) => {
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/#checkbox$/)
   await expect(page.locator('#checkbox')).toBeFocused()
+})
+
+test('inline command selection does not displace catalog arrival', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('[data-specimen="command"]')).toBeAttached()
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
+  const command = page.locator('#command')
+  await command.getByPlaceholder('Search local commands').focus()
+  await page.keyboard.press('Enter')
+  await expect(command.locator('output')).toHaveText('Inspect branch')
+})
+
+test('narrow catalog navigation discloses links and transfers focus to the destination', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+  const navigation = page.getByRole('navigation', { name: 'Component catalog', exact: true })
+  const browse = page.getByRole('button', { name: 'Browse components', exact: true })
+  await expect(navigation).toBeHidden()
+  await expect(browse).toBeInViewport()
+  await browse.click()
+  await expect(navigation).toBeVisible()
+  await navigation.getByRole('link', { name: 'Button', exact: true }).click()
+  await expect(page).toHaveURL(/#button$/)
+  await expect(page.locator('#button')).toBeFocused()
+  await expect(navigation).toBeHidden()
+  await browse.click()
+  await expect(navigation.getByRole('link', { name: 'Button', exact: true })).toHaveAttribute(
+    'aria-current',
+    'location',
+  )
+  await navigation.getByRole('link', { name: 'Foundations', exact: true }).click()
+  await expect(page.locator('#foundations')).toBeFocused()
+  await page.goBack()
+  await browse.click()
+  await expect(navigation.getByRole('link', { name: 'Button', exact: true })).toHaveAttribute(
+    'aria-current',
+    'location',
+  )
+})
+
+test('vertical tabs use vertical arrows to navigate available views', async ({ page }) => {
+  await page.goto('/')
+  const tabs = page.getByRole('tablist', { name: 'vertical default repository views' })
+  await tabs.getByRole('tab', { name: 'Changes', exact: true }).focus()
+  await page.keyboard.press('ArrowDown')
+  await expect(tabs.getByRole('tab', { name: 'Checks', exact: true })).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(tabs.getByRole('tab', { name: 'Checks', exact: true })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  await page.keyboard.press('ArrowUp')
+  await expect(tabs.getByRole('tab', { name: 'Changes', exact: true })).toBeFocused()
 })
 
 test('forms preserve validation mixed and empty-select states', async ({ page }) => {

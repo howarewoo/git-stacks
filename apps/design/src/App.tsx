@@ -1,6 +1,13 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import {
   Button,
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+  Empty,
+  EmptyHeader,
+  EmptyTitle,
+  EmptyDescription,
   CommandDialog,
   CommandInput,
   CommandList,
@@ -21,6 +28,7 @@ import {
   SidebarProvider,
   TooltipProvider,
 } from '@git-stacks/ui'
+import { ChevronDown } from 'lucide-react'
 import {
   COMPONENT_MANIFEST,
   MANIFEST_DATE,
@@ -46,6 +54,20 @@ export default function App() {
   const [commandOpen, setCommandOpen] = useState(false)
   const [theme, setTheme] = useState('system')
   const [density, setDensity] = useState('standard')
+  const [activeId, setActiveId] = useState(() => location.hash.slice(1) || 'foundations')
+  const [narrow, setNarrow] = useState(() => matchMedia('(max-width: 900px)').matches)
+  const [navigationOpen, setNavigationOpen] = useState(false)
+  useEffect(() => {
+    const media = matchMedia('(max-width: 900px)')
+    const resize = () => setNarrow(media.matches)
+    const syncAnchor = () => setActiveId(location.hash.slice(1) || 'foundations')
+    media.addEventListener('change', resize)
+    window.addEventListener('hashchange', syncAnchor)
+    return () => {
+      media.removeEventListener('change', resize)
+      window.removeEventListener('hashchange', syncAnchor)
+    }
+  }, [])
   useEffect(() => {
     const media = matchMedia('(prefers-color-scheme: dark)')
     const apply = () => {
@@ -76,9 +98,12 @@ export default function App() {
   function navigate(id: string) {
     setSearch('')
     setCommandOpen(false)
+    setNavigationOpen(false)
     requestAnimationFrame(() => {
       location.hash = id
-      document.getElementById(id)?.focus({ preventScroll: true })
+      const destination = document.getElementById(id)
+      destination?.scrollIntoView({ block: 'start' })
+      destination?.focus({ preventScroll: true })
     })
   }
   return (
@@ -136,53 +161,102 @@ export default function App() {
               </label>
             </div>
           </SidebarHeader>
-          <SidebarContent className="shrink-0 overflow-visible">
-            <nav aria-label="Component catalog">
-              <SidebarGroup className="p-0">
-                <SidebarGroupContent>
-                  <SidebarMenu>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        render={<a href="#foundations" />}
-                        onClick={() => setSearch('')}
-                      >
-                        Foundations
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        render={<a href="#git-compositions" />}
-                        onClick={() => setSearch('')}
-                      >
-                        Git compositions
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </SidebarGroup>
-              {MANIFEST_GROUPS.map((group) => (
-                <SidebarGroup key={group} className="p-0">
-                  <SidebarGroupLabel render={<h2 />}>{group}</SidebarGroupLabel>
-                  <SidebarGroupContent>
-                    <SidebarMenu>
-                      {visible
-                        .filter((entry) => entry.group === group)
-                        .map((entry) => (
-                          <SidebarMenuItem key={entry.id}>
-                            <SidebarMenuButton render={<a href={`#${entry.id}`} />}>
-                              {entry.name}
-                            </SidebarMenuButton>
-                          </SidebarMenuItem>
-                        ))}
-                    </SidebarMenu>
-                  </SidebarGroupContent>
-                </SidebarGroup>
-              ))}
-            </nav>
-          </SidebarContent>
+          <Collapsible
+            className="catalog-navigation"
+            open={!narrow || navigationOpen}
+            onOpenChange={setNavigationOpen}
+          >
+            <CollapsibleTrigger
+              className="catalog-navigation-trigger"
+              render={<Button variant="subtle" />}
+            >
+              Browse components
+              <ChevronDown aria-hidden="true" className="size-4" />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <SidebarContent>
+                <nav aria-label="Component catalog">
+                  <SidebarGroup className="p-0">
+                    <SidebarGroupContent>
+                      <SidebarMenu>
+                        <SidebarMenuItem>
+                          <SidebarMenuButton
+                            render={
+                              <a
+                                href="#foundations"
+                                aria-current={activeId === 'foundations' ? 'location' : undefined}
+                              />
+                            }
+                            isActive={activeId === 'foundations'}
+                            onClick={(event) => {
+                              event.preventDefault()
+                              navigate('foundations')
+                            }}
+                          >
+                            Foundations
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                        <SidebarMenuItem>
+                          <SidebarMenuButton
+                            render={
+                              <a
+                                href="#git-compositions"
+                                aria-current={
+                                  activeId === 'git-compositions' ? 'location' : undefined
+                                }
+                              />
+                            }
+                            isActive={activeId === 'git-compositions'}
+                            onClick={(event) => {
+                              event.preventDefault()
+                              navigate('git-compositions')
+                            }}
+                          >
+                            Git compositions
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                      </SidebarMenu>
+                    </SidebarGroupContent>
+                  </SidebarGroup>
+                  {MANIFEST_GROUPS.filter((group) =>
+                    visible.some((entry) => entry.group === group),
+                  ).map((group) => (
+                    <SidebarGroup key={group} className="p-0">
+                      <SidebarGroupLabel render={<h2 />}>{group}</SidebarGroupLabel>
+                      <SidebarGroupContent>
+                        <SidebarMenu>
+                          {visible
+                            .filter((entry) => entry.group === group)
+                            .map((entry) => (
+                              <SidebarMenuItem key={entry.id}>
+                                <SidebarMenuButton
+                                  render={
+                                    <a
+                                      href={`#${entry.id}`}
+                                      aria-current={activeId === entry.id ? 'location' : undefined}
+                                    />
+                                  }
+                                  isActive={activeId === entry.id}
+                                  onClick={(event) => {
+                                    event.preventDefault()
+                                    navigate(entry.id)
+                                  }}
+                                >
+                                  {entry.name}
+                                </SidebarMenuButton>
+                              </SidebarMenuItem>
+                            ))}
+                        </SidebarMenu>
+                      </SidebarGroupContent>
+                    </SidebarGroup>
+                  ))}
+                </nav>
+              </SidebarContent>
+            </CollapsibleContent>
+          </Collapsible>
         </Sidebar>
         <main id="catalog" className="design-main" tabIndex={-1}>
-          <header>
+          <header className="catalog-introduction">
             <h2>The Quiet Workbench</h2>
             <p>
               Shared production controls, canonical tokens, and local interaction examples. Change
@@ -212,7 +286,9 @@ export default function App() {
               <GitCompositions />
             </>
           )}
-          <p role="status">{visible.length} component entries</p>
+          <p className="catalog-results" role="status">
+            {visible.length} component entries
+          </p>
           {visible.map((entry) => {
             const Specimen = SPECIMENS[entry.id]
             return (
@@ -223,8 +299,11 @@ export default function App() {
                 className="design-entry"
                 data-component={entry.id}
               >
-                <h2>{entry.name}</h2>
-                <p>{entry.summary}</p>
+                <div className="design-entry-heading">
+                  <h2>{entry.name}</h2>
+                  <span>{entry.group}</span>
+                </div>
+                <p className="design-entry-summary">{entry.summary}</p>
                 <div className="design-specimen" data-specimen={entry.id}>
                   <Specimen />
                 </div>
@@ -252,7 +331,17 @@ export default function App() {
               </section>
             )
           })}
-          {visible.length === 0 && <p>No components match. Clear search to restore the catalog.</p>}
+          {visible.length === 0 && (
+            <Empty className="catalog-empty">
+              <EmptyHeader>
+                <EmptyTitle>No components match</EmptyTitle>
+                <EmptyDescription>Clear search to restore the catalog.</EmptyDescription>
+              </EmptyHeader>
+              <Button variant="secondary" onClick={() => setSearch('')}>
+                Clear search
+              </Button>
+            </Empty>
+          )}
           <footer>
             Shared source: packages/ui. Catalog fixtures: apps/design. Automated checks are not
             accessibility certification.

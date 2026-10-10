@@ -97,16 +97,24 @@ export const navigationSpecimens = {
       <UI.Sidebar collapsible="icon" className="absolute">
         <UI.SidebarHeader>Local repository</UI.SidebarHeader>
         <UI.SidebarContent>
-          <UI.SidebarMenu>
-            {['Branches', 'Review', 'Settings'].map((name) => (
-              <UI.SidebarMenuItem key={name}>
-                <UI.SidebarMenuButton render={<a href="#git-compositions" />} tooltip={name}>
-                  <GitBranch aria-hidden="true" />
-                  <span>{name}</span>
-                </UI.SidebarMenuButton>
-              </UI.SidebarMenuItem>
-            ))}
-          </UI.SidebarMenu>
+          <UI.SidebarGroup>
+            <UI.SidebarGroupLabel>Local navigation</UI.SidebarGroupLabel>
+            <UI.SidebarMenu>
+              {['Branches', 'Review', 'Settings'].map((name, index) => (
+                <UI.SidebarMenuItem key={name}>
+                  <UI.SidebarMenuButton
+                    render={<a href="#git-compositions" />}
+                    tooltip={name}
+                    isActive={index === 0}
+                    size={index === 1 ? 'sm' : 'default'}
+                  >
+                    <GitBranch aria-hidden="true" />
+                    <span>{name}</span>
+                  </UI.SidebarMenuButton>
+                </UI.SidebarMenuItem>
+              ))}
+            </UI.SidebarMenu>
+          </UI.SidebarGroup>
         </UI.SidebarContent>
       </UI.Sidebar>
       <div className="min-w-0 flex-1 p-4">
@@ -201,10 +209,18 @@ export const navigationSpecimens = {
   },
   command: function Commands() {
     const [selected, setSelected] = useState('')
+    // cmdk scrolls its initial selected item into view, even without focus.
+    // Keep this inline example unselected until the user enters the search.
+    const [activeCommand, setActiveCommand] = useState('__unselected__')
     return (
       <>
-        <UI.Command>
-          <UI.CommandInput placeholder="Search local commands" />
+        <UI.Command value={activeCommand} onValueChange={setActiveCommand}>
+          <UI.CommandInput
+            placeholder="Search local commands"
+            onFocus={() => {
+              if (activeCommand === '__unselected__') setActiveCommand('Inspect branch')
+            }}
+          />
           <UI.CommandList>
             <UI.CommandEmpty>No matching command.</UI.CommandEmpty>
             <UI.CommandGroup heading="Local navigation">
@@ -221,17 +237,33 @@ export const navigationSpecimens = {
     )
   },
   tabs: () => (
-    <UI.Tabs defaultValue="changes">
-      <UI.TabsList>
-        <UI.TabsTrigger value="changes">Changes</UI.TabsTrigger>
-        <UI.TabsTrigger value="checks">Checks</UI.TabsTrigger>
-        <UI.TabsTrigger value="unavailable" disabled>
-          Unavailable
-        </UI.TabsTrigger>
-      </UI.TabsList>
-      <UI.TabsContent value="changes">2 local files changed.</UI.TabsContent>
-      <UI.TabsContent value="checks">Checks unavailable — no remote data loaded.</UI.TabsContent>
-    </UI.Tabs>
+    <>
+      {(['horizontal', 'vertical'] as const).map((orientation) =>
+        (['default', 'line'] as const).map((variant) => (
+          <UI.Tabs
+            key={`${orientation}-${variant}`}
+            defaultValue="changes"
+            orientation={orientation}
+          >
+            <UI.TabsList
+              variant={variant}
+              controlSize={variant === 'line' ? 'compact' : 'standard'}
+              aria-label={`${orientation} ${variant} repository views`}
+            >
+              <UI.TabsTrigger value="changes">Changes</UI.TabsTrigger>
+              <UI.TabsTrigger value="checks">Checks</UI.TabsTrigger>
+              <UI.TabsTrigger value="unavailable" disabled>
+                Unavailable
+              </UI.TabsTrigger>
+            </UI.TabsList>
+            <UI.TabsContent value="changes">2 local files changed.</UI.TabsContent>
+            <UI.TabsContent value="checks">
+              Checks unavailable — no remote data loaded.
+            </UI.TabsContent>
+          </UI.Tabs>
+        )),
+      )}
+    </>
   ),
   pagination: function Pages() {
     const [page, setPage] = useState(1)
