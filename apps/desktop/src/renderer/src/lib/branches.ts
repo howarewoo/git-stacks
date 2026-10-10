@@ -146,3 +146,16 @@ export function describeBranchRow(facts: BranchRowFacts): string {
   )
   return parts.join(', ')
 }
+
+export function branchDeleteReason(branch: Branch, defaultBranch: string | null): string | null {
+  if (branch.remote) {
+    if (branch.ref.endsWith('/HEAD')) return 'The remote symbolic HEAD cannot be deleted.'
+    if (defaultBranch && branch.name.endsWith(`/${defaultBranch}`))
+      return 'The default remote branch cannot be deleted.'
+  } else {
+    if (branch.current) return 'Switch to another branch before deleting the current branch.'
+    if (branch.name === defaultBranch) return 'The default branch cannot be deleted.'
+  }
+  if (!branch.oid) return 'The branch tip is unknown. Refresh before selecting it.'
+  return null
+}
