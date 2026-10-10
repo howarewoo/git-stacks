@@ -46,6 +46,7 @@ body {
   position: sticky;
   top: 0;
   height: 100vh;
+  width: 100%;
   overflow-y: auto;
   border-right: 1px solid var(--gs-semantic-border-decorative);
   background: var(--gs-semantic-surface-content);
@@ -114,15 +115,15 @@ body {
   }
 }
 
-.design-nav > h1 {
+.design-nav [data-slot="sidebar-header"] > h1 {
   font-size: 20px;
   font-weight: 600;
 }
-.design-nav > p {
+.design-nav [data-slot="sidebar-header"] > p {
   margin: 8px 0 24px;
   color: var(--gs-semantic-text-secondary);
 }
-.design-nav > button {
+.design-nav [data-slot="sidebar-header"] > button {
   margin-top: 12px;
   width: 100%;
 }
@@ -135,15 +136,7 @@ body {
   display: grid;
   gap: 6px;
 }
-.design-nav nav a {
-  display: block;
-  padding: 5px 8px;
-  border-radius: var(--gs-semantic-radius-control);
-}
-.design-nav nav a:hover {
-  background: var(--gs-semantic-surface-hover);
-}
-.design-nav nav h2 {
+.design-nav [data-slot="sidebar-group-label"] {
   margin-top: 24px;
   font-weight: 600;
   font-size: 13px;

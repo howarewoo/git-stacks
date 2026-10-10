@@ -233,7 +233,14 @@ The foundation radius scale targets 12px for controls, 16px for nested items, an
 
 ## Components
 
-The renderer owns its [shadcn/ui](https://ui.shadcn.com/)-style component library in `apps/desktop/src/renderer/src/components/ui`. `components.json` selects `base-nova` with CSS variables and the configured `components`, `ui`, `utils`, `lib`, and `hooks` aliases. Base UI (`@base-ui/react`) supplies accessible interaction primitives; the local wrappers supply the workbench's token roles and composition contracts. Buttons remain CVA-based (`class-variance-authority`) and compose variants through `cn()` (`clsx` + `tailwind-merge`), with Tailwind CSS v4 and Lucide icons (`lucide-react`). Shadcn is owned source and configuration, not a runtime or CLI application dependency.
+The shared [shadcn/ui](https://ui.shadcn.com/)-style component library lives in `packages/ui/src/components/ui` and is consumed through `@git-stacks/ui` by desktop and the design catalog. `packages/ui/components.json` selects `base-nova` with CSS variables and the configured aliases. Base UI (`@base-ui/react`) supplies accessible interaction primitives; the shared wrappers supply the workbench's token roles and composition contracts. Buttons remain CVA-based (`class-variance-authority`) and compose variants through `cn()` (`clsx` + `tailwind-merge`), with Tailwind CSS v4 and Lucide icons (`lucide-react`). Shadcn is owned source and configuration, not a runtime or CLI application dependency.
+
+### Design-system reuse
+
+- Both applications use shared components in their actual interfaces, including catalog chrome and navigation, not only in specimens. Compose the existing component when it covers the interaction; do not recreate its appearance or behavior with app-local markup and CSS.
+- App-specific layout and domain compositions remain with their application. Semantic HTML is appropriate for document structure and content; shared components own supported controls and interaction patterns.
+- When a reusable capability is missing, extend the shared component or add it to `@git-stacks/ui` rather than creating an app-local counterpart. Keep browser-safe foundations shared and Git, filesystem, credentials, and transport out of the component library.
+- Catalog specimens exercise the same implementation used by application interfaces. A specimen is not permission to add a new desktop workflow.
 
 ### Buttons
 

@@ -9,6 +9,16 @@ import {
   CommandGroup,
   Input,
   Select,
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
   TooltipProvider,
 } from '@git-stacks/ui'
 import {
@@ -76,75 +86,101 @@ export default function App() {
       <a className="skip-link" href="#catalog">
         Skip to catalog
       </a>
-      <div className="design-shell">
-        <aside className="design-nav">
-          <h1>Git Stacks</h1>
-          <p>
-            The Quiet Workbench
-            <br />
-            Design system
-          </p>
-          <Input
-            aria-label="Search components"
-            placeholder="Search components"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          <Button
-            variant="secondary"
-            onClick={() => setCommandOpen(true)}
-            aria-keyshortcuts="Control+k Meta+k"
-          >
-            Command navigation · Ctrl/⌘ K
-          </Button>
-          <div className="catalog-settings">
-            <label>
-              Theme
-              <Select
-                aria-label="Theme"
-                value={theme}
-                onValueChange={setTheme}
-                options={[
-                  { value: 'light', label: 'Light' },
-                  { value: 'dark', label: 'Dark' },
-                  { value: 'system', label: 'System' },
-                ]}
-              />
-            </label>
-            <label>
-              Density
-              <Select
-                aria-label="Density"
-                value={density}
-                onValueChange={setDensity}
-                options={[
-                  { value: 'compact', label: 'Compact' },
-                  { value: 'standard', label: 'Standard' },
-                ]}
-              />
-            </label>
-          </div>
-          <nav aria-label="Component catalog">
-            <a href="#foundations" onClick={() => setSearch('')}>
-              Foundations
-            </a>
-            <a href="#git-compositions" onClick={() => setSearch('')}>
-              Git compositions
-            </a>
-            {MANIFEST_GROUPS.map((group) => (
-              <div key={group}>
-                <h2>{group}</h2>
-                {visible
-                  .filter((entry) => entry.group === group)
-                  .map((entry) => (
-                    <a key={entry.id} href={`#${entry.id}`}>
-                      {entry.name}
-                    </a>
-                  ))}
-              </div>
-            ))}
-          </nav>
-        </aside>
+      <SidebarProvider className="design-shell">
+        <Sidebar collapsible="none" className="design-nav">
+          <SidebarHeader className="p-0">
+            <h1>Git Stacks</h1>
+            <p>
+              The Quiet Workbench
+              <br />
+              Design system
+            </p>
+            <Input
+              aria-label="Search components"
+              placeholder="Search components"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <Button
+              variant="secondary"
+              onClick={() => setCommandOpen(true)}
+              aria-keyshortcuts="Control+k Meta+k"
+            >
+              Command navigation · Ctrl/⌘ K
+            </Button>
+            <div className="catalog-settings">
+              <label>
+                Theme
+                <Select
+                  aria-label="Theme"
+                  value={theme}
+                  onValueChange={setTheme}
+                  options={[
+                    { value: 'light', label: 'Light' },
+                    { value: 'dark', label: 'Dark' },
+                    { value: 'system', label: 'System' },
+                  ]}
+                />
+              </label>
+              <label>
+                Density
+                <Select
+                  aria-label="Density"
+                  value={density}
+                  onValueChange={setDensity}
+                  options={[
+                    { value: 'compact', label: 'Compact' },
+                    { value: 'standard', label: 'Standard' },
+                  ]}
+                />
+              </label>
+            </div>
+          </SidebarHeader>
+          <SidebarContent className="shrink-0 overflow-visible">
+            <nav aria-label="Component catalog">
+              <SidebarGroup className="p-0">
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        render={<a href="#foundations" />}
+                        onClick={() => setSearch('')}
+                      >
+                        Foundations
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        render={<a href="#git-compositions" />}
+                        onClick={() => setSearch('')}
+                      >
+                        Git compositions
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+              {MANIFEST_GROUPS.map((group) => (
+                <SidebarGroup key={group} className="p-0">
+                  <SidebarGroupLabel render={<h2 />}>{group}</SidebarGroupLabel>
+                  <SidebarGroupContent>
+                    <SidebarMenu>
+                      {visible
+                        .filter((entry) => entry.group === group)
+                        .map((entry) => (
+                          <SidebarMenuItem key={entry.id}>
+                            <SidebarMenuButton render={<a href={`#${entry.id}`} />}>
+                              {entry.name}
+                            </SidebarMenuButton>
+                          </SidebarMenuItem>
+                        ))}
+                    </SidebarMenu>
+                  </SidebarGroupContent>
+                </SidebarGroup>
+              ))}
+            </nav>
+          </SidebarContent>
+        </Sidebar>
         <main id="catalog" className="design-main" tabIndex={-1}>
           <header>
             <h2>The Quiet Workbench</h2>
@@ -222,7 +258,7 @@ export default function App() {
             accessibility certification.
           </footer>
         </main>
-      </div>
+      </SidebarProvider>
       <CommandDialog
         open={commandOpen}
         onOpenChange={setCommandOpen}
