@@ -99,7 +99,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     group: 'Actions',
     summary: 'A set of two-state buttons that can be toggled on or off singly or in multiples.',
     anatomy: 'ToggleGroup container with roving focus and item selection',
-    keyboard: 'Arrow keys navigate items in the group, Space/Enter toggles selection.',
+    keyboard:
+      'orientation="horizontal" uses Left/Right; orientation="vertical" uses Up/Down. Space/Enter toggles selection.',
     tokens: ['semantic.surface.inset', 'semantic.radius.pill'],
     importExample:
       "import { ToggleGroup, ToggleGroupItem } from '@git-stacks/ui/components/toggle-group'",
@@ -790,7 +791,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     anatomy:
       'Dialog, DialogTrigger, DialogPortal, DialogOverlay, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose',
     keyboard:
-      'Base UI focus trap confines focus within modal, Esc closes, focus returns to initiating trigger control.',
+      'Base UI focus trap confines focus within modal, Esc closes nested popups before the modal, focus returns to initiating trigger control. Nested Popover, Combobox, and ContextMenu use the popover layer above the dialog.',
     tokens: [
       'semantic.surface.content',
       'semantic.border.essential',

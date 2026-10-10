@@ -148,6 +148,39 @@ test('vertical tabs use vertical arrows to navigate available views', async ({ p
   await expect(tabs.getByRole('tab', { name: 'Changes', exact: true })).toBeFocused()
 })
 
+test('vertical toggle groups use vertical arrows and activate the focused item', async ({
+  page,
+}) => {
+  await page.goto('/')
+  const group = page.getByRole('group', { name: 'vertical text formatting' })
+  await group.getByRole('button', { name: 'Bold', exact: true }).focus()
+  await page.keyboard.press('ArrowDown')
+  const italic = group.getByRole('button', { name: 'Italic', exact: true })
+  await expect(italic).toBeFocused()
+  await page.keyboard.press('Space')
+  await expect(italic).toHaveAttribute('aria-pressed', 'true')
+  await page.keyboard.press('ArrowUp')
+  await expect(group.getByRole('button', { name: 'Bold', exact: true })).toBeFocused()
+})
+
+test('nested dialog popups receive pointer interaction above the modal', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Open inspection dialog' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Branch inspection' })
+  await dialog.getByRole('button', { name: 'Inspect nested scope' }).click()
+  await page.getByRole('button', { name: 'Inspect scope locally', exact: true }).click()
+  await expect(dialog.locator('output')).toHaveText('Nested scope inspected')
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('combobox', { name: 'Nested branch', exact: true }).fill('main')
+  await page.getByRole('option', { name: 'main', exact: true }).click()
+  await expect(dialog.locator('output')).toHaveText('Nested branch: main')
+  await dialog.getByText('Nested branch actions', { exact: true }).click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Copy nested ref', exact: true }).click()
+  await expect(dialog.locator('output')).toHaveText('Nested ref copied locally')
+  await expect(dialog).toBeVisible()
+})
+
 test('forms preserve validation mixed and empty-select states', async ({ page }) => {
   await page.goto('/')
   const field = page.locator('#branch-field')

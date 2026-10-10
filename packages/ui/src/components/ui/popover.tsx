@@ -28,7 +28,7 @@ function PopoverContent({
         alignOffset={alignOffset}
         side={side}
         sideOffset={sideOffset}
-        className="isolate z-50"
+        className="isolate z-[var(--gs-component-overlay-popover-z-index)]"
       >
         <PopoverPrimitive.Popup
           data-slot="popover-content"

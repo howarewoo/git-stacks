@@ -3,27 +3,66 @@ import * as UI from '@git-stacks/ui'
 import { FileDiff, GitBranch, X } from 'lucide-react'
 
 export const overlaySpecimens = {
-  dialog: () => (
-    <UI.Dialog>
-      <UI.DialogTrigger render={<UI.Button />}>Open inspection dialog</UI.DialogTrigger>
-      <UI.DialogContent>
-        <UI.DialogHeader>
-          <UI.DialogTitle>Branch inspection</UI.DialogTitle>
-          <UI.DialogDescription>
-            Focus stays inside this local example until it closes.
-          </UI.DialogDescription>
-        </UI.DialogHeader>
-        <UI.Field id="dialog-ref" label="Ref">
-          <UI.Input defaultValue="feature/quiet-graph" />
-        </UI.Field>
-        <UI.DialogFooter>
-          <UI.DialogClose render={<UI.Button variant="secondary" />}>
-            Close inspection
-          </UI.DialogClose>
-        </UI.DialogFooter>
-      </UI.DialogContent>
-    </UI.Dialog>
-  ),
+  dialog: function Inspection() {
+    const [action, setAction] = useState('No nested action selected')
+    return (
+      <UI.Dialog>
+        <UI.DialogTrigger render={<UI.Button />}>Open inspection dialog</UI.DialogTrigger>
+        <UI.DialogContent>
+          <UI.DialogHeader>
+            <UI.DialogTitle>Branch inspection</UI.DialogTitle>
+            <UI.DialogDescription>
+              Focus stays inside this local example until it closes.
+            </UI.DialogDescription>
+          </UI.DialogHeader>
+          <UI.Field id="dialog-ref" label="Ref">
+            <UI.Input defaultValue="feature/quiet-graph" />
+          </UI.Field>
+          <UI.Popover>
+            <UI.PopoverTrigger render={<UI.Button variant="secondary" />}>
+              Inspect nested scope
+            </UI.PopoverTrigger>
+            <UI.PopoverContent>
+              <UI.Button onClick={() => setAction('Nested scope inspected')}>
+                Inspect scope locally
+              </UI.Button>
+            </UI.PopoverContent>
+          </UI.Popover>
+          <UI.Combobox
+            items={['main', 'feature/quiet-graph']}
+            onValueChange={(value) => setAction(`Nested branch: ${value}`)}
+          >
+            <UI.ComboboxInput aria-label="Nested branch" placeholder="Find a branch" />
+            <UI.ComboboxContent>
+              <UI.ComboboxList>
+                {(item: string) => (
+                  <UI.ComboboxItem key={item} value={item}>
+                    {item}
+                  </UI.ComboboxItem>
+                )}
+              </UI.ComboboxList>
+            </UI.ComboboxContent>
+          </UI.Combobox>
+          <UI.ContextMenu>
+            <UI.ContextMenuTrigger className="rounded border p-3" tabIndex={0}>
+              Nested branch actions
+            </UI.ContextMenuTrigger>
+            <UI.ContextMenuContent>
+              <UI.ContextMenuItem onClick={() => setAction('Nested ref copied locally')}>
+                Copy nested ref
+              </UI.ContextMenuItem>
+            </UI.ContextMenuContent>
+          </UI.ContextMenu>
+          <output aria-live="polite">{action}</output>
+          <UI.DialogFooter>
+            <UI.DialogClose render={<UI.Button variant="secondary" />}>
+              Close inspection
+            </UI.DialogClose>
+          </UI.DialogFooter>
+        </UI.DialogContent>
+      </UI.Dialog>
+    )
+  },
   'alert-dialog': function Confirm() {
     const [result, setResult] = useState('Nothing deleted')
     const [open, setOpen] = useState(false)

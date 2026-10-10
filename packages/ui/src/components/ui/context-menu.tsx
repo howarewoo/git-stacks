@@ -36,7 +36,7 @@ function ContextMenuContent({
   return (
     <ContextMenuPrimitive.Portal>
       <ContextMenuPrimitive.Positioner
-        className="isolate z-50 outline-none"
+        className="isolate z-[var(--gs-component-overlay-popover-z-index)] outline-none"
         align={align}
         alignOffset={alignOffset}
         side={side}

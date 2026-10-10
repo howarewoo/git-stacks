@@ -61,14 +61,23 @@ export const navigationSpecimens = {
     </UI.Toggle>
   ),
   'toggle-group': () => (
-    <UI.ToggleGroup defaultValue={['bold']}>
-      <UI.ToggleGroupItem value="bold" aria-label="Bold">
-        <Bold />
-      </UI.ToggleGroupItem>
-      <UI.ToggleGroupItem value="italic" aria-label="Italic">
-        <Italic />
-      </UI.ToggleGroupItem>
-    </UI.ToggleGroup>
+    <>
+      {(['horizontal', 'vertical'] as const).map((orientation) => (
+        <UI.ToggleGroup
+          key={orientation}
+          defaultValue={['bold']}
+          orientation={orientation}
+          aria-label={`${orientation} text formatting`}
+        >
+          <UI.ToggleGroupItem value="bold" aria-label="Bold">
+            <Bold />
+          </UI.ToggleGroupItem>
+          <UI.ToggleGroupItem value="italic" aria-label="Italic">
+            <Italic />
+          </UI.ToggleGroupItem>
+        </UI.ToggleGroup>
+      ))}
+    </>
   ),
   kbd: () => (
     <p>
