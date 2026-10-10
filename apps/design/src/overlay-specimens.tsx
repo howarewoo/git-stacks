@@ -76,18 +76,20 @@ export const overlaySpecimens = {
             <UI.AlertDialogHeader>
               <UI.AlertDialogTitle>Delete local example branch?</UI.AlertDialogTitle>
               <UI.AlertDialogDescription>
-                Only this specimen changes. No Git operation will run.
+                Simulate deleting <code>feature/quiet-graph</code> from this example. Only this
+                specimen changes; no Git operation will run.
               </UI.AlertDialogDescription>
             </UI.AlertDialogHeader>
             <UI.AlertDialogFooter>
               <UI.AlertDialogCancel>Cancel</UI.AlertDialogCancel>
               <UI.AlertDialogAction
+                variant="danger"
                 onClick={() => {
-                  setResult('Example deleted locally')
+                  setResult('Simulated deletion of feature/quiet-graph. No Git operation ran.')
                   setOpen(false)
                 }}
               >
-                Delete example
+                Simulate deletion
               </UI.AlertDialogAction>
             </UI.AlertDialogFooter>
           </UI.AlertDialogContent>

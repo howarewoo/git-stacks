@@ -223,7 +223,7 @@ export function CommandPaletteContent({
         <p>Search commands, stack navigation, branches, pull requests, issues, and settings.</p>
       </div>
 
-      <div className="palette-search-row flex items-center border-b border-[var(--gs-semantic-border-essential)] px-5 py-3">
+      <div className="palette-search-row flex items-center bg-[var(--gs-semantic-surface-inset)] px-5 py-3">
         <Search
           className="mr-3 size-4 text-[var(--gs-semantic-text-secondary)]"
           aria-hidden="true"
@@ -351,7 +351,7 @@ export function CommandPaletteContent({
         )}
       </div>
 
-      <div className="palette-footer flex items-center justify-between border-t border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] px-5 py-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
+      <div className="palette-footer flex items-center justify-between bg-[var(--gs-semantic-surface-inset)] px-5 py-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)]">
         <div className="flex items-center gap-3">
           <span>
             <kbd className="font-sans">↑↓</kbd> Navigate
@@ -406,7 +406,7 @@ export function CommandPalette({
       }}
     >
       <DialogContent
-        className="palette-dialog fixed left-1/2 top-[12%] z-[var(--gs-component-overlay-z-index)] grid grid-cols-[minmax(0,1fr)] max-h-[calc(88vh-1rem)] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 translate-y-0 gap-0 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-0 shadow-[var(--gs-semantic-elevation-large)] outline-none"
+        className="palette-dialog fixed left-1/2 top-[12%] z-[var(--gs-component-overlay-z-index)] grid grid-cols-[minmax(0,1fr)] max-h-[calc(88vh-1rem)] w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 translate-y-0 gap-0 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] bg-[var(--gs-component-overlay-background)] p-0 shadow-[var(--gs-semantic-elevation-large)] outline-none"
         finalFocus={() => {
           // The resolver is structurally typed for the shared lib, but Base can
           // only be handed a real element, so narrow before returning it.

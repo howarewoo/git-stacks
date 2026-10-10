@@ -428,17 +428,15 @@ test.describe('Leaving a review', () => {
     expect(journal.at(-1)).toEqual(['Typed while the read was out.', 'And this one.'])
   })
 
-  test('a pending comment looks nothing like one already on GitHub', async ({ page }) => {
+  test('pending comments are explicitly distinguished from existing GitHub conversations', async ({
+    page,
+  }) => {
     await page.getByRole('button', { name: RANGE_FIRST }).click()
     await addPendingComment(page, 'Comment on src/main/review.ts:1 (head)', 'Not sent yet.')
 
-    const draft = page.locator('.review-draft')
     const thread = page.locator('.review-thread').first()
     await expect(page.locator('.review-drafts-caption')).toContainText('pending, not sent')
     await expect(thread).not.toContainText('pending, not sent')
-    // One is a locally composed card, the other a conversation somebody is in.
-    expect(await draft.evaluate((el) => getComputedStyle(el).borderLeftStyle)).toBe('dashed')
-    expect(await thread.evaluate((el) => getComputedStyle(el).borderLeftStyle)).toBe('solid')
   })
 })
 

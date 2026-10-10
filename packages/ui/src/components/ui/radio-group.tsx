@@ -57,7 +57,7 @@ export function RadioGroupItem({
         data-slot="radio-group-item"
         className="inline-flex size-5 shrink-0 items-center justify-center rounded-full border border-[var(--gs-component-field-border)] bg-[var(--gs-component-field-background)] outline-none transition-colors data-[checked]:border-[var(--gs-semantic-selection-border)] data-[checked]:bg-[var(--gs-semantic-selection-border)] focus-visible:ring-2 focus-visible:ring-[var(--gs-component-field-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
       >
-        <RadioPrimitive.Indicator className="size-2 rounded-full bg-[var(--gs-semantic-text-inverse)]" />
+        <RadioPrimitive.Indicator className="size-2 rounded-full bg-[var(--gs-semantic-action-primary-foreground)]" />
       </RadioPrimitive.Root>
       <span id={labelId}>{children}</span>
     </label>

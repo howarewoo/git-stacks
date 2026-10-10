@@ -31,7 +31,7 @@
   --color-popover: var(--gs-semantic-surface-content);
   --color-popover-foreground: var(--gs-semantic-text-primary);
   --color-primary: var(--gs-semantic-action-primary);
-  --color-primary-foreground: var(--gs-semantic-text-inverse);
+  --color-primary-foreground: var(--gs-semantic-action-primary-foreground);
   --color-secondary: var(--gs-semantic-surface-inset);
   --color-secondary-foreground: var(--gs-semantic-text-secondary);
   --color-muted: var(--gs-semantic-surface-inset);
@@ -46,7 +46,7 @@
   --color-sidebar: var(--gs-semantic-surface-content);
   --color-sidebar-foreground: var(--gs-semantic-text-primary);
   --color-sidebar-primary: var(--gs-semantic-action-primary);
-  --color-sidebar-primary-foreground: var(--gs-semantic-text-inverse);
+  --color-sidebar-primary-foreground: var(--gs-semantic-action-primary-foreground);
   --color-sidebar-accent: var(--gs-semantic-selection-background);
   --color-sidebar-accent-foreground: var(--gs-semantic-selection-text);
   --color-sidebar-border: var(--gs-semantic-border-decorative);
@@ -56,6 +56,10 @@
   --radius-md: var(--gs-semantic-radius-control);
   --radius-lg: var(--gs-semantic-radius-item);
   --radius-xl: var(--gs-semantic-radius-workbench);
+  --shadow-sm: var(--gs-semantic-elevation-small);
+  --shadow-md: var(--gs-semantic-elevation-medium);
+  --shadow-lg: var(--gs-semantic-elevation-large);
+  --shadow-xl: var(--gs-semantic-elevation-large);
 }
 
 :root {
@@ -92,6 +96,10 @@ pre {
     font: inherit;
   }
 
+  :where([data-slot="button"]) {
+    position: relative;
+  }
+
   /* Tailwind v4 switched buttons to cursor: default; the workbench keeps
      the pointer affordance on enabled interactive elements. */
   button:not(:disabled),
@@ -102,6 +110,25 @@ pre {
 
 button:disabled {
   cursor: not-allowed;
+}
+
+/* Keep the original children in layout and the accessibility tree while
+   placing a decorative busy indicator over them, including bare text nodes. */
+[data-slot="button"][data-loading] {
+  -webkit-text-fill-color: transparent;
+}
+
+[data-slot="button"][data-loading] > :not([data-slot="button-spinner"]) {
+  opacity: 0;
+}
+
+[data-slot="button"] > [data-slot="button-spinner"] {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  -webkit-text-fill-color: initial;
 }
 
 ::selection {
@@ -158,11 +185,9 @@ textarea,
 @keyframes dialog-in {
   from {
     opacity: 0;
-    scale: 0.98;
   }
   to {
     opacity: 1;
-    scale: 1;
   }
 }
 

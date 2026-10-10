@@ -3,16 +3,17 @@ import { Button as ButtonPrimitive } from '@base-ui/react/button'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '../../lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip'
+import { Spinner } from './spinner'
 
 const buttonVariants = cva(
-  'gs-button inline-flex shrink-0 scroll-m-1 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--gs-semantic-radius-control)] text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--gs-semantic-surface-content)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-55',
+  'gs-button inline-flex shrink-0 scroll-m-1 items-center justify-center gap-2 whitespace-nowrap rounded-[var(--gs-semantic-radius-control)] text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--gs-semantic-surface-content)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-55 data-[loading]:opacity-100',
   {
     variants: {
       variant: {
         default:
           'bg-[var(--gs-component-button-primary-background)] text-[var(--gs-component-button-primary-foreground)] hover:bg-[var(--gs-component-button-primary-hover)] active:bg-[var(--gs-component-button-primary-pressed)]',
         secondary:
-          'border border-[var(--gs-component-button-secondary-border)] bg-[var(--gs-component-button-secondary-background)] text-[var(--gs-component-button-secondary-foreground)] hover:bg-[var(--gs-semantic-action-secondary-hover)] active:bg-[var(--gs-semantic-surface-hover)]',
+          'bg-[var(--gs-component-button-secondary-background)] text-[var(--gs-component-button-secondary-foreground)] hover:bg-[var(--gs-semantic-action-secondary-hover)] active:bg-[var(--gs-semantic-surface-hover)]',
         outline:
           'border border-[var(--gs-component-button-secondary-border)] bg-[var(--gs-component-button-secondary-background)] text-[var(--gs-component-button-secondary-foreground)] hover:bg-[var(--gs-semantic-action-secondary-hover)] active:bg-[var(--gs-semantic-surface-hover)]',
         ghost:
@@ -20,11 +21,11 @@ const buttonVariants = cva(
         subtle:
           'bg-[var(--gs-semantic-surface-inset)] text-[var(--gs-semantic-text-secondary)] hover:bg-[var(--gs-semantic-surface-hover)] hover:text-[var(--gs-semantic-text-primary)]',
         accent:
-          'bg-[var(--gs-semantic-selection-text)] text-[var(--gs-semantic-text-inverse)] hover:bg-[var(--gs-semantic-selection-border)]',
+          'bg-[var(--gs-semantic-selection-background)] text-[var(--gs-semantic-selection-text)] hover:bg-[var(--gs-semantic-feedback-info-surface)] active:bg-[var(--gs-semantic-selection-background)]',
         danger:
-          'border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
+          'bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
         destructive:
-          'border border-[var(--gs-semantic-feedback-error-text)] bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
+          'bg-[var(--gs-semantic-feedback-error-surface)] text-[var(--gs-semantic-feedback-error-text)] hover:bg-[var(--gs-semantic-feedback-error-text)] hover:text-[var(--gs-semantic-text-inverse)]',
         link: 'h-auto rounded-none p-0 text-[var(--gs-component-button-link)] underline decoration-[var(--gs-semantic-selection-border)] underline-offset-4 hover:decoration-[var(--gs-component-button-link)]',
         unstyled: '',
       },
@@ -33,9 +34,9 @@ const buttonVariants = cva(
         sm: 'min-h-[var(--gs-semantic-density-control-compact)] px-3',
         default: 'min-h-[var(--gs-semantic-density-control-standard)] px-4',
         lg: 'min-h-[var(--gs-semantic-density-control-standard)] px-5',
-        icon: 'size-11',
-        'icon-sm': 'size-9',
-        'icon-xs': 'size-7',
+        icon: 'size-11 rounded-full',
+        'icon-sm': 'size-11 rounded-full',
+        'icon-xs': 'size-11 rounded-full',
       },
     },
     defaultVariants: {
@@ -46,23 +47,35 @@ const buttonVariants = cva(
 )
 
 export interface ButtonProps
-  extends Omit<ButtonPrimitive.Props, 'className'>,
+  extends Omit<ButtonPrimitive.Props, 'className' | 'children'>,
     VariantProps<typeof buttonVariants> {
   className?: string
+  children?: React.ReactNode | ((state: ButtonPrimitive.State) => React.ReactNode)
   tooltip?: React.ReactNode
   loading?: boolean
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   (
-    { className, variant, size, type = 'button', tooltip, loading = false, disabled, ...props },
+    {
+      className,
+      variant,
+      size,
+      type = 'button',
+      tooltip,
+      loading = false,
+      disabled,
+      children,
+      ...props
+    },
     ref,
   ) => {
-    const hint = tooltip ?? (size === 'icon' || size === 'icon-sm' ? props['aria-label'] : null)
+    const hint = tooltip ?? (size?.startsWith('icon') ? props['aria-label'] : null)
     const isDisabled = disabled || loading
     const button = (
       <ButtonPrimitive
         ref={ref}
+        {...props}
         data-slot="button"
         type={type}
         aria-busy={loading || undefined}
@@ -72,8 +85,14 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
           variant === 'unstyled' ? className : cn(buttonVariants({ variant, size, className }))
         }
         disabled={isDisabled}
-        {...props}
-      />
+      >
+        {typeof children === 'function' ? children({ disabled: Boolean(isDisabled) }) : children}
+        {loading ? (
+          <span data-slot="button-spinner" aria-hidden="true">
+            <Spinner />
+          </span>
+        ) : null}
+      </ButtonPrimitive>
     )
     if (!hint) return button
     return (
@@ -83,7 +102,12 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
             isDisabled ? (
               <span
                 role="group"
-                className="inline-flex shrink-0 scroll-m-1 rounded-[var(--gs-semantic-radius-control)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]"
+                className={cn(
+                  'inline-flex shrink-0 scroll-m-1 outline-none focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]',
+                  size?.startsWith('icon')
+                    ? 'rounded-full'
+                    : 'rounded-[var(--gs-semantic-radius-control)]',
+                )}
                 tabIndex={0}
                 aria-label={typeof hint === 'string' ? hint : props['aria-label']}
               >
@@ -96,7 +120,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         />
         <TooltipContent>
           {hint}
-          {isDisabled && !tooltip ? ' — unavailable' : null}
+          {disabled && !loading && !tooltip ? ' — unavailable' : null}
           {loading ? ' — working' : null}
         </TooltipContent>
       </Tooltip>

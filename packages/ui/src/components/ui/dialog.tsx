@@ -17,7 +17,7 @@ const DialogOverlay = React.forwardRef<
     ref={ref}
     data-slot="dialog-overlay"
     className={cn(
-      'fixed inset-0 z-[var(--gs-component-overlay-z-index)] bg-[color-mix(in_srgb,var(--gs-semantic-text-primary)_34%,transparent)]',
+      'fixed inset-0 z-[var(--gs-component-overlay-z-index)] bg-[var(--gs-component-overlay-scrim)]',
       className,
     )}
     {...props}
@@ -38,7 +38,7 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
         ref={ref}
         data-slot="dialog-content"
         className={cn(
-          'fixed left-1/2 top-1/2 z-[var(--gs-component-overlay-z-index)] grid max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-5 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-component-overlay-background)] p-5 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-large)] outline-none data-[open]:animate-dialog-in',
+          'fixed left-1/2 top-1/2 z-[var(--gs-component-overlay-z-index)] grid max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-5 overflow-y-auto rounded-[var(--gs-semantic-radius-workbench)] bg-[var(--gs-component-overlay-background)] p-5 text-[var(--gs-component-overlay-text)] shadow-[var(--gs-semantic-elevation-large)] outline-none data-[open]:animate-dialog-in',
           className,
         )}
         {...props}

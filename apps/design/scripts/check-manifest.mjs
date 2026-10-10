@@ -23,6 +23,7 @@ const tokens = JSON.parse(
 for (const entry of COMPONENT_MANIFEST) {
   for (const field of [
     'summary',
+    'usage',
     'anatomy',
     'keyboard',
     'importExample',

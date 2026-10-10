@@ -2607,7 +2607,7 @@ function App() {
         </div>
 
         {snapshot ? (
-          <details className="nav-section nav-section-bordered sidebar-disclosure">
+          <details className="nav-section nav-section-separated sidebar-disclosure">
             <summary>Repository info</summary>
             <div className="sidebar-info-row">
               <GitFork className="size-4" />
@@ -2627,7 +2627,7 @@ function App() {
           </details>
         ) : null}
 
-        <div className="nav-section nav-section-bordered recent-section">
+        <div className="nav-section nav-section-separated recent-section">
           <div className="nav-label-row">
             <span className="nav-label">Recent repositories</span>
             <IconButton
@@ -2767,7 +2767,6 @@ function App() {
               Push
             </Button>
           </div>
-          <span className="toolbar-divider" aria-hidden="true" />
           <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
             <Button
               disabled={
@@ -3774,7 +3773,7 @@ function App() {
                       {selectedPrIssueLinks.map((issue) => (
                         <div
                           key={issue.number}
-                          className="flex items-center justify-between gap-2 p-1.5 rounded bg-[var(--gs-semantic-surface-raised)] border border-[var(--gs-semantic-border-subtle)] text-xs"
+                          className="flex items-center justify-between gap-2 p-1.5 rounded bg-[var(--gs-semantic-surface-inset)] text-xs"
                         >
                           <div className="flex items-center gap-1.5 min-w-0">
                             <Badge variant={issue.state === 'OPEN' ? 'success' : 'secondary'}>

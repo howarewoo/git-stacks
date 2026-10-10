@@ -56,7 +56,6 @@ export function ShellSpecimen() {
               <Upload aria-hidden="true" className="size-3.5" /> Push
             </Button>
           </div>
-          <span className="toolbar-divider" aria-hidden="true" />
           <div className="toolbar-action-group" role="group" aria-label="Branch and Git actions">
             <Button size="sm">
               <Plus aria-hidden="true" className="size-3.5" /> New branch
@@ -136,7 +135,7 @@ export function ShellSpecimen() {
                 stashCount={0}
               />
             </div>
-            <div className="nav-section nav-section-bordered recent-section">
+            <div className="nav-section nav-section-separated recent-section">
               <span className="nav-label">Recent repositories</span>
               <Button className="recent-item" type="button" variant="unstyled">
                 <FolderGit2 aria-hidden="true" className="size-3.5" />

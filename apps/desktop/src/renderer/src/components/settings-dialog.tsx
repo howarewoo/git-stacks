@@ -895,7 +895,7 @@ export function SettingsDialog({
                             <summary className="cursor-pointer text-[length:var(--gs-semantic-type-label-size)]">
                               {entry.title}
                             </summary>
-                            <pre className="max-h-48 overflow-auto rounded-[var(--gs-semantic-radius-item)] border border-[var(--gs-semantic-border-essential)] bg-[var(--gs-semantic-surface-inset)] p-2 text-xs">
+                            <pre className="max-h-48 overflow-auto rounded-[var(--gs-semantic-radius-item)] bg-[var(--gs-semantic-surface-inset)] p-2 text-xs">
                               {entry.content}
                             </pre>
                           </details>
@@ -923,7 +923,7 @@ export function SettingsDialog({
             ) : null}
 
             {settings ? (
-              <div className="flex items-center justify-between gap-3 border-t border-[var(--gs-semantic-border)] pt-3">
+              <div className="flex items-center justify-between gap-3 pt-3">
                 <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
                   Stored in {snapshot?.file ?? 'application data'}
                 </span>

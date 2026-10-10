@@ -7,6 +7,7 @@
   --color-surface-inset: var(--gs-semantic-surface-inset);
   --color-surface-hover: var(--gs-semantic-surface-hover);
   --color-surface-inverse: var(--gs-semantic-surface-inverse);
+  --color-surface-scrim: var(--gs-semantic-surface-scrim);
   --color-text-primary: var(--gs-semantic-text-primary);
   --color-text-secondary: var(--gs-semantic-text-secondary);
   --color-text-muted: var(--gs-semantic-text-muted);
@@ -20,6 +21,7 @@
   --color-action-primary: var(--gs-semantic-action-primary);
   --color-action-primary-hover: var(--gs-semantic-action-primary-hover);
   --color-action-primary-pressed: var(--gs-semantic-action-primary-pressed);
+  --color-action-primary-foreground: var(--gs-semantic-action-primary-foreground);
   --color-action-secondary: var(--gs-semantic-action-secondary);
   --color-action-secondary-hover: var(--gs-semantic-action-secondary-hover);
   --color-action-link: var(--gs-semantic-action-link);
@@ -92,6 +94,7 @@
   --gs-primitive-color-diff-add-surface: #dceee3;
   --gs-primitive-color-diff-remove: #9d3d43;
   --gs-primitive-color-diff-remove-surface: #f9dfdf;
+  --gs-primitive-color-scrim: rgba(20, 24, 32, 0.34);
   --gs-primitive-color-diff-hunk: #3155a6;
   --gs-primitive-dark-color-canvas: #11151b;
   --gs-primitive-dark-color-surface: #1a1f27;
@@ -135,9 +138,9 @@
   --gs-primitive-radius-item: 16px;
   --gs-primitive-radius-workbench: 24px;
   --gs-primitive-radius-pill: 999px;
-  --gs-primitive-shadow-sm: 0 1px 2px rgba(23, 28, 36, 0.08);
-  --gs-primitive-shadow-md: 0 8px 24px rgba(23, 28, 36, 0.12);
-  --gs-primitive-shadow-lg: 0 22px 64px rgba(23, 28, 36, 0.2);
+  --gs-primitive-shadow-sm: 0 8px 32px rgba(23, 28, 36, 0.06);
+  --gs-primitive-shadow-md: 0 12px 40px rgba(23, 28, 36, 0.08);
+  --gs-primitive-shadow-lg: 0 16px 56px rgba(23, 28, 36, 0.10);
   --gs-primitive-motion-fast: 120ms;
   --gs-primitive-motion-standard: 180ms;
   --gs-primitive-motion-deliberate: 240ms;
@@ -157,6 +160,7 @@
   --gs-semantic-surface-inset: #f2f4f8;
   --gs-semantic-surface-hover: #e1e6ef;
   --gs-semantic-surface-inverse: #171c24;
+  --gs-semantic-surface-scrim: rgba(20, 24, 32, 0.34);
   --gs-semantic-text-primary: #171c24;
   --gs-semantic-text-secondary: #536176;
   --gs-semantic-text-muted: #536176;
@@ -170,8 +174,9 @@
   --gs-semantic-action-primary: #171c24;
   --gs-semantic-action-primary-hover: #2a3340;
   --gs-semantic-action-primary-pressed: #11151b;
-  --gs-semantic-action-secondary: #ffffff;
-  --gs-semantic-action-secondary-hover: #f2f4f8;
+  --gs-semantic-action-primary-foreground: #ffffff;
+  --gs-semantic-action-secondary: #f2f4f8;
+  --gs-semantic-action-secondary-hover: #e1e6ef;
   --gs-semantic-action-link: #3155a6;
   --gs-semantic-selection-background: #edf2fc;
   --gs-semantic-selection-border: #3155a6;
@@ -215,9 +220,9 @@
   --gs-semantic-radius-item: 16px;
   --gs-semantic-radius-workbench: 24px;
   --gs-semantic-radius-pill: 999px;
-  --gs-semantic-elevation-small: 0 1px 2px rgba(23, 28, 36, 0.08);
-  --gs-semantic-elevation-medium: 0 8px 24px rgba(23, 28, 36, 0.12);
-  --gs-semantic-elevation-large: 0 22px 64px rgba(23, 28, 36, 0.2);
+  --gs-semantic-elevation-small: 0 8px 32px rgba(23, 28, 36, 0.06);
+  --gs-semantic-elevation-medium: 0 12px 40px rgba(23, 28, 36, 0.08);
+  --gs-semantic-elevation-large: 0 16px 56px rgba(23, 28, 36, 0.10);
   --gs-semantic-motion-fast: 120ms;
   --gs-semantic-motion-standard: 180ms;
   --gs-semantic-motion-deliberate: 240ms;
@@ -236,8 +241,8 @@
   --gs-component-button-primary-hover: #2a3340;
   --gs-component-button-primary-pressed: #11151b;
   --gs-component-button-primary-foreground: #ffffff;
-  --gs-component-button-secondary-background: #ffffff;
-  --gs-component-button-secondary-hover: #f2f4f8;
+  --gs-component-button-secondary-background: #f2f4f8;
+  --gs-component-button-secondary-hover: #e1e6ef;
   --gs-component-button-secondary-border: #7c879a;
   --gs-component-button-secondary-foreground: #171c24;
   --gs-component-button-selection-background: #f2f4f8;
@@ -300,6 +305,7 @@
   --gs-component-overlay-popover-z-index: 70;
   --gs-component-overlay-radius: 24px;
   --gs-component-overlay-background: #ffffff;
+  --gs-component-overlay-scrim: rgba(20, 24, 32, 0.34);
   --gs-component-overlay-text: #171c24;
   --surface: #ffffff;
   --surface-muted: #f2f4f8;
@@ -350,6 +356,7 @@
   --gs-primitive-color-diff-add-surface: #162e22;
   --gs-primitive-color-diff-remove: #f0a0a4;
   --gs-primitive-color-diff-remove-surface: #3a1c1e;
+  --gs-primitive-color-scrim: rgba(20, 24, 32, 0.34);
   --gs-primitive-color-diff-hunk: #9dbcff;
   --gs-primitive-font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --gs-primitive-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -365,9 +372,9 @@
   --gs-primitive-radius-item: 16px;
   --gs-primitive-radius-workbench: 24px;
   --gs-primitive-radius-pill: 999px;
-  --gs-primitive-shadow-sm: 0 1px 2px rgba(23, 28, 36, 0.08);
-  --gs-primitive-shadow-md: 0 8px 24px rgba(23, 28, 36, 0.12);
-  --gs-primitive-shadow-lg: 0 22px 64px rgba(23, 28, 36, 0.2);
+  --gs-primitive-shadow-sm: 0 8px 32px rgba(23, 28, 36, 0.06);
+  --gs-primitive-shadow-md: 0 12px 40px rgba(23, 28, 36, 0.08);
+  --gs-primitive-shadow-lg: 0 16px 56px rgba(23, 28, 36, 0.10);
   --gs-primitive-motion-fast: 120ms;
   --gs-primitive-motion-standard: 180ms;
   --gs-primitive-motion-deliberate: 240ms;
@@ -387,6 +394,7 @@
   --gs-semantic-surface-inset: #151a21;
   --gs-semantic-surface-hover: #242b36;
   --gs-semantic-surface-inverse: #e8ecf3;
+  --gs-semantic-surface-scrim: rgba(20, 24, 32, 0.34);
   --gs-semantic-text-primary: #e8ecf3;
   --gs-semantic-text-secondary: #9aa7bd;
   --gs-semantic-text-muted: #9aa7bd;
@@ -400,8 +408,9 @@
   --gs-semantic-action-primary: #e8ecf3;
   --gs-semantic-action-primary-hover: #f2f4f8;
   --gs-semantic-action-primary-pressed: #ffffff;
-  --gs-semantic-action-secondary: #1a1f27;
-  --gs-semantic-action-secondary-hover: #151a21;
+  --gs-semantic-action-primary-foreground: #1a1f27;
+  --gs-semantic-action-secondary: #151a21;
+  --gs-semantic-action-secondary-hover: #242b36;
   --gs-semantic-action-link: #7fa4f0;
   --gs-semantic-selection-background: #1e2a44;
   --gs-semantic-selection-border: #7fa4f0;
@@ -445,9 +454,9 @@
   --gs-semantic-radius-item: 16px;
   --gs-semantic-radius-workbench: 24px;
   --gs-semantic-radius-pill: 999px;
-  --gs-semantic-elevation-small: 0 1px 2px rgba(23, 28, 36, 0.08);
-  --gs-semantic-elevation-medium: 0 8px 24px rgba(23, 28, 36, 0.12);
-  --gs-semantic-elevation-large: 0 22px 64px rgba(23, 28, 36, 0.2);
+  --gs-semantic-elevation-small: 0 8px 32px rgba(23, 28, 36, 0.06);
+  --gs-semantic-elevation-medium: 0 12px 40px rgba(23, 28, 36, 0.08);
+  --gs-semantic-elevation-large: 0 16px 56px rgba(23, 28, 36, 0.10);
   --gs-semantic-motion-fast: 120ms;
   --gs-semantic-motion-standard: 180ms;
   --gs-semantic-motion-deliberate: 240ms;
@@ -466,8 +475,8 @@
   --gs-component-button-primary-hover: #f2f4f8;
   --gs-component-button-primary-pressed: #ffffff;
   --gs-component-button-primary-foreground: #1a1f27;
-  --gs-component-button-secondary-background: #1a1f27;
-  --gs-component-button-secondary-hover: #151a21;
+  --gs-component-button-secondary-background: #151a21;
+  --gs-component-button-secondary-hover: #242b36;
   --gs-component-button-secondary-border: #657185;
   --gs-component-button-secondary-foreground: #e8ecf3;
   --gs-component-button-selection-background: #151a21;
@@ -530,6 +539,7 @@
   --gs-component-overlay-popover-z-index: 70;
   --gs-component-overlay-radius: 24px;
   --gs-component-overlay-background: #1a1f27;
+  --gs-component-overlay-scrim: rgba(20, 24, 32, 0.34);
   --gs-component-overlay-text: #e8ecf3;
   --surface: #1a1f27;
   --surface-muted: #151a21;
@@ -581,6 +591,7 @@
     --gs-primitive-color-diff-add-surface: #162e22;
     --gs-primitive-color-diff-remove: #f0a0a4;
     --gs-primitive-color-diff-remove-surface: #3a1c1e;
+    --gs-primitive-color-scrim: rgba(20, 24, 32, 0.34);
     --gs-primitive-color-diff-hunk: #9dbcff;
     --gs-primitive-font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --gs-primitive-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -596,9 +607,9 @@
     --gs-primitive-radius-item: 16px;
     --gs-primitive-radius-workbench: 24px;
     --gs-primitive-radius-pill: 999px;
-    --gs-primitive-shadow-sm: 0 1px 2px rgba(23, 28, 36, 0.08);
-    --gs-primitive-shadow-md: 0 8px 24px rgba(23, 28, 36, 0.12);
-    --gs-primitive-shadow-lg: 0 22px 64px rgba(23, 28, 36, 0.2);
+    --gs-primitive-shadow-sm: 0 8px 32px rgba(23, 28, 36, 0.06);
+    --gs-primitive-shadow-md: 0 12px 40px rgba(23, 28, 36, 0.08);
+    --gs-primitive-shadow-lg: 0 16px 56px rgba(23, 28, 36, 0.10);
     --gs-primitive-motion-fast: 120ms;
     --gs-primitive-motion-standard: 180ms;
     --gs-primitive-motion-deliberate: 240ms;
@@ -618,6 +629,7 @@
     --gs-semantic-surface-inset: #151a21;
     --gs-semantic-surface-hover: #242b36;
     --gs-semantic-surface-inverse: #e8ecf3;
+    --gs-semantic-surface-scrim: rgba(20, 24, 32, 0.34);
     --gs-semantic-text-primary: #e8ecf3;
     --gs-semantic-text-secondary: #9aa7bd;
     --gs-semantic-text-muted: #9aa7bd;
@@ -631,8 +643,9 @@
     --gs-semantic-action-primary: #e8ecf3;
     --gs-semantic-action-primary-hover: #f2f4f8;
     --gs-semantic-action-primary-pressed: #ffffff;
-    --gs-semantic-action-secondary: #1a1f27;
-    --gs-semantic-action-secondary-hover: #151a21;
+    --gs-semantic-action-primary-foreground: #1a1f27;
+    --gs-semantic-action-secondary: #151a21;
+    --gs-semantic-action-secondary-hover: #242b36;
     --gs-semantic-action-link: #7fa4f0;
     --gs-semantic-selection-background: #1e2a44;
     --gs-semantic-selection-border: #7fa4f0;
@@ -676,9 +689,9 @@
     --gs-semantic-radius-item: 16px;
     --gs-semantic-radius-workbench: 24px;
     --gs-semantic-radius-pill: 999px;
-    --gs-semantic-elevation-small: 0 1px 2px rgba(23, 28, 36, 0.08);
-    --gs-semantic-elevation-medium: 0 8px 24px rgba(23, 28, 36, 0.12);
-    --gs-semantic-elevation-large: 0 22px 64px rgba(23, 28, 36, 0.2);
+    --gs-semantic-elevation-small: 0 8px 32px rgba(23, 28, 36, 0.06);
+    --gs-semantic-elevation-medium: 0 12px 40px rgba(23, 28, 36, 0.08);
+    --gs-semantic-elevation-large: 0 16px 56px rgba(23, 28, 36, 0.10);
     --gs-semantic-motion-fast: 120ms;
     --gs-semantic-motion-standard: 180ms;
     --gs-semantic-motion-deliberate: 240ms;
@@ -697,8 +710,8 @@
     --gs-component-button-primary-hover: #f2f4f8;
     --gs-component-button-primary-pressed: #ffffff;
     --gs-component-button-primary-foreground: #1a1f27;
-    --gs-component-button-secondary-background: #1a1f27;
-    --gs-component-button-secondary-hover: #151a21;
+    --gs-component-button-secondary-background: #151a21;
+    --gs-component-button-secondary-hover: #242b36;
     --gs-component-button-secondary-border: #657185;
     --gs-component-button-secondary-foreground: #e8ecf3;
     --gs-component-button-selection-background: #151a21;
@@ -761,6 +774,7 @@
     --gs-component-overlay-popover-z-index: 70;
     --gs-component-overlay-radius: 24px;
     --gs-component-overlay-background: #1a1f27;
+    --gs-component-overlay-scrim: rgba(20, 24, 32, 0.34);
     --gs-component-overlay-text: #e8ecf3;
     --surface: #1a1f27;
     --surface-muted: #151a21;
