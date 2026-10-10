@@ -2073,6 +2073,8 @@ The dated `apps/design/src/manifest.ts` records all 63 components plus Typograph
  
 Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
+Theme checks must wait for computed styles to settle after the theme attribute changes; reduced motion shortens CSS transitions but does not make them synchronous.
+
 Turbo tracks shared source as an input of both consumers. Design-specific tasks override native prerequisites. Desktop declares the bundled UI workspace as a development dependency: Vite embeds the production controls it uses, while electron-builder does not copy the shared recipe source and unused recipe dependency graph into its production Node modules. Catalog fixtures stay outside the desktop output allowlist.
 
 ### Shared component contracts

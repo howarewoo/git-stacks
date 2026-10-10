@@ -195,10 +195,14 @@ test('theme overrides both system schemes and density changes rendered control d
       await page.getByRole('option', { name: theme, exact: true }).click()
       const expected = theme === 'System' ? system : theme.toLowerCase()
       await expect(page.locator('html')).toHaveAttribute('data-gs-theme', expected)
-      const native = await page
-        .locator('#native-select select')
-        .evaluate((node) => getComputedStyle(node).backgroundColor)
-      expect(native === 'rgba(0, 0, 0, 0)').toBe(expected === 'light')
+      await expect
+        .poll(async () => {
+          const native = await page
+            .locator('#native-select select')
+            .evaluate((node) => getComputedStyle(node).backgroundColor)
+          return native === 'rgba(0, 0, 0, 0)'
+        })
+        .toBe(expected === 'light')
       await expect(page.locator('#chart .recharts-bar-rectangle path').first()).toHaveCSS(
         'fill',
         expected === 'dark' ? 'rgb(127, 164, 240)' : 'rgb(49, 85, 166)',
