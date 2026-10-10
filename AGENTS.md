@@ -61,9 +61,21 @@ and may download it when absent.
 - When changing `GitAction`, update the renderer fixture action messages in
   `apps/desktop/tests/renderer/fixtures/control.ts` and affected payloads. The build typechecks
   these consumers. Keep fixture APIs out of the production renderer.
-- Edit `apps/desktop/src/renderer/src/design-system/tokens.json`, not generated `tokens.css`;
+- Edit `packages/ui/src/tokens/tokens.json`, not generated `tokens.css`;
   run `pnpm run tokens:generate` and `pnpm run tokens:check` after token changes.
   Reuse the shared controls and token roles defined in `DESIGN.md`.
+- Shared browser-safe controls, typography, utilities and foundations belong to
+  `@git-stacks/ui`. Add shadcn Base UI components there; catalog fixtures and
+  navigation belong to `apps/design`, never the production desktop bundle.
+- Before adding or changing UI in either app, inspect `packages/ui/src/index.ts`
+  and the catalog manifest for an existing component. Use shared components in
+  the application interface itself, including design-catalog chrome, not just
+  specimens. Follow [DESIGN.md's reuse rules](DESIGN.md#design-system-reuse);
+  do not create app-local copies of supported controls or interaction patterns.
+- For shared UI changes, update affected catalog specimens and documented APIs,
+  and verify the actual consumer surface as well as the specimen. Use
+  [README's component guidance](README.md#changing-tokens-and-components) for
+  placement and applicable checks; catalog success is not Git or IPC evidence.
 - Preserve captured-preview validation, confirmation gates, force-with-lease
   checks, and recovery journals when changing Git workflows. Use disposable
   repositories and the existing fixtures for verification, not personal

@@ -12,8 +12,8 @@
   "iconLibrary": "lucide",
   "aliases": {
     "components": "@/components",
-    "ui": "@/components/ui",
-    "utils": "@/lib/utils",
+    "ui": "@git-stacks/ui/components",
+    "utils": "@git-stacks/ui/lib/utils",
     "lib": "@/lib",
     "hooks": "@/hooks"
   }

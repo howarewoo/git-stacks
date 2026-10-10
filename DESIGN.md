@@ -233,7 +233,14 @@ The foundation radius scale targets 12px for controls, 16px for nested items, an
 
 ## Components
 
-The renderer owns its [shadcn/ui](https://ui.shadcn.com/)-style component library in `apps/desktop/src/renderer/src/components/ui`. `components.json` selects `base-nova` with CSS variables and the configured `components`, `ui`, `utils`, `lib`, and `hooks` aliases. Base UI (`@base-ui/react`) supplies accessible interaction primitives; the local wrappers supply the workbench's token roles and composition contracts. Buttons remain CVA-based (`class-variance-authority`) and compose variants through `cn()` (`clsx` + `tailwind-merge`), with Tailwind CSS v4 and Lucide icons (`lucide-react`). Shadcn is owned source and configuration, not a runtime or CLI application dependency.
+The shared [shadcn/ui](https://ui.shadcn.com/)-style component library lives in `packages/ui/src/components/ui` and is consumed through `@git-stacks/ui` by desktop and the design catalog. `packages/ui/components.json` selects `base-nova` with CSS variables and the configured aliases. Base UI (`@base-ui/react`) supplies accessible interaction primitives; the shared wrappers supply the workbench's token roles and composition contracts. Buttons remain CVA-based (`class-variance-authority`) and compose variants through `cn()` (`clsx` + `tailwind-merge`), with Tailwind CSS v4 and Lucide icons (`lucide-react`). Shadcn is owned source and configuration, not a runtime or CLI application dependency.
+
+### Design-system reuse
+
+- Both applications use shared components in their actual interfaces, including catalog chrome and navigation, not only in specimens. Compose the existing component when it covers the interaction; do not recreate its appearance or behavior with app-local markup and CSS.
+- App-specific layout and domain compositions remain with their application. Semantic HTML is appropriate for document structure and content; shared components own supported controls and interaction patterns.
+- When a reusable capability is missing, extend the shared component or add it to `@git-stacks/ui` rather than creating an app-local counterpart. Keep browser-safe foundations shared and Git, filesystem, credentials, and transport out of the component library.
+- Catalog specimens exercise the same implementation used by application interfaces. A specimen is not permission to add a new desktop workflow.
 
 ### Buttons
 
@@ -272,6 +279,8 @@ The renderer owns its [shadcn/ui](https://ui.shadcn.com/)-style component librar
 - **Search placement:** The global command palette lives in the title bar; the repository toolbar keeps its distinct in-view filter, synchronization actions, and details toggle. The toolbar stays on one row at the native minimum width and wraps at narrower zoomed widths.
 - **Repository context:** The open-folder control switches repositories; the current recent repository is explicitly marked. Remote and default-branch facts live in the keyboard-operable Repository info disclosure rather than competing with navigation. Connection and runtime controls use separate readable footer rows.
 - **Inspector hierarchy:** Branch identity and state come first, followed by stack position, the primary stack workflow, synchronization facts, pull-request context, and branch actions. Insert, move, remove, and parent-edit actions remain available under Edit stack layers; opening the disclosure never mutates Git, and each action retains its existing preview, confirmation, and operation locks.
+- **Shared navigation controls:** Sidebar items and tabs use the label type role, compact/standard density, control radius, and token motion. Selection is flat, with the named selection surface and primary text; hover uses the surface-hover role, never an opacity-derived palette. `TabsList` supports `controlSize="compact"` or `"standard"` independently of horizontal/vertical orientation. Line tabs mark selection with a blue underline or vertical edge instead of a shadow.
+- **Catalog navigation:** Keep search and appearance controls visible above the independently scrolling desktop catalog index. Below 900px, disclose that index through Browse components so the catalog itself remains visible on arrival. Anchor navigation marks the destination, transfers focus to it, and closes the narrow index. Inline specimens must not move the page before interaction.
 
 ### Keyboard and screen-reader contract
 
@@ -813,8 +822,10 @@ Concrete guardrails for the existing system and the user-confirmed Quiet Workben
 - **Do** keep selection, checked-out state, pull-request lifecycle, checks, review, restacks, and diff additions/deletions/hunks independent and explicitly labelled.
 - **Do** use the 4px spacing rhythm, 36/44px controls, 44/56px rows, and the defined 12/16/24/999px radius scale where the current component architecture consumes them.
 - **Do** use `semantic.border.essential` for essential boundaries, `semantic.focus.ring` for keyboard focus, and text/icon descriptions alongside every Git status.
-- **Do** define primitive, semantic, and component tokens in `apps/desktop/src/renderer/src/design-system/tokens.json`; treat `tokens.css` as generated output, never a second manually maintained palette.
+- **Do** define primitive, semantic, and component tokens in `packages/ui/src/tokens/tokens.json`; treat `tokens.css` as generated output, never a second manually maintained palette.
 - **Do** keep the renderer local-first, preserve the sandbox/preload/IPC/CSP boundary, and retain busy-state text when reduced motion removes animation.
+- **Do** share production controls, typography and foundations through `@git-stacks/ui`; catalog specimens demonstrate this implementation rather than defining a second visual policy. Keep larger content typography distinct from compact application roles.
+- **Do** keep essential boundaries at ≥3:1 against their adjacent surface in both themes; the dark essential-border primitive is `#657185` so shared fields and overlays retain this distinction.
 
 ### Don't:
 

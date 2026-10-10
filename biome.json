@@ -7,7 +7,7 @@
       "**",
       "!**/.impeccable",
       "!**/.turbo",
-      "!apps/desktop/src/renderer/src/design-system/tokens.css",
+      "!packages/ui/src/tokens/tokens.css",
       "!apps/desktop/tests/renderer/references/ui-131/approved-stacks-demo.html"
     ]
   },

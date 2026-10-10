@@ -146,7 +146,7 @@ explicitly enabled for HTML/SVG formatting.
 Biome formats JavaScript, TypeScript, JSX/TSX, JSON, and CSS here. Tailwind CSS
 directives are enabled; HTML and SVG formatting use Biome's experimental full
 support. It honors `.gitignore` and excludes `.impeccable/`
-and generated `apps/desktop/src/renderer/src/design-system/tokens.css`. Validate the latter
+and generated `packages/ui/src/tokens/tokens.css`. Validate the latter
 with `pnpm run tokens:check`; edit `tokens.json` and regenerate rather than
 formatting the generated CSS.
 
@@ -2050,12 +2050,44 @@ Screenshot tests wait for fonts and stable fixture state, use fixed data/timesta
 
 ### Changing tokens and components
 
-After editing `apps/desktop/src/renderer/src/design-system/tokens.json`, run `pnpm run tokens:generate` and `pnpm run tokens:check`. Follow [DESIGN.md](DESIGN.md) for token roles and component rules.
+After editing `packages/ui/src/tokens/tokens.json`, run `pnpm run tokens:generate` and `pnpm run tokens:check`. Follow [DESIGN.md](DESIGN.md) for token roles and component rules.
 
-The renderer owns its shadcn `base-nova` library in `apps/desktop/src/renderer/src/components/ui`, backed by `@base-ui/react`. Import the local wrappers in views rather than recreating primitive behavior. Keep token-based styling, CVA variants, and the existing `cn()` helper; there is no shadcn CLI runtime dependency.
+`packages/ui` owns the browser-safe shadcn `base-nova` library, backed by `@base-ui/react`. Both desktop and design import `@git-stacks/ui/components/<name>` and `@git-stacks/ui/lib/utils`. Existing desktop import paths are thin re-exports, not duplicate implementations. Keep token-based styling, CVA variants and `cn()`; all three `components.json` files direct reusable additions to the shared workspace (`rsc: false`, Lucide, neutral base).
+
+For UI work in either app, inspect the [shared exports](packages/ui/src/index.ts) and [catalog manifest](apps/design/src/manifest.ts) first. Import controls from `@git-stacks/ui` or `@git-stacks/ui/components/<name>` and compose their supported APIs; use `@git-stacks/ui/styles.css` for shared foundations. This applies to the design app's own shell and controls as well as its examples. Keep application-specific layout and domain behavior local, but extend reusable controls in `packages/ui` instead of copying their markup or interaction logic. [DESIGN.md's reuse rules](DESIGN.md#design-system-reuse) define the boundary.
+
+For a shared component change, update its existing catalog specimen and manifest when the documented API or states change. Verify the affected application interface as well as the specimen: search, navigation, focus, disabled states, and popup behavior must work where the component is actually used. Use the catalog commands below and the [renderer verification guidance](#renderer-verification) for relevant desktop consumers; catalog interaction does not prove Git or IPC success.
+
+### Standalone design catalog
+
+```sh
+pnpm --filter design dev
+pnpm --filter design build
+pnpm --filter design preview
+pnpm --filter design typecheck
+pnpm --filter design check:manifest
+pnpm --filter design test:catalog
+```
+
+The catalog uses port 5299 and produces `apps/design/dist`, independently of Electron, the native helper, Git provisioning, repositories and `gh` authentication. A root install still installs desktop dependencies. `VITE_BASE=/catalog/ pnpm --filter design build` selects a hosting subpath; preview that build with `VITE_BASE=/catalog/ pnpm --filter design preview` and open `http://localhost:5299/catalog/`. Keep the same base when previewing so asset requests resolve; no deployment is implied. Output remains fixed at `dist` so Turbo can restore the actual static assets.
+
+Canonical ownership is `packages/ui/src/components/ui`, `packages/ui/src/lib`, and `packages/ui/src/tokens`. Shared foundation CSS is `packages/ui/src/styles/foundations.css`; desktop shell CSS stays in desktop. Run shadcn additions from the shared package and retain Base UI `base-nova` configuration. Change the shared token/component, update its specimen and applicable states in `apps/design/src`, and run affected design and desktop checks in the same PR. Catalog fixtures never import desktop private source or use `window.desktop`; desktop integration fixtures remain separate and are not replaced.
+
+The catalog shell itself uses shared `Sidebar` header, content, groups, and menu controls, alongside shared search, buttons, selectors, command navigation, and `Collapsible` for the narrow index. Search and appearance controls stay above the independently scrolling desktop index. At widths below 900px, Browse components reveals the index; choosing an entry closes it, scrolls to that entry, and transfers focus. The current anchor is marked in navigation, including after browser Back/Forward. Empty search results offer Clear search.
+
+The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
+ 
+Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
+
+Theme checks must wait for computed styles to settle after the theme attribute changes; reduced motion shortens CSS transitions but does not make them synchronous.
+
+Turbo tracks shared source as an input of both consumers. Design-specific tasks override native prerequisites. Desktop declares the bundled UI workspace as a development dependency: Vite embeds the production controls it uses, while electron-builder does not copy the shared recipe source and unused recipe dependency graph into its production Node modules. Catalog fixtures stay outside the desktop output allowlist.
+
+### Shared component contracts
 
 - Compose Base UI triggers with `render`, not Radix `asChild`. `DialogContent` accepts Base UI `initialFocus` and `finalFocus`; guarded roots refuse implicit dismissal through `onOpenChange`'s `details.cancel()`.
 - `Select` accepts `options` and a string-valued `onValueChange`; `''` can be a real option, not a missing value. Field selects fill their container; use `className="w-auto"` for content-sized inline toolbar selects.
+- `Tabs` forwards horizontal/vertical orientation to Base UI for matching keyboard navigation and layout. `TabsList` accepts `controlSize="compact"` or `"standard"` (default) and `variant="default"` or `"line"`; trigger typography stays at the label role. Sidebar items, tabs, and command rows retain 44px minimum coarse-pointer targets.
 - `Checkbox` reports booleans through `onCheckedChange` and exposes mixed state through `indeterminate`. Use `RadioGroup` for form choices and `SegmentedControl` for an exactly-one-selected control with nonempty option keys.
 - Pass `disabled` explicitly to composite controls inside locked fieldsets. Portaled options must not remain usable during an operation.
 - Use TanStack Form's `useForm`, `form.Field`, `handleChange`, `handleBlur`, and `useSelector` for local form drafts. Native form submission prevents default and stops propagation before `form.handleSubmit`; await asynchronous transports and retain synchronous dispatch locks.

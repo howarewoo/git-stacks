@@ -24,8 +24,8 @@
     "test:update-flow": "node scripts/update-flow-smoke.mjs",
     "test:palette:electron": "node tests/command-palette.e2e.cjs",
     "test:inbox:electron": "node tests/inbox.e2e.cjs",
-    "tokens:generate": "node src/renderer/src/design-system/generate-tokens.mjs",
-    "tokens:check": "node src/renderer/src/design-system/generate-tokens.mjs --check",
+    "tokens:generate": "node ../../packages/ui/src/tokens/generate-tokens.mjs",
+    "tokens:check": "node ../../packages/ui/src/tokens/generate-tokens.mjs --check",
     "package": "electron-builder --dir --publish never && pnpm run verify:packaged-git-runtime",
     "dist": "electron-builder --publish never && pnpm run verify:packaged-git-runtime",
     "build:promotion-helper": "node scripts/build-promotion-helper.mjs",
@@ -84,6 +84,7 @@
     "tailwind-merge": "3.7.0"
   },
   "devDependencies": {
+    "@git-stacks/ui": "workspace:*",
     "@axe-core/playwright": "4.13.0",
     "@electron/asar": "3.4.1",
     "@electron/osx-sign": "1.3.3",

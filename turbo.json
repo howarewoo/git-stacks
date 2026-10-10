@@ -3,6 +3,7 @@
   "ui": "tui",
   "agentGuidance": false,
   "cacheDir": ".turbo/cache",
+  "globalDependencies": ["packages/ui/src/**"],
   "globalPassThroughEnv": [
     "CC",
     "CI",
@@ -20,6 +21,30 @@
     "TEST_PORT"
   ],
   "tasks": {
+    "design#build": {
+      "dependsOn": ["^typecheck", "typecheck", "@git-stacks/ui#tokens:check"],
+      "env": ["NODE_ENV", "VITE_BASE"],
+      "outputs": ["dist/**"]
+    },
+    "design#dev": {
+      "cache": false,
+      "persistent": true,
+      "dependsOn": []
+    },
+    "design#preview": {
+      "cache": false,
+      "persistent": true,
+      "dependsOn": []
+    },
+    "design#test": {
+      "cache": false,
+      "dependsOn": ["typecheck", "check:manifest"]
+    },
+    "check:manifest": { "outputs": [] },
+    "test:catalog": {
+      "cache": false,
+      "dependsOn": ["typecheck", "check:manifest"]
+    },
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "outputs": []
@@ -41,13 +66,13 @@
     },
     "tokens:generate": {
       "cache": false,
-      "outputs": ["src/renderer/src/design-system/tokens.css"]
+      "outputs": ["src/tokens/tokens.css"]
     },
     "tokens:check": {
       "inputs": [
-        "src/renderer/src/design-system/tokens.json",
-        "src/renderer/src/design-system/tokens.css",
-        "src/renderer/src/design-system/generate-tokens.mjs"
+        "$TURBO_ROOT$/packages/ui/src/tokens/tokens.json",
+        "$TURBO_ROOT$/packages/ui/src/tokens/tokens.css",
+        "$TURBO_ROOT$/packages/ui/src/tokens/generate-tokens.mjs"
       ],
       "outputs": []
     },
