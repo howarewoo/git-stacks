@@ -2023,7 +2023,7 @@ The run then reads the launched process's own environment back out of the app's 
 `apps/desktop/tests/fixtures/isolated-desktop.cjs` launches the real production main, preload, and renderer (`apps/desktop/out/main/index.js`), with the Electron main entry replaced by the fixture itself:
 
 ```sh
-node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
+apps/desktop/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron \
   apps/desktop/tests/fixtures/isolated-desktop.cjs \
   --use-mock-keychain --password-store=basic \
   --user-data-dir=<owned-temp-root>/user-data \
