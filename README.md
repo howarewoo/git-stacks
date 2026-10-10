@@ -2058,6 +2058,8 @@ For UI work in either app, inspect the [shared exports](packages/ui/src/index.ts
 
 For a shared component change, update its existing catalog specimen and manifest when the documented API or states change. Verify the affected application interface as well as the specimen: search, navigation, focus, disabled states, and popup behavior must work where the component is actually used. Use the catalog commands below and the [renderer verification guidance](#renderer-verification) for relevant desktop consumers; catalog interaction does not prove Git or IPC success.
 
+The CI component checks render shared controls through `tsx` outside Vite. Keep a runtime React import in JSX components reached by those checks, including `Spinner`; a type-only React reference does not provide the classic JSX runtime.
+
 ### Standalone design catalog
 
 ```sh
