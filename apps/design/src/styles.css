@@ -148,6 +148,49 @@ body {
   margin-bottom: var(--gs-semantic-space-8);
 }
 
+.catalog-introduction h3 {
+  margin-block: var(--gs-semantic-space-6) var(--gs-semantic-space-3);
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
+  font-weight: 600;
+}
+
+.catalog-recipes {
+  display: grid;
+  gap: var(--gs-semantic-space-5);
+}
+
+.catalog-recipes > div {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(0, 2fr);
+  gap: var(--gs-semantic-space-2) var(--gs-semantic-space-6);
+}
+
+.catalog-recipes dt {
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
+  font-weight: 600;
+}
+
+.catalog-recipes dd {
+  display: grid;
+  gap: var(--gs-semantic-space-2);
+  min-width: 0;
+  max-width: 72ch;
+}
+
+.catalog-recipe-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gs-semantic-space-2) var(--gs-semantic-space-4);
+}
+
+@media (max-width: 1040px) {
+  .catalog-recipes > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .catalog-introduction h2,
 .design-entry > h2,
 .design-entry-heading h2 {

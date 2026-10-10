@@ -19,6 +19,7 @@ export interface ComponentManifestEntry {
     | 'Conversation'
     | 'Foundations'
   summary: string
+  usage: string
   anatomy: string
   keyboard: string
   tokens: string[]
@@ -49,6 +50,8 @@ export const UPSTREAM_RECONCILIATION = {
 export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   {
     id: 'button',
+    usage:
+      'Use for an explicit action; use an anchor for navigation and a selection control for persistent choices.',
     name: 'Button',
     group: 'Actions',
     summary:
@@ -69,6 +72,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'button-group',
+    usage:
+      'Use to connect closely related actions; use SegmentedControl when exactly one view must stay selected.',
     name: 'Button Group',
     group: 'Actions',
     summary:
@@ -83,6 +88,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'toggle',
+    usage:
+      'Use for a pressed toolbar option; use Checkbox for a form value and Button for a one-time action.',
     name: 'Toggle',
     group: 'Actions',
     summary: 'A two-state button that can be either on (pressed) or off.',
@@ -95,6 +102,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'toggle-group',
+    usage:
+      'Use for related pressed options; use RadioGroup or SegmentedControl when an empty selection is not allowed.',
     name: 'Toggle Group',
     group: 'Actions',
     summary: 'A set of two-state buttons that can be toggled on or off singly or in multiples.',
@@ -109,6 +118,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'kbd',
+    usage:
+      'Use to display a real keyboard shortcut; never present an unbound shortcut as an available action.',
     name: 'Kbd',
     group: 'Actions',
     summary:
@@ -122,6 +133,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'breadcrumb',
+    usage:
+      'Use for a real repository, ref, or file hierarchy; use Tabs for peer views rather than inventing ancestry.',
     name: 'Breadcrumb',
     group: 'Navigation',
     summary: 'Displays the hierarchical path to the current repository, ref, or file location.',
@@ -136,6 +149,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'sidebar',
+    usage:
+      'Use for persistent workspace destinations; use SidebarProvider and SidebarTrigger for collapse instead of parallel state.',
     name: 'Sidebar',
     group: 'Navigation',
     summary:
@@ -152,6 +167,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'navigation-menu',
+    usage:
+      'Use for grouped top-level links; use Sidebar for workbench destinations and DropdownMenu for actions.',
     name: 'Navigation Menu',
     group: 'Navigation',
     summary: 'Horizontal top-level navigation bar with dropdown panels and viewports.',
@@ -166,6 +183,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'menubar',
+    usage:
+      'Use for a persistent row of command menus; use DropdownMenu for actions attached to a single object.',
     name: 'Menubar',
     group: 'Navigation',
     summary:
@@ -182,6 +201,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'dropdown-menu',
+    usage:
+      'Use for secondary actions on the current object; keep the primary action visible and use Select for a form choice.',
     name: 'Dropdown Menu',
     group: 'Navigation',
     summary:
@@ -198,6 +219,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'context-menu',
+    usage:
+      'Use for contextual shortcuts beside a visible action route; never make right-click the only way to perform a task.',
     name: 'Context Menu',
     group: 'Navigation',
     summary:
@@ -214,6 +237,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'command',
+    usage:
+      'Use for keyboard search across actions and objects; use Combobox when the result edits a form value.',
     name: 'Command',
     group: 'Navigation',
     summary:
@@ -230,6 +255,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'tabs',
+    usage:
+      'Use to switch peer panels within one context; use navigation links when changing workspace destinations.',
     name: 'Tabs',
     group: 'Navigation',
     summary:
@@ -246,6 +273,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'pagination',
+    usage:
+      'Use for explicitly paged results; keep scope counts clear and never imply omitted records are selected.',
     name: 'Pagination',
     group: 'Navigation',
     summary:
@@ -261,6 +290,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'field',
+    usage:
+      'Use to associate a control with its label, help, and error; do not rely on a placeholder to explain requirements.',
     name: 'Field',
     group: 'Forms',
     summary:
@@ -275,6 +306,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'label',
+    usage:
+      'Use for a standalone control label; prefer Field when the control also needs help or validation feedback.',
     name: 'Label',
     group: 'Forms',
     summary: 'Accessible form label associated with inputs, checkboxes, and form controls.',
@@ -288,6 +321,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'input',
+    usage:
+      'Use for a short editable value such as a branch name; use Textarea for prose and Combobox for searchable choices.',
     name: 'Input',
     group: 'Forms',
     summary:
@@ -302,6 +337,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'input-group',
+    usage:
+      'Use when an input needs adjacent units or actions; keep validation in Field rather than hiding it in an addon.',
     name: 'Input Group',
     group: 'Forms',
     summary:
@@ -316,6 +353,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'textarea',
+    usage:
+      'Use for multiline prose or review drafts; use Input for short identities and preserve unsent text on failure.',
     name: 'Textarea',
     group: 'Forms',
     summary:
@@ -330,6 +369,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'checkbox',
+    usage:
+      'Use for independent choices, batch selection, or explicit consent; use RadioGroup when choices exclude each other.',
     name: 'Checkbox',
     group: 'Forms',
     summary: 'Control that toggles between checked, unchecked, and indeterminate (mixed) states.',
@@ -343,6 +384,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'radio-group',
+    usage:
+      'Use for one mutually exclusive form choice; use Checkbox for independent options and Select for a longer list.',
     name: 'Radio Group',
     group: 'Forms',
     summary: 'Mutually exclusive single-choice option group with accessible roving focus.',
@@ -357,6 +400,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'switch',
+    usage:
+      'Use for an immediately applied on/off setting; use Checkbox for consent that belongs to a later submission.',
     name: 'Switch',
     group: 'Forms',
     summary:
@@ -370,6 +415,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'select',
+    usage:
+      'Use for a bounded set of known values; use Combobox when users need to search and RadioGroup for a few visible choices.',
     name: 'Select',
     group: 'Forms',
     summary:
@@ -385,6 +432,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'native-select',
+    usage:
+      'Use when a native select fits a simple form; use Select when the shared popup presentation is required.',
     name: 'Native Select',
     group: 'Forms',
     summary: 'Lightweight styled native HTML select element for system forms and simple dropdowns.',
@@ -397,6 +446,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'combobox',
+    usage:
+      'Use to find a value in a searchable list; use Command for actions and Input for unrestricted text.',
     name: 'Combobox',
     group: 'Forms',
     summary:
@@ -412,6 +463,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'slider',
+    usage:
+      'Use when a range is easier to explore spatially; pair it with a precise value and avoid it for categorical choices.',
     name: 'Slider',
     group: 'Forms',
     summary:
@@ -427,6 +480,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'calendar',
+    usage:
+      'Use when date context should stay visible; use DatePicker when date selection is secondary to a form.',
     name: 'Calendar',
     group: 'Forms',
     summary:
@@ -442,6 +497,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'date-picker',
+    usage:
+      'Use for a date field with a compact calendar popup; use Calendar for an always-visible date surface.',
     name: 'Date Picker',
     group: 'Forms',
     summary:
@@ -457,6 +514,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'input-otp',
+    usage:
+      'Use only for a fixed-length code; use Input for branch names and do not imply app-owned authentication.',
     name: 'Input OTP',
     group: 'Forms',
     summary:
@@ -472,6 +531,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'card',
+    usage:
+      'Use to group a complete, independently understandable object; use spacing rather than another card inside every section.',
     name: 'Card',
     group: 'Data display',
     summary:
@@ -486,6 +547,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'badge',
+    usage:
+      'Use for a short labelled state; keep unavailable and unknown explicit, and use Alert when recovery needs explanation.',
     name: 'Badge',
     group: 'Data display',
     summary: 'Concise text label for Git states, PR lifecycle, checks, review status, and counts.',
@@ -504,6 +567,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'avatar',
+    usage:
+      'Use as supporting author identity; keep the name in text and never make an image the sole identity cue.',
     name: 'Avatar',
     group: 'Data display',
     summary: 'Author and reviewer representation with image and fallback initials.',
@@ -518,6 +583,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'table',
+    usage:
+      'Use for aligned facts that users compare by column; use DataTable when sorting or paging is part of the task.',
     name: 'Table',
     group: 'Data display',
     summary:
@@ -533,6 +600,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'data-table',
+    usage:
+      'Use for sortable, paged records; use Table for static facts and preserve explicit bounds on partial data.',
     name: 'Data Table',
     group: 'Data display',
     summary:
@@ -548,6 +617,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'item',
+    usage:
+      'Use to compose an object row with supporting actions; supply domain selection semantics rather than treating every row as a button.',
     name: 'Item',
     group: 'Data display',
     summary:
@@ -563,6 +634,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'accordion',
+    usage:
+      'Use for several related secondary disclosures; keep blockers and the information needed for consent visible.',
     name: 'Accordion',
     group: 'Data display',
     summary:
@@ -579,6 +652,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'collapsible',
+    usage:
+      'Use for one optional detail group; use Accordion for several groups and never hide essential safety scope.',
     name: 'Collapsible',
     group: 'Data display',
     summary: 'Single interactive disclosure component to expand or collapse secondary details.',
@@ -593,6 +668,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'chart',
+    usage:
+      'Use when shape or trend answers a real question; use a table for exact comparisons and do not invent operation progress.',
     name: 'Chart',
     group: 'Data display',
     summary:
@@ -612,6 +689,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'aspect-ratio',
+    usage:
+      'Use to reserve the shape of media; let text and operational content grow instead of fixing their aspect ratio.',
     name: 'Aspect Ratio',
     group: 'Layout',
     summary:
@@ -625,6 +704,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'carousel',
+    usage:
+      'Use for a sequential media comparison; do not hide required workflow steps or safety information in slides.',
     name: 'Carousel',
     group: 'Layout',
     summary:
@@ -639,6 +720,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'resizable',
+    usage:
+      'Use for user-adjustable workbench panes; retain usable minimum sizes and avoid resize handles for simple document sections.',
     name: 'Resizable',
     group: 'Layout',
     summary:
@@ -654,6 +737,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'scroll-area',
+    usage:
+      'Use for a deliberately bounded scroll region; let the document scroll normally when a separate viewport adds no value.',
     name: 'Scroll Area',
     group: 'Layout',
     summary: 'Custom styled scrollable container with quiet rounded scrollbars.',
@@ -667,6 +752,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'separator',
+    usage:
+      'Use when spacing alone cannot distinguish groups or connected controls; avoid outlining every card and status row.',
     name: 'Separator',
     group: 'Layout',
     summary: 'Visual and accessible separator dividing sections, toolbars, and menu groups.',
@@ -679,6 +766,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'direction',
+    usage:
+      'Use to establish reading direction for a subtree; do not reverse content order merely to change visual alignment.',
     name: 'Direction',
     group: 'Layout',
     summary:
@@ -693,6 +782,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'alert',
+    usage:
+      'Use for an inline blocker, outcome, or recovery instruction; use Badge for a short state and keep important errors out of Toast alone.',
     name: 'Alert',
     group: 'Feedback',
     summary: 'Inline banner callout for operation outcomes, warnings, hints, and error alerts.',
@@ -710,6 +801,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'empty',
+    usage:
+      'Use when a content region has nothing to show; distinguish first use, filters, and unavailable data rather than treating them as the same state.',
     name: 'Empty',
     group: 'Feedback',
     summary:
@@ -726,6 +819,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'progress',
+    usage:
+      'Use when completed and remaining work are measured; use Spinner when progress is unknown rather than manufacturing a percentage.',
     name: 'Progress',
     group: 'Feedback',
     summary:
@@ -741,6 +836,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'spinner',
+    usage:
+      'Use for indeterminate work with a visible status label; use Button loading for an action instead of adding a second spinner.',
     name: 'Spinner',
     group: 'Feedback',
     summary:
@@ -756,6 +853,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'skeleton',
+    usage:
+      'Use for the shape of content that is still loading; use Empty or Alert once the result is empty or failed.',
     name: 'Skeleton',
     group: 'Feedback',
     summary: 'Animated pulse placeholder mimicking content shape while data loads.',
@@ -769,6 +868,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'toast',
+    usage:
+      'Use for a brief, nonessential outcome notice; keep blockers, uncertain outcomes, and recovery actions inline.',
     name: 'Toast',
     group: 'Feedback',
     summary:
@@ -784,6 +885,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'dialog',
+    usage:
+      'Use when a task needs protected focus; use Sheet for supporting inspection and AlertDialog for explicit consequential confirmation.',
     name: 'Dialog',
     group: 'Overlays',
     summary:
@@ -794,6 +897,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'Base UI focus trap confines focus within modal, Esc closes nested popups before the modal, focus returns to initiating trigger control. Nested Popover, Combobox, and ContextMenu use the popover layer above the dialog.',
     tokens: [
       'semantic.surface.content',
+      'component.overlay.scrim',
       'semantic.border.essential',
       'semantic.elevation.large',
       'semantic.radius.workbench',
@@ -805,18 +909,20 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'alert-dialog',
+    usage:
+      'Use to confirm captured scope and consequences; use a danger action for deletion, and do not interrupt routine inspection.',
     name: 'Alert Dialog',
     group: 'Overlays',
-    summary:
-      'Destructive confirmation dialog requiring explicit user confirmation before hazardous operations.',
+    summary: 'Explicit confirmation for consequential decisions, including destructive operations.',
     anatomy:
-      'AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel',
+      'AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel. Name the captured identity and consequences; use AlertDialogAction variant="danger" for deletion. Generic confirmations retain the normal action variant.',
     keyboard:
       'Base UI traps focus and handles safe dismissal; set initialFocus explicitly when a particular control must receive focus. The caller performs and settles the confirmed action.',
     tokens: [
       'semantic.feedback.error-surface',
       'semantic.feedback.error-text',
       'semantic.elevation.large',
+      'component.overlay.scrim',
     ],
     importExample:
       "import { AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogAction, AlertDialogCancel } from '@git-stacks/ui/components/alert-dialog'",
@@ -825,13 +931,20 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'sheet',
+    usage:
+      'Use for supporting inspection beside the current context; use Dialog when the task needs protected decision focus.',
     name: 'Sheet',
     group: 'Overlays',
     summary:
       'Slide-out overlay drawer anchored to the side of the screen for secondary inspectors and diagnostics.',
     anatomy: 'Sheet, SheetTrigger, SheetContent, SheetHeader, SheetTitle, SheetDescription',
     keyboard: 'Focus trap inside sheet, Esc dismisses, focus returns to trigger.',
-    tokens: ['semantic.surface.content', 'semantic.elevation.large', 'semantic.border.decorative'],
+    tokens: [
+      'semantic.surface.content',
+      'component.overlay.scrim',
+      'semantic.elevation.large',
+      'semantic.border.decorative',
+    ],
     importExample:
       "import { Sheet, SheetTrigger, SheetContent } from '@git-stacks/ui/components/sheet'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/sheet',
@@ -839,13 +952,20 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'drawer',
+    usage:
+      'Use when a swipeable overlay fits the surface; use Sheet for a conventional desktop inspector and keep essential scope visible.',
     name: 'Drawer',
     group: 'Overlays',
     summary: 'Bottom or side slide-over drawer with swipe-to-dismiss support and drag handle.',
     anatomy:
       'Drawer, DrawerTrigger, DrawerContent, DrawerHeader, DrawerTitle, DrawerDescription, DrawerFooter, DrawerClose; content composes portal, overlay and swipe handle.',
     keyboard: 'Keyboard navigable, touch swipe gestures, Esc dismisses, focus trapped while open.',
-    tokens: ['semantic.surface.content', 'semantic.elevation.large', 'semantic.radius.workbench'],
+    tokens: [
+      'semantic.surface.content',
+      'component.overlay.scrim',
+      'semantic.elevation.large',
+      'semantic.radius.workbench',
+    ],
     importExample:
       "import { Drawer, DrawerTrigger, DrawerContent } from '@git-stacks/ui/components/drawer'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/drawer',
@@ -853,6 +973,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'popover',
+    usage:
+      'Use for a small interactive panel anchored to a control; use Tooltip for a short noninteractive hint.',
     name: 'Popover',
     group: 'Overlays',
     summary:
@@ -869,6 +991,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'hover-card',
+    usage:
+      'Use for optional object context on hover or focus; keep essential identities, status, and actions visible without opening it.',
     name: 'Hover Card',
     group: 'Overlays',
     summary:
@@ -885,6 +1009,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'tooltip',
+    usage:
+      'Use for a shortcut or disabled-action explanation; keep labels, errors, and information required for consent visible.',
     name: 'Tooltip',
     group: 'Overlays',
     summary:
@@ -900,6 +1026,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'attachment',
+    usage:
+      'Use for a file or artifact with labelled transfer state; the caller owns transport, retry, and removal rather than this presentation recipe.',
     name: 'Attachment',
     group: 'Conversation',
     summary:
@@ -916,6 +1044,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'bubble',
+    usage:
+      'Use for message content within a conversation; use Alert for operation feedback and Message when author metadata is needed.',
     name: 'Bubble',
     group: 'Conversation',
     summary:
@@ -932,6 +1062,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'message',
+    usage:
+      'Use for authored conversation content with time and actions; use Bubble for content only and preserve unsent replies separately.',
     name: 'Message',
     group: 'Conversation',
     summary:
@@ -948,6 +1080,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'message-scroller',
+    usage:
+      'Use to follow a conversation with an explicit latest-message action; do not treat this recipe as large-list virtualization.',
     name: 'Message Scroller',
     group: 'Conversation',
     summary:
@@ -963,6 +1097,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'marker',
+    usage:
+      'Use to identify a conversation event with text; use Badge for current state and do not replace an actionable blocker with a marker.',
     name: 'Marker',
     group: 'Conversation',
     summary:
@@ -980,6 +1116,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'questionnaire',
+    usage:
+      'Use for a genuinely sequenced set of questions; use ordinary Fields when answers can be completed together without a wizard.',
     name: 'Questionnaire',
     group: 'Conversation',
     summary:
@@ -996,6 +1134,8 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
   },
   {
     id: 'typography',
+    usage:
+      'Use canonical roles for headings, copy, and metadata; reserve monospace for refs, paths, code, and OIDs rather than decorative emphasis.',
     name: 'Typography',
     group: 'Foundations',
     summary:

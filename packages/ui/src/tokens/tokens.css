@@ -7,6 +7,7 @@
   --color-surface-inset: var(--gs-semantic-surface-inset);
   --color-surface-hover: var(--gs-semantic-surface-hover);
   --color-surface-inverse: var(--gs-semantic-surface-inverse);
+  --color-surface-scrim: var(--gs-semantic-surface-scrim);
   --color-text-primary: var(--gs-semantic-text-primary);
   --color-text-secondary: var(--gs-semantic-text-secondary);
   --color-text-muted: var(--gs-semantic-text-muted);
@@ -93,6 +94,7 @@
   --gs-primitive-color-diff-add-surface: #dceee3;
   --gs-primitive-color-diff-remove: #9d3d43;
   --gs-primitive-color-diff-remove-surface: #f9dfdf;
+  --gs-primitive-color-scrim: rgba(20, 24, 32, 0.34);
   --gs-primitive-color-diff-hunk: #3155a6;
   --gs-primitive-dark-color-canvas: #11151b;
   --gs-primitive-dark-color-surface: #1a1f27;
@@ -158,6 +160,7 @@
   --gs-semantic-surface-inset: #f2f4f8;
   --gs-semantic-surface-hover: #e1e6ef;
   --gs-semantic-surface-inverse: #171c24;
+  --gs-semantic-surface-scrim: rgba(20, 24, 32, 0.34);
   --gs-semantic-text-primary: #171c24;
   --gs-semantic-text-secondary: #536176;
   --gs-semantic-text-muted: #536176;
@@ -302,6 +305,7 @@
   --gs-component-overlay-popover-z-index: 70;
   --gs-component-overlay-radius: 24px;
   --gs-component-overlay-background: #ffffff;
+  --gs-component-overlay-scrim: rgba(20, 24, 32, 0.34);
   --gs-component-overlay-text: #171c24;
   --surface: #ffffff;
   --surface-muted: #f2f4f8;
@@ -352,6 +356,7 @@
   --gs-primitive-color-diff-add-surface: #162e22;
   --gs-primitive-color-diff-remove: #f0a0a4;
   --gs-primitive-color-diff-remove-surface: #3a1c1e;
+  --gs-primitive-color-scrim: rgba(20, 24, 32, 0.34);
   --gs-primitive-color-diff-hunk: #9dbcff;
   --gs-primitive-font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --gs-primitive-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -389,6 +394,7 @@
   --gs-semantic-surface-inset: #151a21;
   --gs-semantic-surface-hover: #242b36;
   --gs-semantic-surface-inverse: #e8ecf3;
+  --gs-semantic-surface-scrim: rgba(20, 24, 32, 0.34);
   --gs-semantic-text-primary: #e8ecf3;
   --gs-semantic-text-secondary: #9aa7bd;
   --gs-semantic-text-muted: #9aa7bd;
@@ -533,6 +539,7 @@
   --gs-component-overlay-popover-z-index: 70;
   --gs-component-overlay-radius: 24px;
   --gs-component-overlay-background: #1a1f27;
+  --gs-component-overlay-scrim: rgba(20, 24, 32, 0.34);
   --gs-component-overlay-text: #e8ecf3;
   --surface: #1a1f27;
   --surface-muted: #151a21;
@@ -584,6 +591,7 @@
     --gs-primitive-color-diff-add-surface: #162e22;
     --gs-primitive-color-diff-remove: #f0a0a4;
     --gs-primitive-color-diff-remove-surface: #3a1c1e;
+    --gs-primitive-color-scrim: rgba(20, 24, 32, 0.34);
     --gs-primitive-color-diff-hunk: #9dbcff;
     --gs-primitive-font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --gs-primitive-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -621,6 +629,7 @@
     --gs-semantic-surface-inset: #151a21;
     --gs-semantic-surface-hover: #242b36;
     --gs-semantic-surface-inverse: #e8ecf3;
+    --gs-semantic-surface-scrim: rgba(20, 24, 32, 0.34);
     --gs-semantic-text-primary: #e8ecf3;
     --gs-semantic-text-secondary: #9aa7bd;
     --gs-semantic-text-muted: #9aa7bd;
@@ -765,6 +774,7 @@
     --gs-component-overlay-popover-z-index: 70;
     --gs-component-overlay-radius: 24px;
     --gs-component-overlay-background: #1a1f27;
+    --gs-component-overlay-scrim: rgba(20, 24, 32, 0.34);
     --gs-component-overlay-text: #e8ecf3;
     --surface: #1a1f27;
     --surface-muted: #151a21;

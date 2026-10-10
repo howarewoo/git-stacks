@@ -2075,6 +2075,18 @@ Canonical ownership is `packages/ui/src/components/ui`, `packages/ui/src/lib`, a
 
 The catalog shell uses the shared `SidebarProvider`, off-canvas `Sidebar`, and `SidebarTrigger` for desktop collapse and the built-in sheet below 768px; it does not maintain a parallel catalog open/close state. Shared search and appearance controls stay above the independently scrolling index. Category disclosure follows the shadcn Base UI composition: `SidebarGroupLabel render={<CollapsibleTrigger />}` with `CollapsibleContent` around `SidebarGroupContent`. Search exposes matching categories; choosing a component opens its category, closes the narrow sheet, scrolls to the destination, and transfers focus. The current anchor is marked after Back/Forward. Command navigation includes Foundations and Git compositions. Empty search results offer Clear search.
 
+The current-section marker follows scrolling independently of the hash: scrolling
+does not add history entries or move focus. Filtering rebuilds tracking around
+the mounted entries; empty results have no current marker. Verify the marker
+after scrolling across adjacent sections, filtering, clearing, resizing, and
+Back/Forward, as well as after an intentional anchor click.
+
+Start with the interaction links existing specimens for inspection, value
+selection, captured-scope confirmation, and status/recovery. Every manifest entry
+has required `usage` guidance visible above its specimen; anatomy, keyboard and
+token details remain optional disclosures. Verify recipe links by pointer and
+keyboard, including destination focus and narrow-sidebar closure.
+
 The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
  
 Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
@@ -2096,6 +2108,12 @@ Checked out label stays independent of the inspected highlight. The scoped
 deletion simulation repeats both captured branch names and their relationship
 inside its Cancel-first confirmation, excludes PR #43, and never calls Git or a
 remote transport. Verify long identities and footer actions at 640×450 reflow.
+
+Dialog, Alert Dialog, Sheet, and Drawer use `component.overlay.scrim`, independent
+of theme-dependent text. Inspect the backdrop in both themes and in the desktop
+command palette, not only the catalog. The simple Alert Dialog deletion example
+names `feature/quiet-graph`, starts on Cancel, and uses a danger action; cancellation
+leaves its state unchanged and confirmation affects only its local simulation.
 
 Theme checks must wait for computed styles to settle after the theme attribute changes; reduced motion shortens CSS transitions but does not make them synchronous.
 

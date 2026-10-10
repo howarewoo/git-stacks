@@ -93,6 +93,35 @@ test('search anchors and keyboard command navigation', async ({ page }) => {
   await expect(page.locator('#checkbox')).toBeFocused()
 })
 
+test('current section follows scrolling and filtered mounts without changing navigation history', async ({
+  page,
+}) => {
+  await page.goto('/')
+  const navigation = page.getByRole('navigation', { name: 'Component catalog', exact: true })
+  const current = navigation.locator('a[aria-current="location"]')
+  await navigation.getByRole('link', { name: 'Button', exact: true }).click()
+  await navigation.getByRole('link', { name: 'Button Group', exact: true }).click()
+  await expect(current).toHaveAttribute('href', '#button-group')
+  await expect(page.locator('#button-group')).toBeFocused()
+  const historyLength = await page.evaluate(() => history.length)
+  await page.locator('#checkbox').evaluate((section) => section.scrollIntoView({ block: 'start' }))
+  await expect(current).toHaveAttribute('href', '#checkbox')
+  await expect(page).toHaveURL(/#button-group$/)
+  expect(await page.evaluate(() => history.length)).toBe(historyLength)
+  await page.goBack()
+  await expect(page).toHaveURL(/#button$/)
+  await expect(current).toHaveAttribute('href', '#button')
+  await page.getByRole('textbox', { name: 'Search components' }).fill('one-time password')
+  await page.locator('#input-otp').evaluate((section) => section.scrollIntoView({ block: 'start' }))
+  await expect(current).toHaveAttribute('href', '#input-otp')
+  await page.getByRole('textbox', { name: 'Search components' }).fill('no-such-component')
+  await expect(current).toHaveCount(0)
+  await page.getByRole('button', { name: 'Clear search', exact: true }).click()
+  await navigation.getByRole('link', { name: 'Git compositions', exact: true }).click()
+  await expect(current).toHaveAttribute('href', '#git-compositions')
+  await expect(page.locator('#git-compositions')).toBeFocused()
+})
+
 test('inline command selection does not displace catalog arrival', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('[data-specimen="command"]')).toBeAttached()

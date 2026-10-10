@@ -17,7 +17,7 @@ const DialogOverlay = React.forwardRef<
     ref={ref}
     data-slot="dialog-overlay"
     className={cn(
-      'fixed inset-0 z-[var(--gs-component-overlay-z-index)] bg-[color-mix(in_srgb,var(--gs-semantic-text-primary)_34%,transparent)]',
+      'fixed inset-0 z-[var(--gs-component-overlay-z-index)] bg-[var(--gs-component-overlay-scrim)]',
       className,
     )}
     {...props}

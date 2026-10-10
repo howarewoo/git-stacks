@@ -43,6 +43,44 @@ import { displaySpecimens } from './display-specimens'
 import { overlaySpecimens } from './overlay-specimens'
 import { Foundations, GitCompositions, TypographySpecimen } from './foundations'
 
+const ADOPTION_RECIPES = [
+  {
+    task: 'Inspect without mutation',
+    guidance: 'Keep inspection separate from checkout. Use a sheet for supporting context.',
+    links: [
+      { id: 'git-compositions', label: 'Git compositions' },
+      { id: 'sheet', label: 'Sheet' },
+      { id: 'dialog', label: 'Dialog' },
+    ],
+  },
+  {
+    task: 'Choose a value',
+    guidance: 'Show a few exclusive choices; add search when the list needs it.',
+    links: [
+      { id: 'radio-group', label: 'Radio Group' },
+      { id: 'select', label: 'Select' },
+      { id: 'combobox', label: 'Combobox' },
+    ],
+  },
+  {
+    task: 'Confirm captured scope',
+    guidance: 'Name the identities and consequences. Keep Cancel first and deletion explicit.',
+    links: [
+      { id: 'git-compositions', label: 'Scoped Git example' },
+      { id: 'alert-dialog', label: 'Alert Dialog' },
+    ],
+  },
+  {
+    task: 'Report status and recovery',
+    guidance: 'Label unknown or unavailable facts. Keep blockers and the next step inline.',
+    links: [
+      { id: 'badge', label: 'Badge' },
+      { id: 'alert', label: 'Alert' },
+      { id: 'field', label: 'Field' },
+    ],
+  },
+] as const
+
 export const SPECIMENS: Record<string, ComponentType> = {
   ...navigationSpecimens,
   ...formSpecimens,
@@ -83,6 +121,9 @@ function CatalogWorkspace() {
       if (group) setExpandedGroup(group)
     }
     window.addEventListener('hashchange', syncAnchor)
+    if (location.hash) {
+      document.getElementById(location.hash.slice(1))?.scrollIntoView({ block: 'start' })
+    }
     return () => {
       window.removeEventListener('hashchange', syncAnchor)
     }
@@ -114,6 +155,50 @@ function CatalogWorkspace() {
   const visible = COMPONENT_MANIFEST.filter((entry) =>
     `${entry.name} ${entry.group} ${entry.summary}`.toLowerCase().includes(query),
   )
+  useEffect(() => {
+    const sections = Array.from(document.querySelectorAll<HTMLElement>('#catalog > section[id]'))
+    setActiveId((current) =>
+      sections.some((section) => section.id === current) ? current : (sections[0]?.id ?? ''),
+    )
+    const intersecting = new Set<Element>()
+    let observer: IntersectionObserver
+    function observeSections() {
+      observer?.disconnect()
+      intersecting.clear()
+      // Follow the heading inset, beyond the preceding section's trailing edge.
+      const style = getComputedStyle(sections[0])
+      const readingLine = parseFloat(style.scrollMarginTop) + parseFloat(style.paddingTop)
+      observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting && entry.intersectionRect.height > 0) {
+              intersecting.add(entry.target)
+            } else {
+              intersecting.delete(entry.target)
+            }
+          }
+          const current = sections.find((section) => intersecting.has(section))
+          if (!current) return
+          setActiveId(current.id)
+          const group = COMPONENT_MANIFEST.find((entry) => entry.id === current.id)?.group
+          if (group) setExpandedGroup(group)
+        },
+        {
+          rootMargin: `-${readingLine}px 0px -${window.innerHeight - readingLine - 1}px 0px`,
+          // Crossing a section boundary must include positive area, not just a touching edge.
+          threshold: Number.EPSILON,
+        },
+      )
+      for (const section of sections) observer.observe(section)
+    }
+    if (!sections.length) return
+    observeSections()
+    window.addEventListener('resize', observeSections)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', observeSections)
+    }
+  }, [query])
   function navigate(id: string) {
     setSearch('')
     setCommandOpen(false)
@@ -289,6 +374,36 @@ function CatalogWorkspace() {
             63 components + Typography · reconciled with shadcn Base UI base-nova on {MANIFEST_DATE}
             . Catalog-only recipes demonstrate capabilities, not new desktop product workflows.
           </p>
+          <h3>Start with the interaction</h3>
+          <dl className="catalog-recipes">
+            {ADOPTION_RECIPES.map((recipe) => (
+              <div key={recipe.task}>
+                <dt>{recipe.task}</dt>
+                <dd>
+                  <p>{recipe.guidance}</p>
+                  <div className="catalog-recipe-links">
+                    {recipe.links.map((link) => (
+                      <Button
+                        key={link.id}
+                        variant="link"
+                        nativeButton={false}
+                        role="link"
+                        render={<a href={`#${link.id}`} />}
+                        onClick={(event) => {
+                          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+                            return
+                          event.preventDefault()
+                          navigate(link.id)
+                        }}
+                      >
+                        {link.label}
+                      </Button>
+                    ))}
+                  </div>
+                </dd>
+              </div>
+            ))}
+          </dl>
           <details>
             <summary>Upstream reconciliation and owned adaptations</summary>
             <p>{UPSTREAM_RECONCILIATION.inventory}</p>
@@ -326,6 +441,7 @@ function CatalogWorkspace() {
                 <span>{entry.group}</span>
               </div>
               <p className="design-entry-summary">{entry.summary}</p>
+              <p className="design-entry-usage">{entry.usage}</p>
               <div className="design-specimen" data-specimen={entry.id}>
                 <Specimen />
               </div>
