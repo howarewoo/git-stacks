@@ -82,6 +82,21 @@ test.describe('PR Inbox queue', () => {
     await switchDestination(page, 'prInbox')
   })
 
+  test('structured lifecycle criteria toggle through the shared checkbox keyboard control', async ({
+    page,
+  }) => {
+    await page.getByText('Structured criteria · AND across fields, OR within each field').click()
+    const draft = page.getByRole('checkbox', { name: 'draft', exact: true })
+    await draft.focus()
+    await draft.press('Space')
+    await expect(draft).toBeChecked()
+    await draft.press('Space')
+    await expect(page.locator('.pr-inbox-criteria')).not.toHaveAttribute('open')
+    await page.getByText('Structured criteria · AND across fields, OR within each field').click()
+    await expect(draft).not.toBeChecked()
+    expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'runAction')).toEqual([])
+  })
+
   test('the six groups report the counts the GitHub facts decide', async ({ page }) => {
     const rail = groupRail(page)
     await expect(rail.getByRole('button')).toHaveCount(GROUP_COUNTS.length)
@@ -216,7 +231,11 @@ test.describe('PR Inbox queue', () => {
     await name.click()
     await name.pressSequentially('Awaiting Ada')
     await expect(save).toBeEnabled()
+    await holdDoubleCall(page, 'savePullRequestInboxFilters')
     await save.click()
+    await expect(save).toHaveAttribute('aria-busy', 'true')
+    await expect(save.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+    await releaseDoubleCalls(page, 'savePullRequestInboxFilters')
 
     const chip = groupRail(page).getByRole('button', { name: 'Awaiting Ada', exact: true })
     await expect(chip).toBeVisible()
@@ -226,6 +245,29 @@ test.describe('PR Inbox queue', () => {
 
     await page.getByRole('button', { name: 'Remove saved filter Awaiting Ada' }).click()
     await expect(chip).toHaveCount(0)
+  })
+
+  test('a refused saved-filter write releases the submitting state without claiming a saved filter', async ({
+    page,
+  }) => {
+    const save = page.getByRole('button', { name: 'Save', exact: true })
+    await page.getByRole('textbox', { name: 'Save this filter' }).fill('Refused save')
+    await holdDoubleCall(page, 'savePullRequestInboxFilters')
+    await save.click()
+    await expect(save).toHaveAttribute('aria-busy', 'true')
+    await page.evaluate(() =>
+      window.fixture.failNext('savePullRequestInboxFilters', 'Saved-filter write refused'),
+    )
+    await releaseDoubleCalls(page, 'savePullRequestInboxFilters')
+    await expect(page.getByRole('alert')).toContainText('Saved-filter write refused')
+    await expect(save).not.toHaveAttribute('aria-busy', 'true')
+    await expect(save.locator('[data-slot="button-spinner"]')).toHaveCount(0)
+    await expect(
+      groupRail(page).getByRole('button', { name: 'Refused save', exact: true }),
+    ).toHaveCount(0)
+    expect(
+      (await getDoubleCalls(page)).filter((entry) => entry.call === 'savePullRequestInboxFilters'),
+    ).toHaveLength(1)
   })
 
   test('the saved-filter controls stay locked while the stored list is still being read', async ({

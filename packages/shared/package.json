@@ -12,6 +12,7 @@
     "./guards": "./src/guards.ts",
     "./host": "./src/host.ts",
     "./notifications": "./src/notifications.ts",
+    "./operation-scope": "./src/operation-scope.ts",
     "./performance": "./src/performance.ts",
     "./pr-graph": "./src/pr-graph.ts",
     "./pr-inbox": "./src/pr-inbox.ts",

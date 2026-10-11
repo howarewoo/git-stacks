@@ -11,6 +11,7 @@ import type {
 import {
   blockedRestackPreview,
   failedMergeStatus,
+  mergeStatus,
   openPullRequest,
   pausedRestackProgress,
   restackPreview,
@@ -1500,6 +1501,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       'An authenticated GitHub CLI account for github.com, with the version reported apart from the authentication.',
     snapshot: connected,
     recentRepositories,
+    mergeStatus,
     githubCliStatus: {
       state: 'authenticated',
       host: 'github.com',
@@ -1874,6 +1876,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       ],
     }),
     recentRepositories,
+    mergeStatus,
   },
   'pull-requests-checks': {
     name: 'pull-requests-checks',

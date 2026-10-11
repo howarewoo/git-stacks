@@ -1804,6 +1804,38 @@ the primary stack action, with secondary Sync, Publish and merge entries.
 Destructive entries use the danger role without bypassing their existing
 reviewed confirmation.
 
+Indexed search, saved-view names and dependent-path search use shared Field/Input
+controls. Collapse uses the shared Checkbox; repository presets use exactly one
+shared SegmentedControl choice, with roving arrow-key focus and explicit activation.
+These controls retain the same bounded criteria, preference ownership, path pages,
+camera and qualified selection. Refresh and preference writes keep their action
+names while the shared Button reports busy state; only the actual pending action
+in the current preference scope shows its loading marker. Retired writes cannot
+disable a replacement account's controls. Utility actions remain secondary or ghost.
+
+The persistent operation surface stays outside destination content. Publication
+steps and observed merge outcomes retain their captured targets across Graph,
+Changes, Review and History; recovery opens the existing reviewed workflow without
+retrying a mutation. Closing a preview, navigating, retrying, dismissing saved
+publication and Git Abort are separate actions. Local Abort never promises to undo
+already published branches, PR changes or native membership effects. Stack recovery
+names Sync from its journal kind and surgery from its already-journalled effects.
+An unstack-only surgery does not register replacement membership; later Submit
+Stack is required where the preview says so. Unavailable queue capability does not
+offer a queue choice.
+Progress events and initial reads carry their admitted repository, origin URL and
+public CLI authority. The producer captures action scope before dispatch; late
+events and null clears cannot be relabelled by the window's eventual repository
+or account. The shell and recovery dialog observe one scoped journal Query;
+overtaken reads are cancelled and a failed refresh keeps the last confirmed facts.
+A merge with confirmed landed targets and later refusals remains partially completed,
+not “Not applied”; failed readback preserves both confirmed merges and refusal details.
+The required action-versus-journal-read source distinguishes transport ownership
+from historical creator provenance: existing journal bytes do not record the
+original public authority, so saved recovery says it is unrecorded. Displayed
+scope grants no mutation consent; saved targets/approvals and live backend
+revalidation still govern explicit Resume, Dismiss and Abort.
+
 **Edit stack layers** uses the shared keyboard-operable `Collapsible` and
 `Button` composition for parent, insert, move and remove entries. Opening it
 remains presentation-only, and its actions keep the existing preview,

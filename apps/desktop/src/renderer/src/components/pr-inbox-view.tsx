@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
+import { Checkbox } from '@git-stacks/ui/components/checkbox'
 import { ChevronRight, Filter, Inbox, RefreshCw, Search, ShieldCheck, Trash2 } from 'lucide-react'
 import {
   PULL_REQUEST_INBOX_DEFAULT_FILTER,
@@ -163,7 +164,7 @@ export function PullRequestInboxView({
   filtersReady: boolean
   onOpen: (item: PullRequestInboxItem) => void
   onRefresh: () => void
-  onSaveFilters: (drafts: PullRequestInboxFilterDraft[]) => void
+  onSaveFilters: (drafts: PullRequestInboxFilterDraft[]) => Promise<void>
   onDismissError: () => void
   /**
    * The queue's own search field. The advertised search shortcut is routed here
@@ -183,12 +184,12 @@ export function PullRequestInboxView({
     validators: {
       onSubmit: ({ value }) => (value.name.trim() ? undefined : 'Name the filter.'),
     },
-    onSubmit: ({ value, formApi }) => {
+    onSubmit: async ({ value, formApi }) => {
       const name = value.name.trim()
       if (filtersSettling) return
       // Reusing a name replaces that filter while preserving its stored identity.
       const existing = savedFilters.find((entry) => entry.name === name)
-      onSaveFilters([
+      await onSaveFilters([
         ...draftsWithout(existing),
         {
           ...(existing ? { id: existing.id } : {}),
@@ -279,7 +280,7 @@ export function PullRequestInboxView({
 
   const removeSavedFilter = (id: string) => {
     if (filtersSettling) return
-    onSaveFilters(draftsWithout({ id }))
+    void onSaveFilters(draftsWithout({ id }))
   }
 
   return (
@@ -415,6 +416,7 @@ export function PullRequestInboxView({
               </saveFilterForm.Field>
               <Button
                 disabled={filtersSettling || saveSubmitting || !saveName.trim()}
+                loading={saveSubmitting}
                 type="submit"
                 size="sm"
                 variant="secondary"
@@ -432,27 +434,25 @@ export function PullRequestInboxView({
                 {repositories.map((repository) => {
                   const identity = repository.toLowerCase()
                   return (
-                    <label key={repository}>
-                      <input
-                        type="checkbox"
-                        checked={
-                          filter.criteria.repositories?.some(
-                            (value) => value.toLowerCase() === identity,
-                          ) ?? false
-                        }
-                        onChange={(event) => {
-                          const others =
-                            filter.criteria.repositories?.filter(
-                              (value) => value.toLowerCase() !== identity,
-                            ) ?? []
-                          setCriteria({
-                            ...filter.criteria,
-                            repositories: event.target.checked ? [...others, repository] : others,
-                          })
-                        }}
-                      />
-                      {repository}
-                    </label>
+                    <Checkbox
+                      key={repository}
+                      label={repository}
+                      checked={
+                        filter.criteria.repositories?.some(
+                          (value) => value.toLowerCase() === identity,
+                        ) ?? false
+                      }
+                      onCheckedChange={(checked) => {
+                        const others =
+                          filter.criteria.repositories?.filter(
+                            (value) => value.toLowerCase() !== identity,
+                          ) ?? []
+                        setCriteria({
+                          ...filter.criteria,
+                          repositories: checked ? [...others, repository] : others,
+                        })
+                      }}
+                    />
                   )
                 })}
               </fieldset>
@@ -495,25 +495,22 @@ export function PullRequestInboxView({
                 <fieldset key={key}>
                   <legend>{label}</legend>
                   {values.map((value) => (
-                    <label key={value}>
-                      <input
-                        type="checkbox"
-                        checked={
-                          (filter.criteria[key] as readonly string[] | undefined)?.includes(
-                            value,
-                          ) ?? false
-                        }
-                        onChange={(event) =>
-                          setCriteria({
-                            ...filter.criteria,
-                            [key]: event.target.checked
-                              ? [...(filter.criteria[key] ?? []), value]
-                              : filter.criteria[key]?.filter((entry) => entry !== value),
-                          })
-                        }
-                      />
-                      {value.toLowerCase().replaceAll('_', ' ')}
-                    </label>
+                    <Checkbox
+                      key={value}
+                      label={value.toLowerCase().replaceAll('_', ' ')}
+                      checked={
+                        (filter.criteria[key] as readonly string[] | undefined)?.includes(value) ??
+                        false
+                      }
+                      onCheckedChange={(checked) =>
+                        setCriteria({
+                          ...filter.criteria,
+                          [key]: checked
+                            ? [...(filter.criteria[key] ?? []), value]
+                            : filter.criteria[key]?.filter((entry) => entry !== value),
+                        })
+                      }
+                    />
                   ))}
                 </fieldset>
               ))}

@@ -167,6 +167,7 @@ export function SettingsDialog({
     }: {
       step: () => Promise<UpdateStatus | undefined> | undefined
       busyWhile: boolean
+      action: 'check' | 'download' | 'install' | 'cancel'
     }) => (await step()) ?? null,
   })
   const busy =
@@ -219,12 +220,16 @@ export function SettingsDialog({
    * install may run.
    */
   const runUpdate = React.useCallback(
-    async (step: () => Promise<UpdateStatus | undefined> | undefined, busyWhile: boolean) => {
+    async (
+      step: () => Promise<UpdateStatus | undefined> | undefined,
+      busyWhile: boolean,
+      action: 'check' | 'download' | 'install' | 'cancel',
+    ) => {
       if (!step) return
       if (busyWhile && writeLock.current) return
       if (busyWhile) writeLock.current = true
       try {
-        const next = await updateMutation.mutateAsync({ step, busyWhile })
+        const next = await updateMutation.mutateAsync({ step, busyWhile, action })
         if (next) {
           await queryClient.cancelQueries({ queryKey: ['update-status'] })
           queryClient.setQueryData(['update-status'], next)
@@ -484,6 +489,7 @@ export function SettingsDialog({
                   <Button
                     type="submit"
                     variant="secondary"
+                    loading={saveMutation.isPending && !!saveMutation.variables?.github?.host}
                     disabled={busy || formSubmitting || locked('github.host')}
                   >
                     Use this host
@@ -784,24 +790,40 @@ export function SettingsDialog({
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="secondary"
+                      loading={
+                        updates?.phase === 'checking' ||
+                        (updateMutation.isPending && updateMutation.variables?.action === 'check')
+                      }
                       disabled={
                         busy || !desktop?.checkForUpdates || updates?.phase === 'not-configured'
                       }
-                      onClick={() => void runUpdate(() => desktop?.checkForUpdates?.(), true)}
+                      onClick={() =>
+                        void runUpdate(() => desktop?.checkForUpdates?.(), true, 'check')
+                      }
                     >
                       Check for updates
                     </Button>
                     <Button
+                      loading={
+                        updates?.phase === 'downloading' ||
+                        (updateMutation.isPending &&
+                          updateMutation.variables?.action === 'download')
+                      }
                       disabled={busy || updates?.phase !== 'available' || !desktop?.downloadUpdate}
-                      onClick={() => void runUpdate(() => desktop?.downloadUpdate?.(), false)}
+                      onClick={() =>
+                        void runUpdate(() => desktop?.downloadUpdate?.(), false, 'download')
+                      }
                     >
-                      {updates?.phase === 'downloading'
-                        ? `Downloading ${updates.progress ?? 0}%`
-                        : 'Download update'}
+                      Download update
                     </Button>
                     <Button
+                      loading={
+                        updateMutation.isPending && updateMutation.variables?.action === 'install'
+                      }
                       disabled={busy || !updates?.readyToInstall || !desktop?.installUpdate}
-                      onClick={() => void runUpdate(() => desktop?.installUpdate?.(), true)}
+                      onClick={() =>
+                        void runUpdate(() => desktop?.installUpdate?.(), true, 'install')
+                      }
                     >
                       Install and restart
                     </Button>
@@ -809,12 +831,22 @@ export function SettingsDialog({
                     desktop?.cancelUpdate ? (
                       <Button
                         variant="secondary"
-                        onClick={() => void runUpdate(() => desktop?.cancelUpdate?.(), false)}
+                        loading={
+                          updateMutation.isPending && updateMutation.variables?.action === 'cancel'
+                        }
+                        onClick={() =>
+                          void runUpdate(() => desktop?.cancelUpdate?.(), false, 'cancel')
+                        }
                       >
                         Cancel
                       </Button>
                     ) : null}
                   </div>
+                  {updates?.phase === 'downloading' ? (
+                    <p role="status" className="text-xs text-[var(--gs-semantic-text-secondary)]">
+                      Downloading {updates.progress ?? 0}%
+                    </p>
+                  ) : null}
                 </WorkflowSection>
               </>
             ) : null}
@@ -872,10 +904,19 @@ export function SettingsDialog({
                     />
                   </Field>
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="secondary" disabled={busy} onClick={previewBundle}>
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      loading={bundleQuery.isFetching}
+                      onClick={previewBundle}
+                    >
                       Preview bundle
                     </Button>
-                    <Button disabled={busy || !bundle?.id} onClick={exportBundle}>
+                    <Button
+                      disabled={busy || !bundle?.id}
+                      loading={exportMutation.isPending}
+                      onClick={exportBundle}
+                    >
                       Create support bundle
                     </Button>
                   </div>
@@ -915,7 +956,12 @@ export function SettingsDialog({
                   and authentication status are asked about rather than assumed, and a CLI version
                   on its own never establishes an account.
                 </p>
-                <Button variant="secondary" disabled={busy} onClick={openDiagnostics}>
+                <Button
+                  variant="secondary"
+                  disabled={busy}
+                  loading={diagnosticsQuery.isFetching}
+                  onClick={openDiagnostics}
+                >
                   Run report
                 </Button>
                 {report ? <OperationFacts facts={reportFacts} /> : null}
@@ -929,6 +975,7 @@ export function SettingsDialog({
                 </span>
                 <Button
                   variant="secondary"
+                  loading={resetMutation.isPending}
                   disabled={busy || !desktop?.resetSettings}
                   onClick={() => {
                     if (!desktop?.resetSettings || writeLock.current) return

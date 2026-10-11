@@ -8,6 +8,7 @@ import {
   settle,
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
+import { scenarios } from './fixtures/scenarios'
 import {
   openDeleteLocalBranchDialog,
   openForcePushDialog,
@@ -78,6 +79,88 @@ test.describe('Safety and mutation dispatch invariants', () => {
   })
 
   test.describe('Busy state prevents duplicate dispatch', () => {
+    for (const operation of ['link', 'unlink'] as const) {
+      test(`closing issue ${operation} keeps its confirmation name during the captured write`, async ({
+        page,
+      }) => {
+        await openGallery(page, { scenario: 'pull-requests-issue-links' })
+        if (operation === 'link') {
+          // A fresh provider observation makes closing links eligible for this PR;
+          // its local stack parent is deliberately not changed to match the base.
+          await page.evaluate((repository) => {
+            window.fixture.pushSnapshot({
+              ...repository,
+              pullRequests: repository.pullRequests.map((pr) =>
+                pr.number === 41 ? { ...pr, base: repository.defaultBranch } : pr,
+              ),
+              branches: repository.branches.map((branch) =>
+                branch.pr?.number === 41
+                  ? { ...branch, pr: { ...branch.pr, base: repository.defaultBranch } }
+                  : branch,
+              ),
+            })
+          }, scenarios['pull-requests-issue-links'].snapshot!)
+        }
+        await selectBranchInList(page, 'feature/checkout-tests')
+        await page.getByRole('button', { name: 'Manage pull request', exact: true }).click()
+        const dialog = page.getByRole('dialog')
+        if (operation === 'unlink') {
+          await dialog
+            .getByRole('button', {
+              name: 'Remove link to issue #42 from this pull request',
+              exact: true,
+            })
+            .click()
+        } else {
+          await dialog.getByRole('textbox', { name: 'Search and link issues' }).fill('51')
+          await dialog.getByRole('button', { name: 'Search', exact: true }).click()
+          await dialog.getByRole('button', { name: 'Close when merged', exact: true }).click()
+        }
+        const name = operation === 'unlink' ? 'Confirm removal' : 'Confirm close when merged'
+        const confirm = dialog.getByRole('button', { name, exact: true })
+        await expect(confirm).toBeEnabled()
+        await holdDoubleCall(page, 'runAction')
+        await confirm.click()
+        await expect(confirm).toHaveAccessibleName(name)
+        await expect(confirm).toHaveAttribute('aria-busy', 'true')
+        await expect(confirm).toBeDisabled()
+        await expect(confirm.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+        await expect(confirm.locator('.lucide-loader-circle')).toHaveCount(1)
+        await releaseDoubleCalls(page, 'runAction')
+        await settle(page)
+        expect(
+          (await getDispatchedActions(page)).filter(
+            (action) => action.type === (operation === 'unlink' ? 'unlinkIssue' : 'linkIssue'),
+          ),
+        ).toHaveLength(1)
+      })
+    }
+
+    test('stash completion keeps its name and a single shared loading marker', async ({ page }) => {
+      await openGallery(page, { scenario: 'files-staged' })
+      await switchDestination(page, 'changes')
+      const dialog = await openStashDialog(page)
+      await holdDoubleCall(page, 'runAction')
+      const submit = dialog.getByRole('button', { name: 'Stash working changes', exact: true })
+      await submit.click()
+      await expect(submit).toHaveAccessibleName('Stash working changes')
+      await expect(submit).toHaveAttribute('aria-busy', 'true')
+      await expect(submit).toBeDisabled()
+      await expect(submit.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+      await expect(
+        page.locator('.changes-view').getByRole('button', {
+          name: 'Stash changes',
+          exact: true,
+          includeHidden: true,
+        }),
+      ).toHaveAttribute('aria-busy', 'true')
+      await releaseDoubleCalls(page, 'runAction')
+      await settle(page)
+      expect(
+        (await getDispatchedActions(page)).filter((action) => action.type === 'stash'),
+      ).toHaveLength(1)
+    })
+
     test('holding runAction prevents duplicate toolbar action dispatch', async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
       // Hold runAction so the in-flight promise does not settle immediately.
@@ -348,7 +431,14 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await messageInput.fill('feat: verify dispatch invariants')
 
       const commitBtn = page.getByRole('button', { name: 'Commit', exact: true })
+      await holdDoubleCall(page, 'runAction')
       await commitBtn.click()
+      await expect(commitBtn).toHaveAccessibleName('Commit')
+      await expect(commitBtn).toHaveAttribute('aria-busy', 'true')
+      await expect(commitBtn).toBeDisabled()
+      await expect(commitBtn.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+      await expect(commitBtn.locator('.lucide-loader-circle')).toHaveCount(1)
+      await releaseDoubleCalls(page, 'runAction')
       await settle(page)
 
       // The commit carries the head the dialog was opened against, so a concurrent

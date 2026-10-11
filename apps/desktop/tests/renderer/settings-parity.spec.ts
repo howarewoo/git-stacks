@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { getDoubleCalls, openGallery } from './helpers/gallery'
+import { getDoubleCalls, holdDoubleCall, openGallery, releaseDoubleCalls } from './helpers/gallery'
 
 async function openSettings(
   page: Parameters<typeof openGallery>[0],
@@ -23,7 +23,13 @@ test('support bundle requires a preview and exports the captured preview identit
   await dialog.getByRole('button', { name: 'Privacy', exact: true }).click()
   const create = dialog.getByRole('button', { name: 'Create support bundle', exact: true })
   await expect(create).toBeDisabled()
+  await holdDoubleCall(page, 'supportBundlePreview')
   await dialog.getByRole('button', { name: 'Preview bundle', exact: true }).click()
+  const preview = dialog.getByRole('button', { name: 'Preview bundle', exact: true })
+  await expect(preview).toHaveAttribute('aria-busy', 'true')
+  await expect(preview.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+  await expect(create).not.toHaveAttribute('aria-busy', 'true')
+  await releaseDoubleCalls(page, 'supportBundlePreview')
   await expect(create).toBeEnabled()
   await expect(dialog).toContainText('The Git executable path is withheld.')
   await create.click()

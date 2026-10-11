@@ -57,7 +57,8 @@ import { ListWindowMore } from './components/list-window'
 import { useListWindow, useRovingListFocus } from './lib/list-window'
 import { createRequestGate, type RequestClaim } from './lib/request-gate'
 import { useSettingsMutation } from './lib/settings-query'
-import { cliAuthority, withoutReplacedCredential } from './credential-identity'
+import { cliAuthority } from '@git-stacks/shared/operation-scope'
+import { withoutReplacedCredential } from './credential-identity'
 import { Badge } from './components/ui/badge'
 import { Button, IconButton } from './components/ui/button'
 import { Checkbox } from './components/ui/checkbox'
@@ -3225,7 +3226,7 @@ function App() {
           requestId: INBOX_REQUEST_ID,
         })
       }
-      onSaveFilters={(drafts) => void saveInboxFilters(drafts)}
+      onSaveFilters={saveInboxFilters}
       savingFilters={inboxSavingFilters}
       refreshing={inboxRefreshing}
       report={inboxReport}
@@ -4270,6 +4271,15 @@ function App() {
       {snapshot ? (
         <OperationBanner
           snapshot={snapshot}
+          authority={authority}
+          desktop={desktop ?? undefined}
+          showingOperation={
+            workflow?.repoPath === snapshot.path &&
+            workflow.request.kind === 'stack' &&
+            (workflow.request.operation === 'publish' || workflow.request.operation === 'merge')
+              ? workflow.request.operation
+              : null
+          }
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}

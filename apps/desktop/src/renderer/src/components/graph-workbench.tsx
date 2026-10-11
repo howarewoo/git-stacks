@@ -41,6 +41,10 @@ import { Button } from '@git-stacks/ui/components/button'
 import { Badge } from '@git-stacks/ui/components/badge'
 import { Select } from '@git-stacks/ui/components/select'
 import { Surface, InlineAlert } from '@git-stacks/ui/components/surface'
+import { Field } from '@git-stacks/ui/components/field'
+import { Input } from '@git-stacks/ui/components/input'
+import { Checkbox } from '@git-stacks/ui/components/checkbox'
+import { SegmentedControl } from '@git-stacks/ui/components/segmented-control'
 import {
   Collapsible,
   CollapsibleTrigger,
@@ -711,7 +715,8 @@ export function GraphWorkbench({
         </div>
         <Button
           size="sm"
-          disabled={indexQuery.isFetching}
+          variant="secondary"
+          loading={indexQuery.isFetching}
           onClick={() => {
             void queryClient
               .fetchQuery({
@@ -726,32 +731,25 @@ export function GraphWorkbench({
           Refresh index
         </Button>
       </header>
-      <nav className="graph-presets" aria-label="Repository PR views">
-        {PRESETS.map((preset) => (
-          <Button
-            key={preset.value}
-            size="sm"
-            variant={criteria.preset === preset.value ? 'accent' : 'ghost'}
-            aria-pressed={criteria.preset === preset.value}
-            onClick={() => changeCriteria((value) => ({ ...value, preset: preset.value }))}
-          >
-            {preset.label}
-          </Button>
-        ))}
-      </nav>
+      <SegmentedControl<GraphPreset>
+        className="graph-presets"
+        label="Repository PR views"
+        value={criteria.preset}
+        options={PRESETS}
+        onValueChange={(preset) => changeCriteria((value) => ({ ...value, preset }))}
+      />
       <div className="graph-filters">
-        <label>
-          Search indexed PRs
-          <input
+        <Field id="graph-index-search" label="Search indexed PRs">
+          <Input
+            controlSize="compact"
             type="search"
             value={effectiveCriteria.text}
             maxLength={256}
             placeholder="PR, title or ref…"
             onChange={(event) => changeSearch(event.target.value)}
           />
-        </label>
-        <label>
-          Author
+        </Field>
+        <Field id="graph-author" label="Author">
           <Select
             value={criteria.author}
             onValueChange={(author) => changeCriteria((value) => ({ ...value, author }))}
@@ -760,9 +758,8 @@ export function GraphWorkbench({
               ...authors.map((author) => ({ value: author, label: `@${author}` })),
             ]}
           />
-        </label>
-        <label>
-          Status
+        </Field>
+        <Field id="graph-status" label="Status">
           <Select
             value={criteria.status}
             onValueChange={(status) =>
@@ -776,17 +773,13 @@ export function GraphWorkbench({
               { value: 'checks-pending', label: 'Known pending checks' },
             ]}
           />
-        </label>
-        <label className="graph-collapse">
-          <input
-            type="checkbox"
-            checked={criteria.collapse}
-            onChange={(event) =>
-              changeCriteria((value) => ({ ...value, collapse: event.target.checked }))
-            }
-          />
-          Collapse linear runs
-        </label>
+        </Field>
+        <Checkbox
+          className="graph-collapse"
+          checked={criteria.collapse}
+          onCheckedChange={(collapse) => changeCriteria((value) => ({ ...value, collapse }))}
+          label="Collapse linear runs"
+        />
       </div>
       <div className="graph-index-status" role="status">
         {status}
@@ -797,9 +790,9 @@ export function GraphWorkbench({
       <details className="graph-saved">
         <summary>Saved view preferences</summary>
         <div className="graph-saved-controls">
-          <label>
-            View name
-            <input
+          <Field id="graph-view-name" label="View name">
+            <Input
+              controlSize="compact"
               value={savedName}
               maxLength={80}
               onChange={(event) => {
@@ -807,9 +800,10 @@ export function GraphWorkbench({
                 setSavedName(event.target.value)
               }}
             />
-          </label>
+          </Field>
           <Button
             size="sm"
+            loading={preferenceBusy && preferenceMutation.variables?.operation === 'save'}
             disabled={
               preferenceBusy ||
               !savedName.trim() ||
@@ -822,6 +816,7 @@ export function GraphWorkbench({
           </Button>
           <Button
             size="sm"
+            variant="secondary"
             disabled={!saved || preferenceBusy}
             onClick={() => {
               if (saved) {
@@ -835,6 +830,8 @@ export function GraphWorkbench({
           </Button>
           <Button
             size="sm"
+            variant="ghost"
+            loading={preferenceBusy && preferenceMutation.variables?.operation === 'reset'}
             disabled={preferenceBusy || !desktop?.resetGraphPreferences || !preferenceAvailable}
             onClick={() => void savePreference('reset')}
           >
@@ -976,6 +973,7 @@ export function GraphWorkbench({
           <div className="graph-camera">
             <Button
               size="icon-sm"
+              variant="ghost"
               aria-label="Zoom graph out"
               disabled={zoom <= 0.5}
               onClick={() => setZoom((value) => Math.max(0.5, value - 0.1))}
@@ -985,6 +983,7 @@ export function GraphWorkbench({
             <span>{Math.round(zoom * 100)}%</span>
             <Button
               size="icon-sm"
+              variant="ghost"
               aria-label="Zoom graph in"
               disabled={zoom >= 1.5}
               onClick={() => setZoom((value) => Math.min(1.5, value + 0.1))}
@@ -993,6 +992,7 @@ export function GraphWorkbench({
             </Button>
             <Button
               size="sm"
+              variant="secondary"
               onClick={() => {
                 const viewport = graphRef.current
                 if (viewport) {
@@ -1006,6 +1006,7 @@ export function GraphWorkbench({
             </Button>
             <Button
               size="sm"
+              variant="ghost"
               className="graph-inspector-toggle"
               aria-expanded={showInspector}
               onClick={() => toggleInspector()}
@@ -1096,9 +1097,9 @@ export function GraphWorkbench({
           </div>
           <details className="graph-paths">
             <summary>Dependent paths · {allPaths.length} available endpoints</summary>
-            <label>
-              Search dependent paths
-              <input
+            <Field id="graph-path-search" label="Search dependent paths">
+              <Input
+                controlSize="compact"
                 type="search"
                 value={pathSearch}
                 onChange={(event) => {
@@ -1106,7 +1107,7 @@ export function GraphWorkbench({
                   setPathPage(0)
                 }}
               />
-            </label>
+            </Field>
             <ul>
               {paths
                 .slice(pathPage * GRAPH_PATH_PAGE_SIZE, (pathPage + 1) * GRAPH_PATH_PAGE_SIZE)
@@ -1122,6 +1123,7 @@ export function GraphWorkbench({
             <div className="graph-path-paging">
               <Button
                 size="sm"
+                variant="secondary"
                 disabled={!pathPage}
                 onClick={() => setPathPage((value) => value - 1)}
               >
@@ -1133,6 +1135,7 @@ export function GraphWorkbench({
               </span>
               <Button
                 size="sm"
+                variant="secondary"
                 disabled={(pathPage + 1) * GRAPH_PATH_PAGE_SIZE >= paths.length}
                 onClick={() => setPathPage((value) => value + 1)}
               >
@@ -1181,7 +1184,7 @@ export function GraphWorkbench({
                   </dl>
                   <div className="graph-pr-actions">
                     <Button
-                      variant="accent"
+                      variant="default"
                       size="sm"
                       onClick={() => onReviewNumber(selectedPr.number)}
                     >

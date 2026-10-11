@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { OperationProgress } from '@git-stacks/shared/operation-scope'
 import type {
   DesktopAPI,
   GitHubCliStatus,
@@ -75,9 +76,9 @@ const desktop: DesktopAPI = {
   stackPreview: (kind, branch) => ipcRenderer.invoke('repository:stack-preview', kind, branch),
   surgeryPreview: (request) => ipcRenderer.invoke('repository:surgery-preview', request),
   submitStackProgress: () => ipcRenderer.invoke('repository:submit-stack-progress'),
-  onSubmitStackProgress: (listener: (progress: PublishProgress | null) => void) =>
+  onSubmitStackProgress: (listener: (event: OperationProgress<PublishProgress>) => void) =>
     subscribe('submit-stack-progress', listener),
-  onMergeProgress: (listener: (progress: MergeProgress | null) => void) =>
+  onMergeProgress: (listener: (event: OperationProgress<MergeProgress>) => void) =>
     subscribe('merge-progress', listener),
   mergeStatus: () => ipcRenderer.invoke('repository:merge-status'),
   reconciliationPreview: (stackKey) =>

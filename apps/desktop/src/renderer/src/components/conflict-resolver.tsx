@@ -682,7 +682,7 @@ export function ConflictResolver({
                       ? 'Every conflicting region has to be decided before the file can be staged.'
                       : 'Write this content and stage it to mark the conflict resolved.'
                   }
-                  variant="accent"
+                  variant="default"
                   onClick={() => apply({ kind: 'content', content: result })}
                 >
                   <Check className="size-3.5" />
@@ -693,7 +693,7 @@ export function ConflictResolver({
                   disabled={busy || loading || outdated}
                   loading={busy}
                   tooltip="Stage the entire existing worktree file without converting or replacing its bytes. Review the external result first."
-                  variant="accent"
+                  variant="default"
                   onClick={() => apply({ kind: 'worktree' })}
                 >
                   <Check className="size-3.5" />

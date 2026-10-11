@@ -7,6 +7,7 @@ import {
 import { changeGraphIndex, graphDetail } from './graph'
 import type { UpdateStatus } from '@git-stacks/shared/update'
 import { REVIEW_STACK_METADATA_LIMIT } from '@git-stacks/shared/performance'
+import { cliAuthority } from '@git-stacks/shared/operation-scope'
 import type {
   ActionResult,
   ConflictFile,
@@ -17,8 +18,6 @@ import type {
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
-  MergeProgress,
-  MergeStatus,
   PushPreview,
   RemoteFreshness,
   RepositorySnapshot,
@@ -51,7 +50,6 @@ import {
   insertSurgeryPreview,
   leasePreview,
   mergePreview,
-  mergeStatus,
   mergeStatusQueueSentence,
   publishPreview,
   restackPreview,
@@ -286,9 +284,13 @@ export function installFixtureControl(options: {
   const waiting: WaitingCall[] = []
   let startsPending = new Set<FixtureCall>()
   let mergeStatusReads = 0
-  const mergeListeners = new Set<(progress: MergeProgress | null) => void>()
-  const publishMergeProgress = (progress: MergeProgress | null): void => {
-    for (const listener of mergeListeners) listener(progress)
+  type MergeEvent = Parameters<Parameters<NonNullable<DesktopAPI['onMergeProgress']>>[0]>[0]
+  type PublishEvent = Parameters<Parameters<NonNullable<DesktopAPI['onSubmitStackProgress']>>[0]>[0]
+  const mergeListeners = new Set<(event: MergeEvent) => void>()
+  const publicationListeners = new Set<(event: PublishEvent) => void>()
+  let publication: PublishEvent | null = null
+  const publishMergeProgress = (event: MergeEvent): void => {
+    for (const listener of mergeListeners) listener(event)
   }
   /** Saved filters, as the main process keeps them: whole-list writes, identities preserved. */
   let inboxFilters: PullRequestInboxSavedFilter[] = []
@@ -321,6 +323,14 @@ export function installFixtureControl(options: {
     const { host, repository, account } = JSON.parse(scope)
     return JSON.stringify([host, repository, account])
   }
+  const captureOperationScope = () => ({
+    repositoryPath: active?.path ?? '',
+    remoteUrl: active?.remoteUrl ?? null,
+    authority: cliAuthority(
+      scenario.identity ? settings.github.host : notificationSettings.github.host,
+      servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus ?? null,
+    ),
+  })
   const matchesGraphPreferenceScope = (
     actual: string | null,
     expected: NonNullable<GraphPreferencesResult['scope']>,
@@ -971,6 +981,7 @@ export function installFixtureControl(options: {
     runAction: (action) => {
       record('runAction', [action])
       actions.push(action)
+      const operationScope = captureOperationScope()
       // A merge reports through the progress channel the way the main process does, and it
       // reports while the run is still going: the request is accepted, GitHub is still
       // running it, and the run returns before the result exists. What GitHub reports
@@ -979,20 +990,24 @@ export function installFixtureControl(options: {
         const layer = mergePreview.merge?.layers[0]
         if (layer) {
           publishMergeProgress({
-            action: 'default',
-            status: 'running',
-            message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
-            layers: [
-              {
-                branch: layer.branch,
-                pullRequest: layer.pullRequest,
-                status: 'pending',
-                detail: 'GitHub has not reported a result yet; refresh to read this request',
-                mergedOid: null,
-                queue: null,
-                requestUuid: 'fixture-request-1',
-              },
-            ],
+            scope: operationScope,
+            source: 'action',
+            progress: {
+              action: 'default',
+              status: 'running',
+              message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
+              layers: [
+                {
+                  branch: layer.branch,
+                  pullRequest: layer.pullRequest,
+                  status: 'pending',
+                  detail: 'GitHub has not reported a result yet; refresh to read this request',
+                  mergedOid: null,
+                  queue: null,
+                  requestUuid: 'fixture-request-1',
+                },
+              ],
+            },
           })
         }
       }
@@ -1084,28 +1099,34 @@ export function installFixtureControl(options: {
     },
     mergeStatus: () => {
       record('mergeStatus', [])
-      return answer<MergeStatus>('mergeStatus', () => {
-        const base = scenario.mergeStatus ?? mergeStatus
+      const scope = captureOperationScope()
+      const base = structuredClone(scenario.mergeStatus ?? null)
+      const read = mergeStatusReads++
+      return answer('mergeStatus', () => {
+        if (!base) return { scope, source: 'journal-read' as const, progress: null }
         // The queue lands the group between reads, so a refresh visibly replaces the queued
         // layer with what GitHub now reports for it; a later read fails, standing in for a
         // transport error that must not erase the last result GitHub reported.
-        const read = mergeStatusReads++
         if (read === 2) throw new Error('GitHub is unreachable')
-        if (read === 0) return base
+        if (read === 0) return { scope, source: 'journal-read' as const, progress: base }
         return {
-          ...base,
-          layers: base.layers.map((layer) =>
-            layer.status === 'enqueued'
-              ? {
-                  ...layer,
-                  status: 'merged' as const,
-                  detail: 'Merged on GitHub as 4444444444',
-                  mergedOid: '4444444444444444444444444444444444444444',
-                  queue: { ...layer.queue!, outcome: 'merged' as const },
-                }
-              : layer,
-          ),
-          message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
+          scope,
+          source: 'journal-read' as const,
+          progress: {
+            ...base,
+            layers: base.layers.map((layer) =>
+              layer.status === 'enqueued'
+                ? {
+                    ...layer,
+                    status: 'merged' as const,
+                    detail: 'Merged on GitHub as 4444444444',
+                    mergedOid: '4444444444444444444444444444444444444444',
+                    queue: { ...layer.queue!, outcome: 'merged' as const },
+                  }
+                : layer,
+            ),
+            message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
+          },
         }
       })
     },
@@ -1124,6 +1145,28 @@ export function installFixtureControl(options: {
       mergeListeners.add(listener)
       return () => {
         mergeListeners.delete(listener)
+      }
+    },
+    submitStackProgress: () => {
+      record('submitStackProgress', [])
+      const scope = captureOperationScope()
+      const progress =
+        publication &&
+        publication.scope.repositoryPath === scope.repositoryPath &&
+        publication.scope.remoteUrl === scope.remoteUrl &&
+        publication.scope.authority === scope.authority
+          ? structuredClone(publication.progress)
+          : null
+      return answer('submitStackProgress', () => ({
+        scope,
+        source: 'journal-read' as const,
+        progress,
+      }))
+    },
+    onSubmitStackProgress: (listener) => {
+      publicationListeners.add(listener)
+      return () => {
+        publicationListeners.delete(listener)
       }
     },
     reviewHeadline: (number) => {
@@ -2130,6 +2173,14 @@ export function installFixtureControl(options: {
       oneShotAnswers.clear()
       released.clear()
       waiting.length = 0
+    },
+    operationScope: captureOperationScope,
+    pushPublication(event) {
+      publication = structuredClone(event)
+      for (const listener of publicationListeners) listener(event)
+    },
+    pushMergeProgress(event) {
+      publishMergeProgress(event)
     },
     pushFreshness(value) {
       push('repository:remote-status', value)

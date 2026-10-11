@@ -1,3 +1,4 @@
+import { cliAuthority, type OperationScope } from '@git-stacks/shared/operation-scope'
 import {
   app,
   BrowserWindow,
@@ -207,6 +208,7 @@ if (!app.isPackaged && process.env.GIT_STACKS_USER_DATA) {
 
 let window: BrowserWindow | null = null
 let activeRepository: string | null = null
+let progressOwner: OperationScope | null = null
 let recents: RecentRepository[] = []
 /**
  * Moves whenever the registered repository list changes, which a read cannot see
@@ -1658,6 +1660,8 @@ function installHandlers() {
   })
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     const root = repository()
+    const generation = hostGeneration
+    const authority = cliAuthority(configuredHost().host, githubCli().current())
     try {
       // A mutation claims the repository lane: background reads end first, so a
       // stage or a commit never waits on a network that is not answering.
@@ -1671,7 +1675,21 @@ function installHandlers() {
               // The merge tool configured in Settings wins over Git's own
               // configuration for the one action that consults it.
               const settings = (await readSettingsFile(settingsFile())).settings
-              return runAction(root, action, settings.git.mergeTool)
+              if (
+                action.type === 'submitStack' ||
+                action.type === 'submitStackRetry' ||
+                action.type === 'submitStackDismiss' ||
+                action.type === 'executeStack'
+              ) {
+                const remoteUrl = await getOriginUrl(root)
+                if (generation !== hostGeneration) throw new CommandCancelled()
+                progressOwner = { repositoryPath: root, remoteUrl, authority }
+              }
+              try {
+                return await runAction(root, action, settings.git.mergeTool)
+              } finally {
+                progressOwner = null
+              }
             }),
           root,
         ),
@@ -1724,24 +1742,58 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:submit-stack-progress', (event) => {
-    return readRepository((root) => getSubmitStackProgress(root))
+    const authority = cliAuthority(configuredHost().host, githubCli().current())
+    return readRepository(
+      async (root, signal) => {
+        const scope = {
+          repositoryPath: root,
+          remoteUrl: await getOriginUrl(root, signal),
+          authority,
+        }
+        return {
+          scope,
+          source: 'journal-read' as const,
+          progress: await getSubmitStackProgress(root),
+        }
+      },
+      'submit-stack-progress',
+      'github',
+    )
   })
   // Read-only: a queue outcome or a still-running request is read from the journal and GitHub,
   // never by asking for another merge.
   ipcMain.handle('repository:merge-status', (event) => {
-    return readRepository((root) => getMergeStatus(root), 'merge-status', 'github')
+    const authority = cliAuthority(configuredHost().host, githubCli().current())
+    return readRepository(
+      async (root, signal) => {
+        const scope = {
+          repositoryPath: root,
+          remoteUrl: await getOriginUrl(root, signal),
+          authority,
+        }
+        return { scope, source: 'journal-read' as const, progress: await getMergeStatus(root) }
+      },
+      'merge-status',
+      'github',
+    )
   })
   // A running submission pushes its own progress. The renderer cannot poll for it: the read
 
   // queues behind the very action that is producing the steps, so it would only ever observe
   // the finished state.
   onPublishProgress((progress: PublishProgress | null) => {
-    window?.webContents.send('submit-stack-progress', progress)
+    if (!progressOwner) return
+    window?.webContents.send('submit-stack-progress', {
+      scope: progressOwner,
+      source: 'action',
+      progress,
+    })
   })
   // A merge runs on GitHub's side, so its result arrives asynchronously. Pushing it is the
   // only way the dialog can follow it: a read would queue behind the merge itself.
   onMergeProgress((progress: MergeProgress | null) => {
-    window?.webContents.send('merge-progress', progress)
+    if (!progressOwner) return
+    window?.webContents.send('merge-progress', { scope: progressOwner, source: 'action', progress })
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     return readRepository(

@@ -11,6 +11,102 @@ const preferenceScope = {
   account: graphIndex(250).viewer!,
 }
 
+test('shared graph presets retain exactly one selection through arrow and activation keys', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  const presets = page.getByRole('group', { name: 'Repository PR views' })
+  const mine = presets.getByRole('button', { name: 'My PRs', exact: true })
+  const requested = presets.getByRole('button', { name: 'Review requested', exact: true })
+  const current = presets.getByRole('button', { name: 'Current branch', exact: true })
+  await mine.click()
+  await expect(presets.locator('[aria-pressed="true"]')).toHaveCount(1)
+  await mine.press('ArrowRight')
+  await expect(requested).toBeFocused()
+  await requested.press('Space')
+  await expect(requested).toHaveAttribute('aria-pressed', 'true')
+  await expect(presets.locator('[aria-pressed="true"]')).toHaveCount(1)
+  await requested.press('ArrowRight')
+  await expect(current).toBeFocused()
+  await current.press('Enter')
+  await expect(current).toHaveAttribute('aria-pressed', 'true')
+  await expect(presets.locator('[aria-pressed="true"]')).toHaveCount(1)
+  await expect(
+    page.locator('[data-graph-outline-row]').filter({ hasText: 'refs/heads/graph/change-1' }),
+  ).toHaveCount(1)
+  await current.press('Space')
+  await expect(current).toHaveAttribute('aria-pressed', 'true')
+  await expect(presets.locator('[aria-pressed="true"]')).toHaveCount(1)
+})
+
+test('graph Fields expose bounded labels and collapse responds to the keyboard', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  await page.getByText('Saved view preferences', { exact: true }).click()
+  const search = page.getByRole('searchbox', { name: 'Search indexed PRs', exact: true })
+  const name = page.getByRole('textbox', { name: 'View name', exact: true })
+  await expect(search).toHaveAttribute('maxlength', '256')
+  await expect(name).toHaveAttribute('maxlength', '80')
+  await search.fill('x'.repeat(257))
+  await expect(search).toHaveValue('x'.repeat(256))
+  await name.fill('n'.repeat(81))
+  await expect(name).toHaveValue('n'.repeat(80))
+  await search.fill('')
+  const collapse = page.getByRole('checkbox', { name: 'Collapse linear runs', exact: true })
+  await expect(collapse).toBeChecked()
+  await collapse.focus()
+  await collapse.press('Space')
+  await expect(collapse).not.toBeChecked()
+  await collapse.press('Space')
+  await expect(collapse).toBeChecked()
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
+})
+
+test('Refresh and Save keep stable names and one shared busy marker during actual requests', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  const refresh = page.getByRole('button', { name: 'Refresh index', exact: true })
+  await expect(refresh).toBeEnabled()
+  await page.evaluate(() => window.fixture.hold('prIndex'))
+  await refresh.click()
+  await expect(refresh).toHaveAccessibleName('Refresh index')
+  await expect(refresh).toHaveAttribute('aria-busy', 'true')
+  await expect(refresh).toBeDisabled()
+  await expect(refresh.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+  await expect(refresh.locator('.lucide-loader-circle')).toHaveCount(1)
+  expect(
+    (await getDoubleCalls(page)).filter((call) => call.call === 'prIndex').at(-1)?.args,
+  ).toEqual([{ refresh: true }])
+  await page.evaluate(() => window.fixture.release('prIndex'))
+  await expect(refresh).toBeEnabled()
+  await expect(refresh.locator('[data-slot="button-spinner"]')).toHaveCount(0)
+  await page.getByText('Saved view preferences', { exact: true }).click()
+  await page.getByRole('textbox', { name: 'View name', exact: true }).fill('Keyboard view')
+  await page.evaluate(() => window.fixture.hold('saveGraphPreferences'))
+  const save = page.getByRole('button', { name: 'Save view', exact: true })
+  await save.click()
+  await expect(save).toHaveAccessibleName('Save view')
+  await expect(save).toHaveAttribute('aria-busy', 'true')
+  await expect(save).toBeDisabled()
+  await expect(save.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+  await expect(save.locator('.lucide-loader-circle')).toHaveCount(1)
+  await expect(
+    page.getByRole('button', { name: 'Reset saved view', exact: true }),
+  ).not.toHaveAttribute('aria-busy', 'true')
+  await page.evaluate(() => window.fixture.release('saveGraphPreferences'))
+  await expect(save).toBeEnabled()
+  await expect(save.locator('[data-slot="button-spinner"]')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Restore saved view', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'View name', exact: true })).toHaveValue(
+    'Keyboard view',
+  )
+})
+
 test('outline retains keyboard row entry after scrolling and source shrinkage', async ({
   page,
 }) => {
@@ -181,7 +277,7 @@ for (const colorScheme of ['light', 'dark'] as const) {
     test(`production panes remain operable ${colorScheme} ${size}`, async ({ page }) => {
       await openGallery(page, { scenario: 'graph-1000', colorScheme, viewport })
       await switchDestination(page, 'stacks')
-      await expect(page.getByRole('navigation', { name: 'Repository PR views' })).toBeVisible()
+      await expect(page.getByRole('group', { name: 'Repository PR views' })).toBeVisible()
       await page.getByRole('button', { name: 'Current branch', exact: true }).click()
       await expect(
         page.locator('[data-graph-outline-row]').filter({ hasText: 'refs/heads/graph/change-1' }),
@@ -498,11 +594,40 @@ for (const boundary of ['host', 'repository', 'account', 'unknown-account'] as c
           }
         : {}),
     })
+    if (boundary !== 'unknown-account') {
+      await page.getByRole('textbox', { name: 'View name', exact: true }).fill('Replacement view')
+      await expect(page.getByRole('button', { name: 'Save view', exact: true })).toBeEnabled()
+      await expect(
+        page.getByRole('button', { name: 'Reset saved view', exact: true }),
+      ).toBeEnabled()
+    }
     await page.evaluate(() => window.fixture.release('saveGraphPreferences'))
     await expect(page.getByRole('button', { name: 'Restore saved view' })).toBeDisabled()
     await expect(search).toHaveValue('')
   })
 }
+
+test('a retired reset does not lock preference actions in the replacement account', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-preferences' })
+  await switchDestination(page, 'stacks')
+  await page.getByText('Saved view preferences', { exact: true }).click()
+  await page.evaluate(() => window.fixture.hold('resetGraphPreferences'))
+  await page.getByRole('button', { name: 'Reset saved view', exact: true }).click()
+  await page.evaluate((index) => window.fixture.pushPrIndex(index), {
+    ...graphIndex(250),
+    viewer: 'replacement-account',
+  })
+  const name = page.getByRole('textbox', { name: 'View name', exact: true })
+  await expect(name).toHaveValue('')
+  await name.fill('Replacement view')
+  await expect(page.getByRole('button', { name: 'Save view', exact: true })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Reset saved view', exact: true })).toBeEnabled()
+  await page.evaluate(() => window.fixture.release('resetGraphPreferences'))
+  await expect(name).toHaveValue('Replacement view')
+  await expect(page.getByRole('button', { name: 'Restore saved view' })).toBeDisabled()
+})
 
 test('held preference answers and failures use the existing deterministic controls', async ({
   page,
@@ -894,6 +1019,13 @@ test('graph inspector exposes restack, sync, publish, merge and surgery actions 
   })
   await expect(surgeryDisclosure).toBeVisible()
   await expect(surgeryDisclosure).toHaveAttribute('aria-expanded', 'false')
+  await expect(
+    inspector.getByRole('button', { name: 'Insert layer above…', exact: true }),
+  ).toHaveCount(0)
+  await expect(inspector.getByRole('button', { name: 'Remove layer…', exact: true })).toHaveCount(0)
+  expect(
+    (await getDoubleCalls(page)).filter((call) => call.call === 'surgeryPreview'),
+  ).toHaveLength(0)
   await surgeryDisclosure.focus()
   await surgeryDisclosure.press('Enter')
   await expect(surgeryDisclosure).toHaveAttribute('aria-expanded', 'true')
@@ -929,6 +1061,13 @@ test('graph inspector exposes restack, sync, publish, merge and surgery actions 
     (await getDoubleCalls(page)).filter((call) => call.call === 'surgeryPreview').at(-1)?.args,
   ).toEqual([{ kind: 'remove', branch: 'graph/change-1' }])
   await expect(page.getByRole('dialog')).toHaveCount(0)
+  await surgeryDisclosure.focus()
+  await surgeryDisclosure.press('Space')
+  await expect(surgeryDisclosure).toHaveAttribute('aria-expanded', 'false')
+  await expect(
+    inspector.getByRole('button', { name: 'Insert layer above…', exact: true }),
+  ).toHaveCount(0)
+  await expect(inspector.getByRole('button', { name: 'Remove layer…', exact: true })).toHaveCount(0)
   expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
 })
 

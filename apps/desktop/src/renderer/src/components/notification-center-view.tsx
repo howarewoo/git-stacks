@@ -5,7 +5,6 @@ import {
   CheckCheck,
   CircleCheck,
   ExternalLink,
-  LoaderCircle,
   RefreshCw,
   Trash2,
 } from 'lucide-react'
@@ -397,16 +396,13 @@ export function NotificationCenterView({
             <>
               <Button
                 disabled={busy}
+                loading={busy}
                 onClick={onRefresh}
                 size="sm"
                 tooltip={`Ask GitHub for this inbox. GitHub asked to be polled no more than once every ${status.poll.pollIntervalSeconds}s, so a request before that returns the list it last confirmed.`}
-                variant="accent"
+                variant="secondary"
               >
-                {busy ? (
-                  <LoaderCircle className="size-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="size-3.5" />
-                )}
+                <RefreshCw aria-hidden="true" className="size-3.5" />
                 Refresh
               </Button>
               <Button
@@ -430,7 +426,7 @@ export function NotificationCenterView({
               onClick={onRemoveCredential}
               size="sm"
               tooltip="Remove this module's credential. Sign-in, pull requests, stacks, and reviews are untouched."
-              variant="secondary"
+              variant="danger"
             >
               <Trash2 className="size-3.5" />
               Remove credential

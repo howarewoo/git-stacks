@@ -481,6 +481,10 @@ test.describe('Notification Center states and transitions', () => {
     await holdDoubleCall(page, 'notificationRefresh')
     const before = await getDoubleCalls(page)
     await page.getByRole('button', REFRESH).click()
+    const refresh = page.getByRole('button', REFRESH)
+    await expect(refresh).toHaveAttribute('aria-busy', 'true')
+    await expect(refresh.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+    await expect(refresh.locator('.lucide-refresh-cw')).toHaveCount(1)
     await expect
       .poll(
         async () =>

@@ -4,7 +4,6 @@ import {
   ChevronRight,
   GitCommitHorizontal,
   GitPullRequest,
-  LoaderCircle,
   Plus,
   RotateCcw,
   ShieldCheck,
@@ -242,12 +241,9 @@ export function ChangesView({
           onClick={onStash}
           size="sm"
           variant="secondary"
+          loading={busyAction === 'Stash changes'}
         >
-          {busyAction === 'Stash changes' ? (
-            <LoaderCircle className="size-3.5 animate-spin" />
-          ) : (
-            <Archive className="size-3.5" />
-          )}
+          <Archive className="size-3.5" />
           Stash changes
         </Button>
       </div>
@@ -454,7 +450,8 @@ export function ChangesView({
               Boolean(actionBlockReason(snapshot.capabilities, 'commit'))
             }
             type="submit"
-            variant="accent"
+            variant="default"
+            loading={busyAction === 'Commit staged changes'}
             tooltip={
               actionBlockReason(snapshot.capabilities, 'commit') ??
               (commitAmend
@@ -462,11 +459,7 @@ export function ChangesView({
                 : 'Create a local commit from staged changes only. Unstaged edits stay in the working tree; nothing is pushed.')
             }
           >
-            {busyAction === 'Commit staged changes' ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <GitCommitHorizontal className="size-3.5" />
-            )}
+            <GitCommitHorizontal className="size-3.5" />
             {commitAmend ? 'Review amend…' : 'Commit'}
           </Button>
         </div>
@@ -650,13 +643,10 @@ export function StashesView({
           }
           onClick={onStash}
           size="sm"
-          variant="accent"
+          variant="default"
+          loading={busyAction === 'Stash changes'}
         >
-          {busyAction === 'Stash changes' ? (
-            <LoaderCircle className="size-3.5 animate-spin" />
-          ) : (
-            <Archive className="size-3.5" />
-          )}
+          <Archive className="size-3.5" />
           Stash current changes
         </Button>
       </div>

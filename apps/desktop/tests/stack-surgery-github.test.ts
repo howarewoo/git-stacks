@@ -333,6 +333,8 @@ test('a retarget that landed before its response was lost is recognised, not rep
     )
     const progress = await getStackProgress(harness.repo)
     assert.deepEqual(progress?.remaining, [], 'the replay finished; only remote work is left')
+    assert.ok(progress?.surgery, 'recovery identifies surgery independently of restack kind')
+    assert.ok(progress.surgery.pullRequests.some((step) => step.action === 'retarget'))
     assert.ok(
       git(harness, ['for-each-ref', 'refs/git-stacks/']).includes('refs/git-stacks/'),
       'the original tips stay recoverable while the run is unfinished',
@@ -726,6 +728,19 @@ test('an interrupted remove keeps a journal that loads, and aborting restores th
     // layer still in place: the recovery banner has to be able to read all of it.
     const progress = await getStackProgress(harness.repo)
     assert.equal(progress?.kind, 'restack')
+    assert.ok(progress?.surgery, 'captured remote effects remain available to persistent recovery')
+    assert.ok(
+      progress.surgery.pullRequests.some(
+        (step) => step.number === layers.two.number && step.action === 'close',
+      ),
+    )
+    assert.equal(
+      progress.surgery.pullRequests.find(
+        (step) => step.number === layers.two.number && step.action === 'close',
+      )?.status,
+      'pending',
+      'a lost response must not be presented as a confirmed completed remote effect',
+    )
     assert.match(progress?.message ?? '', /remote step/u)
     assert.ok(
       git(harness, ['for-each-ref', 'refs/git-stacks/']).includes('refs/git-stacks/'),
