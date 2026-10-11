@@ -12,6 +12,113 @@ function tokenValue(value: string): string {
   return tokenValue(resolved)
 }
 
+export function TypesetSpecimen() {
+  return (
+    <article className="typeset typeset-docs" data-typeset-specimen>
+      <h3>Read the captured scope</h3>
+      <p>
+        A review note is reading content, not an operation. <strong>Inspect the identities</strong>{' '}
+        before following a <a href="#git-compositions">local Git composition</a>.
+      </p>
+      <p>
+        Use <code>git diff main...feature/quiet-graph</code> to describe a comparison. Long paths
+        such as{' '}
+        <code>packages/shared/src/review/captured-scope-and-confirmation-boundaries.ts</code> wrap
+        with the surrounding prose.
+      </p>
+      <h4>Before confirmation</h4>
+      <ol>
+        <li>Name the captured branch and base.</li>
+        <li>
+          Explain the scope.
+          <ul>
+            <li>Included changes stay explicit.</li>
+            <li>Excluded branches remain untouched.</li>
+          </ul>
+        </li>
+        <li>Keep cancellation available.</li>
+      </ol>
+      <blockquote>
+        <p>Unavailable checks never imply passing. Keep the uncertainty beside the next step.</p>
+      </blockquote>
+      <pre>
+        <code>
+          {
+            'const scope = { base: \"main\", branch: \"feature/quiet-graph\" }\n// Documentation only; no Git operation is dispatched.'
+          }
+        </code>
+      </pre>
+      <div
+        className="typeset-scroll"
+        tabIndex={0}
+        role="region"
+        aria-label="Scrollable captured scope example"
+      >
+        <table>
+          <caption>Illustrative captured identities, not live repository state</caption>
+          <thead>
+            <tr>
+              <th>Branch</th>
+              <th>Base</th>
+              <th>Review boundary</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>feature/quiet-graph</td>
+              <td>main</td>
+              <td>Inspect the captured comparison before confirmation</td>
+            </tr>
+            <tr>
+              <td>feature/review-notes</td>
+              <td>feature/quiet-graph</td>
+              <td>Excluded from this local example</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <hr />
+      <h4>Using the shared stylesheet</h4>
+      <p>
+        <code>styles.css</code> already includes Typeset. The standalone import supports consumers
+        that only need prose. Layout, not Typeset, owns the reading measure.
+      </p>
+      <pre>
+        <code>
+          {
+            '@import \"tailwindcss\";\n@import \"@git-stacks/ui/styles.css\";\n/* Or import \"@git-stacks/ui/typeset.css\" beside your own tokens. */\n\n<article className=\"typeset typeset-docs\">{semanticHTML}</article>\n<div className=\"typeset typeset-compact\">{note}</div>'
+          }
+        </code>
+      </pre>
+      <dl>
+        <dt>Rhythm</dt>
+        <dd>
+          <code>--typeset-size</code>, <code>--typeset-leading</code>, and{' '}
+          <code>--typeset-flow</code> tune size, leading, and block spacing.
+        </dd>
+        <dt>Fonts</dt>
+        <dd>
+          <code>--typeset-font-body</code>, <code>--typeset-font-heading</code>, and{' '}
+          <code>--typeset-font-mono</code> use the existing local font roles.
+        </dd>
+      </dl>
+      <p className="text-lg" data-typeset-utility>
+        Utilities override prose: this paragraph uses text-lg.
+      </p>
+      <div className="not-typeset" data-typeset-optout>
+        <UI.Button variant="secondary">Untouched shared control</UI.Button>
+        <div className="typeset">
+          <p>Nested prose activation remains opted out.</p>
+        </div>
+      </div>
+      <p>
+        Use <code>not-typeset</code> or <code>data-not-typeset</code> for an entire component
+        subtree. Semantic HTML needs no markdown parser.
+      </p>
+    </article>
+  )
+}
+
 export function TypographySpecimen() {
   return (
     <div className="grid gap-4">

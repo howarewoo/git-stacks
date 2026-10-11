@@ -53,6 +53,11 @@ body {
 }
 
 .catalog-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--gs-semantic-surface-canvas);
+  padding-block: var(--gs-semantic-space-2);
   display: flex;
   align-items: center;
   gap: var(--gs-semantic-space-2);
@@ -60,6 +65,15 @@ body {
   color: var(--gs-semantic-text-secondary);
   font-size: var(--gs-semantic-type-label-size);
   line-height: var(--gs-semantic-type-label-line);
+}
+
+.typeset[data-typeset-specimen] {
+  max-width: 72ch;
+}
+
+#home:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 4px;
 }
 
 .design-nav [data-slot="sidebar-header"] {
@@ -142,6 +156,8 @@ body {
 }
 
 .catalog-introduction {
+  /* Home's native fragment includes shell inset, main inset, toolbar and its gap. */
+  scroll-margin-top: calc(60px + 3 * var(--gs-semantic-space-3));
   background: var(--gs-semantic-surface-content);
   border-radius: var(--gs-semantic-radius-workbench);
   padding: var(--gs-semantic-space-6);
@@ -235,7 +251,7 @@ body {
 
 .catalog-results {
   margin-top: var(--gs-semantic-space-8);
-  scroll-margin-top: var(--gs-semantic-space-6);
+  scroll-margin-top: calc(var(--gs-semantic-space-6) + 60px);
   color: var(--gs-semantic-text-secondary);
   font-size: var(--gs-semantic-type-metadata-size);
   line-height: var(--gs-semantic-type-metadata-line);
@@ -247,7 +263,7 @@ body {
 }
 
 .design-entry {
-  scroll-margin-top: var(--gs-semantic-space-6);
+  scroll-margin-top: calc(var(--gs-semantic-space-6) + 60px);
   padding-top: var(--gs-semantic-space-6);
   padding-bottom: var(--gs-semantic-space-8);
   min-width: 0;
@@ -383,7 +399,6 @@ body {
 
 .design-main code,
 .git-row code {
-  font-family: var(--gs-semantic-font-mono);
   overflow-wrap: anywhere;
 }
 

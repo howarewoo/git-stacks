@@ -48,7 +48,7 @@ import { navigationSpecimens } from './navigation-specimens'
 import { formSpecimens } from './form-specimens'
 import { displaySpecimens } from './display-specimens'
 import { overlaySpecimens } from './overlay-specimens'
-import { Foundations, GitCompositions, TypographySpecimen } from './foundations'
+import { Foundations, GitCompositions, TypographySpecimen, TypesetSpecimen } from './foundations'
 import { AdoptionExample } from './adoption-examples'
 
 const ADOPTION_RECIPES = [
@@ -95,6 +95,7 @@ export const SPECIMENS: Record<string, ComponentType> = {
   ...displaySpecimens,
   ...overlaySpecimens,
   typography: TypographySpecimen,
+  typeset: TypesetSpecimen,
 }
 
 export default function App() {
@@ -116,7 +117,8 @@ function CatalogWorkspace() {
   const [commandOpen, setCommandOpen] = useState(false)
   const [theme, setTheme] = useState('system')
   const [density, setDensity] = useState('standard')
-  const [activeId, setActiveId] = useState(() => location.hash.slice(1) || 'foundations')
+  const [foundationsOpen, setFoundationsOpen] = useState(true)
+  const [activeId, setActiveId] = useState(() => location.hash.slice(1) || 'home')
   const [expandedGroup, setExpandedGroup] = useState<string | null>(
     () =>
       COMPONENT_MANIFEST.find((entry) => entry.id === location.hash.slice(1))?.group ?? 'Actions',
@@ -125,14 +127,25 @@ function CatalogWorkspace() {
   const resultsRef = useRef<HTMLParagraphElement>(null)
   useEffect(() => {
     const syncAnchor = () => {
-      const id = location.hash.slice(1) || 'foundations'
+      const id = location.hash.slice(1) || 'home'
       setActiveId(id)
+      searchOrigin.current = null
+      setSearch('')
+      requestAnimationFrame(() => {
+        const destination = document.getElementById(id)
+        if (id === 'home') window.scrollTo({ top: 0, behavior: 'instant' })
+        else destination?.scrollIntoView({ block: 'start' })
+        destination?.focus({ preventScroll: true })
+      })
       const group = COMPONENT_MANIFEST.find((entry) => entry.id === id)?.group
       if (group) setExpandedGroup(group)
     }
     window.addEventListener('hashchange', syncAnchor)
     if (location.hash) {
-      document.getElementById(location.hash.slice(1))?.scrollIntoView({ block: 'start' })
+      requestAnimationFrame(() => {
+        if (location.hash === '#home') window.scrollTo({ top: 0, behavior: 'instant' })
+        else document.getElementById(location.hash.slice(1))?.scrollIntoView({ block: 'start' })
+      })
     }
     return () => {
       window.removeEventListener('hashchange', syncAnchor)
@@ -190,10 +203,9 @@ function CatalogWorkspace() {
   }, [query])
   useEffect(() => {
     const sections = Array.from(
-      document.querySelectorAll<HTMLElement>(
-        '#catalog > section[id], .catalog-matches > section[id]',
-      ),
+      document.querySelectorAll<HTMLElement>('#home, #catalog section[id]'),
     )
+    if (query) sections.splice(0, 1)
     setActiveId((current) =>
       sections.some((section) => section.id === current) ? current : (sections[0]?.id ?? ''),
     )
@@ -203,7 +215,9 @@ function CatalogWorkspace() {
       observer?.disconnect()
       intersecting.clear()
       // Follow the heading inset, beyond the preceding section's trailing edge.
-      const style = getComputedStyle(sections[0])
+      const style = getComputedStyle(
+        sections.find((section) => section.tagName === 'SECTION') ?? sections[0],
+      )
       const readingLine = parseFloat(style.scrollMarginTop) + parseFloat(style.paddingTop)
       observer = new IntersectionObserver(
         (entries) => {
@@ -245,7 +259,8 @@ function CatalogWorkspace() {
     requestAnimationFrame(() => {
       location.hash = id
       const destination = document.getElementById(id)
-      destination?.scrollIntoView({ block: 'start' })
+      if (id === 'home') window.scrollTo({ top: 0, behavior: 'instant' })
+      else destination?.scrollIntoView({ block: 'start' })
       destination?.focus({ preventScroll: true })
     })
   }
@@ -274,6 +289,13 @@ function CatalogWorkspace() {
             aria-keyshortcuts="Control+k Meta+k"
           >
             Command navigation · Ctrl/⌘ K
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => navigate('home')}
+            aria-current={activeId === 'home' ? 'location' : undefined}
+          >
+            Home
           </Button>
           <div className="catalog-settings">
             <label>
@@ -312,23 +334,6 @@ function CatalogWorkspace() {
                     <SidebarMenuButton
                       render={
                         <a
-                          href="#foundations"
-                          aria-current={activeId === 'foundations' ? 'location' : undefined}
-                        />
-                      }
-                      isActive={activeId === 'foundations'}
-                      onClick={(event) => {
-                        event.preventDefault()
-                        navigate('foundations')
-                      }}
-                    >
-                      Foundations
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                  <SidebarMenuItem>
-                    <SidebarMenuButton
-                      render={
-                        <a
                           href="#git-compositions"
                           aria-current={activeId === 'git-compositions' ? 'location' : undefined}
                         />
@@ -345,56 +350,83 @@ function CatalogWorkspace() {
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
-            {MANIFEST_GROUPS.filter((group) => visible.some((entry) => entry.group === group)).map(
-              (group) => (
-                <Collapsible
-                  key={group}
-                  open={!!query || expandedGroup === group}
-                  onOpenChange={(open) => setExpandedGroup(open ? group : null)}
-                >
-                  <SidebarGroup className="p-0">
-                    <SidebarGroupLabel
-                      render={<CollapsibleTrigger />}
-                      className="catalog-group-trigger"
-                      aria-label={`${group} components`}
-                    >
-                      {group}
-                      <span aria-hidden="true">
-                        {visible.filter((entry) => entry.group === group).length}
-                        <ChevronDown className="size-4" />
-                      </span>
-                    </SidebarGroupLabel>
-                    <CollapsibleContent>
-                      <SidebarGroupContent>
-                        <SidebarMenu>
-                          {visible
-                            .filter((entry) => entry.group === group)
-                            .map((entry) => (
-                              <SidebarMenuItem key={entry.id}>
-                                <SidebarMenuButton
-                                  render={
-                                    <a
-                                      href={`#${entry.id}`}
-                                      aria-current={activeId === entry.id ? 'location' : undefined}
-                                    />
-                                  }
-                                  isActive={activeId === entry.id}
-                                  onClick={(event) => {
-                                    event.preventDefault()
-                                    navigate(entry.id)
-                                  }}
-                                >
-                                  {entry.name}
-                                </SidebarMenuButton>
-                              </SidebarMenuItem>
-                            ))}
-                        </SidebarMenu>
-                      </SidebarGroupContent>
-                    </CollapsibleContent>
-                  </SidebarGroup>
-                </Collapsible>
-              ),
-            )}
+            {MANIFEST_GROUPS.filter(
+              (group) => group === 'Foundations' || visible.some((entry) => entry.group === group),
+            ).map((group) => (
+              <Collapsible
+                key={group}
+                open={
+                  !!query ||
+                  (group === 'Foundations'
+                    ? foundationsOpen || expandedGroup === group
+                    : expandedGroup === group)
+                }
+                onOpenChange={(open) => {
+                  if (group === 'Foundations') setFoundationsOpen(open)
+                  setExpandedGroup(open ? group : null)
+                }}
+              >
+                <SidebarGroup className="p-0">
+                  <SidebarGroupLabel
+                    render={<CollapsibleTrigger />}
+                    className="catalog-group-trigger"
+                    aria-label={`${group} components`}
+                  >
+                    {group}
+                    <span aria-hidden="true">
+                      {visible.filter((entry) => entry.group === group).length}
+                      <ChevronDown className="size-4" />
+                    </span>
+                  </SidebarGroupLabel>
+                  <CollapsibleContent>
+                    <SidebarGroupContent>
+                      <SidebarMenu>
+                        {group === 'Foundations' && (
+                          <SidebarMenuItem>
+                            <SidebarMenuButton
+                              render={
+                                <a
+                                  href="#foundations"
+                                  aria-current={activeId === 'foundations' ? 'location' : undefined}
+                                />
+                              }
+                              isActive={activeId === 'foundations'}
+                              onClick={(event) => {
+                                event.preventDefault()
+                                navigate('foundations')
+                              }}
+                            >
+                              Tokens
+                            </SidebarMenuButton>
+                          </SidebarMenuItem>
+                        )}
+                        {visible
+                          .filter((entry) => entry.group === group)
+                          .map((entry) => (
+                            <SidebarMenuItem key={entry.id}>
+                              <SidebarMenuButton
+                                render={
+                                  <a
+                                    href={`#${entry.id}`}
+                                    aria-current={activeId === entry.id ? 'location' : undefined}
+                                  />
+                                }
+                                isActive={activeId === entry.id}
+                                onClick={(event) => {
+                                  event.preventDefault()
+                                  navigate(entry.id)
+                                }}
+                              >
+                                {entry.name}
+                              </SidebarMenuButton>
+                            </SidebarMenuItem>
+                          ))}
+                      </SidebarMenu>
+                    </SidebarGroupContent>
+                  </CollapsibleContent>
+                </SidebarGroup>
+              </Collapsible>
+            ))}
           </nav>
         </SidebarContent>
       </Sidebar>
@@ -402,16 +434,24 @@ function CatalogWorkspace() {
         <div className="catalog-toolbar">
           <SidebarTrigger aria-label="Browse components" title="Toggle catalog sidebar" />
           <span>Component catalog</span>
+          <Button
+            variant="ghost"
+            onClick={() => navigate('home')}
+            aria-current={activeId === 'home' ? 'location' : undefined}
+          >
+            Home
+          </Button>
         </div>
-        <header className="catalog-introduction">
+        <header id="home" className="catalog-introduction" tabIndex={-1}>
           <h2>The Quiet Workbench</h2>
           <p>
             Shared production controls, canonical tokens, and local interaction examples. Change the
             implementation once; inspect it here and in desktop.
           </p>
           <p>
-            63 components + Typography · reconciled with shadcn Base UI base-nova on {MANIFEST_DATE}
-            . Catalog-only recipes demonstrate capabilities, not new desktop product workflows.
+            63 components + Typography + Typeset · reconciled with shadcn Base UI base-nova on{' '}
+            {MANIFEST_DATE}. Catalog-only recipes demonstrate capabilities, not new desktop product
+            workflows.
           </p>
           <h3>Start with the interaction</h3>
           <dl className="catalog-recipes">
@@ -443,7 +483,7 @@ function CatalogWorkspace() {
               </div>
             ))}
           </dl>
-          <details>
+          <details className="typeset typeset-compact">
             <summary>Upstream reconciliation and owned adaptations</summary>
             <p>{UPSTREAM_RECONCILIATION.inventory}</p>
             <ul>
@@ -456,60 +496,57 @@ function CatalogWorkspace() {
             </a>
           </details>
         </header>
-        {!query && (
-          <>
-            <Foundations />
-            <GitCompositions />
-          </>
-        )}
+        {!query && <Foundations />}
         <div className="catalog-matches" data-filtered={query ? 'true' : undefined}>
           <p id="catalog-results" ref={resultsRef} className="catalog-results" role="status">
             {visible.length} component entries
           </p>
-          {visible.map((entry) => {
-            const Specimen = SPECIMENS[entry.id]
-            return (
-              <section
-                id={entry.id}
-                tabIndex={-1}
-                key={entry.id}
-                className="design-entry"
-                data-component={entry.id}
-              >
-                <div className="design-entry-heading">
-                  <h2>{entry.name}</h2>
-                  <span>{entry.group}</span>
-                </div>
-                <p className="design-entry-summary">{entry.summary}</p>
-                <p className="design-entry-usage">{entry.usage}</p>
-                <div className="design-specimen" data-specimen={entry.id}>
-                  <Specimen />
-                </div>
-                <details>
-                  <summary>Usage, anatomy, keyboard and tokens</summary>
-                  <dl>
-                    <dt>Anatomy and API</dt>
-                    <dd>{entry.anatomy}</dd>
-                    <dt>Keyboard and accessibility</dt>
-                    <dd>{entry.keyboard}</dd>
-                    <dt>Canonical tokens</dt>
-                    <dd className="design-token-list">
-                      {entry.tokens.map((token) => (
-                        <code key={token}>{token}</code>
-                      ))}
-                    </dd>
-                  </dl>
-                  <pre className="design-code">{entry.importExample}</pre>
-                  <AdoptionExample id={entry.id} />
-                  <p>{entry.reconciledWith}</p>
-                  {entry.catalogOnlyNotice && <p>{entry.catalogOnlyNotice}</p>}
-                  <a href={entry.upstreamDoc} target="_blank" rel="noreferrer">
-                    Upstream {entry.name} documentation
-                  </a>
-                </details>
-              </section>
-            )
-          })}
+          {[...visible]
+            .sort((a, b) => Number(b.group === 'Foundations') - Number(a.group === 'Foundations'))
+            .map((entry) => {
+              const Specimen = SPECIMENS[entry.id]
+              return (
+                <section
+                  id={entry.id}
+                  tabIndex={-1}
+                  key={entry.id}
+                  className="design-entry"
+                  data-component={entry.id}
+                >
+                  <div className="design-entry-heading">
+                    <h2>{entry.name}</h2>
+                    <span>{entry.group}</span>
+                  </div>
+                  <p className="design-entry-summary">{entry.summary}</p>
+                  <p className="design-entry-usage">{entry.usage}</p>
+                  <div className="design-specimen" data-specimen={entry.id}>
+                    <Specimen />
+                  </div>
+                  <details>
+                    <summary>Usage, anatomy, keyboard and tokens</summary>
+                    <dl>
+                      <dt>Anatomy and API</dt>
+                      <dd>{entry.anatomy}</dd>
+                      <dt>Keyboard and accessibility</dt>
+                      <dd>{entry.keyboard}</dd>
+                      <dt>Canonical tokens</dt>
+                      <dd className="design-token-list">
+                        {entry.tokens.map((token) => (
+                          <code key={token}>{token}</code>
+                        ))}
+                      </dd>
+                    </dl>
+                    <pre className="design-code">{entry.importExample}</pre>
+                    <AdoptionExample id={entry.id} />
+                    <p>{entry.reconciledWith}</p>
+                    {entry.catalogOnlyNotice && <p>{entry.catalogOnlyNotice}</p>}
+                    <a href={entry.upstreamDoc} target="_blank" rel="noreferrer">
+                      Upstream {entry.name} documentation
+                    </a>
+                  </details>
+                </section>
+              )
+            })}
           {visible.length === 0 && (
             <Empty className="catalog-empty">
               <EmptyHeader>
@@ -522,6 +559,7 @@ function CatalogWorkspace() {
             </Empty>
           )}
         </div>
+        {!query && <GitCompositions />}
         <footer>
           Shared source: packages/ui. Catalog fixtures: apps/design. Automated checks are not
           accessibility certification.
@@ -537,6 +575,9 @@ function CatalogWorkspace() {
         <CommandList>
           <CommandEmpty>No matching entry.</CommandEmpty>
           <CommandGroup heading="Foundations and patterns">
+            <CommandItem value="Home introduction" onSelect={() => navigate('home')}>
+              Home
+            </CommandItem>
             <CommandItem value="Foundations" onSelect={() => navigate('foundations')}>
               Foundations
             </CommandItem>
