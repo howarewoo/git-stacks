@@ -43,6 +43,7 @@ import {
   MANIFEST_DATE,
   MANIFEST_GROUPS,
   UPSTREAM_RECONCILIATION,
+  type ComponentManifestEntry,
 } from './manifest'
 import { navigationSpecimens } from './navigation-specimens'
 import { formSpecimens } from './form-specimens'
@@ -362,60 +363,41 @@ function CatalogWorkspace() {
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
-            {MANIFEST_GROUPS.filter(
-              (group) => group === 'Foundations' || visible.some((entry) => entry.group === group),
-            ).map((group) => (
-              <Collapsible
-                key={group}
-                open={
-                  !!query ||
-                  (group === 'Foundations'
-                    ? foundationsOpen || expandedGroup === group
-                    : expandedGroup === group)
-                }
-                onOpenChange={(open) => {
-                  if (group === 'Foundations') setFoundationsOpen(open)
-                  setExpandedGroup(open ? group : null)
-                }}
-              >
-                <SidebarGroup className="p-0">
-                  <SidebarGroupLabel
-                    render={<CollapsibleTrigger />}
-                    className="catalog-group-trigger"
-                    aria-label={`${group} components`}
-                  >
-                    {group}
-                    <span aria-hidden="true">
-                      {visible.filter((entry) => entry.group === group).length +
-                        Number(group === 'Foundations')}
-                      <ChevronDown className="size-4" />
-                    </span>
-                  </SidebarGroupLabel>
-                  <CollapsibleContent>
-                    <SidebarGroupContent>
-                      <SidebarMenu>
-                        {group === 'Foundations' && (
-                          <SidebarMenuItem>
-                            <SidebarMenuButton
-                              render={
-                                <a
-                                  href="#foundations"
-                                  aria-current={activeId === 'foundations' ? 'location' : undefined}
-                                />
-                              }
-                              isActive={activeId === 'foundations'}
-                              onClick={(event) => {
-                                event.preventDefault()
-                                navigate('foundations')
-                              }}
-                            >
-                              Tokens
-                            </SidebarMenuButton>
-                          </SidebarMenuItem>
-                        )}
-                        {visible
-                          .filter((entry) => entry.group === group)
-                          .map((entry) => (
+            {MANIFEST_GROUPS.map((group) => {
+              const entries: Pick<ComponentManifestEntry, 'id' | 'name'>[] = visible.filter(
+                (entry) => entry.group === group,
+              )
+              if (group === 'Foundations') entries.unshift({ id: 'foundations', name: 'Tokens' })
+              if (!entries.length) return null
+              return (
+                <Collapsible
+                  key={group}
+                  open={
+                    !!query ||
+                    expandedGroup === group ||
+                    (group === 'Foundations' && foundationsOpen)
+                  }
+                  onOpenChange={(open) => {
+                    if (group === 'Foundations') setFoundationsOpen(open)
+                    setExpandedGroup(open ? group : null)
+                  }}
+                >
+                  <SidebarGroup className="p-0">
+                    <SidebarGroupLabel
+                      render={<CollapsibleTrigger />}
+                      className="catalog-group-trigger"
+                      aria-label={`${group} components`}
+                    >
+                      {group}
+                      <span aria-hidden="true">
+                        {entries.length}
+                        <ChevronDown className="size-4" />
+                      </span>
+                    </SidebarGroupLabel>
+                    <CollapsibleContent>
+                      <SidebarGroupContent>
+                        <SidebarMenu>
+                          {entries.map((entry) => (
                             <SidebarMenuItem key={entry.id}>
                               <SidebarMenuButton
                                 render={
@@ -434,12 +416,13 @@ function CatalogWorkspace() {
                               </SidebarMenuButton>
                             </SidebarMenuItem>
                           ))}
-                      </SidebarMenu>
-                    </SidebarGroupContent>
-                  </CollapsibleContent>
-                </SidebarGroup>
-              </Collapsible>
-            ))}
+                        </SidebarMenu>
+                      </SidebarGroupContent>
+                    </CollapsibleContent>
+                  </SidebarGroup>
+                </Collapsible>
+              )
+            })}
           </nav>
         </SidebarContent>
       </Sidebar>

@@ -34,11 +34,6 @@
     --typeset-size: 1em;
     --typeset-leading: 1.75;
     --typeset-flow: 1.25em;
-  }
-}
-
-@layer components {
-  .typeset:where(:not(.not-typeset, [data-not-typeset], .not-typeset *, [data-not-typeset] *)) {
     font-family: var(--typeset-font-body);
     font-size: calc(var(--typeset-size) * 1.125);
     line-height: var(--typeset-leading);
@@ -120,9 +115,6 @@
     &:where(h1 + *, h2 + *, h3 + *, h4 + *, h5 + *, h6 + *) {
       margin-block-start: 1em;
     }
-    &:where(:is(h1, h2, h3, h4) :is(code)) {
-      font-size: 0.9em;
-    }
 
     /* Links. */
     &:where(a) {
@@ -145,9 +137,6 @@
 
     /* Inline semantics. */
     &:where(strong, b) {
-      font-weight: 600;
-    }
-    &:where(:is(h1, h2, h3, h4) :is(strong, b)) {
       font-weight: 600;
     }
     &:where(mark) {
@@ -486,9 +475,6 @@
     ):not(:where(.not-typeset, [data-not-typeset], .not-typeset *, [data-not-typeset] *)) {
     margin-block-start: 0;
   }
-}
-
-@layer components {
   .typeset-docs {
     --typeset-size: 15px;
     --typeset-leading: 1.75;

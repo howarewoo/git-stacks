@@ -2113,9 +2113,9 @@ header links to the introduction at the genuine page top, and the command entry
 does the same; both clear search, transfer focus, and close narrow navigation.
 Explicit navigation wins over pre-search viewport restoration, including
 Back/Forward.
-Foundations counts include the always-available Tokens destination, including
-while filtering. The brand title underlines on hover and retains keyboard focus
-treatment.
+Each category derives its count and links from one destination list. Foundations
+prepends the always-available Tokens destination, even while filtering. The brand
+title underlines on hover and retains keyboard focus treatment.
 
 Typeset is owned browser-safe CSS adapted from the MIT shadcn/typeset
 [distribution](https://github.com/shadcn-ui/ui/blob/main/apps/v4/app/%28app%29/%28typeset%29/typeset.css)
