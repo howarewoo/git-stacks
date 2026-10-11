@@ -66,21 +66,32 @@ async function expectFocusContrast(locator: Locator) {
   expect(result.ratio).toBeGreaterThanOrEqual(3)
 }
 
-test('grouped foundations and Home preserve search, focus and history', async ({ page }) => {
+test('grouped foundations and brand home link preserve search, focus and history', async ({
+  page,
+}) => {
   await page.goto('/#typeset')
   await expect(page.locator('#typeset')).toBeInViewport()
   const ids = await page
     .locator('#catalog section[id]')
     .evaluateAll((nodes) => nodes.map((node) => node.id))
   expect(ids.slice(0, 3)).toEqual(['foundations', 'typography', 'typeset'])
+  await expect(page.locator('.catalog-toolbar').getByRole('button', { name: 'Home' })).toHaveCount(
+    0,
+  )
   await page.getByRole('textbox', { name: 'Search components' }).fill('no such entry')
-  await page.locator('.catalog-toolbar').getByRole('button', { name: 'Home', exact: true }).click()
+  await page.getByRole('link', { name: 'Git Stacks home', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Search components' })).toHaveValue('')
   await expect(page.locator('#home')).toBeFocused()
   await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
   await page.goBack()
   await expect(page.locator('#typeset')).toBeFocused()
   await page.goForward()
+  await expect(page.locator('#home')).toBeFocused()
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
+  await page.getByRole('textbox', { name: 'Search components' }).fill('no such entry')
+  await page.getByRole('link', { name: 'Git Stacks home', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('textbox', { name: 'Search components' })).toHaveValue('')
   await expect(page.locator('#home')).toBeFocused()
   await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -94,15 +105,15 @@ test('grouped foundations and Home preserve search, focus and history', async ({
     page.getByRole('navigation', { name: 'Component catalog', exact: true }),
   ).toBeHidden()
   await page.getByRole('button', { name: 'Browse components', exact: true }).click()
-  await page
-    .locator('[data-mobile="true"]')
-    .getByRole('button', { name: 'Home', exact: true })
-    .click()
+  await page.locator('[data-mobile="true"]').getByRole('link', { name: 'Git Stacks home' }).click()
   await expect(
     page.getByRole('navigation', { name: 'Component catalog', exact: true }),
   ).toBeHidden()
   await expect(page.locator('#home')).toBeFocused()
   await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
+  await expect(page.locator('.catalog-toolbar').getByRole('button', { name: 'Home' })).toHaveCount(
+    0,
+  )
   await page.goto('/#home')
   await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
 })

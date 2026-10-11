@@ -82,22 +82,34 @@ body {
   padding-bottom: var(--gs-semantic-space-4);
 }
 
-.design-nav [data-slot="sidebar-header"] > h1 {
+.catalog-brand-link {
+  display: block;
+  border-radius: var(--gs-semantic-radius-control);
+  color: var(--gs-semantic-text-primary);
+  text-decoration: none;
+}
+
+.catalog-brand-link:hover {
+  color: var(--gs-semantic-text-primary);
+  text-decoration: none;
+}
+
+.catalog-brand-link:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+  outline-offset: 2px;
+}
+
+.catalog-brand-link > h1 {
   font-size: var(--gs-semantic-type-heading-size);
   line-height: var(--gs-semantic-type-heading-line);
   font-weight: 600;
 }
 
-.design-nav [data-slot="sidebar-header"] > p {
-  margin: 0 0 var(--gs-semantic-space-3);
+.catalog-brand-link > p {
+  margin: var(--gs-semantic-space-2) 0 var(--gs-semantic-space-3);
   color: var(--gs-semantic-text-secondary);
   font-size: var(--gs-semantic-type-metadata-size);
   line-height: var(--gs-semantic-type-metadata-line);
-}
-
-.design-nav [data-slot="sidebar-header"] > button {
-  width: 100%;
-  padding-inline: var(--gs-semantic-space-2);
 }
 
 .catalog-settings {
@@ -127,8 +139,14 @@ body {
 .catalog-group-trigger {
   width: 100%;
   justify-content: space-between;
-  margin-top: var(--gs-semantic-space-2);
+  margin-top: var(--gs-semantic-space-3);
+  padding-inline: var(--gs-semantic-space-2);
+  color: var(--gs-semantic-text-primary);
+  font-size: var(--gs-semantic-type-metadata-size);
+  line-height: var(--gs-semantic-type-metadata-line);
   font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .catalog-group-trigger > span {
@@ -143,8 +161,12 @@ body {
   transform: rotate(180deg);
 }
 
-.design-nav [data-slot="sidebar-menu-button"] {
-  scroll-margin-block: var(--gs-semantic-space-2);
+.catalog-navigation [data-slot="collapsible-content"] [data-slot="sidebar-menu"] {
+  padding-left: var(--gs-semantic-space-4);
+}
+
+.catalog-navigation [data-slot="sidebar-menu-button"] {
+  font-weight: 400;
 }
 
 .design-main {

@@ -271,12 +271,31 @@ function CatalogWorkspace() {
       </a>
       <Sidebar collapsible="offcanvas" variant="floating" className="design-nav">
         <SidebarHeader className="p-0">
-          <h1>Git Stacks</h1>
-          <p>
-            The Quiet Workbench
-            <br />
-            Design system
-          </p>
+          <Button
+            variant="unstyled"
+            nativeButton={false}
+            render={
+              <a
+                href="#home"
+                aria-current={activeId === 'home' ? 'location' : undefined}
+                aria-label="Git Stacks home"
+              />
+            }
+            role="link"
+            onClick={(event) => {
+              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+              event.preventDefault()
+              navigate('home')
+            }}
+            className="catalog-brand-link"
+          >
+            <h1>Git Stacks</h1>
+            <p>
+              The Quiet Workbench
+              <br />
+              Design system
+            </p>
+          </Button>
           <Input
             aria-label="Search components"
             placeholder="Search components"
@@ -289,13 +308,6 @@ function CatalogWorkspace() {
             aria-keyshortcuts="Control+k Meta+k"
           >
             Command navigation · Ctrl/⌘ K
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => navigate('home')}
-            aria-current={activeId === 'home' ? 'location' : undefined}
-          >
-            Home
           </Button>
           <div className="catalog-settings">
             <label>
@@ -434,13 +446,6 @@ function CatalogWorkspace() {
         <div className="catalog-toolbar">
           <SidebarTrigger aria-label="Browse components" title="Toggle catalog sidebar" />
           <span>Component catalog</span>
-          <Button
-            variant="ghost"
-            onClick={() => navigate('home')}
-            aria-current={activeId === 'home' ? 'location' : undefined}
-          >
-            Home
-          </Button>
         </div>
         <header id="home" className="catalog-introduction" tabIndex={-1}>
           <h2>The Quiet Workbench</h2>

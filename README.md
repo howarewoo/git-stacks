@@ -2108,10 +2108,11 @@ Inspect both themes and narrow reflow when changing those specimens; no palette
 values belong in the catalog.
 
 Tokens, Typography, and Typeset are adjacent Foundations entries in content and
-navigation; the original component anchors remain supported. The persistent
-shared Home button and command entry clear search, return to the introduction
-at the genuine page top, transfer focus, and close narrow navigation. Explicit
-navigation wins over pre-search viewport restoration, including Back/Forward.
+navigation; the original component anchors remain supported. The sidebar brand
+header links to the introduction at the genuine page top, and the command entry
+does the same; both clear search, transfer focus, and close narrow navigation.
+Explicit navigation wins over pre-search viewport restoration, including
+Back/Forward.
 
 Typeset is owned browser-safe CSS adapted from the MIT shadcn/typeset
 [distribution](https://github.com/shadcn-ui/ui/blob/main/apps/v4/app/%28app%29/%28typeset%29/typeset.css)
