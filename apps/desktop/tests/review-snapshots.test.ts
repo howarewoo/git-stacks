@@ -15,9 +15,10 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { watch } from 'node:fs'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import test from 'node:test'
 
 import {
@@ -31,7 +32,8 @@ import {
   readReviewSnapshotLog,
   recordObservedHead,
 } from '../src/main/review-snapshots'
-import { readViewedRecord } from '../src/main/review-viewed'
+import { readViewedRecord, writeViewedRecord } from '../src/main/review-viewed'
+import { revalidateReviewOwner } from '../src/main/review-threads'
 import {
   GitHubTransportError,
   setGitHubTransport,
@@ -97,6 +99,32 @@ async function createTestWorkspace(
   return { repo, dispose: () => rm(root, { recursive: true, force: true }) }
 }
 
+/** Storage fixtures authorize only the disposable repository they explicitly own. */
+function authorizeTestJournal(repo: string): () => Promise<void> {
+  return async () => {
+    assert.ok(
+      repo.startsWith(join(tmpdir(), 'git-stacks-snap-')) ||
+        repo.startsWith(join(tmpdir(), 'test-fetch-sentinel-')),
+    )
+    assert.equal(
+      execFileSync('git', ['-C', repo, 'rev-parse', '--git-common-dir'], {
+        encoding: 'utf8',
+      }).trim(),
+      '.git',
+    )
+  }
+}
+
+/** Observe an actual contender, not a delay guessed to mean it reached the lock. */
+function journalAttempt(file: string) {
+  const waiting = Promise.withResolvers<void>()
+  const observer = watch(dirname(file), (_event, filename) => {
+    if (filename?.startsWith(`${basename(file)}.lock.`) && filename.endsWith('.tmp'))
+      waiting.resolve()
+  })
+  return { promise: waiting.promise, close: () => observer.close() }
+}
+
 function mockTransport(handlers: {
   rest?: (request: GitHubRestRequest) => unknown
   graphql?: (query: string, variables?: Record<string, unknown>) => unknown
@@ -145,7 +173,7 @@ test('deduplicating identical heads: same head read multiple times updates obser
   const comp = comparison({ headOid: '1111'.padEnd(40, '0') })
   const log1 = observeReviewHead(null, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: comp,
     commits: 1,
@@ -159,7 +187,7 @@ test('deduplicating identical heads: same head read multiple times updates obser
   // Second observation of the exact same head
   const log2 = observeReviewHead(log1, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: comp,
     commits: null,
@@ -177,7 +205,7 @@ test('force-push creates a new snapshot entry with distinct head OID', () => {
 
   const log1 = observeReviewHead(null, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: head1,
     commits: 1,
@@ -185,7 +213,7 @@ test('force-push creates a new snapshot entry with distinct head OID', () => {
   })
   const log2 = observeReviewHead(log1, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: head2,
     commits: 1,
@@ -211,7 +239,7 @@ test('rebase across branches creates a new snapshot recording the new comparison
 
   const log1 = observeReviewHead(null, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: head1,
     commits: 2,
@@ -219,7 +247,7 @@ test('rebase across branches creates a new snapshot recording the new comparison
   })
   const log2 = observeReviewHead(log1, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: head2,
     commits: 2,
@@ -235,7 +263,7 @@ test('first open after many updates produces an explicit gap stating earlier hea
   // First time Git Stacks sees PR #26, GitHub reports 7 commits already on it
   const log = observeReviewHead(null, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: head,
     commits: 7,
@@ -257,7 +285,7 @@ test('first open with 1 commit records observation gap because earlier force-pus
   const head = comparison({ headOid: '1111'.padEnd(40, '0') })
   const log = observeReviewHead(null, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: head,
     commits: 1,
@@ -275,7 +303,7 @@ test('reviewedSnapshot selects anchor by review recency rather than observation 
 
   let log = observeReviewHead(null, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: comparison({ headOid: oidA }),
     commits: 1,
@@ -287,7 +315,7 @@ test('reviewedSnapshot selects anchor by review recency rather than observation 
   // PR updates to B
   log = observeReviewHead(log, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: comparison({ headOid: oidB }),
     commits: 2,
@@ -299,7 +327,7 @@ test('reviewedSnapshot selects anchor by review recency rather than observation 
   // PR moves back to A (e.g. author reverted or force-pushed back to A)
   log = observeReviewHead(log, {
     number: 26,
-    repo: 'howarewoo/git-stacks',
+    repo: 'github.com/howarewoo/git-stacks',
     viewer: 'alice',
     comparison: comparison({ headOid: oidA }),
     commits: 3,
@@ -441,21 +469,78 @@ test('reviewSnapshotLabel formats friendly readable label for select dropdowns',
 // Storage & journal tests (journal beside git directory)
 // -----------------------------------------------------------------------------
 
+test('viewed records cannot cross host, origin, or account and never adopt legacy marks', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  const legacyPath = join(workspace.repo, '.git', 'git-stacks-reviewed-files.json')
+  const legacy = `${JSON.stringify({ version: 1, records: [{ number: 26, comparison: comparison(), paths: ['src/legacy.ts'], updatedAt: '2026-09-24T00:00:00Z' }] })}\n`
+  await writeFile(legacyPath, legacy)
+  const owner = { host: 'github.com', repository: 'howarewoo/git-stacks', viewer: 'alice' }
+  assert.equal(await readViewedRecord(workspace.repo, owner, 26), null)
+  const record = {
+    number: 26,
+    comparison: comparison(),
+    paths: ['src/current.ts'],
+    updatedAt: '2026-09-24T00:00:00Z',
+  }
+  await writeViewedRecord(workspace.repo, owner, record, async () => {
+    assert.ok(workspace.repo)
+  })
+  assert.deepEqual((await readViewedRecord(workspace.repo, owner, 26))?.paths, ['src/current.ts'])
+  for (const replacement of [
+    { ...owner, host: 'git.acme.example' },
+    { ...owner, repository: 'another/repository' },
+    { ...owner, viewer: 'bob' },
+  ]) {
+    assert.equal(await readViewedRecord(workspace.repo, replacement, 26), null)
+    await writeViewedRecord(
+      workspace.repo,
+      replacement,
+      { ...record, paths: ['src/replacement.ts'] },
+      async () => {
+        assert.ok(workspace.repo)
+      },
+    )
+    assert.deepEqual((await readViewedRecord(workspace.repo, owner, 26))?.paths, ['src/current.ts'])
+  }
+  assert.equal(await readFile(legacyPath, 'utf8'), legacy)
+})
+
 test('review journals read as absent when the repository Git directory disappears', async (t) => {
   const workspace = await createTestWorkspace()
   t.after(workspace.dispose)
-  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, comparison(), 1)
+  await recordObservedHead(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+    comparison(),
+    1,
+    authorizeTestJournal(workspace.repo),
+  )
   await rm(join(workspace.repo, '.git'), { recursive: true })
   const reads = await Promise.allSettled([
-    readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26),
-    readViewedRecord(workspace.repo, 26),
+    readReviewSnapshotLog(workspace.repo, 'github.com/howarewoo/git-stacks', 'alice', 26),
+    readViewedRecord(
+      workspace.repo,
+      { host: 'github.com', repository: 'howarewoo/git-stacks', viewer: 'alice' },
+      26,
+    ),
   ])
   assert.deepEqual(reads, [
     { status: 'fulfilled', value: null },
     { status: 'fulfilled', value: null },
   ])
   await assert.rejects(
-    recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, comparison(), 1),
+    recordObservedHead(
+      workspace.repo,
+      'github.com/howarewoo/git-stacks',
+      'alice',
+      26,
+      comparison(),
+      1,
+      authorizeTestJournal(workspace.repo),
+    ),
   )
 })
 
@@ -465,13 +550,39 @@ test('scope isolation: distinct repository or account viewer keeps independent s
 
   const comp = comparison({ headOid: 'aaaa'.padEnd(40, '0') })
   // Account Alice observes PR #26
-  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, comp, 1)
+  await recordObservedHead(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+    comp,
+    1,
+    authorizeTestJournal(workspace.repo),
+  )
   // Account Bob observes PR #26 with a different head
   const compBob = comparison({ headOid: 'bbbb'.padEnd(40, '0') })
-  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'bob', 26, compBob, 1)
+  await recordObservedHead(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'bob',
+    26,
+    compBob,
+    1,
+    authorizeTestJournal(workspace.repo),
+  )
 
-  const logAlice = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
-  const logBob = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'bob', 26)
+  const logAlice = await readReviewSnapshotLog(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+  )
+  const logBob = await readReviewSnapshotLog(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'bob',
+    26,
+  )
 
   assert.equal(logAlice?.snapshots[0].headOid, 'aaaa'.padEnd(40, '0'))
   assert.equal(logBob?.snapshots[0].headOid, 'bbbb'.padEnd(40, '0'))
@@ -479,7 +590,7 @@ test('scope isolation: distinct repository or account viewer keeps independent s
   // Alice's review must not become Bob's review
   await markReviewSnapshotReviewed(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'alice',
     26,
     comp,
@@ -487,11 +598,16 @@ test('scope isolation: distinct repository or account viewer keeps independent s
   )
   const logAliceAfter = await readReviewSnapshotLog(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'alice',
     26,
   )
-  const logBobAfter = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'bob', 26)
+  const logBobAfter = await readReviewSnapshotLog(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'bob',
+    26,
+  )
 
   assert.equal(logAliceAfter?.snapshots[0].reviewed, true)
   assert.equal(logBobAfter?.snapshots[0].reviewed, false, "Alice's review must never apply to Bob")
@@ -502,12 +618,38 @@ test('clearReviewSnapshots wipes local journal with zero GitHub mutation', async
   t.after(workspace.dispose)
 
   const comp = comparison({ headOid: '1111'.padEnd(40, '0') })
-  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, comp, 1)
-  const before = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  await recordObservedHead(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+    comp,
+    1,
+    authorizeTestJournal(workspace.repo),
+  )
+  const before = await readReviewSnapshotLog(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+  )
   assert.equal(before?.snapshots.length, 1)
 
-  await clearReviewSnapshots(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
-  const after = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  await clearReviewSnapshots(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+    async () => {
+      assert.ok(workspace.repo)
+    },
+  )
+  const after = await readReviewSnapshotLog(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+  )
   assert.equal(after, null)
 })
 
@@ -516,17 +658,38 @@ test('confirmed reviews restore a cleared or never-observed head without restori
   t.after(workspace.dispose)
   const prior = comparison({ headOid: '1'.repeat(40) })
   const reviewed = comparison({ headOid: '2'.repeat(40) })
-  await recordObservedHead(workspace.repo, 'howarewoo/git-stacks', 'alice', 26, prior, 1)
-  await clearReviewSnapshots(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  await recordObservedHead(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+    prior,
+    1,
+    authorizeTestJournal(workspace.repo),
+  )
+  await clearReviewSnapshots(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+    async () => {
+      assert.ok(workspace.repo)
+    },
+  )
   await markReviewSnapshotReviewed(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'alice',
     26,
     reviewed,
     'PRR_confirmed',
   )
-  const restored = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  const restored = await readReviewSnapshotLog(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+  )
   assert.deepEqual(
     restored?.snapshots.map((entry) => ({
       headOid: entry.headOid,
@@ -539,13 +702,18 @@ test('confirmed reviews restore a cleared or never-observed head without restori
   )
   await markReviewSnapshotReviewed(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'alice',
     26,
     prior,
     'PRR_adopted',
   )
-  const adopted = await readReviewSnapshotLog(workspace.repo, 'howarewoo/git-stacks', 'alice', 26)
+  const adopted = await readReviewSnapshotLog(
+    workspace.repo,
+    'github.com/howarewoo/git-stacks',
+    'alice',
+    26,
+  )
   assert.equal(
     adopted?.snapshots.find((entry) => entry.headOid === prior.headOid)?.reviewId,
     'PRR_adopted',
@@ -660,19 +828,21 @@ test('main service readReviewHistoryDiff negative case: missing historical commi
   // Set up journal containing the historical head
   await recordObservedHead(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: historicalHead }),
     1,
+    authorizeTestJournal(workspace.repo),
   )
   await recordObservedHead(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: currentHead }),
     2,
+    authorizeTestJournal(workspace.repo),
   )
 
   const transport = mockTransport({
@@ -730,19 +900,21 @@ test('main service readReviewHistoryDiff negative case: merge-base loss / diverg
 
   await recordObservedHead(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: historicalHead }),
     1,
+    authorizeTestJournal(workspace.repo),
   )
   await recordObservedHead(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: currentHead }),
     2,
+    authorizeTestJournal(workspace.repo),
   )
 
   const transport = mockTransport({
@@ -786,6 +958,109 @@ test('main service readReviewHistoryDiff negative case: merge-base loss / diverg
   assert.match(diff.reason, /merge base was lost/u)
 })
 
+test('captured history clear cannot erase a replacement host or account history', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const original = { repo: 'github.com/howarewoo/git-stacks', viewer: 'original-viewer' }
+  const replacement = { repo: 'github.com/howarewoo/git-stacks', viewer: 'replacement-viewer' }
+  for (const owner of [original, replacement]) {
+    await recordObservedHead(
+      workspace.repo,
+      owner.repo,
+      owner.viewer,
+      26,
+      comparison(),
+      1,
+      authorizeTestJournal(workspace.repo),
+    )
+  }
+  let providerReads = 0
+  setGitHubTransport(
+    mockTransport({
+      graphql: () => {
+        providerReads += 1
+        return {
+          viewer: { login: replacement.viewer },
+          repository: {
+            viewerPermission: 'WRITE',
+            pullRequest: { state: 'OPEN', viewerDidAuthor: false },
+          },
+        }
+      },
+    }),
+  )
+  await assert.rejects(
+    () =>
+      clearReviewHistory(workspace.repo, 26, {
+        ...original,
+        repo: 'git.acme.example/howarewoo/git-stacks',
+      }),
+    /host changed/u,
+  )
+  assert.equal(providerReads, 0)
+  await assert.rejects(() => clearReviewHistory(workspace.repo, 26, original), /account changed/u)
+  assert.ok(await readReviewSnapshotLog(workspace.repo, original.repo, original.viewer, 26))
+  assert.ok(await readReviewSnapshotLog(workspace.repo, replacement.repo, replacement.viewer, 26))
+})
+
+test('history loading cannot combine a captured host with replacement-host viewer evidence', async (t) => {
+  const workspace = await createTestWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const owner = { repo: 'github.com/howarewoo/git-stacks', viewer: 'same-login' }
+  await recordObservedHead(
+    workspace.repo,
+    owner.repo,
+    owner.viewer,
+    26,
+    comparison(),
+    1,
+    authorizeTestJournal(workspace.repo),
+  )
+  let replaced = false
+  setGitHubTransport(
+    mockTransport({
+      graphql: () => {
+        if (!replaced) {
+          replaced = true
+          execFileSync('git', [
+            '-C',
+            workspace.repo,
+            'remote',
+            'set-url',
+            'origin',
+            'https://git.acme.example/howarewoo/git-stacks.git',
+          ])
+        }
+        return {
+          viewer: { login: owner.viewer },
+          repository: {
+            viewerPermission: 'WRITE',
+            pullRequest: { state: 'OPEN', viewerDidAuthor: false },
+          },
+        }
+      },
+      rest: () => ({
+        head: { sha: 'a'.repeat(40) },
+        base: { sha: 'b'.repeat(40), ref: 'main' },
+        commits: 1,
+      }),
+    }),
+  )
+  await assert.rejects(() => readReviewHistory(workspace.repo, 26), /host changed/u)
+  assert.ok(await readReviewSnapshotLog(workspace.repo, owner.repo, owner.viewer, 26))
+  assert.equal(
+    await readReviewSnapshotLog(
+      workspace.repo,
+      'git.acme.example/howarewoo/git-stacks',
+      owner.viewer,
+      26,
+    ),
+    null,
+  )
+})
+
 test('main service clearReviewHistory resets snapshot history and returns fresh single snapshot of current head', async (t) => {
   const workspace = await createTestWorkspace()
   t.after(workspace.dispose)
@@ -820,23 +1095,28 @@ test('main service clearReviewHistory resets snapshot history and returns fresh 
   // Observe multiple heads
   await recordObservedHead(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: 'old1'.padEnd(40, '0') }),
     1,
+    authorizeTestJournal(workspace.repo),
   )
   await recordObservedHead(
     workspace.repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: 'old2'.padEnd(40, '0') }),
     2,
+    authorizeTestJournal(workspace.repo),
   )
 
   // Clear history
-  const reset = await clearReviewHistory(workspace.repo, 26)
+  const reset = await clearReviewHistory(workspace.repo, 26, {
+    repo: 'github.com/howarewoo/git-stacks',
+    viewer: 'tester-viewer',
+  })
   assert.equal(reset.snapshots.length, 0)
   assert.equal(reset.current.headOid, currentHead)
   assert.equal(reset.reviewed, null)
@@ -868,21 +1148,23 @@ test('main service readReviewHistoryDiff uses real Git to produce faithful endpo
   // Record snapshot A
   await recordObservedHead(
     repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: oidA }),
     2,
+    authorizeTestJournal(repo),
     '2026-09-23T18:00:00.000Z',
   )
   // Record snapshot B (new head)
   await recordObservedHead(
     repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: oidB }),
     3,
+    authorizeTestJournal(repo),
     '2026-09-23T19:00:00.000Z',
   )
 
@@ -953,19 +1235,21 @@ test('main service readReviewHistoryDiff handles pure and edited renames with fa
 
   await recordObservedHead(
     repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: oidA }),
     1,
+    authorizeTestJournal(repo),
   )
   await recordObservedHead(
     repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: oidB }),
     2,
+    authorizeTestJournal(repo),
   )
 
   const transport = mockTransport({
@@ -1049,19 +1333,21 @@ test('main service readReviewHistoryDiff preserves binary classification for bin
 
   await recordObservedHead(
     repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: oidA }),
     1,
+    authorizeTestJournal(repo),
   )
   await recordObservedHead(
     repo,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: oidB }),
     2,
+    authorizeTestJournal(repo),
   )
 
   const transport = mockTransport({
@@ -1190,19 +1476,21 @@ test('main service diffEndpointWithGit performs object-only fetch preserving FET
 
   await recordObservedHead(
     local,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: localOid }),
     1,
+    authorizeTestJournal(local),
   )
   await recordObservedHead(
     local,
-    'howarewoo/git-stacks',
+    'github.com/howarewoo/git-stacks',
     'tester-viewer',
     26,
     comparison({ headOid: remoteOid }),
     2,
+    authorizeTestJournal(local),
   )
 
   // Call readReviewHistoryDiff: endpoint diff between localOid and remoteOid
@@ -1223,4 +1511,283 @@ test('main service diffEndpointWithGit performs object-only fetch preserving FET
   // Verify remote tag was NOT downloaded into local repository!
   const localTags = execFileSync('git', ['tag', '-l'], { cwd: local, encoding: 'utf8' }).trim()
   assert.equal(localTags, '', 'Remote tags must not be imported during object-only fetch')
+})
+
+test('viewed saves revalidate their captured owner after the persistent lock wait', {
+  timeout: 10_000,
+}, async (t) => {
+  const workspace = await createTestWorkspace()
+  const owner = { host: 'github.com', repository: 'howarewoo/git-stacks', viewer: 'alice' }
+  const captured = { repo: 'github.com/howarewoo/git-stacks', viewer: 'alice' }
+  const initial = {
+    number: 26,
+    comparison: comparison(),
+    paths: ['src/first.ts'],
+    updatedAt: '2026-09-24T00:00:00Z',
+  }
+  await writeViewedRecord(workspace.repo, owner, initial, authorizeTestJournal(workspace.repo))
+  const files = (await readdir(join(workspace.repo, '.git'))).filter(
+    (name) => name.startsWith('git-stacks-reviewed-files-') && name.endsWith('.json'),
+  )
+  assert.equal(files.length, 1)
+  const file = join(workspace.repo, '.git', files[0])
+  const before = await readFile(file, 'utf8')
+  const lock = `${file}.lock`
+  await writeFile(lock, JSON.stringify({ pid: process.pid }), { mode: 0o600 })
+  const attempted = journalAttempt(file)
+  const cancellation = new AbortController()
+  let viewer = 'alice'
+  setGitHubTransport(
+    mockTransport({
+      graphql: () => ({
+        viewer: { login: viewer },
+        repository: {
+          viewerPermission: 'WRITE',
+          pullRequest: { state: 'OPEN', viewerDidAuthor: false },
+        },
+      }),
+    }),
+  )
+  const pending = writeViewedRecord(
+    workspace.repo,
+    owner,
+    { ...initial, paths: ['src/replaced.ts'] },
+    async () => {
+      await revalidateReviewOwner(workspace.repo, 26, captured, null, cancellation.signal)
+    },
+    cancellation.signal,
+  ).then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  )
+  t.after(async () => {
+    cancellation.abort()
+    attempted.close()
+    await rm(lock, { force: true })
+    await pending
+    setGitHubTransport(null)
+    await workspace.dispose()
+  })
+  await attempted.promise
+  assert.equal(await readFile(file, 'utf8'), before)
+  viewer = 'bob'
+  await rm(lock)
+  const result = await pending
+  assert.ok('error' in result && result.error instanceof Error)
+  assert.match(result.error.message, /account changed/u)
+  assert.equal(await readFile(file, 'utf8'), before)
+  assert.deepEqual(await readViewedRecord(workspace.repo, owner, 26), initial)
+  assert.equal(await readViewedRecord(workspace.repo, { ...owner, viewer: 'bob' }, 26), null)
+})
+
+test('history clear and observation reject owner replacement after actual lock admission', {
+  timeout: 10_000,
+}, async (t) => {
+  for (const operation of ['clear', 'observe'] as const)
+    await t.test(operation, { timeout: 5_000 }, async (subtest) => {
+      const workspace = await createTestWorkspace()
+      const owner = { repo: 'github.com/howarewoo/git-stacks', viewer: 'alice' }
+      await recordObservedHead(
+        workspace.repo,
+        owner.repo,
+        owner.viewer,
+        26,
+        comparison(),
+        1,
+        authorizeTestJournal(workspace.repo),
+      )
+      const file = join(workspace.repo, '.git', 'git-stacks-review-snapshots.json')
+      const before = await readFile(file, 'utf8')
+      const lock = `${file}.lock`
+      await writeFile(lock, JSON.stringify({ pid: process.pid }), { mode: 0o600 })
+      const attempted = journalAttempt(file)
+      const cancellation = new AbortController()
+      let viewer = 'alice'
+      setGitHubTransport(
+        mockTransport({
+          graphql: () => ({
+            viewer: { login: viewer },
+            repository: {
+              viewerPermission: 'WRITE',
+              pullRequest: { state: 'OPEN', viewerDidAuthor: false },
+            },
+          }),
+          rest: () => ({
+            head: { sha: 'a'.repeat(40) },
+            base: { sha: 'b'.repeat(40), ref: 'main' },
+            commits: 1,
+          }),
+        }),
+      )
+      const pending = (
+        operation === 'clear'
+          ? clearReviewHistory(workspace.repo, 26, owner, cancellation.signal)
+          : readReviewHistory(workspace.repo, 26, cancellation.signal)
+      ).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      )
+      subtest.after(async () => {
+        cancellation.abort()
+        attempted.close()
+        await rm(lock, { force: true })
+        await pending
+        setGitHubTransport(null)
+        await workspace.dispose()
+      })
+      await attempted.promise
+      assert.equal(await readFile(file, 'utf8'), before)
+      viewer = 'bob'
+      await rm(lock)
+      const result = await pending
+      assert.ok('error' in result && result.error instanceof Error)
+      assert.match(result.error.message, /account changed/u)
+      assert.equal(await readFile(file, 'utf8'), before)
+      assert.ok(await readReviewSnapshotLog(workspace.repo, owner.repo, owner.viewer, 26))
+      assert.equal(await readReviewSnapshotLog(workspace.repo, owner.repo, 'bob', 26), null)
+    })
+})
+
+test('concurrent viewed saves preserve both pull-request records under the same qualified lock', {
+  timeout: 10_000,
+}, async (t) => {
+  const workspace = await createTestWorkspace()
+  const owner = { host: 'github.com', repository: 'howarewoo/git-stacks', viewer: 'alice' }
+  const initial = {
+    number: 26,
+    comparison: comparison(),
+    paths: ['src/first.ts'],
+    updatedAt: '2026-09-24T00:00:00Z',
+  }
+  await writeViewedRecord(workspace.repo, owner, initial, authorizeTestJournal(workspace.repo))
+  const files = (await readdir(join(workspace.repo, '.git'))).filter(
+    (name) => name.startsWith('git-stacks-reviewed-files-') && name.endsWith('.json'),
+  )
+  assert.equal(files.length, 1)
+  const file = join(workspace.repo, '.git', files[0])
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const cancellation = new AbortController()
+  const first = writeViewedRecord(
+    workspace.repo,
+    owner,
+    initial,
+    async () => {
+      entered.resolve()
+      await release.promise
+      await authorizeTestJournal(workspace.repo)()
+    },
+    cancellation.signal,
+  )
+  await entered.promise
+  const attempted = journalAttempt(file)
+  let secondAuthorized = false
+  const other = { ...initial, number: 27, paths: ['src/other.ts'] }
+  const second = writeViewedRecord(
+    workspace.repo,
+    owner,
+    other,
+    async () => {
+      secondAuthorized = true
+      await authorizeTestJournal(workspace.repo)()
+    },
+    cancellation.signal,
+  )
+  t.after(async () => {
+    cancellation.abort()
+    release.resolve()
+    attempted.close()
+    await Promise.allSettled([first, second])
+    await workspace.dispose()
+  })
+  await attempted.promise
+  assert.equal(
+    secondAuthorized,
+    false,
+    'a contender cannot authorize or publish outside the first lock',
+  )
+  release.resolve()
+  await Promise.all([first, second])
+  assert.deepEqual(await readViewedRecord(workspace.repo, owner, 26), initial)
+  assert.deepEqual(await readViewedRecord(workspace.repo, owner, 27), other)
+})
+
+test('shared snapshot writers preserve a later captured-A receipt and independent B observations after clear', {
+  timeout: 10_000,
+}, async (t) => {
+  const workspace = await createTestWorkspace()
+  const repo = 'github.com/howarewoo/git-stacks'
+  const prior = comparison()
+  const delivered = comparison({ headOid: 'c'.repeat(40) })
+  const newB = comparison({ headOid: 'd'.repeat(40) })
+  for (const viewer of ['alice', 'bob'])
+    await recordObservedHead(
+      workspace.repo,
+      repo,
+      viewer,
+      26,
+      prior,
+      1,
+      authorizeTestJournal(workspace.repo),
+    )
+  const file = join(workspace.repo, '.git', 'git-stacks-review-snapshots.json')
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const cancellation = new AbortController()
+  const clearing = clearReviewSnapshots(
+    workspace.repo,
+    repo,
+    'alice',
+    26,
+    async () => {
+      entered.resolve()
+      await release.promise
+      await authorizeTestJournal(workspace.repo)()
+    },
+    cancellation.signal,
+  )
+  await entered.promise
+  const attempted = journalAttempt(file)
+  const observation = recordObservedHead(
+    workspace.repo,
+    repo,
+    'bob',
+    26,
+    newB,
+    2,
+    authorizeTestJournal(workspace.repo),
+    undefined,
+    cancellation.signal,
+  )
+  const receipt = markReviewSnapshotReviewed(
+    workspace.repo,
+    repo,
+    'alice',
+    26,
+    delivered,
+    'confirmed-A',
+    undefined,
+    cancellation.signal,
+  )
+  t.after(async () => {
+    cancellation.abort()
+    release.resolve()
+    attempted.close()
+    await Promise.allSettled([clearing, observation, receipt])
+    await workspace.dispose()
+  })
+  await attempted.promise
+  release.resolve()
+  await Promise.all([clearing, observation, receipt])
+  const original = await readReviewSnapshotLog(workspace.repo, repo, 'alice', 26)
+  assert.deepEqual(
+    original?.snapshots.map((entry) => [entry.headOid, entry.reviewId]),
+    [[delivered.headOid, 'confirmed-A']],
+  )
+  const replacement = await readReviewSnapshotLog(workspace.repo, repo, 'bob', 26)
+  assert.deepEqual(
+    replacement?.snapshots.map((entry) => entry.headOid).sort(),
+    [prior.headOid, newB.headOid].sort(),
+  )
+  assert.ok(replacement?.snapshots.every((entry) => entry.reviewId !== 'confirmed-A'))
 })

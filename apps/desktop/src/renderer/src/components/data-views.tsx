@@ -27,7 +27,7 @@ import { EmptyState, InlineAlert } from './ui/surface'
 import { FileInspector } from './repository-views'
 import { PullRequestHoverCard } from './repository-hover-cards'
 import { cn } from '../lib/utils'
-import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
+import { workspaceViewHeadingId } from './workspace-navigation'
 import {
   checkLabel,
   checksVariant,
@@ -220,7 +220,7 @@ export function ChangesView({
     <div className="changes-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('changes')} tabIndex={-1}>
             Working changes
           </h1>
           <span className="list-subtitle">
@@ -493,7 +493,7 @@ export function PullRequestListView({
     <div className="pull-requests-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('pullRequests')} tabIndex={-1}>
             Pull requests
           </h1>
           <span className="list-subtitle">
@@ -623,7 +623,7 @@ export function StashesView({
     <div className="stashes-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('stashes')} tabIndex={-1}>
             Stashes
           </h1>
           <span className="list-subtitle">{snapshot.stashes.length} saved</span>
@@ -780,7 +780,7 @@ export function DiagnosticsView({ snapshot }: { snapshot: RepositorySnapshot }) 
     <div className="diagnostics-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('diagnostics')} tabIndex={-1}>
             Diagnostics
           </h1>
           <span className="list-subtitle">

@@ -16,7 +16,7 @@ import { Input } from './ui/input'
 import { EmptyState } from './ui/surface'
 import { InlineAlert } from './ui/surface'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
-import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
+import { workspaceViewHeadingId } from './workspace-navigation'
 import {
   NOTIFICATION_CONSENT_POINTS,
   NOTIFICATION_REASON_LABELS,
@@ -379,7 +379,7 @@ export function NotificationCenterView({
     <div className="diagnostics-view notification-center-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('notifications')} tabIndex={-1}>
             GitHub Notifications
           </h1>
           {!status || polls ? (

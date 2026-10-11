@@ -33,6 +33,12 @@ import { getPullRequest } from './github'
 import { listPullRequestStacks } from './native-stacks'
 import { parseHunkBlock } from './hunks'
 
+export function reviewRepositoryIdentity(remote: ParsedRemote): string {
+  const context = remoteHostContext(remote)
+  if (!context) throw new Error('The review repository host cannot be identified.')
+  return `${context.host}/${remote.owner.toLowerCase()}/${remote.name.toLowerCase()}`
+}
+
 /**
  * GitHub refuses to page a pull request's file list past this many entries, so
  * a read that stops here is reported as incomplete rather than as "all files".

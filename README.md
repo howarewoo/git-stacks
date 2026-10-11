@@ -190,9 +190,60 @@ open before React renders. A retired GitHub authority seeds only local facts
 with remote-derived state removed; it never restores the retired credential.
 
 Review line selections retire when any part of the displayed comparison changes.
-Confirmed review delivery retires only delivered draft identities in main's
-repository/account-scoped journal, even after navigation unmounts the workspace.
-Unsent drafts and settled recovery evidence remain intact.
+Review journals are qualified by the provider host, repository, account, and PR.
+A full-set draft save carries the observed saved version (or an observed absence);
+main compares it under the journal lock and returns the actual accepted record.
+Accepted versions advance monotonically, including empty sets: an explicit clear
+or confirmed delivery cannot be undone by an older full-set save. Conflicts keep
+the latest local words and their original comparison visible; they never retry,
+rebaseline, or submit automatically. Explicitly discard those edits to adopt
+newer saved work.
+While one autosave is actually running, repeated edits replace the latest
+same-comparison paused successor in the existing mutation lifecycle rather than
+enqueueing another complete authored array for each edit. Its accepted-version
+chain remains FIFO; successful and obsolete snapshots are retired.
+
+An unanswered draft read is not an observed absence: new composition waits for
+that qualified journal baseline. A failed conversation refresh in the same
+proven qualified scope keeps the owner's existing local words readable and
+editable; local saves retain the same qualified FIFO and advance only from the
+accepted version of their own predecessor. Existing saved-comment edits also
+remain available when live files cannot be read, retaining the original record
+comparison rather than re-anchoring onto another diff. Neither retained owner
+provenance nor a failed read authorizes provider actions from an older conversation
+answer. Retained historical hunks name their actual comparison endpoint, with a
+visible warning when newly observed head or base facts differ.
+If the selected PR's headline read failed, explicitly choosing that PR again
+restarts the existing scoped Review read; fresh list metadata alone does not
+authorize provider actions or adopt another owner's local drafts.
+
+New saves, viewed marks, and review intents revalidate their captured owner after
+lock admission. Review dispatch also rechecks the original head, base OID, and
+base ref immediately before the provider write. Confirmed delivery retires only
+the exact submitted authored fields at that same original comparison. A receipt
+for an already-dispatched operation remains with its captured owner even if the
+active account or read signal retires; it is never returned to the replacement
+account or used to dispatch again.
+Final permission and comparison validation and the provider mutation share one
+main-only pinned CLI credential; account replacement cannot change the sender
+between them. Cross-process reservations reject concurrent overlapping authored
+versions under the journal lock. Replies also reread their comment boundary at
+reservation admission, so a delayed duplicate preflight cannot outlive confirmed
+reply cleanup; a fresh explicit reply can use the newly observed boundary.
+Recovered review delivery must also match the receipt's original draft ID,
+unmodified body (including meaningful indentation), references, and creation
+time; current edited words are not certified by an older delivered version.
+Historical qualified receipts without that original evidence hold overlapping
+drafts rather than clearing them or posting them again. Reply recovery likewise
+compares exact authored words, not whitespace-normalized text. New settlement
+acknowledgements and history clears require live captured-owner proof under the
+journal lock; the UI explains when that proof is still pending or unavailable.
+
+Unqualified older draft and uncertainty files remain byte-for-byte untouched.
+They cannot certify viewed marks, anchors, receipts, or account identity. The
+explicit unattributed local-text recovery disclosure can show their original
+text without restoring anchors, adopting drafts, changing records, or sending
+anything.
 
 Shared settings writes reconcile through the authoritative settings read rather
 than publishing full reply snapshots. Main's settings and updater queues can
@@ -1898,8 +1949,6 @@ save/reset; unknown authority is unavailable rather than an invented account.
 Preferences contain only bounded name, preset, search, author, status, and
 collapse criteria. Selection and camera are not persisted.
 
-
-
 ### Fresh checkout
 
 Use Node 24 and the committed `pnpm-lock.yaml`:
@@ -2845,6 +2894,39 @@ remains an explicit secondary control; **PR actions** contains management and
 **Open on GitHub**. Local Git commands remain in the palette and local-work
 destinations rather than competing with code in Review.
 
+**Return to …** returns to the workspace that opened Review. The qualified
+origin keeps graph filters, the actual selected PR/ref, expansion and dependent
+path, camera, and local outline/list scroll. Review retains its reading and
+composition state independently. A selected PR that no longer matches a graph
+filter remains explicitly outside that filter. Repository/origin/account or
+credential replacement retires incompatible ephemeral navigation; a cross-repository
+Inbox entry can return to its same host/account queue without restoring the old
+repository's graph. Navigation does not fetch Git refs, check out branches, or
+dispatch a mutation.
+
+Review read results remain Query-owned, while selection and unsent form values
+remain local. While a structured repository mutation is busy, a refreshed file
+set waits to replace the displayed comparison. Observed head/base changes still
+warn and block submission immediately; presentation deferral never defers safety.
+
+Viewed-file aids are stored in a host/repository/viewer-qualified local namespace,
+bound to the full head/base/base-ref comparison. Older unqualified viewed marks
+are left untouched but cannot certify this account's reading. New draft, observed
+history, and uncertain-write owners include the host as well as repository and
+viewer. Captured review/thread/history-clear owners are revalidated in main before
+writes; submissions and replies are checked again after acquiring the journal lock.
+Unsent comments retain their original full comparison when saved or submitted.
+New drafts and uncertainty records use `git-stacks-review-drafts-qualified.json`
+and `git-stacks-review-uncertain-qualified.json` in the repository Git directory.
+The original journal files are read-only recovery material, never normalized or
+migrated by a new save or delivered-draft cleanup. **PR actions →
+Recover unattributed local text** is an explicit local recovery dialog: it first
+lists original recorded identities without bodies, and shows text only after
+**Show original text for manual recovery**. That text is not attached to the
+current hosted account/PR; it contains no recovered anchors, cannot be edited or
+submitted there, and opening/closing recovery does not change the journal.
+Uncertain legacy attempts cannot be adopted or replayed against another host.
+
 **Code** owns the body by default. **Description & reviewers**, **Checks**,
 **Commits**, and **Conversation** open the existing context surfaces beside code
 at wide widths and switch the body at constrained widths. **Code** reopens the
@@ -2924,6 +3006,9 @@ or a push to the base branch changes the diff, and a retarget changes what the
 files are relative to even when both commits are untouched, so the marks are
 dropped rather than carried onto a diff nobody looked at. Nothing is written to
 GitHub.
+The file toolbar also offers **Mark file as unviewed** and **Mark file as viewed**.
+These update that same comparison-bound local record, not an independent display
+flag; removing one mark leaves the other files' marks intact.
 
 ### Line identity contract
 

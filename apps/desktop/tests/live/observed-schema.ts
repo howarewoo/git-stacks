@@ -1,7 +1,7 @@
 import { isRecord } from '@git-stacks/shared/guards'
 import { createPullRequestStack } from '../../src/main/native-stacks'
 import { originRemote, readReviewFilesFrom } from '../../src/main/review'
-import { submitReview } from '../../src/main/review-threads'
+import { readReviewThreads, submitReview } from '../../src/main/review-threads'
 import type { GitHubRestRequest, GitHubTransport } from '../../src/main/github-transport'
 import type { LiveTarget, LiveWorkspace } from './contract'
 import { LiveRedactor } from './diagnostics'
@@ -524,6 +524,7 @@ export async function prepareSchemaSubject(input: {
   // shape being pinned is the shape the product's writers produce.
   const files = await readReviewFilesFrom(await originRemote(workspace.path), pull.number)
   await submitReview(workspace.path, pull.number, {
+    ...(await readReviewThreads(workspace.path, pull.number)).owner,
     event: 'COMMENT',
     body: 'A review written so the schema probes have a record to read.',
     drafts: anchorsFrom(files, PROBE_FILE).slice(0, 1),

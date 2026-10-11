@@ -10,6 +10,7 @@ import type {
   ReviewDraftResolution,
   ReviewEvent,
   ReviewPermissions,
+  ReviewOwner,
   ReviewThread,
   ReviewThreadRead,
 } from '@git-stacks/shared/review-threads'
@@ -237,6 +238,8 @@ export function ReviewConversation({
       setNotice(null)
       try {
         const result = await submitMutation.mutateAsync({
+          repo: getDrafts()!.repo,
+          viewer: getDrafts()!.viewer,
           event: value.event,
           body: value.summary,
           // The whole intended review, including anything the backend will refuse.
@@ -244,7 +247,7 @@ export function ReviewConversation({
           drafts: pending,
           // The comparison the diff on screen was read at, so a pull request that
           // moved since is refused rather than re-anchored onto a new revision.
-          comparison: files.comparison,
+          comparison: getDrafts()?.comparison ?? files.comparison,
         })
         if (!live.current) return
         setUncertain(false)
@@ -330,7 +333,7 @@ export function ReviewConversation({
         drafts={draftList}
         byId={byId}
         staleCount={stale.length}
-        disabled={sending || Boolean(frozenReason)}
+        disabled={sending}
         onChangeBody={(id, body) =>
           onDraftChange(
             (getDrafts()?.drafts ?? []).map((draft) =>
@@ -630,14 +633,13 @@ function SubmitBar({
                   </RadioGroup>
                   <Button
                     disabled={disabled}
+                    loading={busy}
                     size="sm"
                     tooltip={reason}
                     type="submit"
                     variant="accent"
                   >
-                    {busy
-                      ? 'Sending…'
-                      : `Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one review`}
+                    {`Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one review`}
                   </Button>
                   <p className="review-submit-reason" id={summaryReasonId}>
                     {reason}
@@ -683,17 +685,24 @@ function ThreadList({
   }, [])
   const replyMutation = useMutation({
     mutationKey: [...queryIdentity, 'reply', read?.threads.comparison],
-    mutationFn: ({ threadId, body }: { threadId: string; body: string }) =>
-      desktop!.reviewReply!(number, threadId, body),
+    mutationFn: ({
+      threadId,
+      body,
+      owner,
+    }: {
+      threadId: string
+      body: string
+      owner: ReviewOwner
+    }) => desktop!.reviewReply!(number, threadId, body, owner),
     retry: false,
   })
   const resolveMutation = useMutation({
     mutationKey: [...queryIdentity, 'resolve', read?.threads.comparison],
-    mutationFn: (thread: ReviewThread) =>
-      desktop!.reviewSetResolved!(number, thread.id, !thread.resolved),
+    mutationFn: ({ thread, owner }: { thread: ReviewThread; owner: ReviewOwner }) =>
+      desktop!.reviewSetResolved!(number, thread.id, !thread.resolved, owner),
     retry: false,
   })
-  const busy = resolveMutation.isPending ? (resolveMutation.variables?.id ?? null) : null
+  const busy = resolveMutation.isPending ? (resolveMutation.variables?.thread.id ?? null) : null
   const [actionError, setActionError] = React.useState<string | null>(null)
 
   // Threads whose last write left GitHub's answer unknown. A reply is its own
@@ -706,11 +715,17 @@ function ThreadList({
     onSubmitMeta: { threadId: '' },
     onSubmit: async ({ value, formApi, meta }): Promise<void> => {
       const threadId = meta.threadId
-      if (!desktop?.reviewReply || uncertain.has(threadId) || actionLock.current) return
+      if (
+        !desktop?.reviewReply ||
+        !read?.owner.viewer ||
+        uncertain.has(threadId) ||
+        actionLock.current
+      )
+        return
       actionLock.current = true
       setActionError(null)
       try {
-        await replyMutation.mutateAsync({ threadId, body: value.body })
+        await replyMutation.mutateAsync({ threadId, body: value.body, owner: read.owner })
         if (!live.current) return
         // Only what GitHub accepted is cleared: a refused write keeps the words
         // in the box so the same reply can be corrected and sent again.
@@ -731,11 +746,11 @@ function ThreadList({
   const replying = replyMutation.isPending
 
   const toggleResolved = async (thread: ReviewThread) => {
-    if (!desktop?.reviewSetResolved || actionLock.current) return
+    if (!desktop?.reviewSetResolved || !read?.owner.viewer || actionLock.current) return
     actionLock.current = true
     setActionError(null)
     try {
-      await resolveMutation.mutateAsync(thread)
+      await resolveMutation.mutateAsync({ thread, owner: read.owner })
       if (live.current) onReload()
     } catch (cause) {
       if (live.current) setActionError(readableError(cause))
@@ -802,7 +817,11 @@ function ThreadList({
                 <div className="review-thread-actions">
                   {thread.viewerCanResolve && !thread.resolved ? (
                     <Button
-                      disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                      disabled={
+                        !read.owner.viewer ||
+                        busy === thread.id ||
+                        (replying && replyFor === thread.id)
+                      }
                       size="sm"
                       variant="secondary"
                       onClick={() => void toggleResolved(thread)}
@@ -812,7 +831,11 @@ function ThreadList({
                   ) : null}
                   {thread.viewerCanUnresolve && thread.resolved ? (
                     <Button
-                      disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                      disabled={
+                        !read.owner.viewer ||
+                        busy === thread.id ||
+                        (replying && replyFor === thread.id)
+                      }
                       size="sm"
                       variant="secondary"
                       onClick={() => void toggleResolved(thread)}
@@ -822,7 +845,11 @@ function ThreadList({
                   ) : null}
                   {thread.viewerCanReply ? (
                     <Button
-                      disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                      disabled={
+                        !read.owner.viewer ||
+                        busy === thread.id ||
+                        (replying && replyFor === thread.id)
+                      }
                       size="sm"
                       variant="ghost"
                       onClick={() => setReplyFor(replyFor === thread.id ? null : thread.id)}
@@ -855,8 +882,12 @@ function ThreadList({
                           />
                           <Button
                             disabled={
-                              replying || body.state.value.trim() === '' || uncertain.has(thread.id)
+                              !read.owner.viewer ||
+                              replying ||
+                              body.state.value.trim() === '' ||
+                              uncertain.has(thread.id)
                             }
+                            loading={replying}
                             size="sm"
                             tooltip={
                               uncertain.has(thread.id)
@@ -866,7 +897,7 @@ function ThreadList({
                             type="submit"
                             variant="accent"
                           >
-                            {replying ? 'Sending…' : 'Send reply'}
+                            Send reply
                           </Button>
                         </>
                       )}

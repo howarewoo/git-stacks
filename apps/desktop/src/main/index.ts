@@ -14,6 +14,7 @@ import type { IpcMainInvokeEvent } from 'electron'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isRecord } from '@git-stacks/shared/guards'
 import {
   getSnapshot,
   resolveRepository,
@@ -40,12 +41,25 @@ import {
 } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
-import { originRemote, readReviewCommits, readReviewFiles, readReviewHeadline } from './review'
+import {
+  originRemote,
+  readReviewCommits,
+  readReviewFiles,
+  readReviewHeadline,
+  reviewRepositoryIdentity,
+} from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
 import { clearReviewHistory, readReviewHistory, readReviewHistoryDiff } from './review-history'
-import { readReviewDrafts, writeReviewDrafts } from './review-drafts'
+import {
+  readReviewDrafts,
+  writeReviewDrafts,
+  readReviewDraftRecovery,
+  assertReviewDraftOwner,
+} from './review-drafts'
 import {
   readReviewPermissions,
+  readReviewPermissionsFrom,
+  revalidateReviewOwner,
   readReviewThreads,
   replyToThread,
   resolveReviewDraftsAt,
@@ -64,6 +78,7 @@ import type {
   ReviewDraftRecord,
   ReviewEvent,
   ReviewSubmission,
+  ReviewOwner,
 } from '@git-stacks/shared/review-threads'
 import { REVIEW_EVENTS } from '@git-stacks/shared/review-threads'
 import type { ReviewComparison, ReviewLineRef, ReviewViewedRecord } from '@git-stacks/shared/review'
@@ -1206,6 +1221,21 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
   }
 }
 
+function requireReviewOwner(value: unknown): ReviewOwner {
+  if (
+    !isRecord(value) ||
+    typeof value.repo !== 'string' ||
+    value.repo.length > 512 ||
+    value.repo.split('/').length !== 3 ||
+    typeof value.viewer !== 'string' ||
+    !value.viewer ||
+    value.viewer.length > 128
+  ) {
+    throw new Error('The captured review host, repository and account are required.')
+  }
+  return { repo: value.repo, viewer: value.viewer }
+}
+
 function requireSubmission(value: unknown): ReviewSubmission {
   if (typeof value !== 'object' || value === null) throw new Error('Invalid review submission.')
   const submission = value as Record<string, unknown>
@@ -1223,6 +1253,7 @@ function requireSubmission(value: unknown): ReviewSubmission {
     throw new Error('Invalid review submission.')
   }
   return {
+    ...requireReviewOwner(submission),
     event: event as ReviewEvent,
     body: submission.body,
     drafts: submission.drafts.map(requireDraft),
@@ -1868,14 +1899,60 @@ function installHandlers() {
   })
   ipcMain.handle('repository:review-viewed', (event, number: unknown) => {
     return readRepository(
-      (root, signal) => readViewedRecord(root, requirePullRequestNumber(number), signal),
+      async (root, signal) => {
+        const prNumber = requirePullRequestNumber(number)
+        const remote = await originRemote(root, signal)
+        const permissions = await readReviewPermissionsFrom(remote, prNumber, signal)
+        const record = await readViewedRecord(
+          root,
+          {
+            host: remote.host,
+            repository: `${remote.owner}/${remote.name}`,
+            viewer: permissions.viewer,
+          },
+          prNumber,
+          signal,
+        )
+        await revalidateReviewOwner(
+          root,
+          prNumber,
+          { repo: reviewRepositoryIdentity(remote), viewer: permissions.viewer },
+          null,
+          signal,
+        )
+        return record
+      },
       'review-viewed',
       'github',
     )
   })
-  ipcMain.handle('repository:review-set-viewed', (event, value: unknown) => {
+  ipcMain.handle('repository:review-set-viewed', (event, value: unknown, ownerValue: unknown) => {
     return readRepository(
-      (root, signal) => writeViewedRecord(root, requireViewedRecord(value), signal),
+      async (root, signal) => {
+        const record = requireViewedRecord(value)
+        const remote = await originRemote(root, signal)
+        const owner = requireReviewOwner(ownerValue)
+        if (owner.repo !== reviewRepositoryIdentity(remote))
+          throw new Error('The captured viewed-file repository or host changed.')
+        const permissions = await readReviewPermissionsFrom(remote, record.number, signal)
+        if (owner.viewer !== permissions.viewer)
+          throw new Error(
+            'The viewed-file account changed. The replacement account was not marked as having viewed this file.',
+          )
+        return writeViewedRecord(
+          root,
+          {
+            host: remote.host,
+            repository: `${remote.owner}/${remote.name}`,
+            viewer: permissions.viewer,
+          },
+          record,
+          async () => {
+            await revalidateReviewOwner(root, record.number, owner, record.comparison, signal)
+          },
+          signal,
+        )
+      },
       'review-set-viewed',
       'github',
     )
@@ -1895,41 +1972,100 @@ function installHandlers() {
         // is what says whose drafts these are. Reading them without naming the
         // account and the repository would hand one account another's unsent
         // words to submit.
-        const permissions = await readReviewPermissions(
-          root,
+        const permissions = await readReviewPermissionsFrom(
+          remote,
           requirePullRequestNumber(number),
           signal,
         )
-        return readReviewDrafts(
+        const record = await readReviewDrafts(
           root,
-          `${remote.owner}/${remote.name}`,
+          reviewRepositoryIdentity(remote),
           permissions.viewer,
           requirePullRequestNumber(number),
           signal,
         )
+        await revalidateReviewOwner(
+          root,
+          requirePullRequestNumber(number),
+          { repo: reviewRepositoryIdentity(remote), viewer: permissions.viewer },
+          null,
+          signal,
+        )
+        return record
       },
       'review-drafts',
       'github',
     )
   })
-  ipcMain.handle('repository:review-set-drafts', (event, value: unknown) => {
+  ipcMain.handle(
+    'repository:review-set-drafts',
+    (event, value: unknown, expectedUpdatedAt: unknown) => {
+      return readRepository(
+        async (root, signal) => {
+          const incoming = requireDraftRecord(value)
+          if (
+            expectedUpdatedAt !== null &&
+            (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.length > 128)
+          ) {
+            throw new Error('A full draft save requires its observed saved version.')
+          }
+          const remote = await originRemote(root, signal)
+          const owner = requireReviewOwner(incoming)
+          if (owner.repo !== reviewRepositoryIdentity(remote))
+            throw new Error('The draft repository or host changed. Your unsent text was not moved.')
+          // Compare the captured public owner with Git and GitHub before saving;
+          // changing credentials never silently adopts another authority's text.
+          const permissions = await readReviewPermissions(root, incoming.number, signal)
+          if (owner.viewer !== permissions.viewer)
+            throw new Error('The draft account changed. Your unsent text was not moved.')
+          await assertReviewDraftOwner(
+            root,
+            owner.repo,
+            owner.viewer,
+            incoming.number,
+            incoming.drafts.map((draft) => draft.id),
+            incoming.comparison,
+            signal,
+          )
+          return writeReviewDrafts(
+            root,
+            { ...incoming, ...owner },
+            expectedUpdatedAt,
+            async () => {
+              await revalidateReviewOwner(root, incoming.number, owner, null, signal)
+            },
+            signal,
+          )
+        },
+        'review-set-drafts',
+        'github',
+      )
+    },
+  )
+  ipcMain.handle('repository:review-draft-recovery', (event, value: unknown) => {
+    const selected =
+      value === null
+        ? null
+        : (() => {
+            if (
+              !isRecord(value) ||
+              typeof value.repo !== 'string' ||
+              value.repo.split('/').length !== 2 ||
+              value.repo.length > 512 ||
+              typeof value.viewer !== 'string' ||
+              value.viewer.length > 128
+            ) {
+              throw new Error('Choose the original locally saved record to recover.')
+            }
+            return {
+              repo: value.repo,
+              viewer: value.viewer,
+              number: requirePullRequestNumber(value.number),
+            }
+          })()
     return readRepository(
-      async (root, signal) => {
-        const incoming = requireDraftRecord(value)
-        const remote = await originRemote(root, signal)
-        // The repository and the account are stamped here, from the ones Git and
-        // GitHub name, rather than taken from the renderer. The renderer does not
-        // know either, and a record that adopted a caller-supplied owner would be
-        // exactly the record that could be planted under the wrong one.
-        const permissions = await readReviewPermissions(root, incoming.number, signal)
-        return writeReviewDrafts(
-          root,
-          { ...incoming, repo: `${remote.owner}/${remote.name}`, viewer: permissions.viewer },
-          signal,
-        )
-      },
-      'review-set-drafts',
-      'github',
+      (root, signal) => readReviewDraftRecovery(root, selected, signal),
+      'review-draft-recovery',
     )
   })
   ipcMain.handle('repository:review-submit', (event, number: unknown, value: unknown) => {
@@ -1941,7 +2077,7 @@ function installHandlers() {
   })
   ipcMain.handle(
     'repository:review-reply',
-    (event, number: unknown, threadId: unknown, body: unknown) => {
+    (event, number: unknown, threadId: unknown, body: unknown, owner: unknown) => {
       return operations.write(() =>
         inGitRuntime(() =>
           replyToThread(
@@ -1949,6 +2085,7 @@ function installHandlers() {
             requirePullRequestNumber(number),
             requireThreadId(threadId),
             requireCommentBody(body),
+            requireReviewOwner(owner),
           ),
         ),
       )
@@ -1956,10 +2093,18 @@ function installHandlers() {
   )
   ipcMain.handle(
     'repository:review-resolve',
-    (event, number: unknown, threadId: unknown, resolved: unknown) => {
+    (event, number: unknown, threadId: unknown, resolved: unknown, owner: unknown) => {
       if (typeof resolved !== 'boolean') throw new Error('Choose whether to resolve this thread.')
       return operations.write(() =>
-        inGitRuntime(() => setThreadResolved(repository(), requireThreadId(threadId), resolved)),
+        inGitRuntime(() =>
+          setThreadResolved(
+            repository(),
+            requirePullRequestNumber(number),
+            requireThreadId(threadId),
+            resolved,
+            requireReviewOwner(owner),
+          ),
+        ),
       )
     },
   )
@@ -1999,9 +2144,15 @@ function installHandlers() {
       )
     },
   )
-  ipcMain.handle('repository:review-clear-history', (event, number: unknown) => {
+  ipcMain.handle('repository:review-clear-history', (event, number: unknown, owner: unknown) => {
     return readRepository(
-      (root, signal) => clearReviewHistory(root, requirePullRequestNumber(number), signal),
+      (root, signal) =>
+        clearReviewHistory(
+          root,
+          requirePullRequestNumber(number),
+          requireReviewOwner(owner),
+          signal,
+        ),
       'review-clear-history',
       'github',
     )

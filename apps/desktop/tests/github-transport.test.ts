@@ -31,6 +31,7 @@ import { readPullRequestInbox, resetInboxHostAllowances } from '../src/main/pr-i
 import type { CachedGitHubResponse, GitHubResponseCache } from '../src/main/github-response-cache'
 import type { DesktopAPI } from '@git-stacks/shared/types'
 import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
+import { setThreadResolved } from '../src/main/review-threads'
 
 // The renderer bridge is the whole renderer capability surface; it must never gain one.
 type AssertNever<T extends never> = T
@@ -2124,6 +2125,172 @@ if (argv[0] === 'auth' && argv[1] === 'token') {
   }
 })
 
+test('direct credential sessions retain supplied material for validation and dispatch', async () => {
+  const { fetch: fetchDouble, captured } = recordingFetch([
+    { body: { data: { viewer: { login: 'ada' } } } },
+    { body: { id: 7 } },
+  ])
+  const options = { token: 'fixture-a', fetch: fetchDouble }
+  const transport = new DirectGitHubTransport(options)
+  const credential = await transport.pinCredential()
+  const checked = await credential.graphql<{ viewer: { login: string } }>(
+    'query { viewer { login } }',
+  )
+  assert.equal(checked.viewer.login, 'ada')
+  options.token = 'fixture-b'
+  await credential.rest({
+    method: 'POST',
+    path: 'repos/acme/app/pulls/7/reviews',
+    body: { body: 'A words' },
+  })
+  assert.deepEqual(
+    captured.map((request) => new Headers(request.init?.headers).get('authorization')),
+    ['Bearer fixture-a', 'Bearer fixture-a'],
+  )
+  await assert.rejects(new DirectGitHubTransport({ fetch: fetchDouble }).pinCredential(), {
+    kind: 'unauthorized',
+  })
+  assert.equal(captured.length, 2, 'missing credentials refuse without dispatch')
+})
+
+test('review resolution dispatch retains the final checked CLI credential after account replacement', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'git-stacks-review-credential-'))
+  const store = join(directory, 'profile')
+  const repo = join(directory, 'repo')
+  const restoreCredentials = withoutInheritedCredentials()
+  const postedBy: string[] = []
+  let finalChecks = 0
+  const server = createServer(async (request, response) => {
+    const account = request.headers.authorization === 'Bearer profile-a' ? 'A' : 'B'
+    let text = ''
+    for await (const chunk of request) text += chunk
+    const query = text ? (JSON.parse(text).query as string) : ''
+    response.setHeader('content-type', 'application/json')
+    if (query.includes('mutation ResolveReviewThread')) {
+      postedBy.push(account)
+      response.end(
+        JSON.stringify({
+          data: { resolveReviewThread: { thread: { id: 'thread', isResolved: true } } },
+        }),
+      )
+    } else if (query) {
+      if (query.includes('query ReviewPermissions')) {
+        finalChecks += 1
+        // Replace the provider's material after the final owner answer has been
+        // computed but before the awaited origin check and mutation dispatch.
+        writeFileSync(store, 'profile-b')
+      }
+      response.end(
+        JSON.stringify({
+          data: {
+            viewer: { login: account === 'A' ? 'ada' : 'bob' },
+            repository: {
+              viewerPermission: 'WRITE',
+              pullRequest: {
+                state: 'OPEN',
+                viewerDidAuthor: false,
+                headRefOid: 'a'.repeat(40),
+                baseRefOid: 'b'.repeat(40),
+                baseRefName: 'main',
+                reviewThreads: {
+                  totalCount: 1,
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: [
+                    {
+                      id: 'thread',
+                      path: 'file.ts',
+                      line: 1,
+                      diffSide: 'RIGHT',
+                      isResolved: false,
+                      viewerCanResolve: true,
+                      viewerCanUnresolve: false,
+                      comments: {
+                        totalCount: 0,
+                        nodes: [],
+                        pageInfo: { hasNextPage: false, endCursor: null },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      )
+    } else {
+      response.end(
+        JSON.stringify({
+          head: { sha: 'a'.repeat(40) },
+          base: { sha: 'b'.repeat(40), ref: 'main' },
+        }),
+      )
+    }
+  })
+  let host: string | undefined
+  try {
+    await writeFile(store, 'profile-a')
+    await mkdir(repo)
+    execFileSync('git', ['init', repo], { stdio: 'ignore' })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    host = `127.0.0.1:${address.port}`
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', `https://${host}/acme/app.git`])
+    const binary = join(directory, 'gh')
+    await writeFile(
+      binary,
+      `#!${process.execPath}
+import { readFileSync } from 'node:fs'
+const argv = process.argv.slice(2)
+if (argv[0] === 'auth') {
+  process.stdout.write(readFileSync(${JSON.stringify(store)}, 'utf8') + '\\n')
+} else if (argv[0] === 'api') {
+  const endpoint = argv.find((arg) => arg.startsWith('http://'))
+  let input = ''
+  if (argv.includes('--input')) for await (const chunk of process.stdin) input += chunk
+  const token = process.env.GH_ENTERPRISE_TOKEN || process.env.GH_TOKEN
+  const method = argv.includes('--method') ? argv[argv.indexOf('--method') + 1] : 'GET'
+  const answer = await fetch(endpoint, {
+    method,
+    headers: { authorization: 'Bearer ' + token },
+    ...(input ? { body: input } : {}),
+  })
+  process.stdout.write('HTTP/1.1 ' + answer.status + ' OK\\r\\n')
+  for (const [name, value] of answer.headers) process.stdout.write(name + ': ' + value + '\\r\\n')
+  process.stdout.write('\\r\\n' + await answer.text() + '\\n')
+} else process.exit(2)
+`,
+    )
+    await chmod(binary, 0o755)
+    admitOwnedProviderCliRoot(directory)
+    setGitHubHostTransport(
+      host,
+      new GhGitHubTransport({
+        host,
+        apiUrl: `http://${host}/api/v3`,
+        env: { PATH: directory },
+      }),
+    )
+    const result = await setThreadResolved(repo, 7, 'thread', true, {
+      repo: `${host}/acme/app`,
+      viewer: 'ada',
+    })
+    assert.equal(result.state, 'resolved')
+    assert.equal(finalChecks, 1)
+    assert.equal(readFileSync(store, 'utf8'), 'profile-b')
+    assert.deepEqual(postedBy, ['A'], 'B never dispatches the action authorized as A')
+  } finally {
+    if (host) setGitHubHostTransport(host, null)
+    restoreCredentials()
+    server.closeAllConnections()
+    if (server.listening)
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      )
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('a 304 is replayed for a conditional read and refused for a mutation that did not opt in', async () => {
   const validator = 'Tue, 22 Sep 2026 09:41:07 GMT'
   const { fetch: answered304, captured } = recordingFetch([
@@ -2211,4 +2378,50 @@ test('a 304 is replayed for a conditional read and refused for a mutation that d
     'the conditional read was answered from the stored body without a second download',
   )
   assert.equal(captured.length, 3, 'each of the three refused or accepted answers was one request')
+})
+
+test('pinned Gh review REST refuses 304 delivery and preserves conditional read replay', async () => {
+  const entries = new Map<string, CachedGitHubResponse>()
+  const cache: GitHubResponseCache = {
+    get: (key) => entries.get(key) ?? null,
+    set: (key, entry) => void entries.set(key, entry),
+    delete: (key) => void entries.delete(key),
+    clear: () => entries.clear(),
+    size: () => entries.size,
+  }
+  let reads = 0
+  let mutations = 0
+  const transport = new GhGitHubTransport({
+    env: { GH_TOKEN: 'fixture-review-token' },
+    cache,
+    run: async (args) => {
+      if (args[0] === 'auth') return 'fixture-review-token\n'
+      if (args.includes('POST')) {
+        mutations += 1
+        return 'HTTP/1.1 304 Not Modified\r\n\r\n'
+      }
+      reads += 1
+      if (reads === 1) return 'HTTP/1.1 200 OK\r\nETag: "fixture-review"\r\n\r\n{"id":7}'
+      assert.ok(args.includes('if-none-match: "fixture-review"'))
+      return 'HTTP/1.1 304 Not Modified\r\nETag: "fixture-review"\r\n\r\n'
+    },
+  })
+  const credential = await transport.pinCredential()
+  const first = await credential.rest({ path: 'repos/acme/app/pulls/7', cache: true })
+  const replayed = await credential.rest({ path: 'repos/acme/app/pulls/7', cache: true })
+  assert.deepEqual(replayed.data, first.data)
+  assert.equal(replayed.notModified, true)
+  await assert.rejects(
+    credential.rest({
+      method: 'POST',
+      path: 'repos/acme/app/pulls/7/reviews',
+      body: { event: 'COMMENT', body: 'A words' },
+    }),
+    (error: unknown) =>
+      error instanceof GitHubTransportError &&
+      error.kind === 'invalid-response' &&
+      error.detail === 'GitHub answered 304 without a stored response',
+  )
+  assert.equal(mutations, 1)
+  assert.equal(entries.size, 1, 'the refused mutation supplies no delivery receipt or cached body')
 })

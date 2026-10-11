@@ -4350,16 +4350,16 @@ textarea.conflict-content {
 /* Desktop zoom keeps Review inside the window instead of adopting the gallery's
    vertically stacked small-screen shell. Navigation and data each scroll locally. */
 @media (max-width: 760px) {
-  html:has(.review-view),
-  body:has(.review-view),
-  #root:has(.review-view),
-  .app-shell:has(.review-view) {
+  html:has(.workspace[data-workspace-view="review"]),
+  body:has(.workspace[data-workspace-view="review"]),
+  #root:has(.workspace[data-workspace-view="review"]),
+  .app-shell:has(.workspace[data-workspace-view="review"]) {
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
   }
 
-  .workspace:has(.review-view) {
+  .workspace[data-workspace-view="review"] {
     display: grid;
     flex: 1 1 0%;
     grid-template-columns: 150px minmax(0, 1fr);
@@ -4367,26 +4367,26 @@ textarea.conflict-content {
     overflow: hidden;
   }
 
-  .workspace:has(.review-view) .main-pane {
+  .workspace[data-workspace-view="review"] .main-pane {
     min-height: 0;
     overflow: hidden;
   }
 
-  .workspace:has(.review-view) .sidebar {
+  .workspace[data-workspace-view="review"] .sidebar {
     min-height: 0;
     overflow: hidden;
   }
 
-  .workspace:has(.review-view) .sidebar-scroll {
+  .workspace[data-workspace-view="review"] .sidebar-scroll {
     overflow: auto;
   }
 
-  .workspace:has(.review-view) .workspace-nav {
+  .workspace[data-workspace-view="review"] .workspace-nav {
     display: flex;
     flex-direction: column;
   }
 
-  .app-shell:has(.review-view) .toolbar-search {
+  .app-shell:has(.workspace[data-workspace-view="review"]) .toolbar-search {
     width: auto;
     min-width: 0;
     flex: 1;

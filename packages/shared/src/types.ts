@@ -30,6 +30,8 @@ import type {
   ReviewDraftResolution,
   ReviewMutationResult,
   ReviewSubmission,
+  ReviewOwner,
+  ReviewDraftRecovery,
   ReviewThreadRead,
 } from './review-threads'
 import type {
@@ -1314,12 +1316,19 @@ export interface DesktopAPI {
   reviewCommits?(number: number, requestId?: string): Promise<ReviewCommitSet>
   /** Locally recorded viewed files, bound to the head they were read at. */
   reviewViewed?(number: number): Promise<ReviewViewedRecord | null>
-  reviewSetViewed?(record: ReviewViewedRecord): Promise<ReviewViewedRecord>
+  reviewSetViewed?(record: ReviewViewedRecord, owner: ReviewOwner): Promise<ReviewViewedRecord>
   /** Threads and the viewer's permissions for one pull request, read from GitHub. */
   reviewThreads?(number: number, requestId?: string): Promise<ReviewThreadRead>
   /** Locally recorded pending comments, journalled beside the repository. */
   reviewDrafts?(number: number): Promise<ReviewDraftRecord | null>
-  reviewSetDrafts?(record: ReviewDraftRecord): Promise<ReviewDraftRecord>
+  /** Explicit local recovery of unqualified historical text; never returns anchors. */
+  reviewDraftRecovery?(
+    selected: Pick<ReviewDraftRecovery, 'repo' | 'viewer' | 'number'> | null,
+  ): Promise<ReviewDraftRecovery[]>
+  reviewSetDrafts?(
+    record: ReviewDraftRecord,
+    expectedUpdatedAt: string | null,
+  ): Promise<ReviewDraftRecord>
   /**
    * Where each pending draft's lines sit at the comparison on screen now. The
    * view marks a stale draft before anybody presses submit; the main process
@@ -1334,11 +1343,17 @@ export interface DesktopAPI {
    * re-anchored onto a revision the reviewer never read.
    */
   reviewSubmit?(number: number, submission: ReviewSubmission): Promise<ReviewMutationResult>
-  reviewReply?(number: number, threadId: string, body: string): Promise<ReviewMutationResult>
+  reviewReply?(
+    number: number,
+    threadId: string,
+    body: string,
+    owner: ReviewOwner,
+  ): Promise<ReviewMutationResult>
   reviewSetResolved?(
     number: number,
     threadId: string,
     resolved: boolean,
+    owner: ReviewOwner,
   ): Promise<ReviewMutationResult>
   reviewHistory?(number: number, requestId?: string): Promise<ReviewHistory>
   reviewHistoryDiff?(
@@ -1346,7 +1361,7 @@ export interface DesktopAPI {
     fromOid: string,
     requestId?: string,
   ): Promise<ReviewHistoryDiff>
-  reviewClearHistory?(number: number): Promise<ReviewHistory>
+  reviewClearHistory?(number: number, owner: ReviewOwner): Promise<ReviewHistory>
   /** The detailed checks behind one pull request, with its own freshness and permissions. */
   pullRequestChecks?: (
     number: number,

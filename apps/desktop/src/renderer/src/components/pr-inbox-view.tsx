@@ -44,7 +44,7 @@ import { Input } from './ui/input'
 import { Select } from './ui/select'
 import { EmptyState, InlineAlert } from './ui/surface'
 import { cn } from '../lib/utils'
-import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
+import { workspaceViewHeadingId } from './workspace-navigation'
 import type { PullRequest } from '@git-stacks/shared/types'
 
 /**
@@ -287,7 +287,7 @@ export function PullRequestInboxView({
     <div className="pull-requests-view pr-inbox-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('prInbox')} tabIndex={-1}>
             PR Inbox
           </h1>
           <span className="list-subtitle">

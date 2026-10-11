@@ -495,7 +495,22 @@ test('every review read and write reaches the host the origin names, not the pub
   const pullRequest = {
     state: 'OPEN',
     viewerDidAuthor: false,
-    reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+    reviewThreads: {
+      totalCount: 1,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [
+        {
+          id: 'thread-1',
+          path: 'src/review.ts',
+          line: 1,
+          diffSide: 'RIGHT',
+          viewerCanReply: true,
+          viewerCanResolve: true,
+          viewerCanUnresolve: true,
+          comments: { totalCount: 0, nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+        },
+      ],
+    },
   }
   const record = (
     calls: string[],
@@ -510,6 +525,11 @@ test('every review read and write reaches the host the origin names, not the pub
     destinationHost,
     async credentialAuthority(): Promise<string> {
       return `-credential`
+    },
+    async pinCredential() {
+      // This provider double has one immutable viewer and credential. Binding
+      // its own methods retains the host-routing observations for both legs.
+      return { rest: this.rest.bind(this), graphql: this.graphql.bind(this) }
     },
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
       calls.push(`${label}:${request.path ?? ''}`)
@@ -529,6 +549,7 @@ test('every review read and write reaches the host the origin names, not the pub
       return {
         viewer: { login: 'ada' },
         repository: { viewerPermission: 'WRITE', pullRequest },
+        node: { comments: pullRequest.reviewThreads.nodes[0].comments },
         addPullRequestReviewThreadReply: { comment: { id: 'reply-1', url: null } },
         resolveReviewThread: { thread: { id: 'thread-1', isResolved: true } },
         unresolveReviewThread: { thread: { id: 'thread-1', isResolved: false } },
@@ -544,9 +565,9 @@ test('every review read and write reaches the host the origin names, not the pub
     const permissions = await readReviewPermissions(workspace.repo, 7)
     assert.equal(permissions.viewer, 'ada')
     const threads = await readReviewThreads(workspace.repo, 7)
-    assert.equal(threads.threads.threads.length, 0)
-    await replyToThread(workspace.repo, 7, 'thread-1', 'looks good')
-    await setThreadResolved(workspace.repo, 'thread-1', true)
+    assert.equal(threads.threads.threads.length, 1)
+    await replyToThread(workspace.repo, 7, 'thread-1', 'looks good', threads.owner)
+    await setThreadResolved(workspace.repo, 7, 'thread-1', true, threads.owner)
   } finally {
     setGitHubHostTransport(context.host, null)
     setGitHubTransport(null)

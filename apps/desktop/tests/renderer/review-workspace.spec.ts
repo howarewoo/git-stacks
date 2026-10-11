@@ -10,6 +10,7 @@ import {
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { reviewFileSet, textFile } from './fixtures/review'
+import { scenarios } from './fixtures/scenarios'
 
 const head = '4242424242424242424242424242424242424242'
 const longFile = textFile(
@@ -34,21 +35,84 @@ async function openLongReview(
 ) {
   await openGallery(page, { scenario, viewport })
   const number = scenario === 'review-long-stack' ? 136 : 42
-  const currentHead =
-    scenario === 'review-long-stack'
-      ? await page.evaluate(async () => {
-          const read = window.desktop.reviewHeadline
-          if (!read) throw new Error('Review headline fixture capability is unavailable.')
-          return (await read(136)).pullRequest.headOid
-        })
-      : head
+  const pullRequest = await page.evaluate(async (number) => {
+    const read = window.desktop.reviewHeadline
+    if (!read) throw new Error('Review headline fixture capability is unavailable.')
+    return (await read(number)).pullRequest
+  }, number)
   await answerNextDoubleCall(page, 'reviewFiles', {
-    ...reviewFileSet(number, currentHead ?? head),
+    ...reviewFileSet(number, pullRequest.headOid ?? head, pullRequest.base),
     files: [longFile],
   })
   await switchDestination(page, 'review')
   await settle(page)
 }
+
+test('viewed and unviewed records survive same-head return but not a moved head or repository', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'review-stacked' })
+  await switchDestination(page, 'review')
+  const row = page.locator('[data-review-row]').filter({ hasText: 'review.ts' }).first()
+  await expect(page.getByRole('button', { name: /^Mark file as (?:un)?viewed$/ })).toBeEnabled()
+  await row.click()
+  await expect(
+    page.getByRole('button', { name: 'Mark file as unviewed', exact: true }),
+  ).toBeEnabled()
+  await expect
+    .poll(async () => (await page.evaluate(() => window.desktop.reviewViewed!(42)))?.paths)
+    .toContain('src/main/review.ts')
+  const original = await page.evaluate(() => window.desktop.reviewViewed!(42))
+  await page.getByRole('button', { name: 'Mark file as unviewed', exact: true }).click()
+  await expect
+    .poll(async () => (await page.evaluate(() => window.desktop.reviewViewed!(42)))?.paths)
+    .not.toContain('src/main/review.ts')
+  expect((await page.evaluate(() => window.desktop.reviewViewed!(42)))?.comparison).toEqual(
+    original?.comparison,
+  )
+  await page.getByRole('button', { name: 'Mark file as viewed', exact: true }).click()
+  await expect
+    .poll(async () => (await page.evaluate(() => window.desktop.reviewViewed!(42)))?.paths)
+    .toContain('src/main/review.ts')
+  await switchDestination(page, 'stacks')
+  await switchDestination(page, 'review')
+  await expect(
+    page.getByRole('button', { name: 'Mark file as unviewed', exact: true }),
+  ).toBeVisible()
+  const headline = await page.evaluate(() => window.desktop.reviewHeadline!(42))
+  await answerNextDoubleCall(
+    page,
+    'reviewFiles',
+    reviewFileSet(42, '6'.repeat(40), headline.pullRequest.base),
+  )
+  await page.getByRole('button', { name: 'Reload review data from GitHub', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Mark file as viewed', exact: true })).toBeVisible()
+  await expect(row).not.toHaveAttribute('aria-label', /, viewed$/)
+  expect((await page.evaluate(() => window.desktop.reviewViewed!(42)))?.comparison).toEqual(
+    original?.comparison,
+  )
+  const snapshot = scenarios['review-stacked'].snapshot
+  if (!snapshot) throw new Error('Review scenario requires a repository snapshot.')
+  await page.evaluate((snapshot) => window.fixture.pushSnapshot(snapshot), {
+    ...snapshot,
+    path: `${snapshot.path}-other`,
+    remoteUrl: 'https://github.com/other/widgets.git',
+    pullRequests: snapshot.pullRequests.map((pr) => ({
+      ...pr,
+      url: `https://github.com/other/widgets/pull/${pr.number}`,
+    })),
+  })
+  await settle(page)
+  expect(await page.evaluate(() => window.desktop.reviewViewed!(42))).toBeNull()
+  await expect(page.locator('.review-headline')).toContainText('#42')
+  await expect(page.getByRole('button', { name: 'Mark file as viewed', exact: true })).toBeVisible()
+  await expect(row).not.toHaveAttribute('aria-label', /, viewed$/)
+  expect(
+    (await getDoubleCalls(page)).filter((entry) =>
+      ['runAction', 'reviewSubmit', 'reviewReply', 'reviewSetResolved'].includes(entry.call),
+    ),
+  ).toEqual([])
+})
 
 for (const size of [
   { width: 1440, height: 940, rows: 15 },
@@ -118,6 +182,117 @@ for (const size of [
   }
 }
 
+test('a queued repository operation retains reading and composition while head/base safety remains immediate', async ({
+  page,
+}) => {
+  await openLongReview(page, { width: 1000, height: 700 })
+  await page
+    .getByRole('button', { name: 'Comment on src/long-review.ts line 12 on the head', exact: true })
+    .click()
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+  await page.getByRole('button', { name: 'Add pending comment', exact: true }).click()
+  const editor = page.getByRole('textbox', {
+    name: 'Comment on src/long-review.ts:12 (head)',
+    exact: true,
+  })
+  await editor.fill('Keep this sentence while the repository operation waits.')
+  await page.getByRole('textbox', { name: 'Review summary' }).fill('Keep the decision summary too.')
+  await page.getByRole('button', { name: 'Code', exact: true }).click()
+  const region = page.locator('.review-unified')
+  await region.evaluate((element) => {
+    element.scrollTop = 200
+  })
+  const scroll = await region.evaluate((element) => element.scrollTop)
+  await holdDoubleCall(page, 'runAction')
+  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
+  await page.getByRole('combobox').fill('Fetch remote updates')
+  await page.getByRole('option', { name: /^Fetch remote updates/ }).click()
+  await expect
+    .poll(() => page.evaluate(() => window.fixture.pending.includes('runAction')))
+    .toBe(true)
+  await answerNextDoubleCall(page, 'reviewFiles', {
+    ...reviewFileSet(42, 'new-head-observed-while-busy'),
+    files: [
+      textFile('src/replacement.ts', '@@ -0,0 +1,1 @@', [['+a replacement comparison', null, 1]], {
+        status: 'added',
+      }),
+    ],
+  })
+  await page.getByRole('button', { name: 'Reload review data from GitHub', exact: true }).click()
+  await expect(page.locator('.review-view')).toContainText(
+    /head or base changed since this displayed comparison/,
+  )
+  await expect(
+    page.getByRole('button', {
+      name: 'Comment on src/long-review.ts line 12 on the head',
+      exact: true,
+    }),
+  ).toHaveCount(1)
+  await expect(
+    page.getByRole('button', {
+      name: 'Comment on src/replacement.ts line 1 on the head',
+      exact: true,
+    }),
+  ).toHaveCount(0)
+  expect(await region.evaluate((element) => element.scrollTop)).toBe(scroll)
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+  await expect(editor).toHaveValue('Keep this sentence while the repository operation waits.')
+  await expect(page.getByRole('textbox', { name: 'Review summary' })).toHaveValue(
+    'Keep the decision summary too.',
+  )
+  await expect(
+    page.locator('.review-submit').getByRole('button', { name: /Submit/ }),
+  ).toBeDisabled()
+  expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSubmit')).toEqual([])
+  await page.evaluate(() => window.fixture.unhold('runAction'))
+  await releaseDoubleCalls(page, 'runAction')
+})
+
+test('a refreshed comparison never launders a saved comment onto the new head', async ({
+  page,
+}) => {
+  await openLongReview(page, { width: 1000, height: 700 })
+  await page
+    .getByRole('button', { name: 'Comment on src/long-review.ts line 12 on the head', exact: true })
+    .click()
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+  await page.getByRole('button', { name: 'Add pending comment', exact: true }).click()
+  const editor = page.getByRole('textbox', {
+    name: 'Comment on src/long-review.ts:12 (head)',
+    exact: true,
+  })
+  await editor.fill('This sentence was composed against the original head.')
+  await expect
+    .poll(
+      async () => (await page.evaluate(() => window.desktop.reviewDrafts!(42)))?.drafts[0]?.body,
+    )
+    .toBe('This sentence was composed against the original head.')
+  const original = await page.evaluate(() => window.desktop.reviewDrafts!(42))
+  if (!original?.comparison.baseRef) throw new Error('The original fixture base was not observed.')
+  await answerNextDoubleCall(page, 'reviewFiles', {
+    ...reviewFileSet(42, '6'.repeat(40), original.comparison.baseRef),
+    files: [longFile],
+  })
+  await page.getByRole('button', { name: 'Reload review data from GitHub', exact: true }).click()
+  await expect(page.locator('.review-view')).toContainText(
+    'Your unsent comments retain an earlier head or base comparison',
+  )
+  await expect(editor).toHaveValue('This sentence was composed against the original head.')
+  await editor.fill('Edited locally without adopting the replacement comparison.')
+  await expect
+    .poll(
+      async () => (await page.evaluate(() => window.desktop.reviewDrafts!(42)))?.drafts[0]?.body,
+    )
+    .toBe('Edited locally without adopting the replacement comparison.')
+  await expect(
+    page.locator('.review-submit').getByRole('button', { name: /Submit/ }),
+  ).toBeDisabled()
+  expect((await page.evaluate(() => window.desktop.reviewDrafts!(42)))?.comparison).toEqual(
+    original?.comparison,
+  )
+  expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSubmit')).toEqual([])
+})
+
 test('context switches preserve code scroll, selected line, whitespace mode and unsent text', async ({
   page,
 }) => {
@@ -150,8 +325,28 @@ test('context switches preserve code scroll, selected line, whitespace mode and 
   await page
     .getByRole('textbox', { name: 'Reply to src/main/review.ts:2 (head)', exact: true })
     .fill('Unsent reply survives context.')
+  const context = await page.evaluate(async () => ({
+    headline: await window.desktop.reviewHeadline!(42),
+    commits: await window.desktop.reviewCommits!(42),
+  }))
   for (const pane of ['Commits', 'Description & reviewers', 'Checks', 'Code']) {
     await page.getByRole('button', { name: pane, exact: true }).click()
+    if (pane === 'Commits') {
+      await expect(page.locator('.review-context')).toContainText(
+        context.commits.commits[0].message,
+      )
+    } else if (pane === 'Description & reviewers') {
+      await expect(page.locator('.review-about')).toContainText(context.headline.pullRequest.body!)
+    } else if (pane === 'Checks') {
+      await expect(page.getByRole('button', { name: 'Refresh checks', exact: true })).toBeVisible()
+    } else {
+      await expect(
+        page.getByRole('button', {
+          name: 'Comment on src/long-review.ts line 12 on the head',
+          exact: true,
+        }),
+      ).toBeVisible()
+    }
   }
   await expect(page.getByRole('checkbox', { name: 'Hide whitespace' })).toBeChecked()
   expect(await region.evaluate((element) => element.scrollTop)).toBe(top)
@@ -273,6 +468,12 @@ test('historical comparison and submission freeze survive contextual pane switch
 }) => {
   await openGallery(page, { scenario: 'review-stacked' })
   await switchDestination(page, 'review')
+  await expect(page.getByRole('button', { name: /^Mark file as (?:un)?viewed$/ })).toBeEnabled()
+  await page.locator('[data-review-row]').filter({ hasText: 'review.ts' }).first().click()
+  await expect
+    .poll(async () => (await page.evaluate(() => window.desktop.reviewViewed!(42)))?.paths)
+    .toContain('src/main/review.ts')
+  const currentViewed = await page.evaluate(() => window.desktop.reviewViewed!(42))
   await page.locator('.review-history-disclosure summary').click()
   await page.getByRole('button', { name: 'Changes since reviewed', exact: true }).click()
   await page.locator('.review-history-disclosure summary').click()
@@ -284,6 +485,11 @@ test('historical comparison and submission freeze survive contextual pane switch
     await page.getByRole('button', { name: pane, exact: true }).click()
     await expect(page.locator('.review-history-disclosure summary')).toHaveText(endpoint)
   }
+  await page.getByRole('button', { name: 'Code', exact: true }).click()
+  await page.getByRole('button', { name: 'Next file', exact: true }).click()
+  await page.locator('[data-review-row]').filter({ hasText: 'review.ts' }).click()
+  expect(await page.evaluate(() => window.desktop.reviewViewed!(42))).toEqual(currentViewed)
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
   await expect(page.getByRole('button', { name: /Submit .* as one review/ })).toBeDisabled()
   expect(
     (await getDoubleCalls(page)).filter(
@@ -381,3 +587,52 @@ for (const outcome of ['completed', 'refused']) {
     ).toHaveLength(1)
   })
 }
+
+test('held historical hunks keep their actual endpoint label and a visible Code warning after the head moves', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'review-stacked' })
+  await switchDestination(page, 'review')
+  const original = await page.evaluate(async () => {
+    const history = await window.desktop.reviewHistory!(42)
+    if (!history.reviewed) throw new Error('The earlier reviewed endpoint was not observed.')
+    return window.desktop.reviewHistoryDiff!(42, history.reviewed.headOid)
+  })
+  if (original.state !== 'files') throw new Error('The original endpoint diff is unavailable.')
+  await page.locator('.review-history-disclosure > summary').click()
+  await page.getByRole('button', { name: 'Changes since reviewed', exact: true }).click()
+  await expect(page.locator('.review-history-comparing')).toContainText(
+    original.to.headOid!.slice(0, 7),
+  )
+  await holdDoubleCall(page, 'reviewHistoryDiff')
+  await page.evaluate((snapshot) => window.fixture.pushSnapshot(snapshot), {
+    ...scenarios['review-stacked'].snapshot!,
+    pullRequests: scenarios['review-stacked'].snapshot!.pullRequests.map((pr) =>
+      pr.number === 42 ? { ...pr, headOid: '6'.repeat(40) } : pr,
+    ),
+  })
+  await page.getByRole('button', { name: 'Reload review data from GitHub', exact: true }).click()
+  await expect(page.locator('.review-history-comparing')).toContainText(
+    original.to.headOid!.slice(0, 7),
+  )
+  await expect(page.locator('.review-history-comparing')).not.toContainText('6666666')
+  await expect(page.locator('.review-history-disclosure > summary')).toContainText(
+    original.to.headOid!.slice(0, 7),
+  )
+  const warning = page.locator('.review-comparison-alert').filter({
+    hasText: 'These displayed hunks still compare against',
+  })
+  await expect(warning).toBeVisible()
+  await expect(warning).toContainText('6666666')
+  await expect(warning).toContainText(original.to.headOid!.slice(0, 7))
+  await expect(page.locator('.review-body')).toHaveAttribute('data-pane', 'code')
+  await expect(page.locator('.review-diff')).toContainText('return transportDiff()')
+  await releaseDoubleCalls(page, 'reviewHistoryDiff')
+  await expect(page.locator('.review-history-comparing')).toContainText('6666666')
+  await expect(warning).toHaveCount(0)
+  expect(
+    (await getDoubleCalls(page)).filter((entry) =>
+      ['runAction', 'reviewSubmit', 'reviewReply', 'reviewSetResolved'].includes(entry.call),
+    ),
+  ).toEqual([])
+})
