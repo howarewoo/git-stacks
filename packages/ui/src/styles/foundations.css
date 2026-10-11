@@ -1,4 +1,5 @@
 @import "../tokens/tokens.css";
+@import "./typeset.css";
 
 @custom-variant dark {
   &:where([data-gs-theme="dark"], [data-gs-theme="dark"] *) {
@@ -70,9 +71,11 @@
   text-rendering: optimizeLegibility;
 }
 
-code,
-pre {
-  font-family: var(--gs-semantic-font-mono);
+@layer base {
+  code,
+  pre {
+    font-family: var(--gs-semantic-font-mono);
+  }
 }
 
 .gs-empty-state > h2 {

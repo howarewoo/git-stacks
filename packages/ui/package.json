@@ -13,7 +13,11 @@
     "./components/*": "./src/components/ui/*.tsx",
     "./tokens.css": "./src/tokens/tokens.css",
     "./tokens.json": "./src/tokens/tokens.json",
-    "./styles.css": "./src/styles/foundations.css"
+    "./styles.css": "./src/styles/foundations.css",
+    "./typeset.css": {
+      "types": "./src/styles/typeset.d.css.ts",
+      "default": "./src/styles/typeset.css"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

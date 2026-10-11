@@ -66,12 +66,143 @@ async function expectFocusContrast(locator: Locator) {
   expect(result.ratio).toBeGreaterThanOrEqual(3)
 }
 
+test('grouped foundations and brand home link preserve search, focus and history', async ({
+  page,
+}) => {
+  await page.goto('/#typeset')
+  await expect(page.locator('#typeset')).toBeInViewport()
+  const ids = await page
+    .locator('#catalog section[id]')
+    .evaluateAll((nodes) => nodes.map((node) => node.id))
+  expect(ids.slice(0, 3)).toEqual(['foundations', 'typography', 'typeset'])
+  await expect(page.locator('.catalog-toolbar').getByRole('button', { name: 'Home' })).toHaveCount(
+    0,
+  )
+  await page.getByRole('textbox', { name: 'Search components' }).fill('no such entry')
+  await page.getByRole('link', { name: 'Git Stacks home', exact: true }).click()
+  await expect(page.getByRole('textbox', { name: 'Search components' })).toHaveValue('')
+  await expect(page.locator('#home')).toBeFocused()
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
+  await page.goBack()
+  await expect(page.locator('#typeset')).toBeFocused()
+  await page.goForward()
+  await expect(page.locator('#home')).toBeFocused()
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
+  await page.getByRole('textbox', { name: 'Search components' }).fill('no such entry')
+  await page.getByRole('link', { name: 'Git Stacks home', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('textbox', { name: 'Search components' })).toHaveValue('')
+  await expect(page.locator('#home')).toBeFocused()
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: 'Browse components', exact: true }).click()
+  await page
+    .getByRole('navigation', { name: 'Component catalog', exact: true })
+    .getByRole('link', { name: 'Typeset', exact: true })
+    .click()
+  await expect(page.locator('#typeset')).toBeFocused()
+  await expect(
+    page.getByRole('navigation', { name: 'Component catalog', exact: true }),
+  ).toBeHidden()
+  await page.getByRole('button', { name: 'Browse components', exact: true }).click()
+  await page.locator('[data-mobile="true"]').getByRole('link', { name: 'Git Stacks home' }).click()
+  await expect(
+    page.getByRole('navigation', { name: 'Component catalog', exact: true }),
+  ).toBeHidden()
+  await expect(page.locator('#home')).toBeFocused()
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
+  await expect(page.locator('.catalog-toolbar').getByRole('button', { name: 'Home' })).toHaveCount(
+    0,
+  )
+  await page.goto('/#home')
+  await expect.poll(() => page.evaluate(() => scrollY)).toBe(0)
+})
+
+test('Typeset themes, utilities, opt-out, wrapping and appends retain their contracts', async ({
+  page,
+}) => {
+  await page.goto('/#typeset')
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate((theme) => {
+      document.documentElement.dataset.gsTheme = theme
+    }, theme)
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 })
+      const result = await page.locator('[data-typeset-specimen]').evaluate((article) => {
+        const prose = article.querySelector('p')!
+        const utility = article.querySelector('[data-typeset-utility]')!
+        const opted = article.querySelector('[data-typeset-optout] .typeset p')!
+        const scroll = article.querySelector('.typeset-scroll')!
+        article.style.setProperty('--typeset-font-mono', 'serif')
+        for (const escape of ['class="not-typeset"', 'data-not-typeset']) {
+          article.insertAdjacentHTML(
+            'beforeend',
+            `<div ${escape} data-optout-probe><div class="typeset"><h2>Untouched heading</h2><p>First</p><p>Second</p><code>plain code</code></div></div>`,
+          )
+        }
+        const probeStyles = Array.from(article.querySelectorAll('[data-optout-probe]')).map(
+          (probe) => ({
+            heading: getComputedStyle(probe.querySelector('h2')!).fontSize,
+            body: getComputedStyle(probe.querySelector('p')!).fontSize,
+            paragraph: getComputedStyle(probe.querySelector('p + p')!).marginTop,
+            code: getComputedStyle(probe.querySelector('code')!).backgroundColor,
+          }),
+        )
+        const before = [prose, ...article.querySelectorAll('tr')].map((node) => ({
+          top: node.getBoundingClientRect().top,
+          margin: getComputedStyle(node).marginTop,
+          border: getComputedStyle(node).borderBottomWidth,
+        }))
+        article.insertAdjacentHTML('beforeend', '<p>Appended block.</p>')
+        article
+          .querySelector('tbody')!
+          .insertAdjacentHTML(
+            'beforeend',
+            '<tr><td>new branch</td><td>main</td><td>appended row</td></tr>',
+          )
+        const after = [prose, ...Array.from(article.querySelectorAll('tr')).slice(0, -1)].map(
+          (node) => ({
+            top: node.getBoundingClientRect().top,
+            margin: getComputedStyle(node).marginTop,
+            border: getComputedStyle(node).borderBottomWidth,
+          }),
+        )
+        return {
+          before,
+          after,
+          probeStyles,
+          mono: getComputedStyle(article.querySelector('pre')!).fontFamily,
+          utility: getComputedStyle(utility).fontSize,
+          opted: getComputedStyle(opted).marginTop,
+          proseSize: getComputedStyle(prose).fontSize,
+          scroll: scroll.scrollWidth > scroll.clientWidth,
+          fits: document.documentElement.scrollWidth <= innerWidth,
+          color: getComputedStyle(prose).color,
+        }
+      })
+      expect(result.after).toEqual(result.before)
+      expect(result.utility).toBe('18px')
+      expect(result.opted).toBe('0px')
+      for (const probe of result.probeStyles) {
+        expect(probe.paragraph).toBe('0px')
+        expect(probe.code).toBe('rgba(0, 0, 0, 0)')
+        expect(probe.heading).toBe(result.proseSize)
+        expect(probe.body).toBe(result.proseSize)
+      }
+      expect(result.mono).toBe('serif')
+      expect(result.fits).toBe(true)
+      if (width === 390) expect(result.scroll).toBe(true)
+      expect(result.color).not.toBe('rgba(0, 0, 0, 0)')
+    }
+  }
+})
+
 test('all specimens render independently without desktop bridge', async ({ page }) => {
   const errors: string[] = []
   page.on('pageerror', (error) => errors.push(error.message))
   await page.goto('/')
-  await expect(page.locator('[data-specimen]')).toHaveCount(64)
-  await expect(page.locator('[data-component]')).toHaveCount(64)
+  await expect(page.locator('[data-specimen]')).toHaveCount(65)
+  await expect(page.locator('[data-component]')).toHaveCount(65)
   await expect(page.locator('#foundations dl').first()).toContainText('4px')
   await expect(page.locator('#foundations')).not.toContainText('{primitive.')
   expect(await page.evaluate(() => 'desktop' in window)).toBe(false)
@@ -109,9 +240,18 @@ test('search presents results without stealing focus and restores the reading se
     await expect(page.locator('#catalog-results')).toBeInViewport()
     await expect
       .poll(() =>
-        page.locator('#catalog-results').evaluate((node) => node.getBoundingClientRect().top),
+        page.locator('#catalog-results').evaluate((node) => {
+          const top = node.getBoundingClientRect().top
+          const toolbarBottom = document
+            .querySelector('.catalog-toolbar')!
+            .getBoundingClientRect().bottom
+          return (
+            top >= toolbarBottom &&
+            Math.abs(top - parseFloat(getComputedStyle(node).scrollMarginTop)) < 2
+          )
+        }),
       )
-      .toBeLessThan(50)
+      .toBe(true)
   }
   await search.fill('')
   await expect(search).toBeFocused()
@@ -190,7 +330,7 @@ test('narrow catalog navigation discloses links and transfers focus to the desti
     'aria-current',
     'location',
   )
-  await navigation.getByRole('link', { name: 'Foundations', exact: true }).click()
+  await navigation.getByRole('link', { name: 'Tokens', exact: true }).click()
   await expect(page.locator('#foundations')).toBeFocused()
   await page.goBack()
   await browse.click()
@@ -457,6 +597,10 @@ for (const theme of ['light', 'dark'])
       document.documentElement.dataset.gsTheme = theme
       document.documentElement.classList.toggle('dark', theme === 'dark')
     }, theme)
+    // Isolated specimens must not capture unrelated sticky chrome over their own status text.
+    await page.locator('.catalog-toolbar').evaluate((toolbar) => {
+      toolbar.style.visibility = 'hidden'
+    })
     await page.locator('#git-compositions').scrollIntoViewIfNeeded()
     await expect(page.locator('#git-compositions')).toHaveScreenshot(
       `git-compositions-${theme}.png`,
