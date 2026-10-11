@@ -1798,11 +1798,18 @@ disabled reason.
 Native unstack removes unmerged members; merged members may keep the container
 alive, so its confirmation does not promise complete dissolution.
 
-These graph controls consume `@git-stacks/ui` directly. **Edit stack layers**
-uses the shared keyboard-operable `Collapsible` and `Button` composition; opening
-it remains presentation-only, and its actions keep the existing preview,
-confirmation and operation locks. The standalone catalog is not shipped in the
-desktop bundle.
+These graph controls consume `@git-stacks/ui` directly. Selected facts use the
+shared `Surface`; the remote-only explanation uses `InlineAlert`. Restack is
+the primary stack action, with secondary Sync, Publish and merge entries.
+Destructive entries use the danger role without bypassing their existing
+reviewed confirmation.
+
+**Edit stack layers** uses the shared keyboard-operable `Collapsible` and
+`Button` composition for parent, insert, move and remove entries. Opening it
+remains presentation-only, and its actions keep the existing preview,
+confirmation and operation locks. The default branch retains its parent entry;
+insert, move and remove remain restricted to nondefault branches. The standalone
+catalog is not shipped in the desktop bundle.
 
 Index, selected-detail, and preference reads belong to the existing TanStack Query
 client. Keys include checkout origin and CLI authority, plus observed qualified

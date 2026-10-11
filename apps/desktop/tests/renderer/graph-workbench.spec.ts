@@ -247,6 +247,7 @@ test('actual local selection keeps unknown ancestry visible and enters the prese
   const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
   await expect(inspector).toContainText('parent comparison unknown')
   await expect(inspector).toContainText('Parent evidence · provenance unknown')
+  await inspector.getByRole('button', { name: 'Edit stack layers', exact: true }).click()
   await inspector.getByRole('button', { name: 'Set parent…', exact: true }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
@@ -261,6 +262,34 @@ test('actual local selection keeps unknown ancestry visible and enters the prese
         .map((call) => call.args[0]),
     )
     .toEqual([{ type: 'setParent', branch: 'graph/change-1', parent: 'main' }])
+})
+
+test('default-branch parent entry remains available without admitting layer surgery or writes', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  await page.getByRole('button', { name: 'Current branch', exact: true }).click()
+  await page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: 'refs/heads/main' })
+    .locator('button')
+    .first()
+    .click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  await expect(inspector.getByRole('button', { name: 'Set parent…', exact: true })).toHaveCount(0)
+  await inspector.getByRole('button', { name: 'Edit stack layers', exact: true }).click()
+  await expect(
+    inspector.getByRole('button', { name: /Insert layer|Move layer|Remove layer/ }),
+  ).toHaveCount(0)
+  const parent = inspector.getByRole('button', { name: 'Set parent…', exact: true })
+  await parent.click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('combobox', { name: 'Parent branch', exact: true })).toBeVisible()
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(parent).toBeFocused()
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
 })
 
 test('existing details toolbar and keyboard palette intent control the actual selected graph inspector', async ({
