@@ -386,7 +386,8 @@ function CatalogWorkspace() {
                   >
                     {group}
                     <span aria-hidden="true">
-                      {visible.filter((entry) => entry.group === group).length}
+                      {visible.filter((entry) => entry.group === group).length +
+                        Number(group === 'Foundations')}
                       <ChevronDown className="size-4" />
                     </span>
                   </SidebarGroupLabel>

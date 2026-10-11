@@ -65,13 +65,21 @@ export function TypesetSpecimen() {
           </thead>
           <tbody>
             <tr>
-              <td>feature/quiet-graph</td>
-              <td>main</td>
+              <td>
+                <code>feature/quiet-graph</code>
+              </td>
+              <td>
+                <code>main</code>
+              </td>
               <td>Inspect the captured comparison before confirmation</td>
             </tr>
             <tr>
-              <td>feature/review-notes</td>
-              <td>feature/quiet-graph</td>
+              <td>
+                <code>feature/review-notes</code>
+              </td>
+              <td>
+                <code>feature/quiet-graph</code>
+              </td>
               <td>Excluded from this local example</td>
             </tr>
           </tbody>
@@ -105,7 +113,7 @@ export function TypesetSpecimen() {
       <p className="text-lg" data-typeset-utility>
         Utilities override prose: this paragraph uses text-lg.
       </p>
-      <div className="not-typeset" data-typeset-optout>
+      <div className="not-typeset mt-5 grid justify-items-start gap-2" data-typeset-optout>
         <UI.Button variant="secondary">Untouched shared control</UI.Button>
         <div className="typeset">
           <p>Nested prose activation remains opted out.</p>

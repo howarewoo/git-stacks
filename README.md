@@ -2113,6 +2113,9 @@ header links to the introduction at the genuine page top, and the command entry
 does the same; both clear search, transfer focus, and close narrow navigation.
 Explicit navigation wins over pre-search viewport restoration, including
 Back/Forward.
+Foundations counts include the always-available Tokens destination, including
+while filtering. The brand title underlines on hover and retains keyboard focus
+treatment.
 
 Typeset is owned browser-safe CSS adapted from the MIT shadcn/typeset
 [distribution](https://github.com/shadcn-ui/ui/blob/main/apps/v4/app/%28app%29/%28typeset%29/typeset.css)
@@ -2128,6 +2131,9 @@ the entire subtree, even nested activation. Components-layer rules and low
 specificity element selectors let utility overrides win. New blocks own their
 start spacing and new cells own separators, preserving existing block styles
 during appends. No markdown parser is needed for the catalog's semantic specimen.
+Opted-out component subtrees own their layout spacing; the specimen uses a 20px
+outer gap and an 8px inner gap without stretching the shared control. Captured
+branch and base identities use semantic inline code.
 The upstream reconciliation disclosure uses Typeset as actual reading content;
 catalog controls and desktop Git workflows are not globally restyled.
 

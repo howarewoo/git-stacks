@@ -94,6 +94,11 @@ body {
   text-decoration: none;
 }
 
+.catalog-brand-link:hover > h1 {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .catalog-brand-link:focus-visible {
   outline: 2px solid var(--gs-semantic-focus-ring);
   outline-offset: 2px;
