@@ -1394,6 +1394,11 @@ function App() {
     [cliStatus, settings?.github.host],
   )
   const navigationScope = JSON.stringify([authority, snapshot?.path, snapshot?.remoteUrl])
+  const previousNavigationScope = React.useRef(navigationScope)
+  React.useLayoutEffect(() => {
+    if (previousNavigationScope.current !== navigationScope) setSearch('')
+    previousNavigationScope.current = navigationScope
+  }, [navigationScope])
   const visitedReviewScope = React.useRef<string | null>(null)
   if (workspaceView === 'review') visitedReviewScope.current = navigationScope
   if (

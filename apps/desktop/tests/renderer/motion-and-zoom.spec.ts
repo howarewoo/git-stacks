@@ -102,3 +102,140 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
     })
   })
 })
+
+for (const viewport of [
+  { width: 1000, height: 700 },
+  { width: 1440, height: 940 },
+  { width: 1920, height: 1080 },
+]) {
+  for (const theme of ['light', 'dark'] as const) {
+    test(`integrated destination and populated Review keyboard reachability at ${viewport.width}×${viewport.height} ${theme}`, async ({
+      page,
+    }) => {
+      await openGallery(page, {
+        scenario: 'shell-long-content',
+        viewport,
+        colorScheme: theme,
+        reducedMotion: 'reduce',
+      })
+      const nav = page.getByRole('navigation', { name: 'Workspace destinations' })
+      // Branches is initially active: visit Stacks first so returning to Branches
+      // is a real keyboard navigation and every heading must receive focus.
+      const destinations = [
+        ...DESTINATIONS.filter((destination) => destination.id === 'stacks'),
+        ...DESTINATIONS.filter((destination) => destination.id !== 'stacks'),
+      ]
+      for (const destination of destinations) {
+        const control = nav.getByRole('button', {
+          name: new RegExp(`^${destination.label}(\\s|$)`),
+        })
+        await control.focus()
+        await control.press('Enter')
+        const heading = page.getByRole('heading', {
+          level: 1,
+          name: destination.heading,
+          exact: true,
+        })
+        await expect(heading).toBeVisible()
+        await expect(heading).toBeFocused()
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+          viewport.width,
+        )
+        await test.info().attach(`integrated-destination-${destination.id}`, {
+          body: await page.screenshot(),
+          contentType: 'image/png',
+        })
+      }
+      await openGallery(page, {
+        scenario: 'review-stacked',
+        viewport,
+        colorScheme: theme,
+        reducedMotion: 'reduce',
+      })
+      await switchDestination(page, 'review')
+      const panes = page.getByRole('group', { name: 'Review contextual panes' })
+      // Code starts active; return to it after activating all other populated panes.
+      for (const pane of ['Conversation', 'Commits', 'Description & reviewers', 'Checks', 'Code']) {
+        const control = panes.getByRole('button', { name: pane, exact: true })
+        await control.focus()
+        await control.press('Enter')
+        await expect(control).toHaveAttribute('aria-pressed', 'true')
+        if (pane === 'Code') await expect(page.locator('.review-line').first()).toBeVisible()
+        if (pane === 'Conversation')
+          await expect(page.getByRole('textbox', { name: 'Review summary' })).toBeVisible()
+        if (pane === 'Commits') await expect(page.locator('.review-context')).toBeVisible()
+        if (pane === 'Description & reviewers')
+          await expect(page.locator('.review-about')).toBeVisible()
+        if (pane === 'Checks')
+          await expect(
+            page.getByRole('button', { name: 'Refresh checks', exact: true }),
+          ).toBeVisible()
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+          viewport.width,
+        )
+        await test.info().attach(`integrated-review-${pane}`, {
+          body: await page.screenshot(),
+          contentType: 'image/png',
+        })
+      }
+      await test.info().attach('integrated-review-consumer', {
+        body: await page.screenshot(),
+        contentType: 'image/png',
+      })
+    })
+
+    test(`all nine Settings sections remain keyboard reachable at ${viewport.width}×${viewport.height} ${theme}`, async ({
+      page,
+    }) => {
+      await openGallery(page, { scenario: 'settings-ready', viewport, colorScheme: theme })
+      await page.keyboard.press('Meta+k')
+      if (!(await page.getByRole('dialog', { name: 'Command palette' }).isVisible()))
+        await page.keyboard.press('Control+k')
+      await page
+        .getByRole('option', { name: /Settings/ })
+        .first()
+        .click()
+      const dialog = page.getByRole('dialog', { name: 'Settings', exact: true })
+      const nav = dialog.getByRole('navigation', { name: 'Settings sections' })
+      for (const section of [
+        'GitHub CLI',
+        'GitHub',
+        'Notifications',
+        'Git',
+        'Appearance',
+        'Updates',
+        'Shortcuts',
+        'Privacy',
+        'Diagnostics',
+      ]) {
+        const control = nav.getByRole('button', { name: section, exact: true })
+        await control.focus()
+        await control.press('Enter')
+        await expect(control).toHaveAttribute('aria-current', 'page')
+        await page.keyboard.press('Tab')
+        const active = await page.evaluate(() => {
+          const element = document.activeElement!
+          const rect = element.getBoundingClientRect()
+          return {
+            inDialog: Boolean(element.closest('[role="dialog"]')),
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+          }
+        })
+        expect(active.inDialog).toBe(true)
+        expect(active.left).toBeGreaterThanOrEqual(0)
+        expect(active.right).toBeLessThanOrEqual(viewport.width)
+        expect(active.top).toBeGreaterThanOrEqual(0)
+        expect(active.bottom).toBeLessThanOrEqual(viewport.height)
+      }
+      await test.info().attach('integrated-settings-consumer', {
+        body: await page.screenshot(),
+        contentType: 'image/png',
+      })
+      await page.keyboard.press('Escape')
+      await expect(dialog).toHaveCount(0)
+    })
+  }
+}

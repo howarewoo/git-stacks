@@ -2,8 +2,8 @@ import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import type { GraphPreferences } from '@git-stacks/shared/graph-preferences'
 import type { GraphChange } from './graph'
 import type {
-  FileView,
   DesktopAPI,
+  FileView,
   GitAction,
   HistoryPage,
   LinkedIssue,
@@ -117,6 +117,112 @@ export interface FixtureCallRecord {
   readonly call: FixtureCall
   readonly args: readonly unknown[]
 }
+
+export interface FixtureApiCallRecord {
+  readonly method: keyof DesktopAPI
+  readonly args: readonly unknown[]
+}
+
+/** Exhaustive effects of the real typed bridge, independent of older fixture-call aliases. */
+export const DESKTOP_API_EFFECT = {
+  githubHostStatus: 'read',
+  recentRepositories: 'read',
+  openRepository: 'control',
+  addRepository: 'local-write',
+  searchRepositories: 'read',
+  gitEnvironment: 'read',
+  cloneRepository: 'git-provider-write',
+  previewCloneCommand: 'read',
+  chooseDestinationDirectory: 'control',
+  onRepositoryDropped: 'subscribe',
+  refresh: 'read',
+  prIndex: 'read',
+  onPrIndex: 'subscribe',
+  prIndexDetail: 'read',
+  runAction: 'git-provider-write',
+  fileView: 'read',
+  conflictView: 'read',
+  history: 'read',
+  commitDiff: 'read',
+  pushPreview: 'read',
+  stackPreview: 'read',
+  surgeryPreview: 'read',
+  submitStackProgress: 'read',
+  onSubmitStackProgress: 'subscribe',
+  onMergeProgress: 'subscribe',
+  mergeStatus: 'read',
+  reconciliationPreview: 'read',
+  pullRequest: 'read',
+  reviewHeadline: 'read',
+  reviewFiles: 'read',
+  reviewCommits: 'read',
+  reviewViewed: 'read',
+  reviewSetViewed: 'local-write',
+  reviewThreads: 'read',
+  reviewDrafts: 'read',
+  reviewDraftRecovery: 'read',
+  reviewSetDrafts: 'local-write',
+  reviewResolveDrafts: 'read',
+  reviewSubmit: 'git-provider-write',
+  reviewReply: 'git-provider-write',
+  reviewSetResolved: 'git-provider-write',
+  reviewHistory: 'read',
+  reviewHistoryDiff: 'read',
+  reviewClearHistory: 'local-write',
+  pullRequestChecks: 'read',
+  rerunPullRequestCheck: 'git-provider-write',
+  listNativeStacks: 'read',
+  createNativeStack: 'git-provider-write',
+  addPullRequestsToNativeStack: 'git-provider-write',
+  unstackNativeStack: 'git-provider-write',
+  searchIssues: 'read',
+  pullRequestIssueLinks: 'read',
+  previewIssueLink: 'read',
+  remoteStatus: 'read',
+  reportActivity: 'control',
+  onBackgroundSnapshot: 'subscribe',
+  onBackgroundIssues: 'subscribe',
+  onRemoteStatus: 'subscribe',
+  dismissPendingMutation: 'local-write',
+  openExternal: 'external',
+  cancel: 'control',
+  gitRuntimeStatus: 'read',
+  setSystemGit: 'local-write',
+  githubCliStatus: 'read',
+  onGitHubCliStatus: 'subscribe',
+  notificationsStatus: 'read',
+  notifications: 'read',
+  refreshNotifications: 'read',
+  cancelNotifications: 'control',
+  saveNotificationCredential: 'local-write',
+  removeNotificationCredential: 'local-write',
+  markNotificationRead: 'git-provider-write',
+  markNotificationDone: 'git-provider-write',
+  setNotificationSubscription: 'git-provider-write',
+  onNotifications: 'subscribe',
+  settings: 'read',
+  updateSettings: 'local-write',
+  resetSettings: 'local-write',
+  diagnostics: 'read',
+  supportBundlePreview: 'read',
+  exportSupportBundle: 'local-write',
+  openInEditor: 'external',
+  updateStatus: 'read',
+  checkForUpdates: 'read',
+  downloadUpdate: 'local-write',
+  installUpdate: 'local-write',
+  cancelUpdate: 'control',
+  onUpdateStatus: 'subscribe',
+  pullRequestInbox: 'read',
+  pullRequestInboxFilters: 'read',
+  savePullRequestInboxFilters: 'local-write',
+  graphPreferences: 'read',
+  saveGraphPreferences: 'local-write',
+  resetGraphPreferences: 'local-write',
+} as const satisfies Record<
+  keyof DesktopAPI,
+  'read' | 'subscribe' | 'git-provider-write' | 'local-write' | 'external' | 'control'
+>
 
 /**
  * Deterministic data plus behavior for one gallery scenario. Snapshot data reuses the
@@ -251,6 +357,8 @@ export interface FixtureControl {
   readonly externalUrls: string[]
   /** Append-only log of every double call, reads included. */
   readonly calls: FixtureCallRecord[]
+  /** Actual bridge method identities; append-only even when legacy fixture logs are reset. */
+  readonly apiCalls: readonly FixtureApiCallRecord[]
   /** Call kinds currently held pending by `hold`. */
   readonly pending: FixtureCall[]
   /** Actual gallery-owned cache diagnostics; never provider read payloads or credentials. */
@@ -298,7 +406,7 @@ export interface FixtureControl {
    * scenario that has a repository starts connected. No-op when it has none.
    */
   connect(): void
-  /** Clears logs, holds, and one-shot failures while keeping the mounted scenario. */
+  /** Clears legacy logs/holds/one-shot failures; actual apiCalls remains append-only. */
   reset(): void
   /** Captures the producer's repository and public CLI generation before work begins. */
   operationScope(): { repositoryPath: string; remoteUrl: string | null; authority: string }

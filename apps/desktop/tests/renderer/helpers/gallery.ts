@@ -6,7 +6,12 @@ import {
   type ScenarioName,
 } from '../fixtures/manifest'
 import { scenarios } from '../fixtures/scenarios'
-import type { FixtureCall, FixtureCallRecord } from '../fixtures/types'
+import {
+  DESKTOP_API_EFFECT,
+  type FixtureApiCallRecord,
+  type FixtureCall,
+  type FixtureCallRecord,
+} from '../fixtures/types'
 import { galleryUrl } from '../fixtures/urls'
 import type { GitAction, GitHubCliStatus } from '@git-stacks/shared/types'
 
@@ -157,6 +162,17 @@ export async function getDoubleCalls(page: Page): Promise<FixtureCallRecord[]> {
     if (!window.fixture) throw new Error('window.fixture is not installed')
     return [...window.fixture.calls]
   })
+}
+
+/** Actual typed bridge dispatches, including held/rejected writes and legacy alias omissions. */
+export async function getApiCalls(page: Page): Promise<FixtureApiCallRecord[]> {
+  return page.evaluate(() => [...window.fixture.apiCalls])
+}
+
+export async function getGitProviderWrites(page: Page): Promise<FixtureApiCallRecord[]> {
+  return (await getApiCalls(page)).filter(
+    ({ method }) => DESKTOP_API_EFFECT[method] === 'git-provider-write',
+  )
 }
 
 /**

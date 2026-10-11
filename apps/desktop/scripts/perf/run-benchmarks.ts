@@ -11,6 +11,14 @@ import { DiffView } from '../../src/renderer/src/components/repository-views'
 import { windowSlice } from '../../src/renderer/src/lib/list-window'
 import {
   COMMIT_DIFF_BUDGET_MS,
+  GRAPH_DETAIL_NODE_LIMIT,
+  GRAPH_INPUT_PAINT_BUDGET_MS,
+  GRAPH_NAVIGATION_HEAP_BUDGET_BYTES,
+  GRAPH_OUTLINE_ROW_LIMIT,
+  GRAPH_PATH_PAGE_SIZE,
+  GRAPH_PROJECTION_LAYOUT_BUDGET_MS,
+  GRAPH_SCALE_HEAP_BUDGET_BYTES,
+  GRAPH_SELECTED_CACHE_LIMIT,
   HISTORY_BUDGET_MS,
   INTERACTION_BUDGET_MS,
   SNAPSHOT_BRANCH_BUDGET,
@@ -20,7 +28,7 @@ import {
 } from '@git-stacks/shared/performance'
 import { buildAll, FIXTURE_SIZES } from './fixtures.mjs'
 import { measureDesktop } from './desktop-interaction.mjs'
-
+import { measureGraphDesktop } from './desktop-graph'
 /**
  * Measures the launch-to-painted desktop, actual input-to-painted UI, snapshot,
  * history, diff, and supplementary server rendering on locally generated
@@ -63,6 +71,7 @@ async function main() {
       budgetMs: number,
       ms: number,
       detail?: Record<string, number>,
+      isByteBudget = false,
     ) => {
       measurements.push({
         name,
@@ -72,8 +81,14 @@ async function main() {
         ...(detail ? { detail } : {}),
       })
       const verdict = ms <= budgetMs ? 'ok' : 'OVER BUDGET'
+      const formattedElapsed = isByteBudget
+        ? `${(ms / (1024 * 1024)).toFixed(1)}MiB`
+        : `${ms.toFixed(0)}ms`
+      const formattedBudget = isByteBudget
+        ? `${(budgetMs / (1024 * 1024)).toFixed(0)}MiB`
+        : `${budgetMs}ms`
       process.stdout.write(
-        `  ${verdict.padEnd(10)} ${name.padEnd(16)} ${ms.toFixed(0)}ms / ${budgetMs}ms\n`,
+        `  ${verdict.padEnd(10)} ${name.padEnd(24)} ${formattedElapsed} / ${formattedBudget}\n`,
       )
     }
 
@@ -126,18 +141,155 @@ async function main() {
     const list = await elapsed(async () => {
       for (let index = 0; index < 50; index += 1) windowSlice(listItems, 200)
       renderToStaticMarkup(
-        React.createElement(DiffView, { text: diff.value.text, truncated: diff.value.truncated }),
+        React.createElement(DiffView, {
+          text: diff.value.text,
+          truncated: diff.value.truncated,
+        }),
       )
     })
     record('diff-render-ssr', 'renderer', INTERACTION_BUDGET_MS, list.ms, {
       rows: listItems.length,
     })
 
+    const graph = await measureGraphDesktop(repoRoot)
+    record(
+      'graph-input-paint',
+      'graph-5000-warm',
+      GRAPH_INPUT_PAINT_BUDGET_MS,
+      graph.warmInputPaintMs,
+      {
+        p95Ms: Math.round(graph.warmInputPaintMs),
+        warmSamples: graph.warmInputPaintSamples.length,
+        ...Object.fromEntries(
+          graph.warmInputPaintSamples.map((ms, index) => [`sample${index + 1}Ms`, ms]),
+        ),
+        outlineRows: graph.bounds5000.outlineRows,
+        detailNodes: graph.bounds5000.detailNodes,
+        pathPageSize: graph.bounds5000.pathItems,
+        providerRequests: graph.scopedRequests.total,
+        indexPages250: graph.scopedRequests.indexPages250,
+        indexPages1000: graph.scopedRequests.indexPages1000,
+        indexPages5000: graph.scopedRequests.indexPages5000,
+        localExplorationRequests: graph.scopedRequests.localExploration,
+        navigationRefreshRequests: graph.scopedRequests.navigationRefresh,
+        navigationIndexPages: graph.scopedRequests.navigationIndexPages,
+        identityProofRequests: graph.scopedRequests.identityProof,
+        repositoryMetadataRequests: graph.scopedRequests.repositoryMetadata,
+        nativeStackRequests: graph.scopedRequests.nativeStacks,
+        snapshotPageRequests: graph.scopedRequests.snapshotPages,
+        issuePageRequests: graph.scopedRequests.issuePages,
+        unrelatedRequests: graph.scopedRequests.unrelated,
+      },
+    )
+    record(
+      'graph-projection-layout',
+      'graph-5000',
+      GRAPH_PROJECTION_LAYOUT_BUDGET_MS,
+      Math.max(
+        graph.projectionLayout250Ms,
+        graph.projectionLayout1000Ms,
+        graph.projectionLayout5000Ms,
+      ),
+      {
+        projectionLayout250Ms: Math.round(graph.projectionLayout250Ms),
+        projectionLayout1000Ms: Math.round(graph.projectionLayout1000Ms),
+        projectionLayout5000Ms: Math.round(graph.projectionLayout5000Ms),
+      },
+    )
+    for (const [size, samples] of Object.entries(graph.warmSamplesBySize)) {
+      record(
+        'graph-warm-projection-layout',
+        `graph-${size}-warm`,
+        GRAPH_PROJECTION_LAYOUT_BUDGET_MS,
+        samples.warmProjectionLayoutMs,
+        Object.fromEntries(
+          samples.warmProjectionSamples.map((ms, index) => [`sample${index + 1}Ms`, ms]),
+        ),
+      )
+      if (size !== '5000')
+        record(
+          'graph-input-to-paint',
+          `graph-${size}-warm`,
+          GRAPH_INPUT_PAINT_BUDGET_MS,
+          samples.warmInputPaintMs,
+          Object.fromEntries(samples.warmSamples.map((ms, index) => [`sample${index + 1}Ms`, ms])),
+        )
+    }
+    record(
+      'graph-scale-heap',
+      'graph-250-to-5000',
+      GRAPH_SCALE_HEAP_BUDGET_BYTES,
+      graph.heapScaleGrowthBytes,
+      {
+        heap250Bytes: graph.heap250Bytes,
+        heap1000Bytes: graph.heap1000Bytes,
+        heap5000Bytes: graph.heap5000Bytes,
+        repositorySnapshot250Records: graph.snapshotRecords[250],
+        repositorySnapshot1000Records: graph.snapshotRecords[1000],
+        repositorySnapshot5000Records: graph.snapshotRecords[5000],
+        heapGrowthBytes: graph.heapScaleGrowthBytes,
+      },
+      true,
+    )
+    record(
+      'graph-navigation-heap',
+      'graph-30-cycles',
+      GRAPH_NAVIGATION_HEAP_BUDGET_BYTES,
+      graph.heapNavGrowthBytes,
+      {
+        navBaselineBytes: graph.navBaselineBytes,
+        navPostCycleBytes: graph.navPostCycleBytes,
+        heapGrowthBytes: graph.heapNavGrowthBytes,
+        refreshCycles: graph.navigationCycleIndexPages.length,
+        snapshotCompletedRefreshes: graph.snapshotCompletedRefreshes,
+        supersededProgressiveSequences: graph.supersededProgressiveSequences,
+        ...Object.fromEntries(
+          graph.navigationCycleIndexPages.map((pages, index) => [
+            `cycle${index + 1}IndexPages`,
+            pages,
+          ]),
+        ),
+      },
+      true,
+    )
+
+    if (!graph.selectedCacheBound.evictionsObserved) {
+      throw new Error(
+        `Selected-detail cache bound failed: evictions not observed at ${GRAPH_SELECTED_CACHE_LIMIT}`,
+      )
+    }
+    if (graph.bounds5000.outlineRows > GRAPH_OUTLINE_ROW_LIMIT) {
+      throw new Error(
+        `Mounted outline rows ${graph.bounds5000.outlineRows} exceeds limit ${GRAPH_OUTLINE_ROW_LIMIT}`,
+      )
+    }
+    if (graph.bounds5000.detailNodes > GRAPH_DETAIL_NODE_LIMIT) {
+      throw new Error(
+        `Mounted detail nodes ${graph.bounds5000.detailNodes} exceeds limit ${GRAPH_DETAIL_NODE_LIMIT}`,
+      )
+    }
+    if (graph.bounds5000.pathItems > GRAPH_PATH_PAGE_SIZE) {
+      throw new Error(
+        `Mounted path page ${graph.bounds5000.pathItems} exceeds limit ${GRAPH_PATH_PAGE_SIZE}`,
+      )
+    }
+
+    const isReferencePlatform = process.platform === 'darwin' && process.arch === 'arm64'
+    process.stdout.write(
+      `\nplatform gate: running on ${process.platform}-${process.arch}. ` +
+        `${isReferencePlatform ? 'Reference environment matched; budget results follow, not OS or assistive-technology certification.' : 'Agreed macOS arm64 reference gate remains explicitly unmet; reporting regression observations and verified bounds only.'}\n`,
+    )
+
     mkdirSync(out, { recursive: true })
     const report = {
       version: 2 as const,
       node: process.version,
       platform: `${process.platform}-${process.arch}`,
+      referencePlatform: 'darwin-arm64',
+      referenceGateMet:
+        isReferencePlatform &&
+        process.versions.node.startsWith('24.') &&
+        measurements.every((entry) => entry.elapsedMs <= entry.budgetMs),
       generatedAt: new Date().toISOString(),
       measurements,
     }

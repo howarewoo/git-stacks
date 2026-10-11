@@ -79,7 +79,14 @@ import { diagnosticsReportFixture } from './diagnostics'
 import { supportBundleFixture } from './settings'
 import { DEFAULT_SCENARIO, type ScenarioName } from './manifest'
 import type { PullRequestChecksReport } from '@git-stacks/shared/pull-request-checks'
-import type { FixtureCall, FixtureCallRecord, FixtureControl, FixtureScenario } from './types'
+import {
+  DESKTOP_API_EFFECT,
+  type FixtureApiCallRecord,
+  type FixtureCall,
+  type FixtureCallRecord,
+  type FixtureControl,
+  type FixtureScenario,
+} from './types'
 import { canonicalHostName, GITHUB_DEFAULT_HOST } from '@git-stacks/shared/host'
 import type { NotificationInbox, NotificationModuleState } from '@git-stacks/shared/notifications'
 
@@ -281,6 +288,7 @@ export function installFixtureControl(options: {
   const heldDrafts = new Map<string, ReviewDraftRecord>()
   const heldViewed = new Map<string, ReviewViewedRecord>()
   const calls: FixtureCallRecord[] = []
+  const apiCalls: FixtureApiCallRecord[] = []
   const holds = new Set<FixtureCall>()
   const oneShotFailures = new Map<FixtureCall, Error>()
   const oneShotAnswers = new Map<FixtureCall, unknown>()
@@ -2150,6 +2158,7 @@ export function installFixtureControl(options: {
     externalUrls,
     calls,
     reviewCache: options.reviewCache,
+    apiCalls,
     get pending(): FixtureCall[] {
       const kinds = new Set<FixtureCall>(holds)
       for (const call of startsPending) {
@@ -2211,6 +2220,21 @@ export function installFixtureControl(options: {
       // session becomes the new one, so a read asked for afterwards answers as
       // the replacement rather than as the session it replaced, and the window
       // is told about it without having asked.
+      const previous = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      if (
+        servedPrIndex &&
+        previous &&
+        cliAuthority(previous.host, previous) !== cliAuthority(status.host, status)
+      ) {
+        servedPrIndex = {
+          ...servedPrIndex,
+          viewer: null,
+          pullRequests: [],
+          state: 'stale',
+          complete: false,
+        }
+        for (const listener of prIndexListeners) listener(servedPrIndex)
+      }
       servedCliStatus = status
       cliStatusListener?.(status)
     },
@@ -2353,6 +2377,33 @@ export function installFixtureControl(options: {
         if (subscribers.get(channel) === listener) subscribers.delete(channel)
       }
     })
+  }
+
+  for (const method of Object.keys(desktop) as (keyof DesktopAPI)[]) {
+    if (!Object.hasOwn(DESKTOP_API_EFFECT, method))
+      throw new Error(`Unclassified fixture bridge method: ${method}`)
+    const descriptor = Object.getOwnPropertyDescriptor(desktop, method)!
+    const recordInvocation = (invoke: (...args: unknown[]) => unknown, args: unknown[]) => {
+      apiCalls.push({
+        method,
+        args: DESKTOP_API_EFFECT[method] === 'subscribe' ? [] : args,
+      })
+      return Reflect.apply(invoke, desktop, args)
+    }
+    if (descriptor.get) {
+      const get = descriptor.get
+      // Availability is live; a stable forwarding identity does not capture an account.
+      const forward = (...args: unknown[]) => recordInvocation(get.call(desktop), args)
+      Object.defineProperty(desktop, method, {
+        ...descriptor,
+        get: () => (typeof get.call(desktop) === 'function' ? forward : undefined),
+      })
+    } else if (typeof descriptor.value === 'function') {
+      Object.defineProperty(desktop, method, {
+        ...descriptor,
+        value: (...args: unknown[]) => recordInvocation(descriptor.value, args),
+      })
+    }
   }
 
   window.desktop = desktop

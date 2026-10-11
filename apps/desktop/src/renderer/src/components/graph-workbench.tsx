@@ -491,10 +491,14 @@ export function GraphWorkbench({
     [graph],
   )
   // Coordinates depend only on reduced topology, not checks, review status, detail or camera.
-  const topology = JSON.stringify({
-    ids: focused.nodes.map((node) => node.id),
-    edges: focused.edges.map((edge) => [edge.from, edge.to, edge.source]),
-  })
+  const topology = React.useMemo(
+    () =>
+      JSON.stringify({
+        ids: focused.nodes.map((node) => node.id),
+        edges: focused.edges.map((edge) => [edge.from, edge.to]),
+      }),
+    [focused],
+  )
   const layout = React.useMemo(() => {
     const topologyData = JSON.parse(topology) as { ids: string[]; edges: (string | null)[][] }
     const depth = new Map(topologyData.ids.map((id) => [id, 0]))
@@ -532,6 +536,7 @@ export function GraphWorkbench({
   }, [topology])
   const projectionLayoutMs = performance.now() - computationStart
   const select = (id: string) => {
+    if (scopeRetiring || scopeMismatch || !discovery.byId.has(id)) return
     setSelected(id)
     setPath(null)
     setPathPage(0)
@@ -751,6 +756,7 @@ export function GraphWorkbench({
         </Field>
         <Field id="graph-author" label="Author">
           <Select
+            aria-label="Author"
             value={criteria.author}
             onValueChange={(author) => changeCriteria((value) => ({ ...value, author }))}
             options={[
@@ -761,6 +767,7 @@ export function GraphWorkbench({
         </Field>
         <Field id="graph-status" label="Status">
           <Select
+            aria-label="Status"
             value={criteria.status}
             onValueChange={(status) =>
               changeCriteria((value) => ({ ...value, status: status as GraphCriteria['status'] }))
@@ -787,6 +794,12 @@ export function GraphWorkbench({
         {indexError ? ` · ${indexError}` : ''}
         {snapshot.githubStale ? ` · Remote snapshot stale: ${snapshot.githubStale.reason}` : ''}
       </div>
+      {blocked ? (
+        <InlineAlert tone="warning" role="alert">
+          Repository operation active. Mutation controls are locked; graph exploration remains
+          available.
+        </InlineAlert>
+      ) : null}
       <details className="graph-saved">
         <summary>Saved view preferences</summary>
         <div className="graph-saved-controls">
@@ -1060,6 +1073,7 @@ export function GraphWorkbench({
                       type="button"
                       className="graph-node"
                       data-graph-node
+                      data-graph-node-id={node.id}
                       key={node.id}
                       aria-pressed={node.id === selected}
                       style={{ left: position.x, top: position.y }}
@@ -1177,6 +1191,10 @@ export function GraphWorkbench({
                     </dd>
                     <dt>Head repository</dt>
                     <dd>{selectedPr.headRepository ?? 'Unknown'}</dd>
+                    <dt>Head commit</dt>
+                    <dd>
+                      <code>{selectedPr.headOid ?? 'Unknown'}</code>
+                    </dd>
                     <dt>PR base target</dt>
                     <dd>
                       <code>{selectedPr.base}</code>
@@ -1280,6 +1298,14 @@ export function GraphWorkbench({
                       : `${local.parentBehind} commits behind`}
                     {local.needsRestack ? ' · restack required' : ''}
                   </p>
+                  <p>
+                    Parent commit: <code>{local.parentTip ?? 'Unknown'}</code>
+                  </p>
+                  {actionBlockReason(snapshot.capabilities, 'executeStack') ? (
+                    <InlineAlert tone="warning" role="alert">
+                      {actionBlockReason(snapshot.capabilities, 'executeStack')}
+                    </InlineAlert>
+                  ) : null}
                   <div className="graph-local-actions">
                     {!local.current ? (
                       <Button

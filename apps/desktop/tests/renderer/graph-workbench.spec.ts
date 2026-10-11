@@ -1,8 +1,16 @@
-import { test, expect } from '@playwright/test'
-import { openGallery, getDoubleCalls, STANDARD_VIEWPORTS } from './helpers/gallery'
+import { test, expect, type Page } from '@playwright/test'
+import {
+  openGallery,
+  getDoubleCalls,
+  getApiCalls,
+  getGitProviderWrites,
+  getDispatchedActions,
+  STANDARD_VIEWPORTS,
+} from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { graphIndex } from './fixtures/graph'
 import { scenarios } from './fixtures/scenarios'
+import { DESKTOP_API_EFFECT } from './fixtures/types'
 
 const preferenceScope = {
   repositoryPath: scenarios['graph-250'].snapshot!.path,
@@ -569,6 +577,9 @@ for (const boundary of ['host', 'repository', 'account', 'unknown-account'] as c
     await expect(
       page.getByRole('textbox', { name: 'Filter current view branches, files, and pull requests' }),
     ).toHaveValue('')
+    // Origin replacement remounts the workspace and closes its local disclosure.
+    if (!(await page.getByRole('textbox', { name: 'View name', exact: true }).isVisible()))
+      await page.getByText('Saved view preferences', { exact: true }).click()
     await expect(page.getByRole('textbox', { name: 'View name', exact: true })).toHaveValue('')
     await expect(page.getByRole('button', { name: 'Restore saved view' })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Review #181', exact: true })).toHaveCount(0)
@@ -766,6 +777,8 @@ test('old account held preference read cannot restore its private view after acc
     { index: graphIndex(250), snapshot: scenarios['graph-preferences-held'].snapshot! },
   )
   await expect(page.getByRole('searchbox', { name: 'Search indexed PRs' })).toHaveValue('')
+  if (!(await page.getByRole('textbox', { name: 'View name', exact: true }).isVisible()))
+    await page.getByText('Saved view preferences', { exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'View name', exact: true })).toHaveValue('')
   await expect(page.getByRole('button', { name: 'Restore saved view' })).toBeDisabled()
   const staleWrites = await page.evaluate(async (scope) => {
@@ -1193,3 +1206,444 @@ test('retained PR-list creation opens from a click without treating the event as
   await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
   expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
 })
+
+async function graphGeometry(page: Page) {
+  return page.locator('.graph-world').evaluate((world) => {
+    const bounds = world.getBoundingClientRect()
+    return [...world.querySelectorAll<HTMLElement>('[data-graph-node]')].map((node) => {
+      const rect = node.getBoundingClientRect()
+      return {
+        id: node.dataset.graphNodeId,
+        x: Math.round((rect.left - bounds.left) * 100) / 100,
+        y: Math.round((rect.top - bounds.top) * 100) / 100,
+      }
+    })
+  })
+}
+
+async function graphCamera(page: Page) {
+  return page.locator('.graph-viewport').evaluate((viewport) => ({
+    x: viewport.scrollLeft,
+    y: viewport.scrollTop,
+    transform: getComputedStyle(viewport.querySelector('.graph-world')!).transform,
+  }))
+}
+
+async function expectExplorationOnly(page: Page) {
+  expect(await getGitProviderWrites(page)).toEqual([])
+  expect(await getDispatchedActions(page)).toEqual([])
+  expect(
+    (await getApiCalls(page)).filter(({ method }) => DESKTOP_API_EFFECT[method] === 'local-write'),
+  ).toEqual([])
+}
+
+test('same-head parent movement, active operation and new capability blocker stay live with stable camera', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await switchDestination(page, 'stacks')
+  const original = scenarios['graph-250'].snapshot!
+  const source = {
+    ...original,
+    currentBranch: 'graph/change-2',
+    headOid: graphIndex(250).pullRequests.find((pr) => pr.number === 2)!.headOid!,
+    branches: original.branches.map((branch) =>
+      branch.name === 'graph/change-2'
+        ? {
+            ...branch,
+            current: true,
+            recordedParent: null,
+            parentSource: 'pullRequest' as const,
+            parent: 'graph/change-1',
+            parentTip: original.branches.find((branch) => branch.name === 'graph/change-1')!.oid,
+          }
+        : { ...branch, current: false },
+    ),
+  }
+  await page.evaluate((snapshot) => window.fixture.pushSnapshot(snapshot), source)
+  await page.getByRole('button', { name: 'Current branch', exact: true }).click()
+  await page
+    .locator('[data-graph-outline-row]')
+    .filter({ hasText: 'refs/heads/graph/change-2' })
+    .locator('button')
+    .first()
+    .click()
+  const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+  const layers = inspector.getByRole('button', { name: 'Edit stack layers', exact: true })
+  await layers.focus()
+  await layers.press('Enter')
+  await expect(inspector.getByRole('button', { name: 'Set parent…', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Zoom graph in', exact: true }).click()
+  await page.locator('.graph-viewport').evaluate((viewport) => viewport.scrollTo(0, 80))
+  const before = await graphGeometry(page)
+  const camera = await graphCamera(page)
+  const sameHead = graphIndex(250).pullRequests.find((pr) => pr.number === 2)!.headOid!
+  await page.evaluate(
+    (snapshot) =>
+      window.fixture.pushSnapshot({
+        ...snapshot,
+        branches: snapshot.branches.map((branch) =>
+          branch.current
+            ? { ...branch, parentTip: 'c'.repeat(40), parentBehind: 2, needsRestack: true }
+            : branch.name === 'graph/change-1'
+              ? { ...branch, oid: 'c'.repeat(40) }
+              : branch,
+        ),
+      }),
+    source,
+  )
+  await expect(inspector.getByText(sameHead, { exact: true })).toBeVisible()
+  await expect(inspector.getByText('c'.repeat(40), { exact: true })).toBeVisible()
+  await expect(inspector).toContainText('2 commits behind')
+  expect(await graphGeometry(page)).toEqual(before)
+  expect(await graphCamera(page)).toEqual(camera)
+  await page.evaluate(() => window.fixture.changeGraphPr(2, 'base'))
+  await expect(inspector.locator('dd').last()).toHaveText('main')
+  await page.evaluate(
+    (snapshot) =>
+      window.fixture.pushSnapshot({
+        ...snapshot,
+        operation: 'rebase',
+        rebaseInProgress: true,
+        branches: snapshot.branches.map((branch) =>
+          branch.current
+            ? {
+                ...branch,
+                parent: 'main',
+                parentTip: 'b'.repeat(40),
+                parentBehind: 4,
+                needsRestack: true,
+              }
+            : branch.name === 'main'
+              ? { ...branch, oid: 'b'.repeat(40) }
+              : branch,
+        ),
+      }),
+    source,
+  )
+  await expect(inspector.getByText(sameHead, { exact: true })).toBeVisible()
+  await expect(inspector).toContainText('Parent commit:')
+  await expect(inspector.getByText('b'.repeat(40), { exact: true })).toBeVisible()
+  await expect(inspector).toContainText('4 commits behind')
+  await expect(inspector).toContainText('restack required')
+  await expect(page.getByText('Repository operation active.', { exact: false })).toBeVisible()
+  await expect(inspector.getByRole('button', { name: 'Set parent…', exact: true })).toBeDisabled()
+  await page.evaluate(
+    (snapshot) =>
+      window.fixture.pushSnapshot({
+        ...snapshot,
+        operation: null,
+        capabilities: { ...snapshot.capabilities, bare: true },
+        branches: snapshot.branches.map((branch) =>
+          branch.current
+            ? {
+                ...branch,
+                parent: 'main',
+                parentTip: 'b'.repeat(40),
+                parentBehind: 4,
+                needsRestack: true,
+              }
+            : branch.name === 'main'
+              ? { ...branch, oid: 'b'.repeat(40) }
+              : branch,
+        ),
+      }),
+    source,
+  )
+  await expect(inspector).toContainText('This repository has no working tree.')
+  await expect(inspector.getByRole('button', { name: 'Restack…', exact: true })).toBeDisabled()
+  await expect(inspector.getByRole('button', { name: 'Set parent…', exact: true })).toBeDisabled()
+  await expect(inspector.getByText('b'.repeat(40), { exact: true })).toBeVisible()
+  await expectExplorationOnly(page)
+})
+
+for (const state of ['normal', 'busy', 'stale', 'incomplete'] as const) {
+  test(`complete keyboard and pointer graph exploration is read-only in ${state} state`, async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'graph-250' })
+    await switchDestination(page, 'stacks')
+    if (state === 'busy')
+      await page.evaluate(
+        (source) =>
+          window.fixture.pushSnapshot({
+            ...source,
+            operation: 'rebase',
+            rebaseInProgress: true,
+          }),
+        scenarios['graph-250'].snapshot!,
+      )
+    if (state === 'stale' || state === 'incomplete')
+      await page.evaluate(
+        (index) => window.fixture.pushPrIndex(index),
+        graphIndex(250, state === 'stale' ? 'stale' : 'partial'),
+      )
+    if (state !== 'normal')
+      await expect(
+        page.getByRole(state === 'busy' ? 'alert' : 'status').filter({
+          hasText:
+            state === 'busy'
+              ? 'Repository operation active'
+              : state === 'stale'
+                ? 'Retained statuses have not been reconfirmed'
+                : 'incomplete',
+        }),
+      ).toBeVisible()
+    const search = page.getByRole('searchbox', { name: 'Search indexed PRs' })
+    await search.fill('#40')
+    const row = page
+      .locator('[data-graph-outline-row]')
+      .filter({ hasText: '#40 Change 40' })
+      .locator('button')
+      .first()
+    await row.focus()
+    await row.press('Enter')
+    const inspector = page.getByRole('complementary', { name: 'Selected PR or ref details' })
+    await expect(inspector.getByRole('button', { name: 'Review #40', exact: true })).toBeVisible()
+    await search.fill('')
+    const collapse = page.getByRole('checkbox', { name: 'Collapse linear runs' })
+    await collapse.focus()
+    if (!(await collapse.isChecked())) await collapse.press('Space')
+    const expand = page.getByRole('button', { name: /^Expand \d+ items$/ }).first()
+    await expect(expand).toBeVisible()
+    await expand.focus()
+    await expand.press('Enter')
+    await collapse.focus()
+    await collapse.press('Space')
+    await expect(collapse).not.toBeChecked()
+    await collapse.click()
+    await expect(collapse).toBeChecked()
+    await page.getByText(/Dependent paths ·/).focus()
+    await page.keyboard.press('Enter')
+    const pathSearch = page.getByRole('searchbox', { name: 'Search dependent paths' })
+    await pathSearch.fill('#80')
+    const endpoint = page.getByRole('button', { name: '#80 Change 80', exact: true })
+    await endpoint.focus()
+    await endpoint.press('Enter')
+    await expect(page.locator('[data-graph-node]').filter({ hasText: '#80' })).toHaveCount(1)
+    await page.getByRole('combobox', { name: 'Author', exact: true }).click()
+    await page.getByRole('option', { name: '@author-01', exact: true }).click()
+    await page.getByRole('combobox', { name: 'Status', exact: true }).focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('listbox')).toBeVisible()
+    await page.keyboard.press('Home')
+    await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('combobox', { name: 'Status', exact: true })).toContainText('Draft')
+    await search.fill('#51')
+    await expect(inspector.getByRole('button', { name: 'Review #40', exact: true })).toBeVisible()
+    await expect(
+      page.locator('[data-graph-outline-row]').filter({ hasText: '#40 Change 40' }),
+    ).toContainText('Selected · outside active filter')
+    for (const preset of ['My PRs', 'Review requested', 'Current branch', 'All open PRs']) {
+      const control = page.getByRole('button', { name: preset, exact: true })
+      await control.focus()
+      await control.press('Space')
+      await expect(control).toHaveAttribute('aria-pressed', 'true')
+      await expect(inspector.getByRole('button', { name: 'Review #40', exact: true })).toBeVisible()
+    }
+    await page.getByRole('combobox', { name: 'Author', exact: true }).click()
+    await page.getByRole('option', { name: 'Any author', exact: true }).click()
+    for (const [status, query] of [
+      ['Not draft', '#51 Change 51'],
+      ['Known failing checks', '#11 Change 11'],
+      ['Known pending checks', '#10 Change 10'],
+    ]) {
+      await page.getByRole('combobox', { name: 'Status', exact: true }).click()
+      await page.getByRole('option', { name: status, exact: true }).click()
+      await expect(page.getByRole('combobox', { name: 'Status', exact: true })).toContainText(
+        status,
+      )
+      await search.fill(query)
+      await expect(
+        page.locator('[data-graph-outline-row]').filter({ hasText: query }),
+      ).toBeVisible()
+      await expect(inspector.getByRole('button', { name: 'Review #40', exact: true })).toBeVisible()
+    }
+    await page.getByRole('combobox', { name: 'Status', exact: true }).click()
+    await page.getByRole('option', { name: 'All · drafts included', exact: true }).click()
+    await search.fill('remote-only')
+    await page
+      .locator('[data-graph-outline-row]')
+      .filter({ hasText: 'remote-only' })
+      .locator('button')
+      .first()
+      .click()
+    await expect(inspector).toContainText('Remote ref · no local checkout established')
+    const refresh = page.getByRole('button', { name: 'Refresh index', exact: true })
+    await refresh.focus()
+    await refresh.press('Enter')
+    await expect(refresh).toBeEnabled()
+    expect(
+      (await getDoubleCalls(page)).filter(({ call }) => call === 'prIndex').at(-1)?.args,
+    ).toEqual([{ refresh: true }])
+    await expect(inspector).toContainText('Remote ref · no local checkout established')
+    await expect(page.locator('.graph-workbench > footer')).toContainText(
+      'Current checkout: graph/change-1',
+    )
+    await expectExplorationOnly(page)
+    await switchDestination(page, 'branches')
+    const viewFilter = page.getByRole('textbox', {
+      name: 'Filter current view branches, files, and pull requests',
+    })
+    await expect(viewFilter).toHaveValue('remote-only')
+    await viewFilter.fill('')
+    await expect(page.locator('.branch-row[aria-selected="true"]')).toContainText('graph/change-1')
+    await switchDestination(page, 'pullRequests')
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Pull requests', exact: true }),
+    ).toBeVisible()
+    await switchDestination(page, 'stacks')
+    await expect(page.locator('.graph-workbench > footer')).toContainText(
+      'Current checkout: graph/change-1',
+    )
+    await expectExplorationOnly(page)
+  })
+}
+
+for (const boundary of ['host', 'repository', 'account', 'signed-out'] as const) {
+  test(`graph authority is retired immediately across ${boundary} replacement without dispatch`, async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'graph-preferences-held' })
+    await switchDestination(page, 'stacks')
+    await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('#181')
+    await page
+      .locator('[data-graph-outline-row]')
+      .filter({ hasText: '#181 Change 181' })
+      .locator('button')
+      .first()
+      .click()
+    if (boundary === 'host' || boundary === 'repository')
+      await page.evaluate(
+        ({ snapshot, host }) =>
+          window.fixture.pushSnapshot({
+            ...snapshot,
+            remoteUrl: `https://${host}/foreign/private.git`,
+          }),
+        {
+          snapshot: scenarios['graph-preferences-held'].snapshot!,
+          host: boundary === 'host' ? 'enterprise.example' : 'github.com',
+        },
+      )
+    else
+      await page.evaluate(
+        (signedOut) =>
+          window.fixture.publishCliStatus({
+            state: signedOut ? 'signed-out' : 'authenticated',
+            host: 'github.com',
+            login: signedOut ? null : 'other-account',
+            version: '2.62.0',
+            identity: signedOut ? null : 'cli:graph-replacement:2',
+            message: null,
+          }),
+        boundary === 'signed-out',
+      )
+    await expect(page.getByRole('button', { name: 'Review #181', exact: true })).toHaveCount(0)
+    await expect(page.locator('[data-graph-node]').filter({ hasText: 'Change 181' })).toHaveCount(0)
+    await expect(page.getByRole('searchbox', { name: 'Search indexed PRs' })).toHaveValue('')
+    await expect(page.locator('.graph-camera')).toContainText('100%')
+    await page.evaluate(() => window.fixture.release('graphPreferences'))
+    await expect(page.getByRole('button', { name: 'Review #181', exact: true })).toHaveCount(0)
+    await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('local-only')
+    await page.getByRole('button', { name: 'All open PRs', exact: true }).focus()
+    await page.keyboard.press('Space')
+    await page.getByRole('button', { name: 'Refresh index', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Refresh index', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Review #181', exact: true })).toHaveCount(0)
+    await expect(page.locator('.graph-workbench > footer')).toContainText(
+      'Current checkout: graph/change-1',
+    )
+    await expectExplorationOnly(page)
+  })
+}
+
+test('actual fixture boundary records held and rejected writes before settlement and retains them across reset', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-250' })
+  await page.evaluate(() => {
+    window.fixture.hold('runAction')
+    window.fixture.failNext('runAction', 'Fixture write rejected')
+    void window.desktop.runAction({ type: 'fetch' }).catch(() => {})
+  })
+  expect((await getGitProviderWrites(page)).map(({ method }) => method)).toEqual(['runAction'])
+  await page.evaluate(async () => {
+    window.fixture.release('runAction')
+    window.fixture.failNext('reviewReply', 'Fixture provider write rejected')
+    const { owner } = await window.desktop.reviewThreads!(1)
+    await window.desktop.reviewReply!(1, 'fixture-thread', 'controlled fixture body', owner).catch(
+      () => {},
+    )
+    window.fixture.reset()
+  })
+  expect((await getGitProviderWrites(page)).map(({ method }) => method)).toEqual([
+    'runAction',
+    'reviewReply',
+  ])
+})
+
+test('explicit local view persistence is recorded separately from Git and provider writes', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'graph-preferences-held' })
+  await switchDestination(page, 'stacks')
+  await page.evaluate(() => window.fixture.release('graphPreferences'))
+  await page.getByText('Saved view preferences', { exact: true }).click()
+  await page.getByRole('textbox', { name: 'View name', exact: true }).fill('Explicit local view')
+  await page.getByRole('button', { name: 'Save view', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Restore saved view', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Reset saved view', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Restore saved view', exact: true })).toBeDisabled()
+  const localWrites = (await getApiCalls(page)).filter(
+    ({ method }) => DESKTOP_API_EFFECT[method] === 'local-write',
+  )
+  expect(localWrites.map(({ method }) => method)).toEqual([
+    'saveGraphPreferences',
+    'resetGraphPreferences',
+  ])
+  expect(localWrites[0].args[1]).toEqual(preferenceScope)
+  expect(localWrites[1].args[0]).toEqual(preferenceScope)
+  expect(await getGitProviderWrites(page)).toEqual([])
+  expect(await getDispatchedActions(page)).toEqual([])
+})
+
+for (const laterEnabled of [false, true]) {
+  test(`typed exploration ledger preserves current identity through production CLI refresh${laterEnabled ? ' after late availability' : ''}`, async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: laterEnabled ? 'clean' : 'github-cli-authenticated' })
+    const status = page.getByTitle('GitHub CLI status')
+    await status.click()
+    const dialog = page.getByRole('dialog', { name: 'GitHub CLI authentication' })
+    await expect(dialog).toBeVisible()
+    const facts = dialog.getByRole('region', { name: 'GitHub CLI' })
+    if (!laterEnabled) await expect(facts.getByText('octo', { exact: true })).toBeVisible()
+    await page.evaluate(
+      (enabled) =>
+        window.fixture.publishCliStatus({
+          state: enabled ? 'authenticated' : 'signed-out',
+          host: 'github.com',
+          login: enabled ? 'late-fixture-account' : null,
+          version: '2.62.0',
+          identity: enabled ? 'cli:late-fixture-account:1' : null,
+          message: enabled ? null : 'No GitHub account is signed in for github.com.',
+        }),
+      laterEnabled,
+    )
+    await expect(status).toHaveText(
+      laterEnabled ? 'GitHub CLI: signed in' : 'GitHub CLI: signed out',
+    )
+    const before = (await getApiCalls(page)).filter(({ method }) => method === 'githubCliStatus')
+    await dialog.getByRole('button', { name: 'Refresh status', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Refresh status', exact: true })).toBeEnabled()
+    await expect(
+      facts.getByText(laterEnabled ? 'late-fixture-account' : 'None reported', { exact: true }),
+    ).toBeVisible()
+    await expect(facts.getByText('octo', { exact: true })).toHaveCount(0)
+    expect(
+      (await getApiCalls(page)).filter(({ method }) => method === 'githubCliStatus'),
+    ).toHaveLength(before.length + 1)
+    await expectExplorationOnly(page)
+  })
+}

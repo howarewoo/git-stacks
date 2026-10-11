@@ -9,7 +9,7 @@ import electron from 'electron'
 const deadlineMs = 30_000
 const requestTimeoutMs = 10_000
 
-async function freePort() {
+export async function freePort() {
   const server = createServer()
   await new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -20,7 +20,7 @@ async function freePort() {
   return port
 }
 
-async function pageTarget(port, child, getError, pageOrigin) {
+export async function pageTarget(port, child, getError, pageOrigin) {
   const deadline = Date.now() + deadlineMs
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Electron exited before startup: ${getError()}`)
@@ -39,7 +39,7 @@ async function pageTarget(port, child, getError, pageOrigin) {
   throw new Error(`Electron did not expose its application page: ${getError()}`)
 }
 
-async function connect(url) {
+export async function connect(url) {
   const socket = new WebSocket(url)
   const pending = new Map()
   let serial = 0
@@ -111,19 +111,23 @@ async function connect(url) {
   }
 }
 
-async function evaluate(client, expression, awaitPromise = false) {
-  const reply = await client.send('Runtime.evaluate', {
-    expression,
-    returnByValue: true,
-    awaitPromise,
-  })
+export async function evaluate(client, expression, awaitPromise = false) {
+  const reply = await client
+    .send('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise,
+    })
+    .catch((error) => {
+      throw new Error(`${String(error)}; expression: ${expression}`)
+    })
   if (reply.exceptionDetails) {
     throw new Error(reply.exceptionDetails.text || 'Renderer evaluation failed')
   }
   return reply.result.value
 }
 
-async function until(client, expression) {
+export async function until(client, expression) {
   const deadline = Date.now() + deadlineMs
   while (Date.now() < deadline) {
     if (await evaluate(client, expression)) return
@@ -132,7 +136,7 @@ async function until(client, expression) {
   throw new Error(`Desktop did not reach the expected visible state: ${expression}`)
 }
 
-async function click(client, selector) {
+export async function click(client, selector) {
   const point = await evaluate(
     client,
     `(() => { const element = document.querySelector(${JSON.stringify(selector)});
@@ -164,19 +168,14 @@ export async function measureDesktop(repoRoot, fixture) {
   const started = performance.now()
   const child = spawn(
     electron,
-    [
-      '--no-sandbox',
-      '--disable-gpu',
-      `--remote-debugging-port=${port}`,
-      join(repoRoot, 'out/main/index.js'),
-    ],
+    ['--disable-gpu', `--remote-debugging-port=${port}`, join(repoRoot, 'out/main/index.js')],
     {
       cwd: repoRoot,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'ignore', 'pipe'],
       env: {
         ...process.env,
-        ELECTRON_RENDERER_URL: process.env.ELECTRON_RENDERER_URL ?? '',
+        ELECTRON_RENDERER_URL: '',
         GIT_STACKS_REPO: fixture,
         GIT_STACKS_USER_DATA: userData,
       },
@@ -189,14 +188,8 @@ export async function measureDesktop(repoRoot, fixture) {
   })
   let client
   try {
-    client = await connect(
-      await pageTarget(
-        port,
-        child,
-        () => errors,
-        process.env.ELECTRON_RENDERER_URL || 'app://git-stacks',
-      ),
-    )
+    client = await connect(await pageTarget(port, child, () => errors, 'app://git-stacks'))
+    await client.send('Page.bringToFront')
     await until(client, "!!document.querySelector('button.onboarding-recent')")
     // The environment report can move this button between mouse-down and mouse-up.
     await evaluate(client, "document.querySelector('button.onboarding-recent').focus()")

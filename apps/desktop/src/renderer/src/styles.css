@@ -4608,6 +4608,8 @@ textarea.conflict-content {
 }
 .graph-viewport {
   overflow: auto;
+  /* The bounded layout owns camera stability, not the browser's replacement-card anchor. */
+  overflow-anchor: none;
   flex: 1;
   min-height: 250px;
   background: var(--gs-semantic-surface-inset);

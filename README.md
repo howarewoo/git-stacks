@@ -1635,6 +1635,78 @@ since filesystem and process startup costs vary by machine. Hosted-runner
 measurements start a new comparison series; the old self-hosted timings are not
 a directly comparable baseline. The existing performance budgets still apply.
 
+The graph measurements run the same built Electron renderer and typed preload
+as the desktop, with P089's deterministic 250/1,000/5,000-PR records supplied
+through a disposable local GitHub provider boundary. Fixtures are not shipped
+in the renderer. The harness reports warm input-to-paint p95, local projection
+and layout time (excluding provider requests), post-GC heap growth from 250 to
+5,000 records, and post-GC growth across 30 navigation/refresh cycles. Limits
+come from `packages/shared/src/performance.ts`: 250 ms input-to-paint, 100 ms
+projection/layout, 32 MiB scale growth, 8 MiB navigation growth, 64 mounted
+outline rows, 32 focused nodes, 20 path rows, and four selected detail records.
+It checks selected-detail eviction and records scoped provider page counts.
+
+Each size uses an explicit full index invalidation; committed computation
+attributes are observed throughout that update, including overwritten values,
+instead of treating the final cached render's zero as layout evidence. Each size
+collects twenty warm input-to-paint and local projection/layout samples with
+Chromium text/key input, alternating exact PR40/PR41 queries to keep visible
+context comparable. Requested match counts and mounted PR identities (including
+collapsed endpoints) must be correct before paint. Raw samples and p95s are
+reported per size; filtering must make zero provider requests. The fixed PR40
+fork is checked on both path pages and after endpoint selection. Selected-detail
+retention is measured through four cache hits and an evicted fifth record, not
+reported from the configured ceiling alone.
+Warm zero-duration samples retain the clock's raw observation only after a
+present, finite committed metric and the new requested matching result. They
+never substitute for the independently invalidated index-update measurement;
+missing, empty, nonfinite or negative metrics fail instead.
+
+Before each size's heap checkpoint, the real **Refresh repository** control settles
+the application's full snapshot at the same 250/1,000/5,000-record size as its
+graph index. Passive snapshot/index fences require matching repository/account
+scope, fresh complete data, selected-detail readiness, and paint. Both
+navigation checkpoints therefore contain the same 5,000-record repository
+context: a later background snapshot must not turn a 250-to-5,000 size change
+into apparent navigation retention. Observed snapshot counts and the
+1,000-record heap sample are preserved alongside the endpoint measurements.
+
+Every navigation cycle clicks **Refresh index**, observes its main-owned
+admission and a new qualified complete 5,000-record index, and waits for a fresh
+selected-PR detail read and paint before the final post-GC observation. A
+coordinator-confirmed full snapshot can legitimately supersede progressive
+pagination; actual per-cycle page counts, snapshot completions, and superseded
+sequences are reported rather than assuming 3,000 completed pages. Each cycle
+is bounded by the full 100-page index; shorter sequences need observed snapshot
+completion, not an inferred success. The passive observer retains only scalar
+metadata, and unavailable/nonfinite heap metrics fail the run.
+
+Request reporting distinguishes index/detail and identity-proof reads from
+existing same-repository metadata, native-stack, snapshot-PR, and issue reads.
+Unknown operations, foreign repository scopes, and mutations fail the measured
+phases. Background synchronization and account validation remain enabled.
+The harness pins the built `app://git-stacks` renderer and brings its page to
+the foreground; it does not use an ambient `ELECTRON_RENDERER_URL` override.
+Use an uncontended host/display for comparable performance observations;
+execution under competing workloads is functional evidence only.
+
+A focused production-graph smoke, after a build, can be run from the root:
+
+```sh
+pnpm --filter git-stacks exec tsx -e "import { measureGraphDesktop } from './scripts/perf/desktop-graph.ts'; measureGraphDesktop(process.cwd()).then(result => console.log(JSON.stringify(result, null, 2))).catch(error => { console.error(error); process.exitCode = 1 })"
+```
+
+Heap entries are byte-valued despite the legacy report's `elapsedMs`/`budgetMs`
+field names; their `detail` fields retain explicitly byte-labelled values.
+Linux runs are regression observations only: the agreed macOS arm64 reference
+gate remains unproved by Linux results. Final combined Workflow/Review
+acceptance and independent implementation review are separate gates.
+
+The native runner keeps Electron sandboxing enabled. A host that cannot satisfy
+Electron's sandbox policy cannot supply this gate; browser gallery measurements
+must be reported separately, including their controlled bridge and retained
+fixture state, and never substituted for native heap or reference-platform proof.
+
 It writes `benchmarks/latest.json` and appends one line per run to
 `benchmarks/trend.jsonl` (capped at the last 200 runs). The `Performance budgets`
 workflow runs the harness on every push and pull request, uploads `benchmarks/`
@@ -1863,6 +1935,15 @@ camera and qualified selection. Refresh and preference writes keep their action
 names while the shared Button reports busy state; only the actual pending action
 in the current preference scope shows its loading marker. Retired writes cannot
 disable a replacement account's controls. Utility actions remain secondary or ghost.
+
+Graph exploration checks use the exhaustive typed `DESKTOP_API_EFFECT` ledger at
+the fixture bridge. Every Git/provider write is recorded before it settles,
+including held and rejected requests; fixture reset does not erase the ledger.
+Subscriptions record no callback arguments. Accessor-backed optional methods keep
+live availability and current implementations with stable forwarding identities,
+so account replacement and late-enabled CLI status remain observable through the
+actual status dialog. Pointer and keyboard exploration cover incomplete, stale,
+busy and replaced scopes without implying checkout or Git Fetch.
 
 The persistent operation surface stays outside destination content. Publication
 steps and observed merge outcomes retain their captured targets across Graph,
