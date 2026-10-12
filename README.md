@@ -78,10 +78,10 @@ host non-interactively (Codex in this example):
 npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --yes
 ```
 
-Replace `codex` with your host's Skills CLI agent identifier, or omit `--agent`
-to choose interactively. For a user-wide install available across projects, add
-`--global`; this writes to the selected agent's user-level skill location rather
-than the current project:
+Replace `codex` with your host's Skills CLI agent identifier, or omit both `--agent`
+and `--yes` to choose interactively. For a user-wide install available across
+projects, add `--global`; this writes to the selected agent's user-level skill
+location rather than the current project:
 
 ```sh
 npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --global --yes
