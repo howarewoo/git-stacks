@@ -2075,6 +2075,9 @@ and split modes at 1000×700, 1440×940, 1920×1080, and the 720×470 CSS viewpo
 equivalent of 200% zoom. Count complete code rows inside the local diff viewport:
 minimum eight and default fifteen, not merely a nonzero region height. Hold or
 refuse reads to verify selection retirement and explicit unknown metadata.
+For account-switch recovery with a moved PR head, publish the changed snapshot
+after restoring the original CLI owner and preserve it through repository refresh.
+Verify that saving the retained text does not re-enable submission at the old comparison.
 Set a unique `GALLERY_PORT` and cap Playwright workers on loaded hosts:
 
 ```sh
