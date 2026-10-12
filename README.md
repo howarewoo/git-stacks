@@ -274,11 +274,19 @@ Submit the stack containing <canonical PR URL> using submit-stack-for-review.
 The initial pass is strictly top-to-bottom (most dependent PR first). Each layer
 is rebased onto its freshly fetched parent, conflicts are resolved before failing
 checks, and published-head changes are draft-gated. Submission means confirmed
-readiness with required current-head CI evidence, not waiting for human or automated
-review completion. Lower-parent rewrites require a final reconciliation of affected
-upper layers and a fresh ancestry/diff snapshot. Unchanged ready PRs remain unchanged.
-Ambiguous scope, unsafe writes, enabled or unknown auto-merge, pending required CI,
-and continuing external drift block truthful completion. The skill never merges,
+readiness with applicable PR CI checks on the exact published head, not waiting for
+human or automated review completion. These are the jobs configured by repository
+workflows for that PR, discovered from workflow definitions and current-head check
+runs/statuses, not branch-protection requirements, rulesets, approvals, or merge
+eligibility. All applicable checks must pass; a conditional skip is valid only when
+its workflow condition does not apply. Lower-parent rewrites require a final
+reconciliation of affected upper layers and a fresh ancestry/diff snapshot.
+Unchanged ready PRs remain unchanged. Ambiguous scope, unsafe writes, enabled or
+unknown auto-merge, pending, failing, or missing expected CI evidence, and continuing
+external drift block truthful completion. Denied mutations stop the workflow; a
+denied read blocks only when necessary evidence has no other authorized source.
+Protection/ruleset reads are not prerequisites, and their absence or read errors
+do not block established workflow/current-head CI evidence. The skill never merges,
 queues, changes auto-merge/protections, or handles review threads.
 
 Unlike [flatten-pr-graph](.agents/skills/flatten-pr-graph/SKILL.md), which orders PRs
@@ -286,8 +294,11 @@ and deliberately skips checks, this skill verifies every changed layer. For
 Markdown-only changes, simplify and review the instructions, then exercise the
 actual authored skill with an agent on disposable Git fixtures and independent
 state oracles: include latest-parent rebasing, a lower rewrite invalidating upper
-layers, own-commit/diff preservation, and unrelated branch preservation. Keep
-evaluation scripts/evidence outside the production repository. Provider simulation
+layers, own-commit/diff preservation, and unrelated branch preservation. Include
+policy-read denial with valid workflow/current-head CI, old-head/pending/failing/
+missing expected CI, valid and invalid conditional skips, denied mutations, and
+essential denied reads without alternate evidence. Keep evaluation scripts/evidence
+outside the production repository. Provider simulation
 does not prove live GitHub draft/check/readiness integration; record that limit and
 any unavailable native agent evaluation. Do not mutate live PRs merely to test a skill.
 Application tests and Biome do not validate Markdown or agent workflow behavior.
