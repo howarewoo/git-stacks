@@ -51,7 +51,7 @@ services; do not interrupt jobs or delete retained runner data during the cutove
 
 The repository's `.agents/skills/` directory contains two standalone skills:
 `flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack, and
-`ready-stack` prepares an existing stack for review and checks its readiness.
+`submit-stack-for-review` submits an existing full stack for review, initially top-to-bottom.
 Install them with the [Skills CLI](https://github.com/vercel-labs/skills) using
 Node.js and `npx`; cloning this repository, installing pnpm dependencies, or
 building the desktop app is not required.
@@ -75,7 +75,7 @@ The CLI prompts for skills and host agents. To select both skills and a specific
 host non-interactively (Codex in this example):
 
 ```sh
-npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --yes
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --yes
 ```
 
 Replace `codex` with your host's Skills CLI agent identifier, or omit both `--agent`
@@ -84,11 +84,10 @@ projects, add `--global`; this writes to the selected agent's user-level skill
 location rather than the current project:
 
 ```sh
-npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --global --yes
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --global --yes
 ```
 
-The CLI includes each skill's bundled files, including
-`ready-stack/references/verification.md`. Using these GitHub workflows requires
+Each skill is a self-contained `SKILL.md`. Using these GitHub workflows requires
 Git and an authorized GitHub integration (such as authenticated `gh`), plus the
 target repository's own verification tools when the workflow calls for them.
 Installation alone does not authorize PR mutations.
@@ -96,10 +95,12 @@ Installation alone does not authorize PR mutations.
 When changing skill packaging or these commands, verify discovery and actual
 project/global installation from outside this repository with the current Skills
 CLI. Use disposable project directories and an isolated `HOME` and XDG directories
-for the global check; confirm both installed `SKILL.md` files and the ready-stack
-relative reference match their source. Record the CLI version, commands, outcomes,
-and limits in the PR. Desktop builds/tests do not exercise skill installation;
-Biome does not format Markdown.
+for the global check; compare both installed `SKILL.md` files byte-for-byte with
+source and confirm only the current two skills are discovered and installed.
+For an unpushed candidate, substitute the absolute local checkout path for
+`howarewoo/git-stacks`; this proves local packaging, not remote availability.
+Record CLI version, exact commands, outcomes, source hashes, and limits in the PR.
+Desktop builds/tests do not exercise skill installation; Biome does not format Markdown.
 
 ## Commands
 
@@ -262,35 +263,34 @@ ephemeral and outside query keys, payloads, and mutation variables.
 Repository-owned agent skills live in `.agents/skills/`. They are optional agent
 workflows, not desktop features or a required stack-management CLI.
 
-Use [ready-stack](.agents/skills/ready-stack/SKILL.md) for an explicit request to
-prepare an existing PR stack bottom-to-top. Supply a canonical PR URL identifying
-the stack or an explicit PR list; invocation syntax depends on the agent host.
-For example:
+Use [submit-stack-for-review](.agents/skills/submit-stack-for-review/SKILL.md) for an
+explicit request to submit the full existing stack containing one canonical PR URL.
+Invocation syntax depends on the agent host. For example:
 
 ```text
-Prepare the stack containing <canonical PR URL> using ready-stack.
-Prepare these PRs using ready-stack: <bottom PR URL>, <top PR URL>.
-Prepare the stack containing <canonical PR URL> using ready-stack --preview.
+Submit the stack containing <canonical PR URL> using submit-stack-for-review.
 ```
 
-Preparation includes scoped corrections, review-thread handling, verification,
-publication, and restacking. After each layer's corrections and local verification,
-it submits drafts for review one at a time, bottom-to-top, and leaves already-ready
-PRs unchanged. Valid existing approval means no review resubmission or new request.
-Missing human approval does not prevent preparing descendants once author work and
-required checks are complete; the report distinguishes author-ready from merge-ready.
-The skill never merges, enqueues, or changes auto-merge. Preview is read-only,
-and loading the skill alone grants no mutation authority.
-The report is also the recovery handoff: it records verified state and the first
-unproved operation to resume.
+The initial pass is strictly top-to-bottom (most dependent PR first). Each layer
+is rebased onto its freshly fetched parent, conflicts are resolved before failing
+checks, and published-head changes are draft-gated. Submission means confirmed
+readiness with required current-head CI evidence, not waiting for human or automated
+review completion. Lower-parent rewrites require a final reconciliation of affected
+upper layers and a fresh ancestry/diff snapshot. Unchanged ready PRs remain unchanged.
+Ambiguous scope, unsafe writes, enabled or unknown auto-merge, pending required CI,
+and continuing external drift block truthful completion. The skill never merges,
+queues, changes auto-merge/protections, or handles review threads.
 
 Unlike [flatten-pr-graph](.agents/skills/flatten-pr-graph/SKILL.md), which orders PRs
-and deliberately skips checks, ready-stack verifies each changed layer. See its
-[verification scenarios](.agents/skills/ready-stack/references/verification.md)
-for activation, safety, recovery, and behavioral evaluation. For Markdown-only
-skill changes, review formatting manually and exercise the skill with disposable
-fixtures or read-only preview; Biome does not check Markdown, and application tests
-do not validate agent behavior.
+and deliberately skips checks, this skill verifies every changed layer. For
+Markdown-only changes, simplify and review the instructions, then exercise the
+actual authored skill with an agent on disposable Git fixtures and independent
+state oracles: include latest-parent rebasing, a lower rewrite invalidating upper
+layers, own-commit/diff preservation, and unrelated branch preservation. Keep
+evaluation scripts/evidence outside the production repository. Provider simulation
+does not prove live GitHub draft/check/readiness integration; record that limit and
+any unavailable native agent evaluation. Do not mutate live PRs merely to test a skill.
+Application tests and Biome do not validate Markdown or agent workflow behavior.
 
 ## Live local and remote freshness
 
