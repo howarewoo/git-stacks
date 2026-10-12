@@ -52,6 +52,7 @@ export type FixtureCall =
   | 'surgeryPreview'
   | 'mergeStatus'
   | 'submitStackProgress'
+  | 'repositoryOperationScope'
   | 'pullRequest'
   | 'reviewHeadline'
   | 'reviewFiles'
@@ -222,6 +223,7 @@ export interface FixtureScenario {
    * footer of every other scenario to a session no one staged.
    */
   readonly githubCliStatus?: GitHubCliStatus
+  readonly githubCliStatuses?: Readonly<Record<string, GitHubCliStatus>>
   /**
    * What this computer's settings policy and settings file report beyond the
    * values themselves: which keys a policy fixes, which stored values were

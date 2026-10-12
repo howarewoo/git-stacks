@@ -58,6 +58,7 @@ import { useListWindow, useRovingListFocus } from './lib/list-window'
 import { createRequestGate, type RequestClaim } from './lib/request-gate'
 import { useSettingsMutation } from './lib/settings-query'
 import { cliAuthority } from '@git-stacks/shared/operation-scope'
+import { useRepositoryOperationAuthority } from './lib/repository-operation-authority'
 import { withoutReplacedCredential } from './credential-identity'
 import { Badge } from './components/ui/badge'
 import { Button, IconButton } from './components/ui/button'
@@ -1348,6 +1349,8 @@ function App() {
   React.useEffect(() => {
     if (!desktop) return
     const stop = desktop.onGitHubCliStatus?.((status) => {
+      const host = inboxHostRef.current
+      if (host !== null && canonicalHostName(status.host) !== canonicalHostName(host)) return
       cliStatusRequest.current += 1
       applyCliStatus(status)
     })
@@ -1367,6 +1370,7 @@ function App() {
     () => cliAuthority(settings?.github.host ?? null, cliStatus),
     [cliStatus, settings?.github.host],
   )
+  const operationAuthority = useRepositoryOperationAuthority(desktop, snapshot)
 
   // The optional Notification Center. Its own state, its own request counter,
   // and two separate errors: a failed read must not report itself as a failed
@@ -4268,10 +4272,10 @@ function App() {
         {announcement}
       </div>
       {snapshot ? <section aria-label="Repository controls">{renderToolbar()}</section> : null}
-      {snapshot ? (
+      {snapshot && operationAuthority !== null ? (
         <OperationBanner
           snapshot={snapshot}
-          authority={authority}
+          authority={operationAuthority}
           desktop={desktop ?? undefined}
           showingOperation={
             workflow?.repoPath === snapshot.path &&
@@ -4296,12 +4300,15 @@ function App() {
         )}
         {detailsVisible ? renderDetails() : null}
       </div>
-      {workflow && snapshot && workflow.repoPath === snapshot.path ? (
+      {workflow &&
+      snapshot &&
+      operationAuthority !== null &&
+      workflow.repoPath === snapshot.path ? (
         <WorkflowDialog
           key={workflow.id}
           request={workflow.request}
           snapshot={snapshot}
-          authority={authority}
+          authority={operationAuthority}
           busy={isBusy}
           actionError={actionError}
           onClearActionError={() => setActionError(null)}

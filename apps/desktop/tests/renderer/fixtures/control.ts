@@ -302,13 +302,22 @@ export function installFixtureControl(options: {
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
   let active: RepositorySnapshot | null = scenario.snapshot
-  let servedCliStatus: GitHubCliStatus | null = null
+  const cliStatuses = new Map<string, GitHubCliStatus>()
+  const statusForHost = (host: string | null): GitHubCliStatus | null => {
+    if (host === null) return null
+    const declared = scenario.identity?.cli ?? scenario.githubCliStatus
+    return (
+      cliStatuses.get(host) ??
+      scenario.githubCliStatuses?.[host] ??
+      (declared?.host === host ? declared : null)
+    )
+  }
   const graphPreferenceState = new Map<string, GraphPreferences>()
   const graphPreferenceScope = (): string | null => {
     const remote = active?.remoteUrl?.match(
       /^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u,
     )
-    const cli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+    const cli = statusForHost(remote?.[1].toLowerCase() ?? null)
     const account = cli ? (cli.state === 'authenticated' ? cli.login : null) : servedPrIndex?.viewer
     return active && remote && account
       ? JSON.stringify({
@@ -323,14 +332,17 @@ export function installFixtureControl(options: {
     const { host, repository, account } = JSON.parse(scope)
     return JSON.stringify([host, repository, account])
   }
-  const captureOperationScope = () => ({
-    repositoryPath: active?.path ?? '',
-    remoteUrl: active?.remoteUrl ?? null,
-    authority: cliAuthority(
-      scenario.identity ? settings.github.host : notificationSettings.github.host,
-      servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus ?? null,
-    ),
-  })
+  const captureOperationScope = () => {
+    const host =
+      active?.remoteUrl
+        ?.match(/^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u)?.[1]
+        .toLowerCase() ?? null
+    return {
+      repositoryPath: active?.path ?? '',
+      remoteUrl: active?.remoteUrl ?? null,
+      authority: cliAuthority(host, statusForHost(host)),
+    }
+  }
   const matchesGraphPreferenceScope = (
     actual: string | null,
     expected: NonNullable<GraphPreferencesResult['scope']>,
@@ -546,8 +558,8 @@ export function installFixtureControl(options: {
    * behind the host it is pointed at. `null` means the scenario's own
    * declaration still answers, which is the state a scenario starts in.
    */
-  /** The one window listening for the session to change outside it. */
-  let cliStatusListener: ((status: GitHubCliStatus) => void) | null = null
+  /** Independent renderer observers share the preload event stream. */
+  const cliStatusListeners = new Set<(status: GitHubCliStatus) => void>()
 
   /**
    * The GitHub answer this double may give a repository read, which belongs to
@@ -569,7 +581,7 @@ export function installFixtureControl(options: {
   const answeredForServedCredential = (snapshot: RepositorySnapshot): RepositorySnapshot => {
     const declared = scenario.identity?.cli ?? scenario.githubCliStatus ?? null
     if (declared === null) return snapshot
-    const served = servedCliStatus ?? declared
+    const served = statusForHost(declared.host) ?? declared
     if (served.host === declared.host && served.identity === declared.identity) return snapshot
     return {
       ...snapshot,
@@ -804,7 +816,7 @@ export function installFixtureControl(options: {
       // What this double reports is the session it currently serves, which a
       // test can have moved: the scenario's own declaration until something
       // serves the status this installation now answers with.
-      const declared = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      const declared = statusForHost(settings.github.host)
       if (!declared) return undefined
       if (scenario.identity) {
         return () => {
@@ -823,9 +835,9 @@ export function installFixtureControl(options: {
     // window asked for a status at all: a build without the optional read has
     // nothing to change either.
     onGitHubCliStatus: (listener) => {
-      cliStatusListener = listener
+      cliStatusListeners.add(listener)
       return () => {
-        if (cliStatusListener === listener) cliStatusListener = null
+        cliStatusListeners.delete(listener)
       }
     },
     // The optional Notification Center answers on its own calls, with its own
@@ -1129,6 +1141,11 @@ export function installFixtureControl(options: {
           },
         }
       })
+    },
+    repositoryOperationScope: () => {
+      record('repositoryOperationScope', [])
+      const scope = captureOperationScope()
+      return admittedAnswer('repositoryOperationScope', () => scope)
     },
     pullRequest: (number) => {
       record('pullRequest', [number])
@@ -1658,7 +1675,7 @@ export function installFixtureControl(options: {
       // rebuilding it from the replacement is the one thing this fence exists to
       // catch. The list is derived here, at admission, and only the delivery of
       // the answer is held.
-      const admittedCli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      const admittedCli = statusForHost(settings.github.host)
       const produce = () => {
         const query = request.query?.trim() ?? ''
         if (query === 'sso-error') {
@@ -1936,7 +1953,7 @@ export function installFixtureControl(options: {
       // carries the rows the host it asked about read. Reading the served status
       // inside a released producer would rebuild a held read as the replacement
       // account's answer, which is the one thing this boundary exists to catch.
-      const served = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus ?? null
+      const served = statusForHost(settings.github.host)
       const admitted = !scenario.inbox
         ? null
         : served && served.host !== 'github.com'
@@ -2076,7 +2093,7 @@ export function installFixtureControl(options: {
       if (scenario.notifications)
         hostInboxes.set(scenario.notifications.host, scenario.notifications)
       notificationSettings.github = { host: scenario.notifications?.host ?? GITHUB_DEFAULT_HOST }
-      servedCliStatus = null
+      cliStatuses.clear()
       released.clear()
       options.onScenarioChange(scenario.name)
     },
@@ -2104,7 +2121,7 @@ export function installFixtureControl(options: {
       // one: the fixture cannot rebuild a scenario's status for a host that
       // scenario never declared, and inventing a session for it would prove
       // nothing about the host switch.
-      servedCliStatus = status
+      cliStatuses.set(status.host, status)
     },
     publishCliStatus(status) {
       // The session changed outside the window, which is what the main process
@@ -2112,8 +2129,8 @@ export function installFixtureControl(options: {
       // session becomes the new one, so a read asked for afterwards answers as
       // the replacement rather than as the session it replaced, and the window
       // is told about it without having asked.
-      servedCliStatus = status
-      cliStatusListener?.(status)
+      cliStatuses.set(status.host, status)
+      for (const listener of cliStatusListeners) listener(status)
     },
     hold(call) {
       holds.add(call)

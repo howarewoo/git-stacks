@@ -63,6 +63,7 @@ const desktop: DesktopAPI = {
     }
   },
   refresh: () => ipcRenderer.invoke('repository:refresh'),
+  repositoryOperationScope: () => ipcRenderer.invoke('repository:operation-scope'),
   prIndex: (options) => ipcRenderer.invoke('repository:pr-index', options),
   onPrIndex: (listener: (index: PullRequestIndex) => void) =>
     subscribe('repository:pr-index', listener),

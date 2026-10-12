@@ -100,7 +100,11 @@ import {
 } from './git-runtime'
 import { CredentialVault } from './credentials'
 import { safeStorageProtector } from './secret-storage'
-import { forgetGitHubCliServices, gitHubCliStatusService } from './github-cli'
+import {
+  forgetGitHubCliServices,
+  gitHubCliStatusService,
+  onGitHubCliStatusChange,
+} from './github-cli'
 import { retireLegacyPrimaryRecord } from './notification-protection'
 import { NotificationCenter, notificationCredentialStore } from './notifications'
 import {
@@ -609,40 +613,46 @@ let updateService: UpdateService | null = null
  * no path to either has ever left the main process.
  */
 function githubCli() {
-  return gitHubCliStatusService(configuredHost().host, {
-    onChange: (status) => {
-      // The queue's rows belong to the account that read them, so a new identity
-      // is established before the window hears about the status that carries it.
-      // A credential replaced outside this app — in the CLI itself — changes the
-      // identity, and everything read under the old one is dropped with it.
-      const identity = cliIdentity(status)
-      if (identity !== inboxIdentity) {
-        retireInboxIdentity(identity)
-        // A credential replaced outside this app changes whose GitHub answers
-        // every cached read belongs to, not only the queue's. Everything host-
-        // scoped in flight is stopped and its generation retired, what was
-        // observed about hosts is forgotten, and the reports keyed by validator
-        // are dropped: none of them may answer for a credential that no longer
-        // exists. Local Git state and the notification inbox's own host
-        // credential are untouched by this.
-        for (const controller of hostWork) controller.abort()
-        hostWork.clear()
-        hostGeneration += 1
-        forgetHost()
-        // Every GitHub read still running is pinned to the credential that has
-        // just been replaced, so none of them may repopulate a cache, a payload,
-        // or a row that now belongs to another account. Local Git is untouched:
-        // none of these readers can reach it.
-        readKeys.cancelGitHub()
-        retireConfirmedGitHubPayloads()
-        prIndex.invalidate()
-        retirePullRequestChecks()
-        clearCredentialCheckBackoffs()
-      }
-      window?.webContents.send('github-cli:status', status)
-    },
-  })
+  return gitHubCliStatusService(configuredHost().host)
 }
+
+const cliIdentities = new Map<string, string>()
+onGitHubCliStatusChange((status) => {
+  // The queue's rows belong to the account that read them, so a new identity
+  // is established before the window hears about the status that carries it.
+  // A credential replaced outside this app — in the CLI itself — changes the
+  // identity, and everything read under the old one is dropped with it.
+  const identity = cliIdentity(status)
+  const host = canonicalHostName(status.host)
+  const previous = cliIdentities.get(host)
+  cliIdentities.set(host, identity)
+  if (identity !== previous) retireInboxIdentity([...cliIdentities.values()].sort().join('\u0000'))
+  // A host's first proof establishes its scope; subsequent replacements
+  // retire reads. Other hosts' unchanged proofs must not alternate identities.
+  if (previous !== undefined && identity !== previous) {
+    // A credential replaced outside this app changes whose GitHub answers
+    // every cached read belongs to, not only the queue's. Everything host-
+    // scoped in flight is stopped and its generation retired, what was
+    // observed about hosts is forgotten, and the reports keyed by validator
+    // are dropped: none of them may answer for a credential that no longer
+    // exists. Local Git state and the notification inbox's own host
+    // credential are untouched by this.
+    for (const controller of hostWork) controller.abort()
+    hostWork.clear()
+    hostGeneration += 1
+    forgetHost()
+    // Every GitHub read still running is pinned to the credential that has
+    // just been replaced, so none of them may repopulate a cache, a payload,
+    // or a row that now belongs to another account. Local Git is untouched:
+    // none of these readers can reach it.
+    readKeys.cancelGitHub()
+    retireConfirmedGitHubPayloads()
+    prIndex.invalidate()
+    retirePullRequestChecks()
+    clearCredentialCheckBackoffs()
+  }
+  window?.webContents.send('github-cli:status', status)
+})
 
 /**
  * The optional GitHub Notifications Center.
@@ -782,6 +792,7 @@ function applySettings(settings: AppSettings): void {
   prIndex.invalidate()
   forgetHost(previousHost ?? undefined)
   forgetGitHubCliServices()
+  cliIdentities.clear()
   // The notification inbox belongs to the host it was read from, and the window
   // is holding it. The old center is retired here, where the host changed, and
   // the new host's is opened and published at once: its old timer never runs
@@ -924,6 +935,25 @@ async function inGitRuntime<T>(operation: () => Promise<T>): Promise<T> {
 function repository() {
   if (!activeRepository) throw new Error('Open a local Git repository first.')
   return activeRepository
+}
+
+async function repositoryOperationScope(
+  root: string,
+  signal?: AbortSignal,
+): Promise<OperationScope> {
+  const generation = hostGeneration
+  const remoteUrl = await getOriginUrl(root, signal)
+  const host = remoteHostContext(parseRemote(remoteUrl))
+  const service = host ? gitHubCliStatusService(host.host) : null
+  const status = service ? await service.read() : null
+  if (
+    signal?.aborted ||
+    root !== activeRepository ||
+    generation !== hostGeneration ||
+    (host && service !== gitHubCliStatusService(host.host))
+  )
+    throw new CommandCancelled()
+  return { repositoryPath: root, remoteUrl, authority: cliAuthority(host?.host ?? null, status) }
 }
 
 /**
@@ -1661,7 +1691,6 @@ function installHandlers() {
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     const root = repository()
     const generation = hostGeneration
-    const authority = cliAuthority(configuredHost().host, githubCli().current())
     try {
       // A mutation claims the repository lane: background reads end first, so a
       // stage or a commit never waits on a network that is not answering.
@@ -1681,9 +1710,8 @@ function installHandlers() {
                 action.type === 'submitStackDismiss' ||
                 action.type === 'executeStack'
               ) {
-                const remoteUrl = await getOriginUrl(root)
                 if (generation !== hostGeneration) throw new CommandCancelled()
-                progressOwner = { repositoryPath: root, remoteUrl, authority }
+                progressOwner = await repositoryOperationScope(root)
               }
               try {
                 return await runAction(root, action, settings.git.mergeTool)
@@ -1742,18 +1770,15 @@ function installHandlers() {
     )
   })
   ipcMain.handle('repository:submit-stack-progress', (event) => {
-    const authority = cliAuthority(configuredHost().host, githubCli().current())
     return readRepository(
       async (root, signal) => {
-        const scope = {
-          repositoryPath: root,
-          remoteUrl: await getOriginUrl(root, signal),
-          authority,
-        }
+        const scope = await repositoryOperationScope(root, signal)
+        const progress = await getSubmitStackProgress(root)
+        if (signal.aborted) throw new CommandCancelled()
         return {
           scope,
           source: 'journal-read' as const,
-          progress: await getSubmitStackProgress(root),
+          progress,
         }
       },
       'submit-stack-progress',
@@ -1763,20 +1788,20 @@ function installHandlers() {
   // Read-only: a queue outcome or a still-running request is read from the journal and GitHub,
   // never by asking for another merge.
   ipcMain.handle('repository:merge-status', (event) => {
-    const authority = cliAuthority(configuredHost().host, githubCli().current())
     return readRepository(
       async (root, signal) => {
-        const scope = {
-          repositoryPath: root,
-          remoteUrl: await getOriginUrl(root, signal),
-          authority,
-        }
-        return { scope, source: 'journal-read' as const, progress: await getMergeStatus(root) }
+        const scope = await repositoryOperationScope(root, signal)
+        const progress = await getMergeStatus(root)
+        if (signal.aborted) throw new CommandCancelled()
+        return { scope, source: 'journal-read' as const, progress }
       },
       'merge-status',
       'github',
     )
   })
+  ipcMain.handle('repository:operation-scope', () =>
+    readRepository(repositoryOperationScope, 'operation-scope', 'github'),
+  )
   // A running submission pushes its own progress. The renderer cannot poll for it: the read
 
   // queues behind the very action that is producing the steps, so it would only ever observe

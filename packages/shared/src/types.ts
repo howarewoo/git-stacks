@@ -1,5 +1,5 @@
 import type { SnapshotLimits } from './performance'
-import type { OperationProgress } from './operation-scope'
+import type { OperationProgress, OperationScope } from './operation-scope'
 
 import type { GitHubHostStatus } from './host'
 import type { RepositoryCapabilities } from './capabilities'
@@ -1271,6 +1271,8 @@ export interface DesktopAPI {
    */
   onRepositoryDropped?(listener: (paths: string[]) => void): () => void
   refresh(): Promise<RepositorySnapshot>
+  /** Origin-host CLI authority for the active repository, not the Settings host. */
+  repositoryOperationScope(): Promise<OperationScope>
   /** Lightweight source-backed open PR pages; never a mutation preflight. */
   prIndex?(options?: { refresh: boolean }): Promise<PullRequestIndex>
   onPrIndex?(listener: (index: PullRequestIndex) => void): () => void
@@ -1399,9 +1401,9 @@ export interface DesktopAPI {
    */
   githubCliStatus?(): Promise<GitHubCliStatus>
   /**
-   * Subscribes to status changes main established on its own — a host change, a
-   * request that proved the credential had been replaced — and returns the
-   * unsubscribe.
+   * Subscribes to status changes for every host main reads, including repository
+   * origins. Filter by the surface's host; operation scope consumers refresh the
+   * scope when its authority's host changes. Returns the unsubscribe.
    */
   onGitHubCliStatus?: (listener: (status: GitHubCliStatus) => void) => () => void
   /**
