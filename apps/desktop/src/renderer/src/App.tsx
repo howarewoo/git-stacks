@@ -4382,10 +4382,7 @@ function App() {
             ]
               .filter((view): view is WorkspaceView => view !== null)
               .map((view) => (
-                <div
-                  key={`${view === 'prInbox' ? authority : navigationScope}:${view}`}
-                  style={{ display: workspaceView === view ? 'contents' : 'none' }}
-                >
+                <div key={view} style={{ display: workspaceView === view ? 'contents' : 'none' }}>
                   <WorkspaceSurface view={view} active={workspaceView === view}>
                     {renderMainContent(view)}
                   </WorkspaceSurface>

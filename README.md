@@ -2988,6 +2988,11 @@ Inbox entry can return to its same host/account queue without restoring the old
 repository's graph. Navigation does not fetch Git refs, check out branches, or
 dispatch a mutation.
 
+Active destinations keep their mounted identity while their existing scoped
+state handlers retire incompatible graph search, selection, and saved-view state.
+Changing authority does not reset the Inbox's local filter or collapse the
+reconciliation disclosure; retired remote rows and repair previews still disappear.
+
 Review read results remain Query-owned, while selection and unsent form values
 remain local. While a structured repository mutation is busy, a refreshed file
 set waits to replace the displayed comparison. Observed head/base changes still
