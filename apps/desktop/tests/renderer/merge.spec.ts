@@ -82,13 +82,15 @@ test.describe('Merge reads after a run', () => {
     // refusal as the failure it is, still carrying GitHub's own reason. `InlineAlert` only
     // carries `role="alert"` for an error tone, so this also proves the refusal is presented
     // as an error rather than as the success a fallback would have produced.
-    const refusal = dialog.getByRole('alert')
+    const refusal = dialog
+      .getByRole('region', { name: /^What GitHub reports now/ })
+      .getByRole('alert')
     await expect(refusal).toContainText('Required review is missing')
     await expect(dialog.getByText('failed', { exact: true })).toBeVisible()
 
-    // Reading again answers with the same refusal: no later read quietly resolves it.
+    // A later read must not erase the refusal, even when that read fails.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
-    await expect(dialog.getByRole('alert')).toContainText('Required review is missing')
+    await expect(refusal).toContainText('Required review is missing')
   })
 })
 
