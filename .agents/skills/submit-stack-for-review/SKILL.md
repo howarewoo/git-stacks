@@ -16,20 +16,15 @@ merge protections or auto-merge, access credentials, or modify unrelated work.
 
 ## CI verification scope
 
-“Applicable PR CI checks” means the CI jobs configured by the repository’s
-workflows for that PR and its exact published head. It does not mean GitHub
-branch-protection requirements, rulesets, review approvals, or merge eligibility.
-Discover these checks from workflow definitions and current-head check
-runs/statuses. All applicable CI checks must pass; an intentional conditional
-skip is acceptable only when its workflow condition does not apply. Pending,
-failing, or missing expected CI evidence blocks submission.
+“Applicable PR CI checks” are the jobs configured by repository workflows for the
+PR and its exact published head. Discover them from workflow definitions and
+current-head check runs/statuses. All must pass; a conditional skip is valid only
+when its workflow condition does not apply. Pending, failing, or missing expected
+evidence blocks submission.
 
-## Policy endpoints
-
-Reading branch protections or rulesets is not a prerequisite. Their absence or a
-read error does not block this workflow when repository workflows and current-head
-CI evidence establish the applicable checks. Never change merge protections or
-auto-merge.
+Branch protections, rulesets, review approvals, and merge eligibility are not CI
+checks. Protection/ruleset reads are not prerequisites; their absence or read
+errors do not block established workflow/current-head CI evidence.
 
 ## Establish scope and safety
 
@@ -41,10 +36,10 @@ all descendants and ancestors to the target trunk. Branch names or a partial lis
 are not proof. Missing, ambiguous, inaccessible, foreign, or incomplete membership
 blocks mutations; do not invent an order or silently process a subset.
 
-Record bottom-to-top membership, PR URLs, branches, bases, remote heads, each old
-layer boundary, intended own-layer and cumulative diffs, applicable PR CI checks, readiness,
-and existing review requests. Top means most dependent PR. **Every processing pass
-must be strictly bottom-up**, starting with the PR based on target trunk.
+Record bottom-to-top membership, PR URLs, branches, bases, remote heads, old layer
+boundaries, intended own-layer and cumulative diffs, applicable CI checks,
+readiness, and existing review requests. Top means most dependent PR. **Every pass
+starts at target trunk and proceeds strictly bottom-up.**
 
 Use an isolated, exclusively owned checkout; inspect its index and worktree and
 preserve unrelated changes and branches. Fetch and retain recoverable original
@@ -77,25 +72,35 @@ Local recovery refs are not authority to overwrite drift.
 3. **Resolve parent conflicts, then failing checks.** Diagnose attributable causes,
    make only scoped corrections, and run meaningful repository-local verification
    of the resulting layer/cumulative state. Never weaken, skip, or fake checks to
-   obtain green status. Unrelated failures or missing required tools are blockers,
-   not permission to broaden scope. Commit only real scoped changes.
+   obtain green status. Commit only real scoped changes.
+
+   **Unknown attribution requires continued investigation.** Unchanged failing
+   files, passing changed-path tests, or an unknown cause do not prove a failure
+   unrelated. Before stopping for an unrelated failure, prove its cause independent
+   of the stack; check shared dependencies, concurrency, timing, resource contention,
+   and test isolation where relevant. Proven unrelated failures block submission;
+   they do not authorize broader fixes.
+
+   If investigation is genuinely blocked, report the exact unavailable capability
+   or evidence, attempts to obtain it, and why no authorized next step remains.
+   “No scoped correction established” alone is not a valid stopping condition.
 4. **Publish safely and read back.** Recheck auto-merge, head, base, and draft gates
    immediately before writing. Push only the selected branch; a rewrite requires
    explicit `--force-with-lease=refs/heads/<branch>:<observed-remote-head-oid>`.
    Never use an implicit lease or unconditional force. Independently verify exact
    remote head, expected predecessor/trunk base, and readiness. Unexpected or
    uncertain outcomes require fresh reads before retrying, not duplicate writes.
-5. **Verify current-head CI and submit.** Require check evidence tied to the exact
-   published head and applicable PR CI checks, not green results on an old OID.
-   For checks gated on draft status, transition to ready only after local evidence
-   and safe publication, then verify those checks on that head. On failure return
-   to draft and independently confirm before the next head fix. Pending applicable
-   PR CI checks are not ready: use bounded waits and report the pending blocker;
-   never busy poll or call a draft-gated transition completed submission before checks pass.
+5. **Verify current-head CI and submit.** Apply the CI gate above to the exact
+   published head, never an old OID. For draft-gated checks, transition to ready
+   only after local verification and safe publication, then verify those checks.
+   On failure, return to draft and independently confirm before the next head fix.
+   Use bounded waits for pending checks; report unresolved checks as blockers,
+   never busy poll or claim completed submission before they pass.
+
    When checks permit, transition a draft to ready and independently confirm it.
-   This readiness transition is submission. Preserve existing review requests;
-   never invent a reviewer or duplicate requests. Use configured resubmission only
-   when genuinely required. An unchanged ready PR needs no submission action.
+   Confirmed readiness with passing applicable CI is submission; an unchanged
+   ready PR needs no action. Preserve existing review requests; never invent a
+   reviewer or duplicate requests. Use configured resubmission only when required.
 
 Advance to a child only after its parent has completed rebasing, scoped fixes,
 publication, exact-current-head CI verification, and independently confirmed
@@ -105,15 +110,15 @@ descendants; never advance past an unsafe decision or process top-to-bottom.
 
 ## Reconcile and prove completion
 
-External head/base drift stops processing; recovery refs do not authorize a retry.
-Resume only after independently reconciling that drift and proving fresh complete
-membership, current heads/bases, preserved external work, and each affected PR's
-old own-layer boundary. If those facts cannot be proved, remain blocked.
-Restart affected processing bottom-up, completing each parent before its child
-under the same draft, lease, CI, and readiness gates. Replay only the proven own
-layer onto the freshly fetched published parent; never overwrite external work.
-Recovery and final-snapshot repairs must stay within a bounded convergence window;
-continued drift or unsafe evidence blocks completion. No top-to-bottom pass is allowed.
+After external head/base drift, resume only after independently reconciling it and
+proving fresh complete membership, current heads/bases, preserved external work,
+and each affected PR's old own-layer boundary. Recovery refs do not authorize
+overwriting drift. If proof is unavailable, remain blocked.
+
+Reprocess affected layers bottom-up under the same per-PR gates, replaying only
+their proven own layers onto freshly fetched published parents. Recovery and
+final-snapshot repairs require bounded convergence; continued drift or unsafe
+evidence blocks completion.
 
 Take a final fresh remote/provider snapshot for the entire proven stack. For every
 final head prove its latest observed parent OID is an ancestor, its base is correct,
