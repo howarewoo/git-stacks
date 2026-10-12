@@ -265,9 +265,10 @@ export function reviewRail(
 export function reviewThreadSet(
   number: number,
   headOid: string,
+  baseRef: string | null,
   options: { resolved?: boolean; outdated?: boolean } = {},
 ): ReviewThreadSet {
-  const comparison = { headOid, baseOid: 'b'.repeat(40), baseRef: 'main' }
+  const comparison = { headOid, baseOid: 'b'.repeat(40), baseRef }
   return {
     number,
     comparison,

@@ -1739,6 +1739,14 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       nativeStacks: nativeReviewFixture(reviewStackPullRequests),
     }),
     recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'acme-viewer',
+      version: '2.62.0',
+      identity: 'cli:github.com:acme-viewer:review-fixture',
+      message: null,
+    },
   },
   'review-long-stack': {
     name: 'review-long-stack',
@@ -1871,7 +1879,6 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       pullRequests: reviewStackPullRequests,
     }),
     recentRepositories,
-    reviewHeadOid: 'ffffeee',
     reviewPermissions: { blocked: 'COMMENT' },
   },
   'review-own-pull-request': {
@@ -1884,7 +1891,6 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       pullRequests: reviewStackPullRequests,
     }),
     recentRepositories,
-    reviewHeadOid: 'ffffeee',
     reviewPermissions: { isAuthor: true },
   },
   'pull-requests-lifecycle': {

@@ -147,7 +147,9 @@ test.describe('PR Inbox queue', () => {
     await expect(
       page.getByText('#81 Add a GitHub-derived PR Inbox across registered repositories').first(),
     ).toBeVisible()
-    await expect(page.getByText('checks passing').first()).toBeVisible()
+    await expect(
+      page.locator('[data-workspace-surface="review"]').getByText('checks passing').first(),
+    ).toBeVisible()
     await expect(page.getByText('Pull request #81 is not in this fixture snapshot')).toHaveCount(0)
     await expect(page.getByText('No pull request selected')).toHaveCount(0)
     // Opening a row is navigation, not checkout: nothing is switched or staged.
@@ -606,7 +608,9 @@ test.describe('PR Inbox to Review, in one window', () => {
     await expect(
       page.getByText('#81 Add a GitHub-derived PR Inbox across registered repositories').first(),
     ).toBeVisible()
-    await expect(page.getByText('checks passing').first()).toBeVisible()
+    await expect(
+      page.locator('[data-workspace-surface="review"]').getByText('checks passing').first(),
+    ).toBeVisible()
     // Its files and its commits are read for that pull request, from that
     // pull request's own head rather than the branch that happens to be checked
     // out in this workspace.
@@ -618,7 +622,9 @@ test.describe('PR Inbox to Review, in one window', () => {
     await expect(
       page.getByText('#77 Charge every native-stack page to the refresh budget').first(),
     ).toBeVisible()
-    await expect(page.getByText('checks failing').first()).toBeVisible()
+    await expect(
+      page.locator('[data-workspace-surface="review"]').getByText('checks failing').first(),
+    ).toBeVisible()
     await expect(page.getByText('src/main/review.ts').first()).toBeVisible()
     // The workspace on screen is that repository's, with its own canonical
     // origin: nothing here resolved the row against the repository that was

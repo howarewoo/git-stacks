@@ -29,12 +29,41 @@ export type WorkspaceView =
   | 'diagnostics'
   | 'notifications'
 
-/**
- * Every destination heading carries this id so a keyboard-driven destination
- * change can move focus to the new workspace instead of stranding it on the
- * navigation control the user just pressed.
- */
-export const WORKSPACE_VIEW_HEADING_ID = 'workspace-view-heading'
+/** Retained destinations need distinct IDs; keyboard entry addresses the active view. */
+export function workspaceViewHeadingId(view: WorkspaceView): string {
+  return `workspace-view-heading-${view}`
+}
+
+/** Retained read observers stay mounted; this surface owns transient DOM scroll. */
+export function WorkspaceSurface({
+  view,
+  active,
+  children,
+}: {
+  view: WorkspaceView
+  active: boolean
+  children: React.ReactNode
+}) {
+  const surface = React.useRef<HTMLDivElement>(null)
+  const positions = React.useRef<{ element: HTMLElement; top: number; left: number }[]>([])
+  React.useLayoutEffect(() => {
+    if (!active) return
+    for (const { element, top, left } of positions.current) {
+      element.scrollTop = top
+      element.scrollLeft = left
+    }
+    return () => {
+      positions.current = [...(surface.current?.querySelectorAll<HTMLElement>('*') ?? [])]
+        .filter((element) => element.scrollTop !== 0 || element.scrollLeft !== 0)
+        .map((element) => ({ element, top: element.scrollTop, left: element.scrollLeft }))
+    }
+  }, [active])
+  return (
+    <div ref={surface} data-workspace-surface={view} style={{ display: 'contents' }}>
+      {children}
+    </div>
+  )
+}
 
 /**
  * Destinations that address registered repositories or a GitHub host rather

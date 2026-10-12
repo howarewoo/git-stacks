@@ -98,24 +98,29 @@ const desktop: DesktopAPI = {
   reviewCommits: (number, requestId) =>
     ipcRenderer.invoke('repository:review-commits', number, requestId),
   reviewViewed: (number) => ipcRenderer.invoke('repository:review-viewed', number),
-  reviewSetViewed: (record) => ipcRenderer.invoke('repository:review-set-viewed', record),
+  reviewSetViewed: (record, owner) =>
+    ipcRenderer.invoke('repository:review-set-viewed', record, owner),
   reviewThreads: (number, requestId) =>
     ipcRenderer.invoke('repository:review-threads', number, requestId),
   reviewDrafts: (number) => ipcRenderer.invoke('repository:review-drafts', number),
+  reviewDraftRecovery: (selected) =>
+    ipcRenderer.invoke('repository:review-draft-recovery', selected),
   reviewResolveDrafts: (number, drafts) =>
     ipcRenderer.invoke('repository:review-resolve-drafts', number, drafts),
-  reviewSetDrafts: (record) => ipcRenderer.invoke('repository:review-set-drafts', record),
+  reviewSetDrafts: (record, expectedUpdatedAt) =>
+    ipcRenderer.invoke('repository:review-set-drafts', record, expectedUpdatedAt),
   reviewSubmit: (number, submission) =>
     ipcRenderer.invoke('repository:review-submit', number, submission),
-  reviewReply: (number, threadId, body) =>
-    ipcRenderer.invoke('repository:review-reply', number, threadId, body),
-  reviewSetResolved: (number, threadId, resolved) =>
-    ipcRenderer.invoke('repository:review-resolve', number, threadId, resolved),
+  reviewReply: (number, threadId, body, owner) =>
+    ipcRenderer.invoke('repository:review-reply', number, threadId, body, owner),
+  reviewSetResolved: (number, threadId, resolved, owner) =>
+    ipcRenderer.invoke('repository:review-resolve', number, threadId, resolved, owner),
   reviewHistory: (number, requestId) =>
     ipcRenderer.invoke('repository:review-history', number, requestId),
   reviewHistoryDiff: (number, fromOid, requestId) =>
     ipcRenderer.invoke('repository:review-history-diff', number, fromOid, requestId),
-  reviewClearHistory: (number) => ipcRenderer.invoke('repository:review-clear-history', number),
+  reviewClearHistory: (number, owner) =>
+    ipcRenderer.invoke('repository:review-clear-history', number, owner),
   pullRequestChecks: (number, options) =>
     ipcRenderer.invoke('repository:pull-request-checks', number, options),
   rerunPullRequestCheck: (number, runId) =>

@@ -471,7 +471,14 @@ Review is the single read destination for repository PR rows, Inbox rows, stack 
 
 Code owns the body by default. Description and readonly reviewer/readiness context, complete check details, commits, and conversation are keyboard-reachable contextual panes. Wide workspaces show selected context beside code; constrained workspaces switch the body rather than divide its height into thin strips. Context stays mounted so toggling it preserves file, layout, whitespace, comparison, line range, local scroll position, and unsent text. Returning to Code is always an explicit visible control.
 
-Use one compact PR headline with a keyboard-accessible full-title disclosure, a collapsed full-stack disclosure, and a collapsed comparison disclosure whose summary names the current or historical endpoint. Historical submission warnings remain outside the disclosure. Review quiets persistent local-Git controls while preserving the palette and local-work destinations. At desktop zoom, the shell, navigation, and reading regions stay bounded with local scrolling; expanding context never makes code a one-line strip.
+Review entry captures a qualified return destination, not a second inspector. The origin's actual identity, filter/query, expansion/path, camera, local scroll, and meaningful focus survive readonly navigation; the Review composition remains mounted independently. Host/origin/credential/account replacement retires incompatible ephemeral state rather than restoring another authority's selection. Structured-operation busy states may defer file presentation changes, never live head/base warnings or submission freezes.
+
+Unsent words keep their original comparison. A saved-version conflict preserves the latest local text and blocks submission; it never silently adopts newer saved work or retries a full-set save. The explicit discard control names that it will replace these local edits with saved drafts. Accepted empty sets remain authoritative deletion barriers. Confirmation removes only the exact submitted authored version at its original comparison, never newer words, references, or comparison context.
+
+An account or origin boundary hides private text without deleting its owner's journal or unresolved local edit. A confirmed outcome from an already-dispatched operation stays with its captured owner even after that boundary; a replacement account sees neither its private body nor its history. Older unqualified draft and uncertainty records are visibly unattributed, explicit read-only text recovery only: showing words restores no anchors, account identity, submission receipt, or send action.
+
+
+Use one compact PR headline with a keyboard-accessible full-title disclosure, a collapsed full-stack disclosure, and a collapsed comparison disclosure whose summary names the actual current or historical endpoint. Retained historical hunks must not acquire a newly observed endpoint's label or unchanged files before that comparison arrives. Historical submission warnings remain outside the disclosure and visible in every pane. Review quiets persistent local-Git controls while preserving the palette and local-work destinations. At desktop zoom, the shell, navigation, and reading regions stay bounded with local scrolling; expanding context never makes code a one-line strip.
 In short viewports, the workbench itself scrolls locally to expose the reading
 area without shrinking it to a strip. Its header and contextual controls remain
 reachable by scrolling or keyboard focus; the document does not grow.
@@ -501,6 +508,10 @@ Membership and metadata are separate claims. A partial membership names its load
 Blocker disclosure identifies actual local parent comparisons and reconciliation evidence. Red checks, merged labels, inferred ancestry, and unavailable comparisons do not establish a restack requirement. In Stacks, repository-wide submitted membership remains reachable without local feature branches and distinct from local children-above-parents order. Compact local rows disclose full branch names, parent provenance, and landing details; Restack, Publish, repair, and Merge continue through their existing captured previews.
 
 Viewed files are a local reading aid bound to the **whole comparison** they were recorded at: the head object, the base object, and the base branch name. A force-push changes the head and a push to the base branch changes the base, so either drops the marks rather than carrying them onto a diff nobody looked at. A retarget is a third case: it can leave both object ids untouched, so the branch name is carried too, and a rename reads the same way. Retargeting is a routine action, not a rare race, and a mark carried across it would claim review of changes nobody opened; the cost is re-opening a few files. GitHub is not asked to store them, and the app never claims to have synced a state GitHub does not expose.
+
+The current-file toolbar exposes explicit viewed/unviewed actions against that
+same qualified comparison record. Unviewing changes only the chosen path; it does
+not clear other files or certify a replacement head, base, or repository.
 
 **Leaving a review.** The conversation pane holds GitHub's submitted threads,
 unsent comments, and the single decision that sends them together. It remains
@@ -640,12 +651,13 @@ count from the same number, mint one identity for the same line, and then a
 settled record naming that identity would answer for the other window's comment —
 clearing words it never sent and reporting a decision GitHub never received. So a
 draft's identity may not depend on the state any other window last read. It also
-may not depend on the record outliving it: a record whose drafts are gone has
-nothing left to keep, and is dropped rather than retained as a counter that would
-have to be read, rewound, and trusted. Identities minted under earlier rules —
+may not depend on the record outliving it. An accepted empty record retains only
+the saved-version barrier, never an identity counter to read, rewind, or trust.
+Identities minted under earlier rules —
 the range alone, or the range and a small whole number — remain opaque strings
-compared only with each other, so stored drafts stay readable and submit as
-themselves, and none of those names can be minted again.
+compared only with each other. A qualified record retains those identities;
+an unqualified legacy record remains readable only as unattributed local recovery
+text, never as a submission anchor. None of those names can be minted again.
 
 The guard covers an unresolved _comment_, not an attempt id. Changing the
 decision, or adding one more pending draft, produces a different attempt over
@@ -713,12 +725,26 @@ a reload, not resolved by picking a side.
 
 Pending drafts are journalled in the repository's Git directory, so they follow
 the repository across worktrees and workspaces. That makes the file a shared
-resource and not a boundary: the **record** carries the repository and the signed-in
-account, and lookup, replacement, and clearing are all scoped by them. A pull
-request number is only unique inside one repository, and a draft is one person's
-unsent words — so a record belonging to another repository, or to another
-account, stays on disk and is not offered. The owner is stamped by the main
-process from Git and GitHub, never taken from the caller's payload.
+resource and not a boundary: the **record** carries the host-qualified repository
+and signed-in viewer, and lookup, replacement, and clearing are scoped by them.
+A pull request number is only unique inside one hosted repository; a viewer
+login on another host does not establish the same person's identity. The main
+process compares a captured owner's host/repository/viewer with live Git and
+GitHub authority before accepting drafts or any submission, reply, resolution,
+or history clear. Submissions and replies recheck after the journal-lock await,
+before transport dispatch. A retained draft identity keeps its original comparison;
+neither saving nor submission may replace that comparison with the currently shown diff.
+The provider endpoint continues to use its ordinary owner/name, not this local
+namespace. Legacy records without a host stay byte-for-byte intact and are never
+adopted automatically. Explicit recovery lists original recorded identities
+without bodies and reveals text only upon a separate local request; it never
+recovers anchors, line positions, selection, uncertain retry, edit, or submission.
+Unqualified viewed marks and history cannot certify a qualified current account,
+and uncertain legacy writes cannot be attributed or replayed across hosts.
+New authored records use separate `git-stacks-review-drafts-qualified.json` and
+`git-stacks-review-uncertain-qualified.json` files. Legacy files are read-only;
+even unsupported anchors and unknown metadata keep every byte through new saves
+and cleanup. Recovery extracts text without validating or adopting those anchors.
 
 Sharing the file makes it a resource more than one process writes, and a
 read/modify/write over a shared file is a claim on something no single process
@@ -770,7 +796,7 @@ The four review commands — next file, previous file, next layer, previous laye
 
 A pull request's versions on GitHub are not a complete version control history: GitHub does not maintain permanent version objects for arbitrary force-pushes, and an app that was not running cannot know what commits previously occupied a pull request branch. The review workspace therefore persists observed PR head snapshots with timestamps, observation counts, and review associations, without claiming a complete version history the app never saw.
 
-A snapshot record is scoped strictly by repository identity (`owner/name`), pull request number, and authenticated viewer login. One account's review must never become another account's anchor. Identical heads observed across repeated reads deduplicate into a single snapshot entry, updating the observation count and last-seen timestamp rather than appending duplicate entries. A force-push or rebase moves the head SHA and creates a new snapshot entry.
+A snapshot record is scoped strictly by host-qualified repository identity (`host/owner/name`), pull request number, and authenticated viewer login. One account's review must never become another account's anchor. Identical heads observed across repeated reads deduplicate into a single snapshot entry, updating the observation count and last-seen timestamp rather than appending duplicate entries. A force-push or rebase moves the head SHA and creates a new snapshot entry.
 
 When the workspace first opens a pull request that already has multiple commits, it detects that earlier updates occurred before the app ever saw the branch and presents an explicit gap banner stating that earlier revisions were never observed and cannot be compared.
 

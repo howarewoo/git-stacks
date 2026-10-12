@@ -51,7 +51,7 @@ import {
   CollapsibleContent,
 } from '@git-stacks/ui/components/collapsible'
 import { ReconciliationPanel } from './reconciliation-view'
-import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
+import { workspaceViewHeadingId } from './workspace-navigation'
 import type { RunAction, WorkflowRequest } from './workflow-dialog'
 
 const PRESETS: { value: GraphPreset; label: string; description: string }[] = [
@@ -708,7 +708,7 @@ export function GraphWorkbench({
     <div className="graph-workbench" data-graph-projection-layout-ms={projectionLayoutMs}>
       <header className="graph-page-heading">
         <div>
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('stacks')} tabIndex={-1}>
             Stacks
           </h1>
           <p>Actual pull requests and refs, with their dependency evidence.</p>

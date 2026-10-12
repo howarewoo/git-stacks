@@ -1,16 +1,31 @@
+import { createHash } from 'node:crypto'
 import { REVIEW_VIEWED_MAX_RECORDS, type ReviewViewedRecord } from '@git-stacks/shared/review'
 import { isRecord } from '@git-stacks/shared/guards'
-import { readJournal, repositoryJournalPath, writeJournal } from './review-journal'
+import { readJournal, repositoryJournalPath, writeJournal, withJournalLock } from './review-journal'
 
-const VIEWED_JOURNAL = 'git-stacks-reviewed-files.json'
+export interface ReviewViewedOwner {
+  host: string
+  repository: string
+  viewer: string
+}
+
+function viewedJournal(owner: ReviewViewedOwner): string {
+  const scope = JSON.stringify([
+    owner.host.toLowerCase(),
+    owner.repository.toLowerCase(),
+    owner.viewer.toLowerCase(),
+  ])
+  return `git-stacks-reviewed-files-${createHash('sha256').update(scope).digest('hex')}.json`
+}
 
 async function readViewedJournal(
   repoPath: string,
+  owner: ReviewViewedOwner,
   signal?: AbortSignal,
 ): Promise<ReviewViewedRecord[]> {
   try {
     return await readJournal(
-      await repositoryJournalPath(repoPath, VIEWED_JOURNAL, signal),
+      await repositoryJournalPath(repoPath, viewedJournal(owner), signal),
       'records',
       parseRecord,
     )
@@ -49,10 +64,11 @@ function parseRecord(value: unknown): ReviewViewedRecord | null {
 /** The viewed-file record for one pull request, or null when it has never been read. */
 export async function readViewedRecord(
   repoPath: string,
+  owner: ReviewViewedOwner,
   number: number,
   signal?: AbortSignal,
 ): Promise<ReviewViewedRecord | null> {
-  const records = await readViewedJournal(repoPath, signal)
+  const records = await readViewedJournal(repoPath, owner, signal)
   return records.find((record) => record.number === number) ?? null
 }
 
@@ -67,17 +83,23 @@ export async function readViewedRecord(
  */
 export async function writeViewedRecord(
   repoPath: string,
+  owner: ReviewViewedOwner,
   record: ReviewViewedRecord,
+  authorize: () => Promise<void>,
   signal?: AbortSignal,
 ): Promise<ReviewViewedRecord> {
-  const records = (await readViewedJournal(repoPath, signal)).filter(
-    (entry) => entry.number !== record.number,
+  const file = await repositoryJournalPath(repoPath, viewedJournal(owner), signal)
+  return withJournalLock(
+    file,
+    async () => {
+      const records = (await readJournal(file, 'records', parseRecord)).filter(
+        (entry) => entry.number !== record.number,
+      )
+      records.unshift(record)
+      await authorize()
+      await writeJournal(file, 'records', records.slice(0, REVIEW_VIEWED_MAX_RECORDS))
+      return record
+    },
+    signal,
   )
-  records.unshift(record)
-  await writeJournal(
-    await repositoryJournalPath(repoPath, VIEWED_JOURNAL, signal),
-    'records',
-    records.slice(0, REVIEW_VIEWED_MAX_RECORDS),
-  )
-  return record
 }

@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto'
-import * as fs from 'node:fs/promises'
 import path from 'node:path'
 
 import type { ReviewComparison, ReviewLineRef, ReviewSide } from '@git-stacks/shared/review'
@@ -10,253 +8,16 @@ import type {
   ReviewDraftRecord,
   ReviewUncertainWrite,
   UncertainComment,
+  ReviewDraftRecovery,
 } from '@git-stacks/shared/review-threads'
-import { REVIEW_DRAFTS_MAX } from '@git-stacks/shared/review-threads'
-import { CommandCancelled } from './git-core'
+import { REVIEW_DRAFTS_MAX, sameReviewDraft } from '@git-stacks/shared/review-threads'
 import { isRecord } from '@git-stacks/shared/guards'
-import { readJournal, repositoryJournalPath, writeJournal } from './review-journal'
+import { readJournal, repositoryJournalPath, writeJournal, withJournalLock } from './review-journal'
 
-/**
- * Both journals are read, changed, and written back by every process that has
- * this repository open: two windows of one app, two worktrees, or two copies of
- * Git Stacks. A read/modify/write over a shared file is therefore a claim on
- * something no process owns on its own, and the window between the read and the
- * rename is wide enough for a second process to read the same bytes and publish
- * its own change over them. The result is not a merge: the last rename wins and
- * the other's record — unsent words, or a guard against a duplicate review —
- * is silently gone.
- *
- * The claim is a lock file beside the journal, created with `link(2)`, which is
- * atomic: exactly one process can create the name, and the winner owns it until
- * it removes it. Creating it with content already written means a process that
- * finds the lock never reads a half-written owner, so "is the holder still
- * alive?" is answerable. A lock is released only by removing the exact inode it
- * created, so a lock another process has since taken over is never taken away
- * from it.
- *
- * No lock is ever taken from its holder, not even one whose owner has been
- * killed: reclaiming a lock is a rename, and a rename that frees the name lets a
- * contender in while a holder that turns out to be alive still believes it owns
- * the journal. A lock whose holder is gone therefore blocks, and the refusal
- * names the one file a person may remove once they know no window is open. A
- * lock this process cannot read, or a wait that runs out, refuses the same
- * way: the honest outcome for a journal that cannot be updated in order is
- * that nothing was written, which the caller already reports.
- */
-const JOURNAL_LOCK_POLL_MS = 20
-const JOURNAL_LOCK_WAIT_MS = 15_000
-
-interface JournalLockIdentity {
-  dev: number
-  ino: number
-}
-
-function cancelIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new CommandCancelled()
-}
-
-function processIsRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    // A process owned by another user reports EPERM rather than ESRCH: it is
-    // running, this process just may not signal it.
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
-function waitFor(ms: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>()
-  setTimeout(resolve, ms)
-  return promise
-}
-
-/**
- * Whether the process that wrote a lock is still running, and null when the
- * lock cannot be read as one this build wrote. A lock with no readable owner
- * has no owner to ask, so it is treated as a holder that might be alive.
- */
-function lockHolderIsRunning(raw: string): boolean | null {
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!isRecord(parsed)) return null
-    const pid = parsed.pid
-    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return null
-    return processIsRunning(pid)
-  } catch {
-    return null
-  }
-}
-
-/**
- * The refusal a writer gets when it cannot take the lock. It names the file and
- * the condition under which removing it is safe, because the one thing no
- * process on disk can know is whether a person still has a window open.
- */
-function journalLockRefusal(lockPath: string, running: boolean | null): Error {
-  const holder =
-    running === null
-      ? 'a lock this build did not write, whose owner cannot be identified'
-      : running
-        ? 'a window of this app that is still running'
-        : 'a window of this app that is no longer running'
-  return new Error(
-    `This repository's review journal is locked at ${lockPath} by ${holder}. Nothing was written. ` +
-      'A lock is only ever released by the process that took it, so it is never taken from its holder: ' +
-      'freeing the name would let another process enter the journal while its holder still believes it ' +
-      'owns it, which is the lost record this lock exists to prevent. Close every Git Stacks window for ' +
-      'this repository, confirm none is open, and then remove that one file — the next write takes the ' +
-      'lock itself.',
-  )
-}
-
-/**
- * The refusal a writer gets when the lock exists and cannot be read: a file
- * this process may not open, or not one it can read bytes from.
- *
- * Nothing about it can be answered by waiting. The holder's identity is the
- * one thing the lock carries, and there is none of it here, so this is the
- * same unknown as a lock written by something else — except that the person
- * reading it can do something about it: a lock that cannot be opened is almost
- * always a permission, and saying so is what makes the refusal actionable
- * rather than a wall.
- */
-function journalLockUnreadable(lockPath: string, cause: unknown): Error {
-  const code = (cause as NodeJS.ErrnoException | null)?.code
-  const reason =
-    code === 'EACCES' || code === 'EPERM'
-      ? 'this app is not allowed to read it'
-      : code === 'EISDIR'
-        ? 'it is a directory rather than a lock file'
-        : `it could not be read (${code ?? 'no reason reported'})`
-  return new Error(
-    `This repository's review journal is locked at ${lockPath} and ${reason}, so its owner cannot be identified. Nothing was written. ` +
-      'A lock is never taken from its holder, so the write stops here rather than writing beside a window that may still hold the journal. ' +
-      'Close every Git Stacks window for this repository, confirm none is open, and then remove that one file — or make it readable ' +
-      'to this account — and the next write takes the lock itself.',
-  )
-}
-
-/**
- * Takes the journal lock, or refuses.
- *
- * The lock is created with `link(2)`, which is atomic: exactly one process can
- * create the name, and the winner owns it until it removes it. That is the whole
- * protocol, and it is deliberately the whole protocol. A lock is never taken
- * from its holder, because no pathname protocol can take one safely: removing
- * or renaming the name frees it, a contender can take it and be inside the
- * journal in the meantime, and nothing that happens afterwards can un-enter it.
- * An open descriptor pins the inode a lock was made from, which is what tells
- * two locks apart — it does not hold the name, and it is not ownership.
- *
- * So a lock whose holder is gone is not reclaimed. It blocks, and says exactly
- * which file to remove and when it is safe to remove it, because a person
- * closing the last window for a repository knows something no process on disk
- * can know. A lock that cannot be read as one is refused the same way: it was
- * not written by this protocol, and guessing at its owner is how a live lock
- * gets deleted. So is a lock that cannot be read at all, which says nothing
- * even about who wrote it — that one is refused immediately rather than waited
- * on, because no amount of waiting opens a file this process may not read.
- */
-async function acquireJournalLock(
-  file: string,
-  signal?: AbortSignal,
-): Promise<JournalLockIdentity> {
-  const lockPath = `${file}.lock`
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  const deadline = Date.now() + JOURNAL_LOCK_WAIT_MS
-  for (;;) {
-    cancelIfAborted(signal)
-    const temporary = `${lockPath}.${randomUUID()}.tmp`
-    const handle = await fs.open(temporary, 'wx', 0o600)
-    let identity: JournalLockIdentity
-    try {
-      const stat = await handle.stat()
-      identity = { dev: stat.dev, ino: stat.ino }
-      await handle.writeFile(
-        `${JSON.stringify({ pid: process.pid, at: new Date().toISOString() })}\n`,
-        'utf8',
-      )
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
-    try {
-      await fs.link(temporary, lockPath)
-      return identity
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    } finally {
-      await fs.rm(temporary, { force: true }).catch(() => {})
-    }
-
-    // Someone held it a moment ago. The lock is only read, to say who, and is
-    // left exactly as it was found: it is never taken from its holder. A holder
-    // that released between the failed link and this read has simply finished,
-    // so the name is free now and the next attempt takes it — a lock that is
-    // gone is the only read failure worth trying again. Any other failure
-    // leaves a lock standing that this process cannot see into, and retrying
-    // that spins on a file no waiting helps: the owner may well be alive, so the
-    // write refuses instead of guessing.
-    let held: string
-    try {
-      held = await fs.readFile(lockPath, 'utf8')
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-      throw journalLockUnreadable(lockPath, error)
-    }
-    const running = lockHolderIsRunning(held)
-    // Only a holder known to be alive gets the wait: it is a window mid-write,
-    // and it will let go. A holder that is gone, or one this build cannot read,
-    // is refused at once — waiting cannot help either way, and only a person can
-    // clear it.
-    if (running === true && Date.now() < deadline) {
-      cancelIfAborted(signal)
-      await waitFor(JOURNAL_LOCK_POLL_MS)
-      continue
-    }
-    throw journalLockRefusal(lockPath, running)
-  }
-}
-
-/**
- * Releases a lock, and only the lock this process took.
- *
- * The name is compared against the inode recorded when it was taken, so a lock
- * that is somehow no longer the one acquired is left alone rather than removed
- * on its behalf. Nothing else can take the name while this process holds it:
- * every other writer only ever creates the name, and creates fail while it is
- * there.
- */
-async function releaseJournalLock(file: string, identity: JournalLockIdentity): Promise<void> {
-  const lockPath = `${file}.lock`
-  try {
-    const stat = await fs.lstat(lockPath)
-    if (stat.dev !== identity.dev || stat.ino !== identity.ino) return
-    await fs.rm(lockPath, { force: true })
-  } catch {
-    // A lock already gone needs no release.
-  }
-}
-
-/** Runs an update of one journal with no other process able to interleave. */
-async function withJournalLock<T>(
-  file: string,
-  run: () => Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  const identity = await acquireJournalLock(file, signal)
-  try {
-    return await run()
-  } finally {
-    await releaseJournalLock(file, identity)
-  }
-}
-
-const DRAFTS_JOURNAL = 'git-stacks-review-drafts.json'
-
-const UNCERTAIN_JOURNAL = 'git-stacks-review-uncertain.json'
+const LEGACY_DRAFTS_JOURNAL = 'git-stacks-review-drafts.json'
+const DRAFTS_JOURNAL = 'git-stacks-review-drafts-qualified.json'
+const LEGACY_UNCERTAIN_JOURNAL = 'git-stacks-review-uncertain.json'
+const UNCERTAIN_JOURNAL = 'git-stacks-review-uncertain-qualified.json'
 
 /**
  * The pending drafts live beside the repository's own Git directory, like the
@@ -279,6 +40,11 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
     number: value.number,
     kind: value.kind,
     summary: typeof value.summary === 'string' ? value.summary : '',
+    ...(value.kind === 'reply' &&
+    typeof value.authoredReplyBody === 'string' &&
+    value.authoredReplyBody === value.summary
+      ? { authoredReplyBody: value.authoredReplyBody }
+      : {}),
     threadId: typeof value.threadId === 'string' ? value.threadId : null,
     headOid: typeof value.headOid === 'string' ? value.headOid : null,
     // A record written before the comparison was stored cannot be shown to
@@ -355,6 +121,19 @@ function parseUncertainComments(value: unknown): UncertainComment[] {
     if (!isRecord(entry)) continue
     if (typeof entry.path !== 'string' || typeof entry.body !== 'string') continue
     if (typeof entry.line !== 'number') continue
+    const authoredDraft =
+      isRecord(entry.authoredDraft) &&
+      entry.authoredDraft.id === entry.draftId &&
+      entry.authoredDraft.body === entry.body &&
+      isRecord(entry.authoredDraft.ref) &&
+      typeof entry.authoredDraft.ref.hunkId === 'string' &&
+      (entry.authoredDraft.startRef === null ||
+        (isRecord(entry.authoredDraft.startRef) &&
+          typeof entry.authoredDraft.startRef.hunkId === 'string')) &&
+      typeof entry.authoredDraft.body === 'string' &&
+      typeof entry.authoredDraft.createdAt === 'string'
+        ? parseDraft(entry.authoredDraft)
+        : null
     parsed.push({
       path: entry.path,
       side: entry.side === 'base' ? 'base' : 'head',
@@ -362,6 +141,7 @@ function parseUncertainComments(value: unknown): UncertainComment[] {
       startLine: typeof entry.startLine === 'number' ? entry.startLine : null,
       startSide: entry.startSide === 'base' || entry.startSide === 'head' ? entry.startSide : null,
       body: entry.body,
+      ...(authoredDraft ? { authoredDraft } : {}),
       // The composition this comment was written from. A record that predates the
       // association carries none, and a comment with none is evidence about no
       // particular composition: it is not read as delivering anything.
@@ -511,6 +291,147 @@ export async function readReviewDrafts(
   )
 }
 
+/** Legacy text is local recovery material, never a current host's review or anchor. */
+export async function readReviewDraftRecovery(
+  repoPath: string,
+  selected: Pick<ReviewDraftRecovery, 'repo' | 'viewer' | 'number'> | null,
+  signal?: AbortSignal,
+): Promise<ReviewDraftRecovery[]> {
+  const groups = new Map<
+    string,
+    {
+      repo: string
+      viewer: string
+      number: number
+      bodies: string[]
+    }
+  >()
+  const groupFor = (record: Record<string, unknown>) => {
+    if (
+      typeof record.repo !== 'string' ||
+      record.repo.split('/').length !== 2 ||
+      typeof record.viewer !== 'string' ||
+      typeof record.number !== 'number' ||
+      !Number.isInteger(record.number) ||
+      (selected &&
+        (record.repo !== selected.repo ||
+          record.viewer !== selected.viewer ||
+          record.number !== selected.number))
+    )
+      return null
+    const key = JSON.stringify([record.repo, record.viewer, record.number])
+    let group = groups.get(key)
+    if (!group) {
+      group = { repo: record.repo, viewer: record.viewer, number: record.number, bodies: [] }
+      groups.set(key, group)
+    }
+    return group
+  }
+  const records = await readJournal(
+    await repositoryJournalPath(repoPath, LEGACY_DRAFTS_JOURNAL, signal),
+    'records',
+    (value) => (isRecord(value) ? value : null),
+  )
+  for (const record of records) {
+    if (!Array.isArray(record.drafts)) continue
+    const group = groupFor(record)
+    if (!group) continue
+    for (const draft of record.drafts) {
+      if (isRecord(draft) && typeof draft.body === 'string') group.bodies.push(draft.body)
+    }
+  }
+  const attempts = await readJournal(
+    await repositoryJournalPath(repoPath, LEGACY_UNCERTAIN_JOURNAL, signal),
+    'writes',
+    (value) => (isRecord(value) ? value : null),
+  )
+  for (const attempt of attempts) {
+    const group = groupFor(attempt)
+    if (!group) continue
+    if (typeof attempt.summary === 'string' && attempt.summary !== '')
+      group.bodies.push(attempt.summary)
+    if (!Array.isArray(attempt.comments)) continue
+    for (const comment of attempt.comments) {
+      if (isRecord(comment) && typeof comment.body === 'string') group.bodies.push(comment.body)
+    }
+  }
+  return [...groups.values()].map((group) => ({
+    repo: group.repo,
+    viewer: group.viewer,
+    number: group.number,
+    count: group.bodies.length,
+    bodies: selected ? group.bodies : null,
+  }))
+}
+
+export async function assertReviewDraftOwner(
+  repoPath: string,
+  repo: string,
+  viewer: string,
+  number: number,
+  ids: readonly string[],
+  comparison: ReviewComparison,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (ids.length === 0) return
+  const file = await repositoryJournalPath(repoPath, DRAFTS_JOURNAL, signal)
+  const records = await readDrafts(file)
+  const directory = path.dirname(file)
+  const [legacy, legacyAttempts] = await Promise.all([
+    readJournal(path.join(directory, LEGACY_DRAFTS_JOURNAL), 'records', (value) =>
+      isRecord(value) ? value : null,
+    ),
+    readJournal(path.join(directory, LEGACY_UNCERTAIN_JOURNAL), 'writes', (value) =>
+      isRecord(value) ? value : null,
+    ),
+  ])
+  if (
+    ids.some(
+      (id) =>
+        legacy.some(
+          (record) =>
+            Array.isArray(record.drafts) &&
+            record.drafts.some((draft) => isRecord(draft) && draft.id === id),
+        ) ||
+        legacyAttempts.some(
+          (attempt) =>
+            (Array.isArray(attempt.draftIds) && attempt.draftIds.includes(id)) ||
+            (Array.isArray(attempt.comments) &&
+              attempt.comments.some((comment) => isRecord(comment) && comment.draftId === id)),
+        ),
+    )
+  ) {
+    throw new Error(
+      'Legacy comments are recovery-only text; their original anchors cannot be adopted or submitted here.',
+    )
+  }
+  for (const id of ids) {
+    const owned = records.find(
+      (record) =>
+        record.number === number &&
+        sameOwner(record, repo, viewer) &&
+        record.drafts.some((draft) => draft.id === id),
+    )
+    if (owned && !sameReviewComparison(owned.comparison, comparison)) {
+      throw new Error(
+        'These saved comments retain their original comparison. Their anchors cannot be moved to the current revision.',
+      )
+    }
+    if (!owned && records.some((record) => record.drafts.some((draft) => draft.id === id))) {
+      throw new Error(
+        'These saved comments belong to another host/repository/account or pull request. Recover the text locally; their original anchors cannot be adopted or submitted here.',
+      )
+    }
+  }
+}
+
+function nextDraftVersion(previous: ReviewDraftRecord | undefined): string {
+  const previousTime = previous ? Date.parse(previous.updatedAt) : Number.NaN
+  return new Date(
+    Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0),
+  ).toISOString()
+}
+
 /**
  * Replaces the drafts of one pull request.
  *
@@ -519,13 +440,15 @@ export async function readReviewDrafts(
  * is scoped the same way lookup is, so saving here never overwrites another
  * repository's or another account's record for the same number.
  *
- * The read and the write happen under the journal's cross-process lock, so a
- * second window or worktree saving its own pull request cannot read the state
- * before this save and publish over it.
+ * The read, observed-version comparison, authorization, and write happen under
+ * the journal's cross-process lock. Empty accepted records retain a version so
+ * older full-array requests cannot resurrect cleared or confirmed comments.
  */
 export async function writeReviewDrafts(
   repoPath: string,
   record: ReviewDraftRecord,
+  expectedUpdatedAt: string | null,
+  authorize: () => Promise<void>,
   signal?: AbortSignal,
 ): Promise<ReviewDraftRecord> {
   const file = await repositoryJournalPath(repoPath, DRAFTS_JOURNAL, signal)
@@ -533,32 +456,42 @@ export async function writeReviewDrafts(
     file,
     async () => {
       const records = await readDrafts(file)
+      const previous = records.find(
+        (entry) => entry.number === record.number && sameOwner(entry, record.repo, record.viewer),
+      )
+      if ((previous?.updatedAt ?? null) !== expectedUpdatedAt) {
+        throw new Error(
+          'Saved drafts changed after this full set was read. Your unsent text remains in this window; discard those local edits explicitly before using the newer saved drafts.',
+        )
+      }
+      if (
+        previous &&
+        record.drafts.some((draft) => previous.drafts.some((saved) => saved.id === draft.id)) &&
+        !sameReviewComparison(previous.comparison, record.comparison)
+      ) {
+        throw new Error(
+          'Saved comments retain their original comparison; saving cannot move their anchors.',
+        )
+      }
       const kept = records.filter(
         (entry) => entry.number !== record.number || !sameOwner(entry, record.repo, record.viewer),
       )
-      // A record is kept while it has drafts, and dropped once they are gone.
-      // It used to outlive them for the sake of a counter: a draft's identity
-      // had to be counted from this record, so removing it would hand the next
-      // draft a name this account has already used — the second comment on a
-      // line, which no amount of reading the words or the anchor can tell from
-      // the first. An identity is minted where a draft is composed now, so
-      // there is nothing here left to keep, and an empty record would be one
-      // pull request occupying a slot in a file that is never pruned. An
-      // account that never wrote a draft still leaves nothing behind.
-      if (record.drafts.length > 0) {
-        kept.unshift({ ...record, drafts: record.drafts.slice(0, REVIEW_DRAFTS_MAX) })
-      }
+      // Empty records are deletion barriers, not pending comments. Their existing
+      // version prevents an older full-array save from resurrecting cleared work.
+      const accepted = { ...record, updatedAt: nextDraftVersion(previous) }
+      kept.unshift(accepted)
+      await authorize()
       await writeDrafts(file, kept)
-      return record
+      return accepted
     },
     signal,
   )
 }
 
 /**
- * Retires only confirmed delivered draft identities for the submitting owner.
- * The read/modify/write runs under the journal's cross-process lock so drafts
- * added by another window while the review was in flight remain unsent work.
+ * Retires only the exact authored versions confirmed by the submitting operation.
+ * Another window's additions or same-identity edits remain unsent. Empty records
+ * retain an accepted version as a barrier against older full-array saves.
  */
 export async function removeDeliveredReviewDrafts(
   repoPath: string,
@@ -566,23 +499,47 @@ export async function removeDeliveredReviewDrafts(
   viewer: string,
   number: number,
   delivered: ReadonlySet<string>,
+  submitted: readonly ReviewDraft[],
+  comparison: ReviewComparison,
+  authorize: () => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await repositoryJournalPath(repoPath, DRAFTS_JOURNAL, signal)
+  const submittedById = new Map(submitted.map((draft) => [draft.id, draft]))
   await withJournalLock(
     file,
     async () => {
       const records = await readDrafts(file)
       const kept: ReviewDraftRecord[] = []
+      let changed = false
       for (const entry of records) {
-        if (entry.number !== number || !sameOwner(entry, repo, viewer)) {
+        if (
+          entry.number !== number ||
+          !sameOwner(entry, repo, viewer) ||
+          !sameReviewComparison(entry.comparison, comparison)
+        ) {
           kept.push(entry)
           continue
         }
-        const drafts = entry.drafts.filter((draft) => !delivered.has(draft.id))
-        if (drafts.length > 0) kept.push({ ...entry, drafts, updatedAt: new Date().toISOString() })
+        const confirmed = (draft: ReviewDraft) => {
+          const sent = submittedById.get(draft.id)
+          return delivered.has(draft.id) && sent !== undefined && sameReviewDraft(draft, sent)
+        }
+        if (!entry.drafts.some(confirmed)) {
+          kept.push(entry)
+          continue
+        }
+        changed = true
+        kept.push({
+          ...entry,
+          drafts: entry.drafts.filter((draft) => !confirmed(draft)),
+          updatedAt: nextDraftVersion(entry),
+        })
       }
-      await writeDrafts(file, kept)
+      if (changed) {
+        await authorize()
+        await writeDrafts(file, kept)
+      }
     },
     signal,
   )
@@ -604,20 +561,71 @@ export async function removeDeliveredReviewDrafts(
  * GitHub's own state settles it, and a submission that cannot journal its
  * attempt refuses rather than sending unguarded.
  *
- * The read and the write run under the journal's cross-process lock: two
- * processes attempting writes at once must both end up recorded, because losing
- * one is indistinguishable from never having guarded it.
+ * Initial reservation and receipt publication share the cross-process lock.
+ * Reservation refuses overlapping work; receipt publication updates the captured
+ * attempt without discarding another owner's evidence.
  */
 export async function recordUncertainWrite(
   repoPath: string,
   write: ReviewUncertainWrite,
+  authorize: () => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
+  await publishUncertainWrite(repoPath, write, authorize, false, signal)
+}
+
+/** Returns the existing guard when this captured attempt cannot reserve dispatch. */
+export async function reserveUncertainWrite(
+  repoPath: string,
+  write: ReviewUncertainWrite,
+  authorize: () => Promise<void>,
+  signal?: AbortSignal,
+): Promise<ReviewUncertainWrite | null> {
+  return publishUncertainWrite(repoPath, write, authorize, true, signal)
+}
+
+async function publishUncertainWrite(
+  repoPath: string,
+  write: ReviewUncertainWrite,
+  authorize: () => Promise<void>,
+  reserve: boolean,
+  signal?: AbortSignal,
+): Promise<ReviewUncertainWrite | null> {
   const file = await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal)
-  await withJournalLock(
+  return withJournalLock(
     file,
     async () => {
       const existing = await readUncertain(file)
+      await authorize()
+      if (reserve) {
+        const conflict = existing.find(
+          (entry) =>
+            entry.number === write.number &&
+            entry.kind === write.kind &&
+            entry.repo === write.repo &&
+            entry.viewer === write.viewer &&
+            (entry.settled === null
+              ? entry.id === write.id ||
+                (write.kind === 'review' &&
+                  sameReviewComparison(entry.comparison, write.comparison) &&
+                  entry.draftIds.some((id) => write.draftIds.includes(id)))
+              : write.kind === 'review' &&
+                sameReviewComparison(entry.comparison, write.comparison) &&
+                entry.comments.some((comment) =>
+                  write.comments.some(
+                    (mine) =>
+                      comment.draftId !== null &&
+                      comment.draftId === mine.draftId &&
+                      (comment.authoredDraft === undefined ||
+                        mine.authoredDraft === undefined ||
+                        sameReviewDraft(comment.authoredDraft, mine.authoredDraft)),
+                  ),
+                )),
+        )
+        // Settled evidence blocks stale preflights of the same authored version,
+        // not genuinely edited drafts that retain their original identity.
+        if (conflict) return conflict
+      }
       // Replacement is scoped by the same complete owner identity as lookup and
       // clearing. An attempt id is not unique across accounts, so matching on it
       // alone would let one account's record delete another's guard.
@@ -630,6 +638,7 @@ export async function recordUncertainWrite(
           entry.viewer !== write.viewer,
       )
       await writeUncertain(file, [write, ...kept])
+      return null
     },
     signal,
   )
@@ -664,6 +673,7 @@ export async function clearUncertainWrite(
   number: number,
   viewer: string,
   id: string,
+  authorize: () => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal)
@@ -671,18 +681,18 @@ export async function clearUncertainWrite(
     file,
     async () => {
       const existing = await readUncertain(file)
-      await writeUncertain(
-        file,
-        existing.filter(
-          (entry) =>
-            !(
-              entry.number === number &&
-              entry.id === id &&
-              entry.viewer === viewer &&
-              entry.repo === repo
-            ),
-        ),
+      const kept = existing.filter(
+        (entry) =>
+          !(
+            entry.number === number &&
+            entry.id === id &&
+            entry.viewer === viewer &&
+            entry.repo === repo
+          ),
       )
+      if (kept.length === existing.length) return
+      await authorize()
+      await writeUncertain(file, kept)
     },
     signal,
   )
@@ -723,6 +733,7 @@ export async function retireSettledWrites(
   viewer: string,
   comparison: ReviewComparison,
   draftIds: readonly string[],
+  authorize: () => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   const file = await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal)
@@ -743,6 +754,7 @@ export async function retireSettledWrites(
         return entry.draftIds.some((theirs) => draftIds.includes(theirs))
       })
       if (kept.length === existing.length) return
+      await authorize()
       await writeUncertain(file, kept)
     },
     signal,

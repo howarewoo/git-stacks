@@ -742,7 +742,7 @@ export function adjacentStackLayer(
 }
 
 /**
- * Records a file as viewed. The record is bound to the comparison it was made at,
+ * Records a file's viewed state. The record is bound to the comparison it was made at,
  * so a force-push or a base retarget drops the marks rather than carrying them
  * onto a diff nobody looked at.
  */
@@ -751,6 +751,7 @@ export function withViewedFile(
   number: number,
   comparison: ReviewComparison,
   path: string,
+  viewed: boolean,
   now: string,
 ): ReviewViewedRecord {
   const current =
@@ -760,7 +761,11 @@ export function withViewedFile(
   return {
     number,
     comparison,
-    paths: current.paths.includes(path) ? current.paths : [...current.paths, path],
+    paths: viewed
+      ? current.paths.includes(path)
+        ? current.paths
+        : [...current.paths, path]
+      : current.paths.filter((entry) => entry !== path),
     updatedAt: now,
   }
 }

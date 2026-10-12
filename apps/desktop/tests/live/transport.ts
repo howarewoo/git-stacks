@@ -1,6 +1,7 @@
 import { setTimeout } from 'node:timers/promises'
 import {
   GitHubTransportError,
+  type GitHubCredentialSession,
   type GitHubErrorKind,
   type GitHubGraphqlOptions,
   type GitHubRestRequest,
@@ -113,6 +114,21 @@ export class FaultInjectingTransport implements GitHubTransport {
     return this.inner.credentialAuthority()
   }
 
+  async pinCredential(options: GitHubGraphqlOptions = {}): Promise<GitHubCredentialSession> {
+    if (!this.inner.pinCredential) {
+      throw new Error('The live transport cannot pin its dispatch credential.')
+    }
+    const credential = await this.inner.pinCredential(options)
+    return {
+      rest: <T = unknown>(request: GitHubRestRequest) => this.restWith<T>(credential, request),
+      graphql: <T = Record<string, unknown>>(
+        query: string,
+        variables: Record<string, unknown> = {},
+        requestOptions: GitHubGraphqlOptions = {},
+      ) => this.graphqlWith<T>(credential, query, variables, requestOptions),
+    }
+  }
+
   /**
    * Sends the next matching request and then reports that nothing came back.
    * The host has applied it; the caller cannot know that.
@@ -161,6 +177,13 @@ export class FaultInjectingTransport implements GitHubTransport {
   }
 
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
+    return this.restWith<T>(this.inner, request)
+  }
+
+  private async restWith<T>(
+    transport: GitHubCredentialSession,
+    request: GitHubRestRequest,
+  ): Promise<GitHubRestResponse<T>> {
     const method = request.method ?? 'GET'
     const rule = this.ruleFor(method, request.path)
     if (rule && rule.fault !== 'lost') {
@@ -183,7 +206,7 @@ export class FaultInjectingTransport implements GitHubTransport {
       })
     }
     try {
-      const send = (): Promise<GitHubRestResponse<T>> => this.inner.rest<T>(request)
+      const send = (): Promise<GitHubRestResponse<T>> => transport.rest<T>(request)
       const response = await (this.pacing ? this.pacing.run(method !== 'GET', send) : send())
       this.record(method, request.path, response.status)
       if (rule) {
@@ -223,6 +246,15 @@ export class FaultInjectingTransport implements GitHubTransport {
     variables: Record<string, unknown> = {},
     options: GitHubGraphqlOptions = {},
   ): Promise<T> {
+    return this.graphqlWith<T>(this.inner, query, variables, options)
+  }
+
+  private async graphqlWith<T>(
+    transport: GitHubCredentialSession,
+    query: string,
+    variables: Record<string, unknown>,
+    options: GitHubGraphqlOptions,
+  ): Promise<T> {
     // A GraphQL request has no path, so the operation is what names it. Matching and
     // recording use the same label, which is what lets a scenario aim a fault at one
     // mutation instead of at whichever GraphQL call happens to come first.
@@ -237,7 +269,7 @@ export class FaultInjectingTransport implements GitHubTransport {
       })
     }
     try {
-      const send = (): Promise<T> => this.inner.graphql<T>(query, variables, options)
+      const send = (): Promise<T> => transport.graphql<T>(query, variables, options)
       const data = await (this.pacing
         ? this.pacing.run(/^\s*mutation\b/u.test(query), send)
         : send())

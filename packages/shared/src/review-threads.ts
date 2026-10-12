@@ -56,6 +56,30 @@ export interface ReviewDraft {
   createdAt: string
 }
 
+function sameDraftLine(left: ReviewLineRef, right: ReviewLineRef): boolean {
+  return (
+    left.path === right.path &&
+    left.side === right.side &&
+    left.line === right.line &&
+    left.hunkId === right.hunkId &&
+    left.anchor === right.anchor &&
+    left.context === right.context
+  )
+}
+
+/** A confirmation belongs to this authored version, not just its stable identity. */
+export function sameReviewDraft(left: ReviewDraft, right: ReviewDraft): boolean {
+  return (
+    left.id === right.id &&
+    left.body === right.body &&
+    left.createdAt === right.createdAt &&
+    sameDraftLine(left.ref, right.ref) &&
+    (left.startRef === null
+      ? right.startRef === null
+      : right.startRef !== null && sameDraftLine(left.startRef, right.startRef))
+  )
+}
+
 /**
  * The pending drafts of one pull request, recorded beside the repository.
  *
@@ -68,10 +92,10 @@ export interface ReviewDraft {
 export interface ReviewDraftRecord {
   number: number
   /**
-   * The GitHub repository these drafts belong to, as `owner/name`. A pull
-   * request number is only unique inside one repository, so keying the journal
-   * by number alone would load the previous repository's pending words the
-   * moment a worktree's origin was pointed somewhere else.
+   * Main-confirmed `host/owner/name` for qualified work. Earlier `owner/name`
+   * records remain stored but are recovery-only: the current origin cannot
+   * supply their missing host, and their anchors cannot be adopted. A pull
+   * request number is only unique inside one hosted repository.
    */
   repo: string
   /**
@@ -242,7 +266,22 @@ export function reviewDraftLabel(draft: ReviewDraft): string {
 }
 
 /** The threads of one pull request together with what the viewer may do to it. */
+export interface ReviewOwner {
+  /** Public, main-confirmed host/owner/name identity, never a transport endpoint. */
+  repo: string
+  viewer: string
+}
+
+export interface ReviewDraftRecovery {
+  number: number
+  repo: string
+  viewer: string
+  count: number
+  /** Text is returned only after an explicit local recovery request, never with anchors. */
+  bodies: string[] | null
+}
 export interface ReviewThreadRead {
+  owner: ReviewOwner
   threads: ReviewThreadSet
   permissions: ReviewPermissions
 }
@@ -259,7 +298,7 @@ export interface ReviewThreadRead {
  * to the comparison the diff was rendered from, and a mismatch is reported as
  * one instead of being adopted.
  */
-export interface ReviewSubmission {
+export interface ReviewSubmission extends ReviewOwner {
   event: ReviewEvent
   body: string
   drafts: ReviewDraft[]
@@ -286,6 +325,8 @@ export interface ReviewUncertainWrite {
   kind: 'review' | 'reply' | 'resolve'
   /** The words of the write, so a reconciliation can recognise it on GitHub. */
   summary: string
+  /** Exact reply payload; absent historical evidence cannot certify reply delivery. */
+  authoredReplyBody?: string
   /** A reply's thread, or a review's head commit — where to look for it. */
   threadId: string | null
   headOid: string | null
@@ -408,6 +449,8 @@ export interface UncertainComment {
   startLine: number | null
   startSide: 'base' | 'head' | null
   body: string
+  /** Exact authored fields; absent historical evidence cannot certify draft cleanup. */
+  authoredDraft?: ReviewDraft
   /**
    * The draft this comment was composed from, recorded so a later submission
    * can tell *which* comment of a line it is.

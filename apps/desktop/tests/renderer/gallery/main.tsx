@@ -44,6 +44,24 @@ const control = installFixtureControl({
     window.history.replaceState(null, '', `?${search.toString()}${window.location.hash}`)
     for (const listener of scenarioListeners) listener()
   },
+  reviewCache: () => ({
+    reads: queryClient
+      .getQueryCache()
+      .getAll()
+      .filter((query) => query.queryKey[0] === 'review')
+      .map((query) => query.queryKey),
+    writes: queryClient
+      .getMutationCache()
+      .getAll()
+      .filter((mutation) => mutation.options.mutationKey?.[0] === 'review')
+      .map((mutation) => ({
+        key: mutation.options.mutationKey ?? null,
+        status: mutation.state.status,
+        retained: mutation.options.meta?.retainedReviewDraft === true,
+        authored:
+          mutation.options.meta?.retainedReviewDraft === true ? mutation.state.variables : null,
+      })),
+  }),
 })
 
 function GalleryIndex({ scenario }: { scenario: string }) {

@@ -41,7 +41,7 @@ import {
   rovingTabIndex,
   rovingTarget,
 } from '../lib/tree-navigation'
-import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
+import { workspaceViewHeadingId } from './workspace-navigation'
 import { workflowError, type RunAction, type WorkflowRequest } from './workflow-dialog'
 import { PhaseStatus, WorkflowActions } from './workflow-composition'
 import { partialProgress, workflowPhase } from './workflow-policy'
@@ -934,7 +934,7 @@ export function HistoryView({
     <div className="history-view">
       <div className="list-toolbar">
         <div className="list-title-group">
-          <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+          <h1 id={workspaceViewHeadingId('history')} tabIndex={-1}>
             History
           </h1>
           <span className="list-subtitle">

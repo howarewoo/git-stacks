@@ -1,5 +1,11 @@
 import * as React from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  type Mutation,
+  useMutation,
+  useMutationState,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import {
   ArrowUpRight,
   ChevronDown,
@@ -47,7 +53,7 @@ import { Checkbox } from './ui/checkbox'
 import { SegmentedControl } from './ui/segmented-control'
 import { EmptyState, InlineAlert } from './ui/surface'
 import { checkLabel, checksVariant, reviewLabel, reviewVariant } from '../lib/pull-request-state'
-import { WORKSPACE_VIEW_HEADING_ID } from './workspace-navigation'
+import { workspaceViewHeadingId } from './workspace-navigation'
 import { cn } from '../lib/utils'
 import { claimsRovingKey, rovingAction, rovingTabIndex, rovingTarget } from '../lib/tree-navigation'
 import {
@@ -56,7 +62,13 @@ import {
   type ReviewSelection,
 } from './review-conversation'
 import { sameReviewComparison } from '@git-stacks/shared/review'
-import type { ReviewDraft, ReviewDraftRecord } from '@git-stacks/shared/review-threads'
+import type {
+  ReviewDraft,
+  ReviewDraftRecord,
+  ReviewDraftRecovery,
+  ReviewOwner,
+} from '@git-stacks/shared/review-threads'
+import { sameReviewDraft } from '@git-stacks/shared/review-threads'
 import { ReviewDiff } from './review-diff'
 import type { ReviewHistory } from '@git-stacks/shared/review-snapshots'
 import {
@@ -64,6 +76,7 @@ import {
   reviewSnapshotLabel,
 } from '@git-stacks/shared/review-snapshots'
 import { PullRequestChecksPanel } from './check-details'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 
 /**
  * The four review commands the shell's global shortcuts dispatch. They are
@@ -86,6 +99,58 @@ function readableError(value: unknown): string {
   return 'GitHub did not return review data.'
 }
 
+interface LocalDraftWrite {
+  record: ReviewDraftRecord
+  // Only a confirmed preceding write in this local FIFO may advance this baseline.
+  expectedUpdatedAt: string | null
+}
+
+function capturedDraftWrite(mutation: Mutation): LocalDraftWrite | null {
+  if (typeof mutation.options.meta?.retainedReviewDraft !== 'boolean') return null
+  // Only this typed local writer tags these trusted in-process variables.
+  const write = mutation.state.variables as LocalDraftWrite | undefined
+  return write ?? null
+}
+
+function sameDraftOwner(record: ReviewDraftRecord, owner: ReviewOwner, number: number): boolean {
+  return (
+    record.number === number &&
+    record.repo.toLowerCase() === owner.repo.toLowerCase() &&
+    record.viewer.toLowerCase() === owner.viewer.toLowerCase()
+  )
+}
+
+/** Only unresolved authored writes survive their observer, never read data or camera state. */
+export function UnsentReviewChangesNotice() {
+  const writes = useMutationState({
+    filters: {
+      predicate: (mutation) =>
+        mutation.options.meta?.retainedReviewDraft === true &&
+        (mutation.state.status === 'pending' || mutation.state.status === 'error'),
+    },
+    select: (mutation) => mutation.state.status,
+  })
+  const unsaved = writes.length > 0
+  React.useEffect(() => {
+    if (!unsaved) return
+    const protectUnsentText = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', protectUnsentText)
+    return () => window.removeEventListener('beforeunload', protectUnsentText)
+  }, [unsaved])
+  if (!writes.includes('error')) return null
+  return (
+    <InlineAlert tone="warning" title="Local review edits are not saved" role="status">
+      <p className="m-0 text-sm">
+        Unsent review changes are retained only in this window. Return to their original repository
+        and account to save them before closing.
+      </p>
+    </InlineAlert>
+  )
+}
+
 export function ReviewView({
   authority,
   desktop,
@@ -95,6 +160,9 @@ export function ReviewView({
   onSelectNumber,
   onManageNumber,
   commands,
+  busy,
+  observedPullRequest,
+  returnContext,
 }: {
   /**
    * The CLI authority the review data on screen was read under: the host, the
@@ -109,11 +177,14 @@ export function ReviewView({
   authority: string
   desktop: DesktopAPI | undefined
   pullRequests: readonly PullRequest[]
-  stackContext: Pick<RepositorySnapshot, 'branches' | 'reconciliation'>
+  stackContext: Pick<RepositorySnapshot, 'branches' | 'reconciliation' | 'path' | 'remoteUrl'>
   number: number | null
   onSelectNumber: (number: number) => void
   onManageNumber: (number: number) => void
   commands: React.MutableRefObject<ReviewCommands | null>
+  busy: boolean
+  observedPullRequest: PullRequest | null
+  returnContext: { label: string; onReturn: () => void } | null
 }) {
   const queryClient = useQueryClient()
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null)
@@ -136,6 +207,16 @@ export function ReviewView({
   const identityRef = React.useRef(identity)
   identityRef.current = identity
   const writeLocks = React.useRef(new Set<string>())
+  const draftOrigin = JSON.stringify([stackContext.path, stackContext.remoteUrl])
+  const draftOriginRef = React.useRef(draftOrigin)
+  draftOriginRef.current = draftOrigin
+  const mounted = React.useRef(false)
+  React.useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const rootKey = ['review', authority, number, reloadToken] as const
   const headlineQuery = useQuery({
     queryKey: [...rootKey, 'headline'],
@@ -182,6 +263,8 @@ export function ReviewView({
       })
       return desktop!.reviewHistory!(number!, 'review-history')
     },
+    placeholderData: (previous, query) =>
+      query?.queryKey[1] === authority && query.queryKey[2] === number ? previous : undefined,
   })
   const historyDiffQuery = useQuery({
     queryKey: [...rootKey, 'history-diff', ...revision, activeSnapshotOid],
@@ -192,6 +275,12 @@ export function ReviewView({
       })
       return desktop!.reviewHistoryDiff!(number!, activeSnapshotOid!, 'review-history-diff')
     },
+    placeholderData: (previous, query) =>
+      query?.queryKey[1] === authority &&
+      query.queryKey[2] === number &&
+      query.queryKey.at(-1) === activeSnapshotOid
+        ? previous
+        : undefined,
   })
   const threadsQuery = useQuery({
     queryKey: [...rootKey, 'threads', ...revision],
@@ -206,6 +295,16 @@ export function ReviewView({
   const draftsKey = ['review', authority, number, 'drafts'] as const
   const draftEdits = React.useRef(0)
   const pendingDraftWrites = React.useRef(0)
+  const verifiedDraftRecord = React.useRef<ReviewDraftRecord | null | undefined>(undefined)
+  const confirmedDraftOwner = React.useRef<ReviewOwner | null>(null)
+  const verifiedDraftIdentity = React.useRef(identity)
+  const verifiedDraftOrigin = React.useRef(draftOrigin)
+  if (verifiedDraftIdentity.current !== identity || verifiedDraftOrigin.current !== draftOrigin) {
+    verifiedDraftIdentity.current = identity
+    verifiedDraftOrigin.current = draftOrigin
+    verifiedDraftRecord.current = undefined
+    confirmedDraftOwner.current = null
+  }
   const draftsQuery = useQuery({
     queryKey: draftsKey,
     enabled: Boolean(headline && desktop?.reviewDrafts),
@@ -214,7 +313,43 @@ export function ReviewView({
       signal.throwIfAborted()
       const editsAtStart = draftEdits.current
       const writeAtStart = pendingDraftWrites.current > 0
+      const verifiedAtStart = verifiedDraftRecord.current
       const record = await desktop!.reviewDrafts!(number!)
+      signal.throwIfAborted()
+      if (
+        identityRef.current === identity &&
+        draftOriginRef.current === draftOrigin &&
+        (verifiedDraftRecord.current === verifiedAtStart ||
+          (record !== null &&
+            verifiedDraftRecord.current !== undefined &&
+            (verifiedDraftRecord.current === null ||
+              Date.parse(record.updatedAt) >= Date.parse(verifiedDraftRecord.current.updatedAt))))
+      )
+        verifiedDraftRecord.current = record
+      if (record) {
+        for (const mutation of queryClient.getMutationCache().getAll()) {
+          const captured = capturedDraftWrite(mutation)
+          if (
+            mutation.options.meta?.retainedReviewDraft !== true ||
+            mutation.options.meta.reviewDraftOrigin !== draftOrigin ||
+            !captured ||
+            !sameDraftOwner(captured.record, record, record.number)
+          )
+            continue
+          const matching =
+            sameReviewComparison(record.comparison, captured.record.comparison) &&
+            record.drafts.length === captured.record.drafts.length &&
+            record.drafts.every((draft, index) =>
+              sameReviewDraft(draft, captured.record.drafts[index]),
+            )
+          if (!matching) continue
+          mutation.setOptions({
+            ...mutation.options,
+            meta: { ...mutation.options.meta, retainedReviewDraft: false },
+          })
+          if (mutation.state.status !== 'pending') queryClient.getMutationCache().remove(mutation)
+        }
+      }
       if (writeAtStart || pendingDraftWrites.current > 0 || editsAtStart !== draftEdits.current) {
         const current = queryClient.getQueryData<ReviewDraftRecord | null>(draftsKey)
         if (current !== undefined) return current
@@ -222,6 +357,10 @@ export function ReviewView({
       return record
     },
   })
+  const reloadReview = () => {
+    setReloadToken((value) => value + 1)
+    void queryClient.invalidateQueries({ queryKey: draftsKey, exact: true })
+  }
   const viewedKey = [...rootKey, 'viewed', ...revision]
   const viewedQuery = useQuery({
     queryKey: viewedKey,
@@ -231,12 +370,82 @@ export function ReviewView({
       return desktop!.reviewViewed!(number!)
     },
   })
-  const files = filesQuery.data ?? null
+  const latestFiles = filesQuery.data ?? null
+  const displayedFiles = React.useRef({ identity, files: latestFiles })
+  if (
+    displayedFiles.current.identity !== identity ||
+    (!busy && displayedFiles.current.files !== latestFiles) ||
+    (!displayedFiles.current.files && latestFiles !== null)
+  ) {
+    displayedFiles.current = { identity, files: latestFiles }
+  }
+  const files = displayedFiles.current.files
+  const observedRevision = JSON.stringify([observedPullRequest?.headOid, observedPullRequest?.base])
+  const observedAtRead = React.useRef({ files, revision: observedRevision })
+  if (observedAtRead.current.files !== files) {
+    observedAtRead.current = { files, revision: observedRevision }
+  }
   const commits = commitsQuery.data ?? null
   const history = historyQuery.data ?? null
-  const historyDiff = historyDiffQuery.data ?? null
+  const latestHistoryDiff = historyDiffQuery.data ?? null
+  const displayedHistoryDiff = React.useRef({
+    identity,
+    snapshot: activeSnapshotOid,
+    diff: latestHistoryDiff,
+  })
+  if (
+    displayedHistoryDiff.current.identity !== identity ||
+    displayedHistoryDiff.current.snapshot !== activeSnapshotOid ||
+    (!busy && displayedHistoryDiff.current.diff !== latestHistoryDiff) ||
+    (!displayedHistoryDiff.current.diff && latestHistoryDiff !== null)
+  ) {
+    displayedHistoryDiff.current = {
+      identity,
+      snapshot: activeSnapshotOid,
+      diff: latestHistoryDiff,
+    }
+  }
+  const historyDiff = displayedHistoryDiff.current.diff
   const threadRead = threadsQuery.data ?? null
-  const draftRecord = draftsQuery.data ?? null
+  if (threadRead?.owner.viewer) confirmedDraftOwner.current = threadRead.owner
+  // Owner provenance survives a failed same-scope permissions read; it grants
+  // local composition access, never permission to dispatch a provider mutation.
+  const draftOwner = confirmedDraftOwner.current
+  // Keep the mutation opaque: structural sharing must not copy authored arrays.
+  const retainedDraftWrites = useMutationState<readonly [Mutation, 'pending' | 'error'] | null>({
+    filters: {
+      predicate: (mutation) =>
+        mutation.options.meta?.retainedReviewDraft === true &&
+        mutation.options.meta.reviewDraftOrigin === draftOrigin &&
+        (mutation.state.status === 'pending' || mutation.state.status === 'error'),
+    },
+    select: (mutation) => {
+      const write = capturedDraftWrite(mutation)
+      if (
+        !write ||
+        !draftOwner?.viewer ||
+        !sameDraftOwner(write.record, draftOwner, number!) ||
+        (mutation.state.status !== 'pending' && mutation.state.status !== 'error')
+      )
+        return null
+      return [mutation, mutation.state.status] as const
+    },
+  })
+  const retainedWrite = retainedDraftWrites.findLast((write) => write !== null) ?? null
+  const retainedLocalWrite = retainedWrite ? capturedDraftWrite(retainedWrite[0]) : null
+  const retainedDraft = retainedLocalWrite?.record ?? null
+  const ownedDraft =
+    draftsQuery.data && draftOwner?.viewer && sameDraftOwner(draftsQuery.data, draftOwner, number!)
+      ? draftsQuery.data
+      : null
+  const draftRecord = retainedDraft ?? ownedDraft
+  const liveDraftRecord = React.useRef(draftRecord)
+  liveDraftRecord.current = draftRecord
+  const savedDraftConflict = Boolean(
+    retainedLocalWrite &&
+      verifiedDraftRecord.current !== undefined &&
+      retainedLocalWrite.expectedUpdatedAt !== (verifiedDraftRecord.current?.updatedAt ?? null),
+  )
   const viewed = viewedQuery.data ?? null
   const draftVersion = React.useRef({ record: draftRecord, generation: 0 })
   if (draftVersion.current.record !== draftRecord) {
@@ -279,10 +488,10 @@ export function ReviewView({
           ? 'ready'
           : 'idle'
   const headlineState = stage(headlineQuery)
-  const filesState = stage(filesQuery)
+  const filesState = files ? 'ready' : stage(filesQuery)
   const commitsState = stage(commitsQuery)
   const historyState = stage(historyQuery)
-  const historyDiffState = stage(historyDiffQuery)
+  const historyDiffState = historyDiff ? 'ready' : stage(historyDiffQuery)
   const threadState = stage(threadsQuery)
   const threadError = threadsQuery.error ? readableError(threadsQuery.error) : null
   const readError = headlineQuery.error ?? filesQuery.error ?? historyDiffQuery.error
@@ -303,10 +512,11 @@ export function ReviewView({
     writeLocks.current.clear()
     draftEdits.current += 1
   }, [identity])
+  const comparisonIdentity = JSON.stringify(files?.comparison ?? null)
   React.useEffect(() => {
     // Numeric addresses are meaningful only in the comparison they were picked.
     setSelection(null)
-  }, [files?.comparison.headOid, files?.comparison.baseOid, files?.comparison.baseRef])
+  }, [comparisonIdentity])
   React.useEffect(() => {
     if (!checksWatching || pane !== 'checks') return
     const timer = setInterval(() => setChecksReload((value) => value + 1), 10_000)
@@ -346,17 +556,24 @@ export function ReviewView({
   }
   const clearHistoryMutation = useMutation({
     mutationKey: [...rootKey, 'clear-history'],
-    mutationFn: () => desktop!.reviewClearHistory!(number!),
+    mutationFn: (owner: ReviewOwner) => desktop!.reviewClearHistory!(number!, owner),
     retry: false,
   })
   const clearingHistory = clearHistoryMutation.isPending
   const handleClearHistory = async () => {
-    if (!headline || !desktop?.reviewClearHistory || writeLocks.current.has('history')) return
+    if (
+      !headline ||
+      !threadRead?.owner.viewer ||
+      !desktop?.reviewClearHistory ||
+      writeLocks.current.has('history')
+    )
+      return
     const owner = identity
+    const capturedOwner = threadRead.owner
     writeLocks.current.add('history')
     try {
       await queryClient.cancelQueries({ queryKey: [...rootKey, 'history'] })
-      const reset = await clearHistoryMutation.mutateAsync()
+      const reset = await clearHistoryMutation.mutateAsync(capturedOwner)
       if (identityRef.current !== owner) return
       queryClient.setQueryData([...rootKey, 'history', ...revision], reset)
       setActiveSnapshotOid(null)
@@ -368,41 +585,161 @@ export function ReviewView({
   }
   const saveDraftsMutation = useMutation({
     mutationKey: [...rootKey, 'save-drafts', files?.comparison],
-    mutationFn: (record: ReviewDraftRecord) => desktop!.reviewSetDrafts!(record),
+    // FIFO is the existing mutation lifecycle, not a second journal or retry queue.
+    scope: {
+      id: JSON.stringify([
+        draftOrigin,
+        draftOwner?.repo.toLowerCase(),
+        draftOwner?.viewer.toLowerCase(),
+        number,
+        'local-review-drafts',
+      ]),
+    },
+    meta: { reviewDraftOrigin: draftOrigin, retainedReviewDraft: true },
+    gcTime: Infinity,
+    mutationFn: async (write: LocalDraftWrite) => {
+      if (!mounted.current || draftOriginRef.current !== draftOrigin)
+        throw new Error('Return to the original review context to save these local edits.')
+      const cache = queryClient.getMutationCache()
+      const mutation = cache.getAll().find((entry) => entry.state.variables === write)
+      if (mutation?.options.meta?.retainedReviewDraft === false)
+        throw new Error('A newer local edit superseded this queued draft write.')
+      const baseline = write.expectedUpdatedAt
+      const saved = await desktop!.reviewSetDrafts!(write.record, baseline)
+      // A following local edit was derived from this optimistic predecessor.
+      // Advance only that known chain, never from an unrelated read or failure.
+      for (const following of cache.getAll()) {
+        const captured = capturedDraftWrite(following)
+        if (
+          captured &&
+          captured !== write &&
+          following.options.meta?.retainedReviewDraft === true &&
+          following.options.meta.reviewDraftOrigin === draftOrigin &&
+          sameDraftOwner(captured.record, saved, saved.number) &&
+          captured.expectedUpdatedAt === baseline
+        )
+          captured.expectedUpdatedAt = saved.updatedAt
+      }
+      const verified = verifiedDraftRecord.current
+      if (
+        mounted.current &&
+        identityRef.current === identity &&
+        draftOriginRef.current === draftOrigin &&
+        (!verified ||
+          !sameDraftOwner(verified, saved, saved.number) ||
+          Date.parse(saved.updatedAt) >= Date.parse(verified.updatedAt))
+      )
+        verifiedDraftRecord.current = saved
+      return saved
+    },
     retry: false,
   })
   const saveDrafts = (drafts: ReviewDraft[]) => {
-    if (!headline || !files) return
-    const record: ReviewDraftRecord = {
-      number: headline.pullRequest.number,
-      repo: '',
-      viewer: '',
-      comparison: files.comparison,
-      drafts,
-      updatedAt: new Date().toISOString(),
+    if (number === null || !draftOwner?.viewer) return
+    const preservesSavedComparison =
+      draftRecord !== null &&
+      (drafts.length === 0 ||
+        draftRecord.drafts.some((saved) => drafts.some((draft) => draft.id === saved.id)))
+    const comparison = preservesSavedComparison ? draftRecord.comparison : files?.comparison
+    if (!comparison) {
+      setError('Read the current comparison before composing a new inline comment.')
+      return
     }
-    const owner = identity
+    if (!retainedLocalWrite && verifiedDraftRecord.current === undefined) {
+      setError('Saved drafts must be read before a full-set save can be admitted.')
+      return
+    }
+    const previousTime = Date.parse(draftRecord?.updatedAt ?? '')
+    const record: ReviewDraftRecord = {
+      number,
+      ...draftOwner,
+      comparison,
+      drafts,
+      updatedAt: new Date(
+        Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0),
+      ).toISOString(),
+    }
     draftEdits.current += 1
+    liveDraftRecord.current = record
     void queryClient.cancelQueries({ queryKey: draftsKey, exact: true })
     queryClient.setQueryData(draftsKey, record)
     if (!desktop?.reviewSetDrafts) return
+    const cache = queryClient.getMutationCache()
+    for (const mutation of cache.getAll()) {
+      const queued = capturedDraftWrite(mutation)
+      if (
+        queued &&
+        mutation.state.status === 'pending' &&
+        mutation.state.isPaused &&
+        mutation.options.meta?.retainedReviewDraft === true &&
+        mutation.options.meta.reviewDraftOrigin === draftOrigin &&
+        sameDraftOwner(queued.record, record, record.number) &&
+        sameReviewComparison(queued.record.comparison, record.comparison)
+      ) {
+        // Nothing has left this paused lifecycle yet. Keep its latest authored
+        // snapshot instead of retaining another complete array for every edit.
+        queued.record = record
+        return
+      }
+    }
+    const write: LocalDraftWrite = {
+      record,
+      expectedUpdatedAt: retainedLocalWrite
+        ? retainedLocalWrite.expectedUpdatedAt
+        : (verifiedDraftRecord.current?.updatedAt ?? null),
+    }
+    const owner = identity
     pendingDraftWrites.current += 1
-    void saveDraftsMutation
-      .mutateAsync(record)
+    const writing = saveDraftsMutation.mutateAsync(write)
+    for (const mutation of cache.getAll()) {
+      const captured = capturedDraftWrite(mutation)
+      if (
+        !captured ||
+        captured === write ||
+        mutation.options.meta?.reviewDraftOrigin !== draftOrigin ||
+        !sameDraftOwner(captured.record, record, record.number)
+      )
+        continue
+      mutation.setOptions({
+        ...mutation.options,
+        meta: { ...mutation.options.meta, retainedReviewDraft: false },
+      })
+      // Older pending variables remain only for their running lifecycle, then are removed.
+      if (mutation.state.status !== 'pending') cache.remove(mutation)
+    }
+    void writing
       .then((saved) => {
         // A later local edit outranks the acknowledgement of an earlier one.
-        if (identityRef.current === owner && queryClient.getQueryData(draftsKey) === record) {
+        if (
+          mounted.current &&
+          identityRef.current === owner &&
+          draftOriginRef.current === draftOrigin &&
+          queryClient.getQueryData(draftsKey) === write.record
+        ) {
           queryClient.setQueryData(draftsKey, saved)
+          liveDraftRecord.current = saved
         }
       })
-      .catch(() => {
-        if (identityRef.current === owner)
-          setError(
-            'The pending comments could not be saved for this repository, so they will not survive leaving this workspace.',
-          )
+      .catch((cause) => {
+        if (
+          mounted.current &&
+          identityRef.current === owner &&
+          draftOriginRef.current === draftOrigin &&
+          queryClient.getQueryData(draftsKey) === write.record
+        ) {
+          setError(readableError(cause))
+          void queryClient.invalidateQueries({ queryKey: draftsKey, exact: true })
+        }
       })
       .finally(() => {
         pendingDraftWrites.current -= 1
+        const mutation = cache.getAll().find((entry) => entry.state.variables === write)
+        if (
+          mutation &&
+          (mutation.state.status === 'success' ||
+            mutation.options.meta?.retainedReviewDraft !== true)
+        )
+          cache.remove(mutation)
       })
   }
 
@@ -444,7 +781,8 @@ export function ReviewView({
 
   const viewedMutation = useMutation({
     mutationKey: [...rootKey, 'save-viewed', files?.comparison],
-    mutationFn: (record: ReviewViewedRecord) => desktop!.reviewSetViewed!(record),
+    mutationFn: ({ record, owner }: { record: ReviewViewedRecord; owner: ReviewOwner }) =>
+      desktop!.reviewSetViewed!(record, owner),
     retry: false,
   })
 
@@ -467,7 +805,9 @@ export function ReviewView({
       return diffFiles
     }
     const seenPaths = new Set(diffFiles.map((f) => f.path))
-    const unchangedFromCurrent: ReviewFile[] = (files?.files ?? [])
+    const unchangedFromCurrent: ReviewFile[] = (
+      files && sameReviewComparison(historyDiff.to, files.comparison) ? files.files : []
+    )
       .filter((f) => !seenPaths.has(f.path))
       .map((f) => ({
         ...f,
@@ -496,8 +836,15 @@ export function ReviewView({
   }, [eligibleFiles, selectedPath])
 
   const markViewed = React.useCallback(
-    (path: string) => {
-      if (!headline || !files) return
+    (path: string, isViewed: boolean) => {
+      if (
+        !headline ||
+        !files ||
+        !threadRead?.owner.viewer ||
+        !desktop?.reviewSetViewed ||
+        isComparing
+      )
+        return
       // Bound to the comparison the displayed files were read at, not to the
       // head alone: a base retarget changes what every file means, and a mark
       // carried across it would claim a review of changes nobody looked at.
@@ -506,25 +853,36 @@ export function ReviewView({
         headline.pullRequest.number,
         files.comparison,
         path,
+        isViewed,
         new Date().toISOString(),
       )
       const owner = identity
       void queryClient.cancelQueries({ queryKey: viewedKey, exact: true })
       queryClient.setQueryData(viewedKey, next)
-      if (desktop?.reviewSetViewed)
-        void viewedMutation
-          .mutateAsync(next)
-          .then((saved) => {
-            if (identityRef.current === owner && queryClient.getQueryData(viewedKey) === next) {
-              queryClient.setQueryData(viewedKey, saved)
-            }
-          })
-          .catch(() => {
-            if (identityRef.current === owner)
-              setError('The viewed-file record could not be saved for this repository.')
-          })
+      void viewedMutation
+        .mutateAsync({ record: next, owner: threadRead.owner })
+        .then((saved) => {
+          if (identityRef.current === owner && queryClient.getQueryData(viewedKey) === next) {
+            queryClient.setQueryData(viewedKey, saved)
+          }
+        })
+        .catch(() => {
+          if (identityRef.current === owner)
+            setError('The viewed-file record could not be saved for this repository.')
+        })
     },
-    [desktop, files, headline, viewed, identity, queryClient, viewedKey, viewedMutation],
+    [
+      desktop,
+      files,
+      headline,
+      isComparing,
+      viewed,
+      threadRead,
+      identity,
+      queryClient,
+      viewedKey,
+      viewedMutation,
+    ],
   )
 
   const step = React.useCallback(
@@ -533,7 +891,7 @@ export function ReviewView({
       const target = adjacentReviewFileIndex(filePaths, selectedPath, direction)
       if (target) {
         setSelectedPath(target)
-        markViewed(target)
+        markViewed(target, true)
       }
     },
     [filePaths, markViewed, selectedPath],
@@ -589,13 +947,43 @@ export function ReviewView({
     return historyDiff.files.find((file) => file.path === selectedPath) ?? null
   }, [historyDiff, isComparing, selectedPath])
 
-  const frozenReason = isComparing
-    ? `Viewing changes since ${activeSnapshot?.headOid.slice(0, 7) ?? 'a previous head'}. Comments and reviews are disabled in historical comparison mode; return to the current diff to comment.`
-    : null
+  const observedChanged = Boolean(
+    files &&
+      ((observedAtRead.current.revision !== observedRevision &&
+        ((observedPullRequest?.headOid &&
+          observedPullRequest.headOid !== files.comparison.headOid) ||
+          (observedPullRequest && observedPullRequest.base !== files.comparison.baseRef))) ||
+        (headline?.pullRequest.headOid &&
+          headline.pullRequest.headOid !== files.comparison.headOid) ||
+        (headline && headline.pullRequest.base !== files.comparison.baseRef) ||
+        (latestFiles && !sameReviewComparison(latestFiles.comparison, files.comparison))),
+  )
+  const draftComparisonChanged = Boolean(
+    files &&
+      draftRecord?.drafts.length &&
+      !sameReviewComparison(draftRecord.comparison, files.comparison),
+  )
+  const frozenReason = draftComparisonChanged
+    ? 'Your unsent comments retain an earlier head or base comparison. Their original anchors cannot be moved to this diff. Keep or discard those comments before composing a review of the current revision.'
+    : observedChanged
+      ? 'The pull request head or base changed since this displayed comparison. Your unsent text is retained. Reload and inspect the current diff before sending a review.'
+      : isComparing
+        ? `Viewing changes since ${activeSnapshot?.headOid.slice(0, 7) ?? 'a previous head'}. Comments and reviews are disabled in historical comparison mode; return to the current diff to comment.`
+        : !retainedLocalWrite && verifiedDraftRecord.current === undefined
+          ? 'Saved drafts have not been read for this repository and account. Wait for the local journal read or reload before composing a new comment.'
+          : threadState !== 'ready' || !threadRead?.owner.viewer
+            ? 'The current conversation permissions have not been confirmed. Your existing text is retained; wait for the permissions read or reload before composing or sending.'
+            : null
+  const submissionFrozenReason = savedDraftConflict
+    ? `${frozenReason ? `${frozenReason} ` : ''}Saved drafts changed after these unsent edits were composed. The full set cannot overwrite newer saved work; copy any text you need before explicitly discarding these local edits.`
+    : (frozenReason ??
+      (retainedWrite
+        ? 'These local edits have not been saved yet. Keep editing while the write finishes, or explicitly save the retained drafts before submitting.'
+        : null))
 
   const select = (path: string) => {
     setSelectedPath(path)
-    markViewed(path)
+    markViewed(path, true)
   }
 
   // Arrow keys move between file rows the way they move between branches, and
@@ -620,13 +1008,18 @@ export function ReviewView({
         <div className="list-title-group">
           <h1
             className={headline ? 'sr-only' : undefined}
-            id={WORKSPACE_VIEW_HEADING_ID}
+            id={workspaceViewHeadingId('review')}
             tabIndex={-1}
           >
             Review
           </h1>
           {!headline ? <span className="list-subtitle">No pull request selected</span> : null}
         </div>
+        {returnContext ? (
+          <Button size="sm" variant="ghost" onClick={returnContext.onReturn}>
+            {returnContext.label}
+          </Button>
+        ) : null}
         {headline ? (
           <>
             <SegmentedControl
@@ -644,33 +1037,37 @@ export function ReviewView({
               onCheckedChange={setHideWhitespace}
               title="Hide lines whose only difference from the line they replaced is spaces or tabs. GitHub's API has no whitespace option for a pull request diff, so this filters the text it already sent."
             />
-            <IconButton
-              label="Reload review data from GitHub"
-              onClick={() => setReloadToken((value) => value + 1)}
-            >
+            <IconButton label="Reload review data from GitHub" onClick={reloadReview}>
               <RefreshCw className="size-4" />
             </IconButton>
-            <details className="review-actions">
-              <summary>PR actions</summary>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => {
-                  if (desktop) openExternalMutation.mutate(headline.pullRequest.url)
-                }}
-              >
-                <ExternalLink className="size-3.5" />
-                Open on GitHub
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => onManageNumber(headline.pullRequest.number)}
-              >
-                Manage pull request
-              </Button>
-            </details>
           </>
+        ) : null}
+        {headline || desktop?.reviewDraftRecovery ? (
+          <details className="review-actions">
+            <summary>{headline ? 'PR actions' : 'Local recovery'}</summary>
+            {headline ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    if (desktop) openExternalMutation.mutate(headline.pullRequest.url)
+                  }}
+                >
+                  <ExternalLink className="size-3.5" />
+                  Open on GitHub
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onManageNumber(headline.pullRequest.number)}
+                >
+                  Manage pull request
+                </Button>
+              </>
+            ) : null}
+            <ReviewDraftRecoveryPanel desktop={desktop} authority={authority} />
+          </details>
         ) : null}
       </div>
 
@@ -691,6 +1088,51 @@ export function ReviewView({
           {error} Local Git actions are unaffected; nothing was checked out to read this.
         </InlineAlert>
       ) : null}
+      {retainedWrite?.[1] === 'error' && retainedDraft ? (
+        <InlineAlert
+          tone="warning"
+          title={savedDraftConflict ? 'Saved drafts changed' : 'Local draft edits await saving'}
+          role="status"
+        >
+          <p className="m-0 text-sm">
+            These original edits remain in this window with their original comparison and anchors.
+            {savedDraftConflict
+              ? ' Newer saved work was not overwritten. Copy any local text you need before discarding these unsaved edits.'
+              : ' They have not been saved to the local journal.'}
+          </p>
+          {savedDraftConflict ? (
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={saveDraftsMutation.isPending}
+              onClick={() => {
+                const mutation = retainedWrite[0]
+                mutation.setOptions({
+                  ...mutation.options,
+                  meta: { ...mutation.options.meta, retainedReviewDraft: false },
+                })
+                queryClient.getMutationCache().remove(mutation)
+                queryClient.setQueryData(draftsKey, verifiedDraftRecord.current ?? null)
+                liveDraftRecord.current = verifiedDraftRecord.current ?? null
+                setError(null)
+                setSelection(null)
+              }}
+            >
+              Discard unsaved edits and use saved drafts
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={saveDraftsMutation.isPending}
+              disabled={!desktop?.reviewSetDrafts}
+              onClick={() => saveDrafts(retainedDraft.drafts)}
+            >
+              Save local drafts
+            </Button>
+          )}
+        </InlineAlert>
+      ) : null}
 
       {!headline && headlineState !== 'loading' ? (
         <EmptyState className="compact-empty">
@@ -707,7 +1149,14 @@ export function ReviewView({
             <ul className="review-chooser">
               {pullRequests.slice(0, LIST_PAGE_SIZE).map((pr) => (
                 <li key={pr.number}>
-                  <Button size="sm" variant="secondary" onClick={() => onSelectNumber(pr.number)}>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      onSelectNumber(pr.number)
+                      if (pr.number === number) reloadReview()
+                    }}
+                  >
                     #{pr.number} {pr.title}
                   </Button>
                 </li>
@@ -753,27 +1202,55 @@ export function ReviewView({
             <summary>
               Comparison ·{' '}
               {isComparing
-                ? `Historical ${shortOid(activeSnapshotOid)}`
+                ? `Historical ${shortOid(activeSnapshotOid)} → ${shortOid(historyDiff?.to.headOid ?? null)}`
                 : `Current head ${shortOid(files?.comparison.headOid ?? headline.pullRequest.headOid ?? null)}`}
             </summary>
             <ReviewHistoryBar
               history={history}
               state={historyState}
               currentHeadOid={files?.comparison.headOid ?? headline.pullRequest.headOid ?? null}
+              displayedComparison={historyDiff?.to ?? null}
               activeSnapshotOid={activeSnapshotOid}
               hideUnchanged={hideUnchanged}
               unchangedCount={unchangedPaths.length}
               truncated={historyDiff?.truncated ?? false}
               clearing={clearingHistory}
+              clearUnavailableReason={
+                !threadRead?.owner.viewer
+                  ? threadState === 'failed'
+                    ? 'Snapshot history cannot be cleared until the current repository and account are confirmed. Reload the failed conversation read.'
+                    : 'Wait for the current repository and account to be confirmed before clearing snapshot history.'
+                  : null
+              }
               onSelectSnapshot={(oid) => setActiveSnapshotOid(oid)}
               onToggleHideUnchanged={(checked) => setHideUnchanged(checked)}
               onClearHistory={handleClearHistory}
             />
           </details>
-          {isComparing ? (
+          {frozenReason ? (
             <p className="review-history-warning" role="status">
               {frozenReason}
             </p>
+          ) : null}
+          {isComparing &&
+          historyDiff?.state === 'files' &&
+          files &&
+          !sameReviewComparison(historyDiff.to, files.comparison) ? (
+            <InlineAlert className="review-comparison-alert" role="status" tone="warning">
+              The pull request moved to head {shortOid(files.comparison.headOid)}, base{' '}
+              {shortOid(files.comparison.baseOid)} ({files.comparison.baseRef ?? 'unknown'}). These
+              displayed hunks still compare against head {shortOid(historyDiff.to.headOid)}, base{' '}
+              {shortOid(historyDiff.to.baseOid)} ({historyDiff.to.baseRef ?? 'unknown'}). Reload to
+              compare against the latest endpoint.
+              <Button
+                className="review-comparison-reload"
+                size="sm"
+                variant="secondary"
+                onClick={reloadReview}
+              >
+                Reload
+              </Button>
+            </InlineAlert>
           ) : null}
 
           <div
@@ -915,14 +1392,41 @@ export function ReviewView({
                     ? `${filePaths.indexOf(selected.path) + 1} of ${filePaths.length}`
                     : `No file open`}
                 </span>
-                <Button
-                  disabled={filePaths.length === 0}
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => step(1)}
-                >
-                  Next file
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  {selected && !isComparing ? (
+                    <Button
+                      disabled={
+                        !desktop?.reviewSetViewed ||
+                        !threadRead?.owner.viewer ||
+                        viewedMutation.isPending
+                      }
+                      size="sm"
+                      variant="ghost"
+                      onClick={() =>
+                        markViewed(
+                          selected.path,
+                          !viewedPaths(viewed, number!, files?.comparison ?? null).includes(
+                            selected.path,
+                          ),
+                        )
+                      }
+                    >
+                      {viewedPaths(viewed, number!, files?.comparison ?? null).includes(
+                        selected.path,
+                      )
+                        ? 'Mark file as unviewed'
+                        : 'Mark file as viewed'}
+                    </Button>
+                  ) : null}
+                  <Button
+                    disabled={filePaths.length === 0}
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => step(1)}
+                  >
+                    Next file
+                  </Button>
+                </div>
               </div>
               {filesState === 'loading' || (isComparing && historyDiffState === 'loading') ? (
                 <p className="section-empty" role="status">
@@ -1106,26 +1610,7 @@ export function ReviewView({
                       className="review-comparison-reload"
                       size="sm"
                       variant="secondary"
-                      onClick={() => setReloadToken((value) => value + 1)}
-                    >
-                      Reload
-                    </Button>
-                  </InlineAlert>
-                ) : null}
-
-                {isComparing &&
-                historyDiff?.state === 'files' &&
-                files?.comparison.headOid &&
-                historyDiff.to.headOid !== files.comparison.headOid ? (
-                  <InlineAlert className="review-comparison-alert" role="status" tone="warning">
-                    The pull request moved to {shortOid(files.comparison.headOid)} after this
-                    comparison was taken against {shortOid(historyDiff.to.headOid)}. Reload to
-                    compare against the latest head.
-                    <Button
-                      className="review-comparison-reload"
-                      size="sm"
-                      variant="secondary"
-                      onClick={() => setReloadToken((value) => value + 1)}
+                      onClick={reloadReview}
                     >
                       Reload
                     </Button>
@@ -1147,14 +1632,14 @@ export function ReviewView({
                           ? 'failed'
                           : 'loading'
                     }
-                    getDrafts={() => queryClient.getQueryData<ReviewDraftRecord>(draftsKey) ?? null}
+                    getDrafts={() => liveDraftRecord.current}
                     resolutions={resolutions}
                     selection={selection}
                     onClearSelection={() => setSelection(null)}
                     onDraftChange={saveDrafts}
-                    onReload={() => setReloadToken((value) => value + 1)}
+                    onReload={reloadReview}
                     onSelect={selectThreadLine}
-                    frozenReason={frozenReason}
+                    frozenReason={submissionFrozenReason}
                   />
                 </ReviewQueryIdentity.Provider>
               </div>
@@ -1163,6 +1648,93 @@ export function ReviewView({
         </>
       ) : null}
     </div>
+  )
+}
+
+function ReviewDraftRecoveryPanel({
+  desktop,
+  authority,
+}: {
+  desktop: DesktopAPI | undefined
+  authority: string
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [selected, setSelected] = React.useState<Pick<
+    ReviewDraftRecovery,
+    'repo' | 'viewer' | 'number'
+  > | null>(null)
+  const recovery = useQuery({
+    queryKey: ['review-draft-recovery', authority, selected],
+    enabled: open && Boolean(desktop?.reviewDraftRecovery),
+    queryFn: () => desktop!.reviewDraftRecovery!(selected),
+    gcTime: 0,
+  })
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => {
+          setSelected(null)
+          setOpen(true)
+        }}
+      >
+        Recover unattributed local text
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="workflow-dialog" aria-label="Recover unattributed local text">
+          <DialogHeader>
+            <DialogTitle>Recover unattributed local text</DialogTitle>
+            <DialogDescription>
+              Older local records did not record their GitHub host. These are not drafts for the
+              pull request or account currently on screen. Showing their original text is an
+              explicit local recovery action; no anchors, submission receipts, or account identity
+              are restored, no records are changed, and nothing is sent.
+            </DialogDescription>
+          </DialogHeader>
+          {recovery.isFetching ? <p role="status">Reading local recovery records…</p> : null}
+          {recovery.error ? (
+            <InlineAlert tone="warning">{readableError(recovery.error)}</InlineAlert>
+          ) : null}
+          {recovery.data?.length === 0 ? <p>No unattributed local records were found.</p> : null}
+          {recovery.data?.map((record) => (
+            <section key={JSON.stringify([record.repo, record.viewer, record.number])}>
+              <h3>
+                {record.repo} #{record.number} · original recorded account {record.viewer}
+              </h3>
+              <p>
+                Host not recorded · {record.count} locally saved text fragment
+                {record.count === 1 ? '' : 's'}.
+              </p>
+              {record.bodies === null ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() =>
+                    setSelected({
+                      repo: record.repo,
+                      viewer: record.viewer,
+                      number: record.number,
+                    })
+                  }
+                >
+                  Show original text for manual recovery
+                </Button>
+              ) : (
+                record.bodies.map((body, index) => (
+                  <p key={index} className="whitespace-pre-wrap break-words">
+                    {body}
+                  </p>
+                ))
+              )}
+            </section>
+          ))}
+          <Button variant="secondary" onClick={() => setOpen(false)}>
+            Close without changing records
+          </Button>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
@@ -1578,11 +2150,13 @@ function ReviewHistoryBar({
   history,
   state: _state,
   currentHeadOid,
+  displayedComparison,
   activeSnapshotOid,
   hideUnchanged,
   unchangedCount,
   truncated,
   clearing,
+  clearUnavailableReason,
   onSelectSnapshot,
   onToggleHideUnchanged,
   onClearHistory,
@@ -1590,11 +2164,13 @@ function ReviewHistoryBar({
   history: ReviewHistory | null
   state: Stage
   currentHeadOid: string | null
+  displayedComparison: ReviewComparison | null
   activeSnapshotOid: string | null
   hideUnchanged: boolean
   unchangedCount: number
   truncated: boolean
   clearing: boolean
+  clearUnavailableReason: string | null
   onSelectSnapshot: (oid: string | null) => void
   onToggleHideUnchanged: (checked: boolean) => void
   onClearHistory: () => void
@@ -1655,7 +2231,7 @@ function ReviewHistoryBar({
         {isComparing ? (
           <div className="review-history-comparing">
             <Badge variant="outline">
-              Comparing {activeShort} → {currentShort}
+              Comparing {activeShort} → {shortOid(displayedComparison?.headOid ?? null)}
             </Badge>
             <Checkbox
               checked={hideUnchanged}
@@ -1678,8 +2254,11 @@ function ReviewHistoryBar({
         <Button
           size="sm"
           variant="ghost"
-          disabled={clearing || snapshots.length === 0}
-          tooltip="Clear locally observed snapshots for this pull request under the current account"
+          disabled={clearing || snapshots.length === 0 || clearUnavailableReason !== null}
+          tooltip={
+            clearUnavailableReason ??
+            'Clear locally observed snapshots for this pull request under the current account'
+          }
           onClick={onClearHistory}
         >
           {clearing ? 'Clearing…' : 'Clear snapshot history'}

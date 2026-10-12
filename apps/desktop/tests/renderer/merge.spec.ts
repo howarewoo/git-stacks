@@ -478,4 +478,79 @@ test.describe('Persistent remote recovery in the actual App', () => {
     await expect(dialog.getByText('Completed', { exact: true })).toHaveCount(0)
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
+  test('a retired producer cannot replace current merge outcomes after authority changes', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-authenticated' })
+    const retiredScope = await page.evaluate(() => window.fixture.operationScope())
+    await publishCliStatus(page, {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'replacement',
+      version: '2.62.0',
+      identity: 'cli:github.com:replacement:1',
+      message: null,
+    })
+    await page.evaluate((scope) => {
+      window.fixture.pushMergeProgress({
+        scope: window.fixture.operationScope(),
+        source: 'action',
+        progress: {
+          action: 'default',
+          status: 'running',
+          message: 'Current captured merge',
+          layers: [
+            {
+              branch: 'feature/checkout-tests',
+              pullRequest: 41,
+              status: 'pending',
+              detail: 'Current authority owns this request',
+              mergedOid: null,
+              queue: null,
+              requestUuid: 'current',
+            },
+          ],
+        },
+      })
+      window.fixture.pushMergeProgress({
+        scope,
+        source: 'action',
+        progress: {
+          action: 'default',
+          status: 'running',
+          message: 'Retired merge must not appear',
+          layers: [
+            {
+              branch: 'feature/retired',
+              pullRequest: 999,
+              status: 'pending',
+              detail: 'Retired result',
+              mergedOid: null,
+              queue: null,
+              requestUuid: 'retired',
+            },
+          ],
+        },
+      })
+      window.fixture.pushMergeProgress({ scope, source: 'action', progress: null })
+    }, retiredScope)
+    const recovery = page.getByRole('region', { name: 'Remote operation recovery' })
+    await expect(recovery).toContainText('Current captured merge')
+    await expect(recovery).not.toContainText('Retired merge must not appear')
+    await expect(recovery).not.toContainText('Retired result')
+    for (const destination of ['changes', 'review', 'history', 'branches'] as const) {
+      await switchDestination(page, destination)
+      await expect(recovery).toContainText('Current captured merge')
+      await expect(recovery).not.toContainText('Retired result')
+    }
+    await page.evaluate(() =>
+      window.fixture.failNext('mergeStatus', 'Recovery reentry unavailable'),
+    )
+    await recovery.getByRole('button', { name: 'Review merge outcomes' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('Current captured merge')
+    await expect(dialog).toContainText('Recovery reentry unavailable')
+    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
+    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+  })
 })

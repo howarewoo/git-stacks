@@ -688,7 +688,7 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await diagnostics.focus()
     await page.keyboard.press('Enter')
 
-    const heading = page.locator('#workspace-view-heading')
+    const heading = page.locator('#workspace-view-heading-diagnostics')
     await expect(heading).toBeFocused()
     await expect(heading).toHaveText('Diagnostics')
     // The change is also announced politely for readers that track the live region.

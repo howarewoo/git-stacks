@@ -61,6 +61,7 @@ export type FixtureCall =
   | 'reviewSetViewed'
   | 'reviewThreads'
   | 'reviewDrafts'
+  | 'reviewDraftRecovery'
   | 'reviewSetDrafts'
   | 'reviewResolveDrafts'
   | 'reviewSubmit'
@@ -254,6 +255,16 @@ export interface FixtureControl {
   readonly calls: FixtureCallRecord[]
   /** Call kinds currently held pending by `hold`. */
   readonly pending: FixtureCall[]
+  /** Actual gallery-owned cache diagnostics; never provider read payloads or credentials. */
+  reviewCache(): {
+    reads: readonly (readonly unknown[])[]
+    writes: ReadonlyArray<{
+      key: readonly unknown[] | null
+      status: string
+      retained: boolean
+      authored: unknown
+    }>
+  }
   /**
    * Installs another scenario's answers into the doubles already installed, without
    * remounting anything: the mounted tree keeps its state, its destination, and
@@ -275,7 +286,7 @@ export interface FixtureControl {
    */
   release(call?: FixtureCall, occurrence?: 'oldest' | 'newest'): number
   /** Rejects the next call of `call` once, then restores normal behavior. */
-  failNext(call: FixtureCall, message?: string): void
+  failNext(call: FixtureCall, message?: string, name?: string): void
   /**
    * Answers the next call of `call` with `value` once, then restores normal
    * behavior. The value is the answer the producer itself would return, so a

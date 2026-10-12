@@ -90,14 +90,19 @@ import {
 import { claimsRovingKey, rovingAction, rovingTabIndex, rovingTarget } from './lib/tree-navigation'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import {
-  WORKSPACE_VIEW_HEADING_ID,
+  workspaceViewHeadingId,
   WORKSPACE_VIEW_SHORTCUTS,
   WorkspaceNavigation,
+  WorkspaceSurface,
   type WorkspaceView,
   workspaceNeedsNoRepository,
   workspaceViewLabel,
 } from './components/workspace-navigation'
-import { ReviewView, type ReviewCommands } from './components/review-view'
+import {
+  ReviewView,
+  UnsentReviewChangesNotice,
+  type ReviewCommands,
+} from './components/review-view'
 import { ConflictResolver } from './components/conflict-resolver'
 import { HistoryView, OperationBanner } from './components/repository-views'
 import { GraphWorkbench } from './components/graph-workbench'
@@ -516,7 +521,20 @@ function App() {
   } | null>(null)
   const branchSelectionMode =
     branchSelection !== null && branchSelection.repoPath === snapshot?.path
-  const [workspaceView, setWorkspaceView] = React.useState<WorkspaceView>('branches')
+  const [workspaceView, setWorkspaceViewState] = React.useState<WorkspaceView>('branches')
+  const workspaceViewRef = React.useRef(workspaceView)
+  workspaceViewRef.current = workspaceView
+  const reviewOrigin = React.useRef<{
+    scope: string
+    authority: string
+    view: WorkspaceView
+    focus: HTMLElement | null
+  } | null>(null)
+  const captureReviewEntry = React.useCallback(() => {
+    if (workspaceViewRef.current === 'review' || !reviewOrigin.current) return
+    const focused = document.activeElement
+    reviewOrigin.current.focus = focused instanceof HTMLElement ? focused : null
+  }, [])
   const [branchFilter, setBranchFilter] = React.useState<BranchFilter>('all')
   const [search, setSearch] = React.useState('')
   const bootLoading = Boolean(desktop && recentRepositoriesQuery.isPending)
@@ -754,6 +772,13 @@ function App() {
    * persisted the selection, so its completed local identity must be adopted.
    */
   const openingRef = React.useRef<RequestClaim | null>(null)
+  const setWorkspaceView = React.useCallback(
+    (view: WorkspaceView) => {
+      if (view === 'review' && !openingRef.current) captureReviewEntry()
+      setWorkspaceViewState(view)
+    },
+    [captureReviewEntry],
+  )
   const searchRef = React.useRef<HTMLInputElement>(null)
   /** The queue's own filter field, which the search chord focuses while it is on screen. */
   const inboxSearchRef = React.useRef<HTMLInputElement>(null)
@@ -1014,6 +1039,7 @@ function App() {
       landing?: { reviewNumber: number },
     ) => {
       if (!desktop || openingRef.current || busyRef.current) return
+      if (landing) captureReviewEntry()
       // Resetting the gate before awaiting retires every in-flight refresh, so
       // a snapshot taken from the previous repository cannot land here.
       repositoryGate.reset()
@@ -1021,7 +1047,7 @@ function App() {
       openingRef.current = claim
       return repositoryOpenMutation.mutateAsync({ path, mode, landing, claim })
     },
-    [desktop, repositoryGate, repositoryOpenMutation.mutateAsync],
+    [captureReviewEntry, desktop, repositoryGate, repositoryOpenMutation.mutateAsync],
   )
 
   /**
@@ -1370,6 +1396,27 @@ function App() {
     () => cliAuthority(settings?.github.host ?? null, cliStatus),
     [cliStatus, settings?.github.host],
   )
+  const navigationScope = JSON.stringify([authority, snapshot?.path, snapshot?.remoteUrl])
+  const visitedReviewScope = React.useRef<string | null>(null)
+  if (workspaceView === 'review') visitedReviewScope.current = navigationScope
+  if (
+    reviewOrigin.current &&
+    (reviewOrigin.current.authority !== authority ||
+      (reviewOrigin.current.view !== 'prInbox' && reviewOrigin.current.scope !== navigationScope))
+  ) {
+    reviewOrigin.current = null
+  }
+  if (
+    workspaceView !== 'review' &&
+    (reviewOrigin.current?.scope !== navigationScope || reviewOrigin.current.view !== workspaceView)
+  ) {
+    reviewOrigin.current = {
+      scope: navigationScope,
+      authority,
+      view: workspaceView,
+      focus: null,
+    }
+  }
   const operationAuthority = useRepositoryOperationAuthority(desktop, snapshot)
 
   // The optional Notification Center. Its own state, its own request counter,
@@ -2371,7 +2418,11 @@ function App() {
     previousViewRef.current = workspaceView
     setAnnouncement(`${workspaceViewLabel(workspaceView)} workspace`)
     if (anyModalOpen) return
-    document.getElementById(WORKSPACE_VIEW_HEADING_ID)?.focus()
+    document
+      .querySelector<HTMLElement>(
+        `[data-workspace-surface="${workspaceView}"] #${workspaceViewHeadingId(workspaceView)}`,
+      )
+      ?.focus()
   }, [anyModalOpen, workspaceView])
 
   // A raised error answers something the user just did, so focus is taken to it
@@ -2430,7 +2481,7 @@ function App() {
       if (isComposingKeyEvent(event)) return
 
       // If any modal dialog is currently open, don't execute global hotkeys underneath
-      if (anyModalOpen) return
+      if (anyModalOpen || document.querySelector('[role="dialog"][data-open]')) return
 
       // A bare printable remap must not steal text from either search field.
       // Modified openers such as Cmd/Ctrl+K still work while editing.
@@ -3289,19 +3340,45 @@ function App() {
     )
   }
 
-  const renderMainContent = () => {
+  const renderMainContent = (view: WorkspaceView = workspaceView) => {
     // Both cross-repository inboxes stay reachable before a repository is open.
-    if (workspaceView === 'prInbox') return renderPrInbox()
-    if (workspaceView === 'notifications') return renderNotifications()
+    if (view === 'prInbox') return renderPrInbox()
+    if (view === 'notifications') return renderNotifications()
     if (!snapshot) return null
-    if (workspaceView === 'changes') return renderChanges()
-    if (workspaceView === 'pullRequests') return renderPullRequests()
-    if (workspaceView === 'review')
+    if (view === 'changes') return renderChanges()
+    if (view === 'pullRequests') return renderPullRequests()
+    if (view === 'review')
       return (
         <ReviewView
           key={JSON.stringify([authority, snapshot.path, snapshot.remoteUrl])}
           authority={JSON.stringify([authority, snapshot.path, snapshot.remoteUrl])}
           commands={reviewCommands}
+          busy={isBusy}
+          observedPullRequest={
+            snapshot.pullRequests.find(
+              (pr) => pr.number === (reviewNumber ?? selectedPullRequest?.number),
+            ) ?? null
+          }
+          returnContext={
+            reviewOrigin.current
+              ? {
+                  label: `Return to ${workspaceViewLabel(reviewOrigin.current.view)}`,
+                  onReturn: () => {
+                    const origin = reviewOrigin.current
+                    if (
+                      !origin ||
+                      origin.authority !== authority ||
+                      (origin.view !== 'prInbox' && origin.scope !== navigationScope)
+                    )
+                      return
+                    setWorkspaceView(origin.view)
+                    requestAnimationFrame(() => {
+                      if (origin.focus?.isConnected) origin.focus.focus({ preventScroll: true })
+                    })
+                  },
+                }
+              : null
+          }
           desktop={desktop ?? undefined}
           number={reviewNumber ?? selectedPullRequest?.number ?? null}
           onSelectNumber={setReviewNumber}
@@ -3310,13 +3387,13 @@ function App() {
           stackContext={snapshot}
         />
       )
-    if (workspaceView === 'stashes') return renderStashes()
-    if (workspaceView === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
-    if (workspaceView === 'history')
+    if (view === 'stashes') return renderStashes()
+    if (view === 'diagnostics') return <DiagnosticsView snapshot={snapshot} />
+    if (view === 'history')
       return (
         <HistoryView snapshot={snapshot} busy={isBusy} onRequest={openWorkflow} search={search} />
       )
-    if (workspaceView === 'stacks')
+    if (view === 'stacks')
       return (
         <GraphWorkbench
           actionError={actionError}
@@ -3350,7 +3427,7 @@ function App() {
       <div className="branches-view">
         <div className="list-toolbar">
           <div className="list-title-group">
-            <h1 id={WORKSPACE_VIEW_HEADING_ID} tabIndex={-1}>
+            <h1 id={workspaceViewHeadingId('branches')} tabIndex={-1}>
               Branches
             </h1>
             <span className="list-subtitle">{visibleBranches.length} shown</span>
@@ -4291,10 +4368,27 @@ function App() {
           onShowChanges={() => setWorkspaceView('changes')}
         />
       ) : null}
-      <div className={cn('workspace', !detailsVisible && 'workspace-details-hidden')}>
+      <UnsentReviewChangesNotice />
+      <div
+        className={cn('workspace', !detailsVisible && 'workspace-details-hidden')}
+        data-workspace-view={workspaceView}
+      >
         {renderSidebar()}
         {snapshot || workspaceNeedsNoRepository(workspaceView) ? (
-          <main className="main-pane">{renderMainContent()}</main>
+          <main className="main-pane">
+            {[
+              reviewOrigin.current?.view ?? (workspaceView === 'review' ? null : workspaceView),
+              visitedReviewScope.current === navigationScope ? ('review' as const) : null,
+            ]
+              .filter((view): view is WorkspaceView => view !== null)
+              .map((view) => (
+                <div key={view} style={{ display: workspaceView === view ? 'contents' : 'none' }}>
+                  <WorkspaceSurface view={view} active={workspaceView === view}>
+                    {renderMainContent(view)}
+                  </WorkspaceSurface>
+                </div>
+              ))}
+          </main>
         ) : (
           renderOnboarding()
         )}
