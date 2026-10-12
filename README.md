@@ -1839,6 +1839,64 @@ Open **Submitted native order and reconciliation** before inspecting submitted
 membership or reviewing repairs. Submitted links retain known PR titles, fall
 back to head refs when titles are unavailable, and wrap within the disclosure.
 
+The selected local-ref inspector exposes Restack, Sync, Publish, merge previews,
+and insert/move/remove layer previews through the existing reviewed workflow
+dialog. Selection does not change checkout: checkout requires an explicit action,
+while new PR creation and local working-change actions use the current checkout.
+Moving a
+layer down selects its predecessor's parent, not its unchanged current parent;
+removing a middle layer lets the backend preview enumerate replayed descendants.
+Graph filters never define mutation scope. Remote-only refs offer explicit
+tracking and remote deletion; protected local deletion remains visible with its
+disabled reason.
+Native unstack removes unmerged members; merged members may keep the container
+alive, so its confirmation does not promise complete dissolution.
+
+These graph controls consume `@git-stacks/ui` directly. Selected facts use the
+shared `Surface`; the remote-only explanation uses `InlineAlert`. Restack is
+the primary stack action, with secondary Sync, Publish and merge entries.
+Destructive entries use the danger role without bypassing their existing
+reviewed confirmation.
+
+Indexed search, saved-view names and dependent-path search use shared Field/Input
+controls. Collapse uses the shared Checkbox; repository presets use exactly one
+shared SegmentedControl choice, with roving arrow-key focus and explicit activation.
+These controls retain the same bounded criteria, preference ownership, path pages,
+camera and qualified selection. Refresh and preference writes keep their action
+names while the shared Button reports busy state; only the actual pending action
+in the current preference scope shows its loading marker. Retired writes cannot
+disable a replacement account's controls. Utility actions remain secondary or ghost.
+
+The persistent operation surface stays outside destination content. Publication
+steps and observed merge outcomes retain their captured targets across Graph,
+Changes, Review and History; recovery opens the existing reviewed workflow without
+retrying a mutation. Closing a preview, navigating, retrying, dismissing saved
+publication and Git Abort are separate actions. Local Abort never promises to undo
+already published branches, PR changes or native membership effects. Stack recovery
+names Sync from its journal kind and surgery from its already-journalled effects.
+An unstack-only surgery does not register replacement membership; later Submit
+Stack is required where the preview says so. Unavailable queue capability does not
+offer a queue choice.
+Progress events and initial reads carry their admitted repository, origin URL and
+public CLI authority. The producer captures action scope before dispatch; late
+events and null clears cannot be relabelled by the window's eventual repository
+or account. The shell and recovery dialog observe one scoped journal Query;
+overtaken reads are cancelled and a failed refresh keeps the last confirmed facts.
+A merge with confirmed landed targets and later refusals remains partially completed,
+not “Not applied”; failed readback preserves both confirmed merges and refusal details.
+The required action-versus-journal-read source distinguishes transport ownership
+from historical creator provenance: existing journal bytes do not record the
+original public authority, so saved recovery says it is unrecorded. Displayed
+scope grants no mutation consent; saved targets/approvals and live backend
+revalidation still govern explicit Resume, Dismiss and Abort.
+
+**Edit stack layers** uses the shared keyboard-operable `Collapsible` and
+`Button` composition for parent, insert, move and remove entries. Opening it
+remains presentation-only, and its actions keep the existing preview,
+confirmation and operation locks. The default branch retains its parent entry;
+insert, move and remove remain restricted to nondefault branches. The standalone
+catalog is not shipped in the desktop bundle.
+
 Index, selected-detail, and preference reads belong to the existing TanStack Query
 client. Keys include checkout origin and CLI authority, plus observed qualified
 index identity. A push cancels a late read and updates scoped query data; authored
@@ -2024,6 +2082,22 @@ The visual suite covers the ten destinations and three dialog compositions at mi
 pnpm run package
 pnpm run test:desktop
 ```
+
+On Linux, the unpacked Electron package needs its official `chrome-sandbox`
+helper installed with root ownership and mode `4755`. After the frozen install,
+run `pnpm --filter git-stacks exec install-electron` to materialize the pinned
+official Electron reference distribution without launching the application.
+Before an authorized
+privileged installation, verify that the generated helper is a regular,
+non-symlink file inside the workspace and matches
+`apps/desktop/node_modules/electron/dist/chrome-sandbox` byte-for-byte; record its original
+ownership and mode. Configure only that generated helper using existing
+administrative permission, then run the smoke script directly against the same
+package so repackaging does not overwrite the setup. Restore the original
+ownership and mode after a temporary development verification. Do not disable
+sandboxing, change privilege policy, or repair unrelated host services to make
+this check pass. If the required installation cannot be performed, report the
+packaged native checks as blocked rather than replacing them with renderer tests.
 
 The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `release/linux-unpacked/git-stacks` on Linux; Windows is unsupported until its process-tree cleanup can be verified. `node apps/desktop/scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates a disposable repository and local bare remote, isolates the Chromium user data, the temporary directory, the Git configuration and the gh configuration inside the workspace, strips inherited Git/GitHub and credential-shaped environment variables, and cleans the temporary workspace. On macOS the app inherits the host home directory, because the system only spawns the app's sandboxed helper processes against the home the password database reports: with a synthetic `HOME` the browser process never brings those helpers up and stops answering on its own DevTools endpoint, so the smoke can never reach the renderer. Nothing the app, git or gh reads comes from that home — user data is the redirected `--user-data-dir`, and `GIT_CONFIG_NOSYSTEM=1` with an empty `GIT_CONFIG_GLOBAL` and a disposable `GH_CONFIG_DIR` keep the machine's own Git identity, credential helpers and GitHub login out of the fixture. A `browserType.connectOverCDP` timeout on the first `/json/version` request is that dead endpoint, not a slow start. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
 

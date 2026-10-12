@@ -1,6 +1,12 @@
 import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { OperationProgress } from '@git-stacks/shared/operation-scope'
+import {
+  mergeProgressAfterRead,
+  operationProgressKeys,
+  readOperationProgress,
+} from '../lib/operation-progress'
 import { ExternalLink, Link2, LoaderCircle, Search, Trash2 } from 'lucide-react'
 import type {
   Branch,
@@ -11,7 +17,6 @@ import type {
   MergeLayerResult,
   MergeProgress,
   PublishLayerChoice,
-  PublishProgress,
   PullRequest,
   PushPreview,
   RepositorySnapshot,
@@ -134,7 +139,7 @@ const SURGERY_ACTION_BADGE: Record<SurgeryLayerAction, BadgeProps['variant']> = 
 
 const SURGERY_STACK_LABELS: Record<NonNullable<SurgeryPreview['nativeStack']>['action'], string> = {
   none: 'Native stack membership is unchanged',
-  unstack: `Unstack the native stack, then register the pull requests in the new order`,
+  unstack: 'Unstack the native stack without registering a replacement stack',
   'unstack-and-create': `Unstack the native stack, then register it again in the new order`,
 }
 
@@ -661,17 +666,11 @@ function PrLinkedIssuesSection({
             <Button
               size="sm"
               variant="danger"
+              loading={actionBusy}
               disabled={disabled || actionBusy || hasFormEdits}
               onClick={() => handleConfirmUnlinkClosing(pendingUnlink)}
             >
-              {actionBusy ? (
-                <>
-                  <LoaderCircle className="size-3 animate-spin mr-1" />
-                  Removing…
-                </>
-              ) : (
-                'Confirm removal'
-              )}
+              Confirm removal
             </Button>
           </div>
         </div>
@@ -711,18 +710,12 @@ function PrLinkedIssuesSection({
             </Button>
             <Button
               size="sm"
-              variant="accent"
+              variant="default"
+              loading={actionBusy}
               disabled={disabled || actionBusy || hasFormEdits}
               onClick={() => handleConfirmCloseWhenMerged(pendingClosingLink)}
             >
-              {actionBusy ? (
-                <>
-                  <LoaderCircle className="size-3 animate-spin mr-1" />
-                  Updating PR…
-                </>
-              ) : (
-                'Confirm close when merged'
-              )}
+              Confirm close when merged
             </Button>
           </div>
         </div>
@@ -757,14 +750,11 @@ function PrLinkedIssuesSection({
           <Button
             size="sm"
             variant="secondary"
+            loading={searching}
             disabled={disabled || searching || actionBusy || !query.trim()}
             onClick={() => void search.handleSubmit()}
           >
-            {searching ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <Search className="size-3.5" />
-            )}
+            <Search className="size-3.5" />
             Search
           </Button>
         </div>
@@ -807,7 +797,7 @@ function PrLinkedIssuesSection({
                         {closingAvailable ? (
                           <Button
                             size="sm"
-                            variant="accent"
+                            variant="secondary"
                             disabled={disabled || actionBusy}
                             tooltip="Insert closing keyword into PR description to close this issue when PR is merged"
                             onClick={() => void handleRequestClosingLink(issue)}
@@ -901,28 +891,54 @@ export function WorkflowDialog({
   const queryClient = useQueryClient()
   const instance = React.useId()
   const queryScope = React.useMemo(() => ({ instance, authority }), [instance, authority])
-  const progressKey = ['workflow-publication-progress', snapshot.path, queryScope] as const
-  const mergeProgressKey = ['workflow-merge-progress', snapshot.path, queryScope] as const
-  const mergeStatusKey = ['workflow-merge-status', snapshot.path, queryScope] as const
+  const operationScope = React.useMemo(
+    () => ({
+      repositoryPath: snapshot.path,
+      remoteUrl: snapshot.remoteUrl,
+      authority,
+    }),
+    [snapshot.path, snapshot.remoteUrl, authority],
+  )
+  const operationKeys = React.useMemo(() => operationProgressKeys(operationScope), [operationScope])
+  const {
+    publication: progressKey,
+    mergeProgress: mergeProgressKey,
+    merge: mergeStatusKey,
+  } = operationKeys
   const progressQuery = useQuery({
     queryKey: progressKey,
     enabled: false,
-    queryFn: async () => (await stackApi.submitStackProgress?.()) ?? null,
+    queryFn: ({ signal }) =>
+      readOperationProgress(stackApi.submitStackProgress!, operationScope, signal),
   })
-  const mergeProgressQuery = useQuery<MergeProgress | null>({
+  const mergeProgressQuery = useQuery<OperationProgress<MergeProgress> | null>({
     queryKey: mergeProgressKey,
     enabled: false,
   })
   const mergeStatusQuery = useQuery({
     queryKey: mergeStatusKey,
     enabled: false,
-    queryFn: () => stackApi.mergeStatus!(),
+    queryFn: async ({ signal }) => {
+      const result = await readOperationProgress(stackApi.mergeStatus!, operationScope, signal)
+      queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
+        mergeProgressKey,
+        (previous) => mergeProgressAfterRead(previous, result),
+      )
+      return result
+    },
   })
-  const progress = progressQuery.data ?? null
-  const mergeProgress = mergeProgressQuery.data ?? null
-  const mergeStatus = mergeStatusQuery.data ?? null
-  const setProgress = (value: PublishProgress | null) =>
-    queryClient.setQueryData(progressKey, value)
+  const progress =
+    request.kind === 'stack' && request.operation === 'publish'
+      ? (progressQuery.data?.progress ?? null)
+      : null
+  const mergeProgress =
+    request.kind === 'stack' && request.operation === 'merge'
+      ? (mergeProgressQuery.data?.progress ?? null)
+      : null
+  const mergeStatus =
+    request.kind === 'stack' && request.operation === 'merge'
+      ? (mergeStatusQuery.data?.progress ?? null)
+      : null
   const mergeStatusError = mergeStatusQuery.error ? workflowError(mergeStatusQuery.error) : null
   const [mergeRunning, setMergeRunning] = React.useState(false)
   const [attempt, setAttempt] = React.useState(0)
@@ -1071,48 +1087,17 @@ export function WorkflowDialog({
     }
   }, [request, attempt, stackApi, queryScope])
 
-  // A submission that stopped part-way survives a restart; show it before anything
-  // else so a person can resume or dismiss it instead of starting a second one.
+  // The persistent shell owns events and the scoped durable-journal projection.
+  // Reopening recovery reads it without replaying a mutation or erasing confirmed facts.
   React.useEffect(() => {
-    if (request.kind !== 'stack' || request.operation !== 'publish') {
-      setProgress(null)
-      return
-    }
-    let active = true
-    // A running submission pushes its own progress. Reading it on a timer cannot work: that
-    // read queues behind the action producing the steps, so it would only ever report the
-    // state after the whole operation finished.
-    const unsubscribe = stackApi.onSubmitStackProgress?.((value) => {
-      if (active) {
-        void queryClient.cancelQueries({ queryKey: progressKey }).then(() => {
-          if (active) queryClient.setQueryData(progressKey, value)
-        })
-      }
-    })
-    void progressQuery.refetch({ throwOnError: true }).then(
-      () => undefined,
-      () => active && setProgress(null),
+    if (
+      request.kind !== 'stack' ||
+      request.operation !== 'publish' ||
+      !stackApi.submitStackProgress
     )
-    return () => {
-      active = false
-      unsubscribe?.()
-    }
-  }, [request, stackApi, queryScope])
-
-  // A merge waits on GitHub's background result, so the running state is pushed rather than
-  // polled: a read would queue behind the merge that is producing it.
-  React.useEffect(() => {
-    if (request.kind !== 'stack' || request.operation !== 'merge') {
-      queryClient.setQueryData(mergeProgressKey, null)
       return
-    }
-    const unsubscribe = stackApi.onMergeProgress?.((value) =>
-      queryClient.setQueryData(mergeProgressKey, value),
-    )
-    return () => {
-      unsubscribe?.()
-    }
-  }, [request, stackApi, queryScope])
+    void progressQuery.refetch({ throwOnError: true }).catch(() => {})
+  }, [request, stackApi, operationScope])
 
   // What GitHub reported for earlier merge requests is read, never re-requested: a queue that
   // later merged or dropped a pull request, or a request that is still running, is only
@@ -1128,15 +1113,11 @@ export function WorkflowDialog({
     }
   }, [stackApi, mergeStatusQuery.refetch, queryScope])
   React.useEffect(() => {
-    if (request.kind !== 'stack' || request.operation !== 'merge') {
-      queryClient.setQueryData(mergeStatusKey, null)
-      void queryClient.resetQueries({ queryKey: mergeStatusKey })
-      return
-    }
+    if (request.kind !== 'stack' || request.operation !== 'merge' || mergeRunning) return
     void readMergeStatus()
     // A run that ends is read again: its result is what GitHub published, and a read is
     // newer than the progress that run pushed.
-  }, [request, readMergeStatus, mergeProgress, mergeRunning])
+  }, [request, readMergeStatus, mergeRunning])
 
   const title =
     request.kind === 'surgery'
@@ -1199,17 +1180,26 @@ export function WorkflowDialog({
     try {
       await progressQuery.refetch({ throwOnError: true })
     } catch {
-      setProgress(null)
+      // A failed read is not evidence that saved remote effects disappeared.
     }
   }
 
   // A merge that landed some pull requests and not others is a finished run with a partial
   // outcome. Treating it as a stopped operation would offer a retry that GitHub would reject
   // for the pull requests that are already merged.
-  const mergePartial =
-    finished &&
-    mergeProgress !== null &&
-    mergeProgress.layers.some((layer) => layer.status !== 'merged')
+  const currentMergeLayers = preview?.merge?.layers.map(
+    (target) =>
+      mergeProgress?.layers.find((layer) => layer.pullRequest === target.pullRequest) ??
+      mergeStatus?.layers.find((layer) => layer.pullRequest === target.pullRequest) ?? {
+        status: 'pending' as const,
+      },
+  )
+  const mergeIncomplete = Boolean(
+    finished && currentMergeLayers?.some((layer) => layer.status !== 'merged'),
+  )
+  const mergePartial = Boolean(
+    mergeIncomplete && currentMergeLayers?.some((layer) => layer.status === 'merged'),
+  )
 
   const run = async (action: GitAction, label: string) => {
     if (
@@ -1424,15 +1414,19 @@ export function WorkflowDialog({
       pullRequestTitle: values.prTitle,
     })
   const blocker = guardFor(values)
-  const failed = Boolean(error || actionError)
+  const failed = Boolean(
+    error ||
+      actionError ||
+      (finished && !mergePartial && currentMergeLayers?.some((layer) => layer.status === 'failed')),
+  )
   const phase = workflowPhase({
     loading,
     busy,
     failed,
     stale,
-    finished: finished && !mergePartial,
+    finished: finished && !mergeIncomplete,
     partial: mergePartial,
-    blocked: Boolean(blocker || shapeReason) && !finished,
+    blocked: mergeIncomplete || (Boolean(blocker || shapeReason) && !finished),
   })
   const actionLabel =
     request.kind === 'surgery'
@@ -1450,7 +1444,7 @@ export function WorkflowDialog({
       : phase === 'submitting'
         ? `${actionLabel} is running. Wait for it to finish before doing anything else here.`
         : phase === 'failed'
-          ? (error ?? (actionError as string))
+          ? (error ?? actionError ?? mergeProgress?.message ?? mergeStatus?.message)
           : phase === 'stale'
             ? 'This preview was already rejected. Reload it to read the current state; the rejected preview will not run again.'
             : phase === 'partial'
@@ -1460,7 +1454,9 @@ export function WorkflowDialog({
                   ? 'Restack the remaining branches onto the updated base, then publish to update their pull requests.'
                   : 'Publish next to update remote branches and PR bases. Rewritten branches require your explicit force-with-lease approval.'
                 : phase === 'blocked'
-                  ? (shapeReason ?? blocker?.message)
+                  ? mergeIncomplete
+                    ? 'The merge is not fully confirmed. Read the reported PR outcomes; accepted, queued and unknown results are not merged.'
+                    : (shapeReason ?? blocker?.message)
                   : undefined
   const destructive = composition === 'destructive'
 
@@ -2068,6 +2064,19 @@ export function WorkflowDialog({
                   {request.operation === 'publish' && (publishOffer || recovering) ? (
                     <>
                       <PublishProgressPanel progress={progress} />
+                      {progressQuery.data?.source === 'journal-read' && progress ? (
+                        <p className="workflow-note">
+                          Saved journal read. Original operation authority was not recorded. Saved
+                          targets and approvals remain unchanged; Resume is revalidated by the
+                          backend.
+                        </p>
+                      ) : null}
+                      {progressQuery.error ? (
+                        <InlineAlert tone="error">
+                          Recovery read unavailable: {workflowError(progressQuery.error)}. Last
+                          confirmed journal facts remain visible; no mutation was retried.
+                        </InlineAlert>
+                      ) : null}
                       {/*
                         A resumed submission republishes the consent it was given. An
                         unchecked box here would read as "not agreed" while Resume force
@@ -2494,7 +2503,7 @@ export function WorkflowDialog({
                 dispatches, and reading what GitHub did afterwards is not a dispatch. */}
             {request.kind === 'stack' &&
             request.operation === 'merge' &&
-            (mergeProgress || mergeStatus) ? (
+            (mergeProgress || mergeStatus || mergeStatusError) ? (
               <div className="grid gap-2">
                 {mergeStatusError ? (
                   <InlineAlert tone="error">
@@ -2502,31 +2511,46 @@ export function WorkflowDialog({
                     until a read succeeds.
                   </InlineAlert>
                 ) : null}
+                {mergeStatusQuery.data?.source === 'journal-read' ? (
+                  <p className="workflow-note">
+                    Saved merge journal read. Original operation authority was not recorded; this
+                    read requested no merge.
+                  </p>
+                ) : null}
                 {/* A run in flight speaks for itself. Once it returns, a read is newer
                           than the progress it pushed, and a read that arrives later is newer
                           still, so the read-back is what the panel shows; the run's own result
                           stands only until a read answers. */}
-                {mergeProgress && (mergeRunning || !mergeStatus) ? (
-                  <MergeOutcomePanel progress={mergeProgress} />
-                ) : (
+                {mergeProgress ? (
+                  <MergeOutcomePanel
+                    progress={mergeProgress}
+                    label={
+                      mergeProgressQuery.data?.source === 'journal-read'
+                        ? 'What GitHub reports now with retained captured targets'
+                        : undefined
+                    }
+                  />
+                ) : mergeStatus ? (
                   <MergeOutcomePanel
                     label={`What GitHub reports now \u2014 ${mergeStatus!.layers.length} pull request${
                       mergeStatus!.layers.length === 1 ? '' : 's'
                     } from this and earlier merge requests`}
                     progress={{
                       action: 'default',
-                      status: mergeStatus!.layers.some((layer) => layer.status === 'failed')
+                      status: mergeStatus.layers.some((layer) => layer.status === 'failed')
                         ? 'failed'
-                        : mergeStatus!.layers.some((layer) => layer.status === 'pending')
-                          ? 'running'
-                          : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
+                        : mergeStatus.layers.every((layer) => layer.status === 'merged')
+                          ? 'succeeded'
+                          : mergeStatus.layers.every(
+                                (layer) => layer.status === 'merged' || layer.status === 'enqueued',
+                              )
                             ? 'queued'
-                            : 'succeeded',
+                            : 'running',
                       layers: mergeStatus!.layers,
                       message: mergeStatus!.message,
                     }}
                   />
-                )}
+                ) : null}
                 <div>
                   <Button type="button" onClick={() => void readMergeStatus()}>
                     Refresh what GitHub reports
@@ -2592,7 +2616,7 @@ export function WorkflowDialog({
                     Dismiss submission
                   </Button>
                   <Button
-                    variant="accent"
+                    variant="default"
                     disabled={busy || Boolean(resumeBlocked)}
                     loading={busy}
                     onClick={() => run({ type: 'submitStackRetry' }, 'Resume submission')}
@@ -2608,7 +2632,7 @@ export function WorkflowDialog({
               ) : (
                 <Button
                   type="submit"
-                  variant={destructive ? 'danger' : 'accent'}
+                  variant={destructive ? 'danger' : 'default'}
                   disabled={Boolean(blocker || shapeReason || issueMutationBusy || formSubmitting)}
                   loading={busy || formSubmitting}
                   tooltip={shapeReason ?? (blocker ? blocker.message : description)}

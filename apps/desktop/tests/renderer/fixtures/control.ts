@@ -7,6 +7,7 @@ import {
 import { changeGraphIndex, graphDetail } from './graph'
 import type { UpdateStatus } from '@git-stacks/shared/update'
 import { REVIEW_STACK_METADATA_LIMIT } from '@git-stacks/shared/performance'
+import { cliAuthority } from '@git-stacks/shared/operation-scope'
 import type {
   ActionResult,
   ConflictFile,
@@ -17,8 +18,6 @@ import type {
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
-  MergeProgress,
-  MergeStatus,
   PushPreview,
   RemoteFreshness,
   RepositorySnapshot,
@@ -51,7 +50,6 @@ import {
   insertSurgeryPreview,
   leasePreview,
   mergePreview,
-  mergeStatus,
   mergeStatusQueueSentence,
   publishPreview,
   restackPreview,
@@ -286,9 +284,13 @@ export function installFixtureControl(options: {
   const waiting: WaitingCall[] = []
   let startsPending = new Set<FixtureCall>()
   let mergeStatusReads = 0
-  const mergeListeners = new Set<(progress: MergeProgress | null) => void>()
-  const publishMergeProgress = (progress: MergeProgress | null): void => {
-    for (const listener of mergeListeners) listener(progress)
+  type MergeEvent = Parameters<Parameters<NonNullable<DesktopAPI['onMergeProgress']>>[0]>[0]
+  type PublishEvent = Parameters<Parameters<NonNullable<DesktopAPI['onSubmitStackProgress']>>[0]>[0]
+  const mergeListeners = new Set<(event: MergeEvent) => void>()
+  const publicationListeners = new Set<(event: PublishEvent) => void>()
+  let publication: PublishEvent | null = null
+  const publishMergeProgress = (event: MergeEvent): void => {
+    for (const listener of mergeListeners) listener(event)
   }
   /** Saved filters, as the main process keeps them: whole-list writes, identities preserved. */
   let inboxFilters: PullRequestInboxSavedFilter[] = []
@@ -300,13 +302,22 @@ export function installFixtureControl(options: {
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
   let active: RepositorySnapshot | null = scenario.snapshot
-  let servedCliStatus: GitHubCliStatus | null = null
+  const cliStatuses = new Map<string, GitHubCliStatus>()
+  const statusForHost = (host: string | null): GitHubCliStatus | null => {
+    if (host === null) return null
+    const declared = scenario.identity?.cli ?? scenario.githubCliStatus
+    return (
+      cliStatuses.get(host) ??
+      scenario.githubCliStatuses?.[host] ??
+      (declared?.host === host ? declared : null)
+    )
+  }
   const graphPreferenceState = new Map<string, GraphPreferences>()
   const graphPreferenceScope = (): string | null => {
     const remote = active?.remoteUrl?.match(
       /^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u,
     )
-    const cli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+    const cli = statusForHost(remote?.[1].toLowerCase() ?? null)
     const account = cli ? (cli.state === 'authenticated' ? cli.login : null) : servedPrIndex?.viewer
     return active && remote && account
       ? JSON.stringify({
@@ -320,6 +331,17 @@ export function installFixtureControl(options: {
   const graphPreferenceKey = (scope: string): string => {
     const { host, repository, account } = JSON.parse(scope)
     return JSON.stringify([host, repository, account])
+  }
+  const captureOperationScope = () => {
+    const host =
+      active?.remoteUrl
+        ?.match(/^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u)?.[1]
+        .toLowerCase() ?? null
+    return {
+      repositoryPath: active?.path ?? '',
+      remoteUrl: active?.remoteUrl ?? null,
+      authority: cliAuthority(host, statusForHost(host)),
+    }
   }
   const matchesGraphPreferenceScope = (
     actual: string | null,
@@ -536,8 +558,8 @@ export function installFixtureControl(options: {
    * behind the host it is pointed at. `null` means the scenario's own
    * declaration still answers, which is the state a scenario starts in.
    */
-  /** The one window listening for the session to change outside it. */
-  let cliStatusListener: ((status: GitHubCliStatus) => void) | null = null
+  /** Independent renderer observers share the preload event stream. */
+  const cliStatusListeners = new Set<(status: GitHubCliStatus) => void>()
 
   /**
    * The GitHub answer this double may give a repository read, which belongs to
@@ -559,7 +581,7 @@ export function installFixtureControl(options: {
   const answeredForServedCredential = (snapshot: RepositorySnapshot): RepositorySnapshot => {
     const declared = scenario.identity?.cli ?? scenario.githubCliStatus ?? null
     if (declared === null) return snapshot
-    const served = servedCliStatus ?? declared
+    const served = statusForHost(declared.host) ?? declared
     if (served.host === declared.host && served.identity === declared.identity) return snapshot
     return {
       ...snapshot,
@@ -794,7 +816,7 @@ export function installFixtureControl(options: {
       // What this double reports is the session it currently serves, which a
       // test can have moved: the scenario's own declaration until something
       // serves the status this installation now answers with.
-      const declared = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      const declared = statusForHost(settings.github.host)
       if (!declared) return undefined
       if (scenario.identity) {
         return () => {
@@ -813,9 +835,9 @@ export function installFixtureControl(options: {
     // window asked for a status at all: a build without the optional read has
     // nothing to change either.
     onGitHubCliStatus: (listener) => {
-      cliStatusListener = listener
+      cliStatusListeners.add(listener)
       return () => {
-        if (cliStatusListener === listener) cliStatusListener = null
+        cliStatusListeners.delete(listener)
       }
     },
     // The optional Notification Center answers on its own calls, with its own
@@ -971,6 +993,7 @@ export function installFixtureControl(options: {
     runAction: (action) => {
       record('runAction', [action])
       actions.push(action)
+      const operationScope = captureOperationScope()
       // A merge reports through the progress channel the way the main process does, and it
       // reports while the run is still going: the request is accepted, GitHub is still
       // running it, and the run returns before the result exists. What GitHub reports
@@ -979,20 +1002,24 @@ export function installFixtureControl(options: {
         const layer = mergePreview.merge?.layers[0]
         if (layer) {
           publishMergeProgress({
-            action: 'default',
-            status: 'running',
-            message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
-            layers: [
-              {
-                branch: layer.branch,
-                pullRequest: layer.pullRequest,
-                status: 'pending',
-                detail: 'GitHub has not reported a result yet; refresh to read this request',
-                mergedOid: null,
-                queue: null,
-                requestUuid: 'fixture-request-1',
-              },
-            ],
+            scope: operationScope,
+            source: 'action',
+            progress: {
+              action: 'default',
+              status: 'running',
+              message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
+              layers: [
+                {
+                  branch: layer.branch,
+                  pullRequest: layer.pullRequest,
+                  status: 'pending',
+                  detail: 'GitHub has not reported a result yet; refresh to read this request',
+                  mergedOid: null,
+                  queue: null,
+                  requestUuid: 'fixture-request-1',
+                },
+              ],
+            },
           })
         }
       }
@@ -1084,30 +1111,41 @@ export function installFixtureControl(options: {
     },
     mergeStatus: () => {
       record('mergeStatus', [])
-      return answer<MergeStatus>('mergeStatus', () => {
-        const base = scenario.mergeStatus ?? mergeStatus
+      const scope = captureOperationScope()
+      const base = structuredClone(scenario.mergeStatus ?? null)
+      const read = mergeStatusReads++
+      return answer('mergeStatus', () => {
+        if (!base) return { scope, source: 'journal-read' as const, progress: null }
         // The queue lands the group between reads, so a refresh visibly replaces the queued
         // layer with what GitHub now reports for it; a later read fails, standing in for a
         // transport error that must not erase the last result GitHub reported.
-        const read = mergeStatusReads++
         if (read === 2) throw new Error('GitHub is unreachable')
-        if (read === 0) return base
+        if (read === 0) return { scope, source: 'journal-read' as const, progress: base }
         return {
-          ...base,
-          layers: base.layers.map((layer) =>
-            layer.status === 'enqueued'
-              ? {
-                  ...layer,
-                  status: 'merged' as const,
-                  detail: 'Merged on GitHub as 4444444444',
-                  mergedOid: '4444444444444444444444444444444444444444',
-                  queue: { ...layer.queue!, outcome: 'merged' as const },
-                }
-              : layer,
-          ),
-          message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
+          scope,
+          source: 'journal-read' as const,
+          progress: {
+            ...base,
+            layers: base.layers.map((layer) =>
+              layer.status === 'enqueued'
+                ? {
+                    ...layer,
+                    status: 'merged' as const,
+                    detail: 'Merged on GitHub as 4444444444',
+                    mergedOid: '4444444444444444444444444444444444444444',
+                    queue: { ...layer.queue!, outcome: 'merged' as const },
+                  }
+                : layer,
+            ),
+            message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
+          },
         }
       })
+    },
+    repositoryOperationScope: () => {
+      record('repositoryOperationScope', [])
+      const scope = captureOperationScope()
+      return admittedAnswer('repositoryOperationScope', () => scope)
     },
     pullRequest: (number) => {
       record('pullRequest', [number])
@@ -1124,6 +1162,28 @@ export function installFixtureControl(options: {
       mergeListeners.add(listener)
       return () => {
         mergeListeners.delete(listener)
+      }
+    },
+    submitStackProgress: () => {
+      record('submitStackProgress', [])
+      const scope = captureOperationScope()
+      const progress =
+        publication &&
+        publication.scope.repositoryPath === scope.repositoryPath &&
+        publication.scope.remoteUrl === scope.remoteUrl &&
+        publication.scope.authority === scope.authority
+          ? structuredClone(publication.progress)
+          : null
+      return answer('submitStackProgress', () => ({
+        scope,
+        source: 'journal-read' as const,
+        progress,
+      }))
+    },
+    onSubmitStackProgress: (listener) => {
+      publicationListeners.add(listener)
+      return () => {
+        publicationListeners.delete(listener)
       }
     },
     reviewHeadline: (number) => {
@@ -1615,7 +1675,7 @@ export function installFixtureControl(options: {
       // rebuilding it from the replacement is the one thing this fence exists to
       // catch. The list is derived here, at admission, and only the delivery of
       // the answer is held.
-      const admittedCli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      const admittedCli = statusForHost(settings.github.host)
       const produce = () => {
         const query = request.query?.trim() ?? ''
         if (query === 'sso-error') {
@@ -1893,7 +1953,7 @@ export function installFixtureControl(options: {
       // carries the rows the host it asked about read. Reading the served status
       // inside a released producer would rebuild a held read as the replacement
       // account's answer, which is the one thing this boundary exists to catch.
-      const served = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus ?? null
+      const served = statusForHost(settings.github.host)
       const admitted = !scenario.inbox
         ? null
         : served && served.host !== 'github.com'
@@ -2033,7 +2093,7 @@ export function installFixtureControl(options: {
       if (scenario.notifications)
         hostInboxes.set(scenario.notifications.host, scenario.notifications)
       notificationSettings.github = { host: scenario.notifications?.host ?? GITHUB_DEFAULT_HOST }
-      servedCliStatus = null
+      cliStatuses.clear()
       released.clear()
       options.onScenarioChange(scenario.name)
     },
@@ -2061,7 +2121,7 @@ export function installFixtureControl(options: {
       // one: the fixture cannot rebuild a scenario's status for a host that
       // scenario never declared, and inventing a session for it would prove
       // nothing about the host switch.
-      servedCliStatus = status
+      cliStatuses.set(status.host, status)
     },
     publishCliStatus(status) {
       // The session changed outside the window, which is what the main process
@@ -2069,8 +2129,8 @@ export function installFixtureControl(options: {
       // session becomes the new one, so a read asked for afterwards answers as
       // the replacement rather than as the session it replaced, and the window
       // is told about it without having asked.
-      servedCliStatus = status
-      cliStatusListener?.(status)
+      cliStatuses.set(status.host, status)
+      for (const listener of cliStatusListeners) listener(status)
     },
     hold(call) {
       holds.add(call)
@@ -2130,6 +2190,14 @@ export function installFixtureControl(options: {
       oneShotAnswers.clear()
       released.clear()
       waiting.length = 0
+    },
+    operationScope: captureOperationScope,
+    pushPublication(event) {
+      publication = structuredClone(event)
+      for (const listener of publicationListeners) listener(event)
+    },
+    pushMergeProgress(event) {
+      publishMergeProgress(event)
     },
     pushFreshness(value) {
       push('repository:remote-status', value)

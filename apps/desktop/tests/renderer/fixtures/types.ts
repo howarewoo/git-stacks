@@ -3,6 +3,7 @@ import type { GraphPreferences } from '@git-stacks/shared/graph-preferences'
 import type { GraphChange } from './graph'
 import type {
   FileView,
+  DesktopAPI,
   GitAction,
   HistoryPage,
   LinkedIssue,
@@ -50,6 +51,8 @@ export type FixtureCall =
   | 'stackPreview'
   | 'surgeryPreview'
   | 'mergeStatus'
+  | 'submitStackProgress'
+  | 'repositoryOperationScope'
   | 'pullRequest'
   | 'reviewHeadline'
   | 'reviewFiles'
@@ -220,6 +223,7 @@ export interface FixtureScenario {
    * footer of every other scenario to a session no one staged.
    */
   readonly githubCliStatus?: GitHubCliStatus
+  readonly githubCliStatuses?: Readonly<Record<string, GitHubCliStatus>>
   /**
    * What this computer's settings policy and settings file report beyond the
    * values themselves: which keys a policy fixes, which stored values were
@@ -287,6 +291,15 @@ export interface FixtureControl {
   connect(): void
   /** Clears logs, holds, and one-shot failures while keeping the mounted scenario. */
   reset(): void
+  /** Captures the producer's repository and public CLI generation before work begins. */
+  operationScope(): { repositoryPath: string; remoteUrl: string | null; authority: string }
+  /** Publishes the supplied captured scope verbatim, including deliberately retired producers. */
+  pushPublication(
+    event: Parameters<Parameters<NonNullable<DesktopAPI['onSubmitStackProgress']>>[0]>[0],
+  ): void
+  pushMergeProgress(
+    event: Parameters<Parameters<NonNullable<DesktopAPI['onMergeProgress']>>[0]>[0],
+  ): void
   /**
    * Pushes a freshness state exactly as the main process does when a read
    * answers, fails, or hits a rate limit.

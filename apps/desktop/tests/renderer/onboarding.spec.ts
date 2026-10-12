@@ -139,6 +139,10 @@ test.describe('Onboarding and repository discovery', () => {
     await holdDoubleCall(page, 'searchRepositories')
     await dialog.getByPlaceholder('Name, owner, or description').fill('a replacement search')
     await dialog.getByRole('button', { name: 'Search', exact: true }).click()
+    const search = dialog.getByRole('button', { name: 'Search', exact: true })
+    await expect(search).toHaveAttribute('aria-busy', 'true')
+    await expect(search.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+    await expect(search.locator('.lucide-search')).toHaveCount(1)
     await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
     await answerNextDoubleCall(page, 'searchRepositories', {

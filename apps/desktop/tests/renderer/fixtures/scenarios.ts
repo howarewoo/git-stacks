@@ -11,6 +11,7 @@ import type {
 import {
   blockedRestackPreview,
   failedMergeStatus,
+  mergeStatus,
   openPullRequest,
   pausedRestackProgress,
   restackPreview,
@@ -1500,6 +1501,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       'An authenticated GitHub CLI account for github.com, with the version reported apart from the authentication.',
     snapshot: connected,
     recentRepositories,
+    mergeStatus,
     githubCliStatus: {
       state: 'authenticated',
       host: 'github.com',
@@ -1522,6 +1524,31 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       version: '2.62.0',
       identity: 'cli:github.com:octo:1',
       message: null,
+    },
+  },
+  'github-cli-cross-host-operation': {
+    name: 'github-cli-cross-host-operation',
+    summary: 'Public-host Settings and enterprise-origin operation progress use separate accounts.',
+    snapshot: { ...connected, remoteUrl: 'git@ghe.example.com:octo/git-stacks.git' },
+    recentRepositories,
+    mergeStatus,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:github.com:octo:1',
+      message: null,
+    },
+    githubCliStatuses: {
+      'ghe.example.com': {
+        state: 'authenticated',
+        host: 'ghe.example.com',
+        login: 'account1',
+        version: '2.62.0',
+        identity: 'cli:ghe.example.com:account1:1',
+        message: null,
+      },
     },
   },
   'shell-loading': {
@@ -1874,6 +1901,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       ],
     }),
     recentRepositories,
+    mergeStatus,
   },
   'pull-requests-checks': {
     name: 'pull-requests-checks',

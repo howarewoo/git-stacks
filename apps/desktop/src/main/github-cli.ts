@@ -691,6 +691,13 @@ export class GitHubCliStatusService {
 }
 
 const services = new Map<string, GitHubCliStatusService>()
+const statusListeners = new Set<(status: GitHubCliStatus) => void>()
+
+/** Observes every host service, including services created before subscription. */
+export function onGitHubCliStatusChange(listener: (status: GitHubCliStatus) => void): () => void {
+  statusListeners.add(listener)
+  return () => statusListeners.delete(listener)
+}
 
 /**
  * The status service for one host, so a refresh and a window that asks at the
@@ -703,7 +710,13 @@ export function gitHubCliStatusService(
   const key = canonicalHostName(host)
   const existing = services.get(key)
   if (existing) return existing
-  const created = new GitHubCliStatusService(key, options)
+  const created = new GitHubCliStatusService(key, {
+    ...options,
+    onChange: (status) => {
+      options.onChange?.(status)
+      for (const listener of statusListeners) listener(status)
+    },
+  })
   services.set(key, created)
   return created
 }

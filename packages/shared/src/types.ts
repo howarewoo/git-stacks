@@ -1,4 +1,5 @@
 import type { SnapshotLimits } from './performance'
+import type { OperationProgress, OperationScope } from './operation-scope'
 
 import type { GitHubHostStatus } from './host'
 import type { RepositoryCapabilities } from './capabilities'
@@ -915,6 +916,20 @@ export interface StackProgress {
   completed: string[]
   remaining: string[]
   message: string
+  /** Already-journalled surgery effects; absent for ordinary restack and Sync. */
+  surgery?: {
+    pullRequests: {
+      number: number
+      action: 'retarget' | 'close'
+      status: 'pending' | 'completed'
+    }[]
+    nativeStack: {
+      number: number
+      action: 'unstack' | 'unstack-and-create'
+      unstackStatus: 'pending' | 'completed'
+      createStatus: 'pending' | 'completed' | 'skipped'
+    } | null
+  }
 }
 export type StackAction =
   | { type: 'setParent'; branch: string; parent: string }
@@ -1256,6 +1271,8 @@ export interface DesktopAPI {
    */
   onRepositoryDropped?(listener: (paths: string[]) => void): () => void
   refresh(): Promise<RepositorySnapshot>
+  /** Origin-host CLI authority for the active repository, not the Settings host. */
+  repositoryOperationScope(): Promise<OperationScope>
   /** Lightweight source-backed open PR pages; never a mutation preflight. */
   prIndex?(options?: { refresh: boolean }): Promise<PullRequestIndex>
   onPrIndex?(listener: (index: PullRequestIndex) => void): () => void
@@ -1271,23 +1288,25 @@ export interface DesktopAPI {
   /** The reviewed insert, move, or remove surgery for one stack. */
   surgeryPreview(request: SurgeryRequest): Promise<SurgeryPreview>
   /** Resumable Submit Stack progress left on disk, or null when nothing is pending. */
-  submitStackProgress?: () => Promise<PublishProgress | null>
+  submitStackProgress?: () => Promise<OperationProgress<PublishProgress>>
   /**
    * Subscribes to progress pushed by a running submission, and returns the unsubscribe. The
    * dialog uses this rather than polling, because a read queues behind the action that is
    * producing the steps.
    */
-  onSubmitStackProgress?: (listener: (progress: PublishProgress | null) => void) => () => void
+  onSubmitStackProgress?: (
+    listener: (event: OperationProgress<PublishProgress>) => void,
+  ) => () => void
   /**
    * Subscribes to the running merge's own progress. A merge waits on GitHub's background
    * result, so the dialog cannot poll for it: the read queues behind the action itself.
    */
-  onMergeProgress?: (listener: (progress: MergeProgress | null) => void) => () => void
+  onMergeProgress?: (listener: (event: OperationProgress<MergeProgress>) => void) => () => void
   /**
    * Read-only: what GitHub now reports for merge requests made earlier, including requests it
    * is still running and pull requests it dropped from a merge queue. It submits nothing.
    */
-  mergeStatus?: () => Promise<MergeStatus | null>
+  mergeStatus?: () => Promise<OperationProgress<MergeStatus>>
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
   /** The review workspace headline: one pull request plus the stack layers around it. */
@@ -1382,9 +1401,9 @@ export interface DesktopAPI {
    */
   githubCliStatus?(): Promise<GitHubCliStatus>
   /**
-   * Subscribes to status changes main established on its own — a host change, a
-   * request that proved the credential had been replaced — and returns the
-   * unsubscribe.
+   * Subscribes to status changes for every host main reads, including repository
+   * origins. Filter by the surface's host; operation scope consumers refresh the
+   * scope when its authority's host changes. Returns the unsubscribe.
    */
   onGitHubCliStatus?: (listener: (status: GitHubCliStatus) => void) => () => void
   /**

@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { CancelledError, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, FolderOpen, LoaderCircle, Search, Terminal } from 'lucide-react'
+import { Check, Copy, FolderOpen, Search, Terminal } from 'lucide-react'
 import { useForm, useSelector } from '@tanstack/react-form'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
@@ -408,12 +408,8 @@ export function RepositoryDiscoveryDialog({
                 </Field>
               )}
             </searchForm.Field>
-            <Button disabled={searching} type="submit" variant="accent">
-              {searching ? (
-                <LoaderCircle aria-hidden="true" className="size-4 animate-spin" />
-              ) : (
-                <Search aria-hidden="true" className="size-4" />
-              )}
+            <Button loading={searching} type="submit" variant="secondary">
+              <Search aria-hidden="true" className="size-4" />
               Search
             </Button>
             {searching ? (

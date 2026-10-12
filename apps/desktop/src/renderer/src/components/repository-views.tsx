@@ -1,5 +1,11 @@
 import * as React from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { sameOperationScope, type OperationProgress } from '@git-stacks/shared/operation-scope'
+import {
+  mergeProgressAfterRead,
+  operationProgressKeys,
+  readOperationProgress,
+} from '../lib/operation-progress'
 import {
   ChevronRight,
   GitBranch,
@@ -11,7 +17,13 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import type { RepositorySnapshot } from '@git-stacks/shared/types'
+import type {
+  RepositorySnapshot,
+  DesktopAPI,
+  PublishProgress,
+  MergeProgress,
+  MergeStatus,
+} from '@git-stacks/shared/types'
 import { DIFF_PAGE_SIZE, LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 import { useListWindow, useRovingListFocus } from '../lib/list-window'
 import { createRequestGate } from '../lib/request-gate'
@@ -42,6 +54,218 @@ type CommonProps = {
   onRequest: (request: WorkflowRequest) => void
 }
 
+function RemoteOperationStatus({
+  snapshot,
+  authority,
+  desktop,
+  onRequest,
+  showingOperation,
+  busy,
+}: {
+  snapshot: RepositorySnapshot
+  authority: string
+  desktop?: DesktopAPI
+  onRequest: (request: WorkflowRequest) => void
+  showingOperation: 'publish' | 'merge' | null
+  busy: boolean
+}) {
+  const queryClient = useQueryClient()
+  const scope = React.useMemo(
+    () => ({ repositoryPath: snapshot.path, remoteUrl: snapshot.remoteUrl, authority }),
+    [snapshot.path, snapshot.remoteUrl, authority],
+  )
+  const keys = React.useMemo(() => operationProgressKeys(scope), [scope])
+  const { publication: publicationKey, merge: mergeKey, mergeProgress: mergeProgressKey } = keys
+  const publication = useQuery<OperationProgress<PublishProgress>>({
+    queryKey: publicationKey,
+    enabled: false,
+    queryFn: ({ signal }) => readOperationProgress(desktop!.submitStackProgress!, scope, signal),
+  })
+  const merge = useQuery<OperationProgress<MergeStatus>>({
+    queryKey: mergeKey,
+    enabled: false,
+    queryFn: async ({ signal }) => {
+      const result = await readOperationProgress(desktop!.mergeStatus!, scope, signal)
+      queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
+        mergeProgressKey,
+        (previous) => mergeProgressAfterRead(previous, result),
+      )
+      return result
+    },
+  })
+  const pushedMerge = useQuery<OperationProgress<MergeProgress> | null>({
+    queryKey: mergeProgressKey,
+    enabled: false,
+  })
+  React.useEffect(() => {
+    let active = true
+    let publicationRevision = 0
+    let mergeRevision = 0
+    const unsubscribePublication = desktop?.onSubmitStackProgress?.((event) => {
+      if (!active || !sameOperationScope(event.scope, scope)) return
+      const revision = ++publicationRevision
+      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true }).then(() => {
+        if (active && revision === publicationRevision)
+          queryClient.setQueryData(publicationKey, event)
+      })
+    })
+    const unsubscribeMerge = desktop?.onMergeProgress?.((event) => {
+      if (!active || !sameOperationScope(event.scope, scope)) return
+      const revision = ++mergeRevision
+      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true }).then(() => {
+        if (active && revision === mergeRevision)
+          queryClient.setQueryData(mergeProgressKey, event.progress === null ? null : event)
+      })
+    })
+    if (desktop?.submitStackProgress) {
+      void queryClient
+        .fetchQuery({
+          queryKey: publicationKey,
+          queryFn: async ({ signal }) => {
+            const value = await readOperationProgress(desktop.submitStackProgress!, scope, signal)
+            if (!active || signal.aborted) throw new Error('Retired publication read')
+            return value
+          },
+        })
+        .catch(() => {})
+    }
+    if (desktop?.mergeStatus) {
+      void queryClient
+        .fetchQuery({
+          queryKey: mergeKey,
+          queryFn: async ({ signal }) => {
+            const value = await readOperationProgress(desktop.mergeStatus!, scope, signal)
+            if (!active || signal.aborted) throw new Error('Retired merge read')
+            queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
+              mergeProgressKey,
+              (previous) => mergeProgressAfterRead(previous, value),
+            )
+            return value
+          },
+        })
+        .catch(() => {})
+    }
+    return () => {
+      active = false
+      unsubscribePublication?.()
+      unsubscribeMerge?.()
+      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true })
+      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true })
+      queryClient.removeQueries({ queryKey: publicationKey, exact: true })
+      queryClient.removeQueries({ queryKey: mergeKey, exact: true })
+      queryClient.removeQueries({ queryKey: mergeProgressKey, exact: true })
+    }
+  }, [desktop, queryClient, publicationKey, mergeKey, mergeProgressKey, scope])
+  const progress = publication.data?.progress
+  const mergeEnvelope = pushedMerge.data ?? merge.data
+  const mergeResult = mergeEnvelope?.progress
+  if (!progress && !mergeResult && !publication.error && !merge.error) return null
+  return (
+    <section className="operation-banner" aria-label="Remote operation recovery">
+      <p role="status" aria-live="polite" className="sr-only">
+        {progress && showingOperation !== 'publish'
+          ? `Publication ${progress.status}. ${progress.message}`
+          : ''}
+        {mergeResult && showingOperation !== 'merge'
+          ? `Merge outcomes. ${mergeResult.message}`
+          : ''}
+        {(publication.error && showingOperation !== 'publish') ||
+        (merge.error && showingOperation !== 'merge')
+          ? 'Recovery read unavailable. Last confirmed results remain visible.'
+          : ''}
+      </p>
+      {progress ? (
+        <div className="grid gap-2">
+          <p>
+            <strong>Publication · {progress.status}</strong> · {progress.message}
+          </p>
+          <p className="workflow-note">
+            Captured layers: {progress.layers.map((layer) => layer.branch).join(', ')}. Published
+            remote changes are not undone by local Abort.
+          </p>
+          {publication.data?.source === 'journal-read' ? (
+            <p className="workflow-note">
+              Saved journal read. Original operation authority was not recorded; this read does not
+              grant retry consent.
+            </p>
+          ) : null}
+          <ul>
+            {progress.steps.map((step, index) => (
+              <li key={index}>
+                {step.status} · {step.label}
+              </li>
+            ))}
+          </ul>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() =>
+              onRequest({
+                kind: 'stack',
+                operation: 'publish',
+                branch: progress.layers[0]?.branch ?? snapshot.currentBranch ?? '',
+              })
+            }
+          >
+            Review publication recovery
+          </Button>
+        </div>
+      ) : null}
+      {mergeResult ? (
+        <div className="grid gap-2">
+          <p>
+            <strong>Merge outcomes</strong> · {mergeResult.message}
+          </p>
+          {mergeEnvelope?.source === 'journal-read' ? (
+            <p className="workflow-note">
+              Saved merge journal read. Original operation authority was not recorded; no merge was
+              requested.
+            </p>
+          ) : null}
+          <ul>
+            {mergeResult.layers.map((layer) => (
+              <li key={layer.pullRequest}>
+                #{layer.pullRequest} {layer.branch} · {layer.status} · {layer.detail}
+              </li>
+            ))}
+          </ul>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() =>
+              onRequest({
+                kind: 'stack',
+                operation: 'merge',
+                branch: mergeResult.layers[0]?.branch ?? snapshot.currentBranch ?? '',
+              })
+            }
+          >
+            Review merge outcomes
+          </Button>
+        </div>
+      ) : null}
+      {publication.error || merge.error ? (
+        <p className="workflow-note">
+          Recovery read unavailable. Last confirmed results remain visible; no mutation was retried.
+        </p>
+      ) : null}
+      {desktop?.mergeStatus && mergeResult ? (
+        <Button
+          size="sm"
+          variant="secondary"
+          loading={merge.isFetching}
+          disabled={busy}
+          onClick={() => {
+            void merge.refetch({ throwOnError: true }).catch(() => {})
+          }}
+        >
+          Refresh merge outcomes
+        </Button>
+      ) : null}
+    </section>
+  )
+}
+
 /**
  * The persistent operation banner. It stays on screen across every workspace
  * view while a Git operation or stack restack is in flight, and it renders the
@@ -55,14 +279,38 @@ export function OperationBanner({
   onRequest,
   onShowChanges,
   onResolveConflict,
-}: CommonProps & { onShowChanges: () => void; onResolveConflict: (path: string) => void }) {
+  authority,
+  desktop,
+  showingOperation,
+}: CommonProps & {
+  authority: string
+  desktop?: DesktopAPI
+  showingOperation: 'publish' | 'merge' | null
+  onShowChanges: () => void
+  onResolveConflict: (path: string) => void
+}) {
   const operation = snapshot.operation
   const stack = snapshot.stackOperation
   const conflicts = snapshot.files.filter((file) => file.conflicted).length
   const firstConflict = snapshot.files.find((file) => file.conflicted)?.path ?? null
-  if (!operation && !stack && !conflicts) return null
+  const remoteStatus = (
+    <RemoteOperationStatus
+      key={JSON.stringify([snapshot.path, snapshot.remoteUrl, authority])}
+      snapshot={snapshot}
+      authority={authority}
+      desktop={desktop}
+      onRequest={onRequest}
+      showingOperation={showingOperation}
+      busy={busy}
+    />
+  )
+  if (!operation && !stack && !conflicts) return remoteStatus
   const label = stack
-    ? 'Stack restack'
+    ? stack.surgery
+      ? 'Stack surgery'
+      : stack.kind === 'sync'
+        ? 'Stack Sync'
+        : 'Stack restack'
     : operation === 'cherryPick'
       ? 'Cherry-pick'
       : operation
@@ -76,13 +324,23 @@ export function OperationBanner({
         message: stack.message,
       })
     : null
+  const pendingRemoteEffects = Boolean(
+    stack?.surgery?.pullRequests.some((step) => step.status !== 'completed') ||
+      (stack?.surgery?.nativeStack &&
+        (stack.surgery.nativeStack.unstackStatus !== 'completed' ||
+          (stack.surgery.nativeStack.action === 'unstack-and-create' &&
+            stack.surgery.nativeStack.createStatus === 'pending'))),
+  )
   const phase = workflowPhase({
     loading: false,
     busy: false,
     failed: false,
     stale: false,
-    finished: progress !== null && progress.remaining === 0,
-    partial: progress !== null && progress.completed > 0 && progress.remaining > 0,
+    finished: progress !== null && progress.remaining === 0 && !pendingRemoteEffects,
+    partial:
+      progress !== null &&
+      progress.completed > 0 &&
+      (progress.remaining > 0 || pendingRemoteEffects),
     blocked: resumable && conflicts > 0,
   })
   const message =
@@ -92,101 +350,128 @@ export function OperationBanner({
         ? `${progress.summary}. ${progress.message}`
         : 'Review the working tree, then continue or abort.'
   return (
-    <section className="operation-banner" aria-label="Git operation status">
-      <PhaseStatus
-        phase={phase}
-        title={`${label} ${operation || stack ? 'in progress' : 'need attention'}`}
-        message={message}
-        className="operation-status"
-      />
-      <div className="workflow-row">
-        <Button size="sm" variant="secondary" onClick={onShowChanges}>
-          View changes
-        </Button>
-        {conflicts > 0 && firstConflict ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            tooltip="Open the three-way resolver for the first conflicted file. It explains the operation, shows index stages 1, 2, and 3, and stages a result only after the file is revalidated."
-            onClick={() => onResolveConflict(firstConflict)}
-          >
-            Resolve conflicts
-          </Button>
+    <>
+      {remoteStatus}
+      <section className="operation-banner" aria-label="Git operation status">
+        <PhaseStatus
+          phase={phase}
+          title={`${label} ${operation || stack ? 'in progress' : 'need attention'}`}
+          message={message}
+          className="operation-status"
+        />
+        {stack?.surgery ? (
+          <div className="grid gap-2">
+            <p className="workflow-note">
+              Captured surgery effects remain journalled; local Abort does not undo remote effects.
+            </p>
+            <ul>
+              {stack.surgery.pullRequests.map((step) => (
+                <li key={`${step.number}:${step.action}`}>
+                  #{step.number} · {step.action} · {step.status}
+                </li>
+              ))}
+              {stack.surgery.nativeStack ? (
+                <li>
+                  Native stack #{stack.surgery.nativeStack.number} ·{' '}
+                  {stack.surgery.nativeStack.action} · unstack{' '}
+                  {stack.surgery.nativeStack.unstackStatus}
+                  {stack.surgery.nativeStack.action === 'unstack-and-create'
+                    ? ` · replacement ${stack.surgery.nativeStack.createStatus}`
+                    : ''}
+                </li>
+              ) : null}
+            </ul>
+          </div>
         ) : null}
-        {resumable ? (
-          <>
+        <div className="workflow-row">
+          <Button size="sm" variant="secondary" onClick={onShowChanges}>
+            View changes
+          </Button>
+          {conflicts > 0 && firstConflict ? (
             <Button
-              disabled={busy || conflicts > 0}
               size="sm"
-              variant="accent"
-              tooltip={
-                conflicts > 0
-                  ? 'Blocked until every conflicted file is resolved and staged.'
-                  : stack
-                    ? 'Resume the stack restack locally using staged resolutions.'
-                    : `Resume the ${label.toLowerCase()} locally using staged resolutions.`
-              }
-              onClick={() =>
-                runAction(
-                  { type: stack ? 'stackContinue' : 'operationContinue' },
-                  `Continue ${label.toLowerCase()}`,
-                )
-              }
+              variant="secondary"
+              tooltip="Open the three-way resolver for the first conflicted file. It explains the operation, shows index stages 1, 2, and 3, and stages a result only after the file is revalidated."
+              onClick={() => onResolveConflict(firstConflict)}
             >
-              Continue
+              Resolve conflicts
             </Button>
-            {!stack && ['rebase', 'cherryPick', 'revert'].includes(operation ?? '') ? (
+          ) : null}
+          {resumable ? (
+            <>
+              <Button
+                disabled={busy || conflicts > 0}
+                size="sm"
+                variant="default"
+                tooltip={
+                  conflicts > 0
+                    ? 'Blocked until every conflicted file is resolved and staged.'
+                    : stack
+                      ? `Resume ${label.toLowerCase()} using the saved journal and staged resolutions.`
+                      : `Resume the ${label.toLowerCase()} locally using staged resolutions.`
+                }
+                onClick={() =>
+                  runAction(
+                    { type: stack ? 'stackContinue' : 'operationContinue' },
+                    `Continue ${label.toLowerCase()}`,
+                  )
+                }
+              >
+                Continue
+              </Button>
+              {!stack && ['rebase', 'cherryPick', 'revert'].includes(operation ?? '') ? (
+                <Button
+                  disabled={busy}
+                  size="sm"
+                  variant="secondary"
+                  tooltip="Skip the current commit without applying it locally. Its conflict resolutions are discarded."
+                  onClick={() =>
+                    onRequest({
+                      kind: 'confirm',
+                      title: `Skip current ${label.toLowerCase()} step?`,
+                      description:
+                        'The current commit will not be applied. Its conflict resolutions will be discarded.',
+                      label: 'Skip current commit',
+                      action: { type: 'operationSkip' },
+                      destructive: true,
+                    })
+                  }
+                >
+                  Skip…
+                </Button>
+              ) : null}
               <Button
                 disabled={busy}
                 size="sm"
                 variant="secondary"
-                tooltip="Skip the current commit without applying it locally. Its conflict resolutions are discarded."
+                tooltip={
+                  stack
+                    ? 'Abort local replay and restore saved local tips where safe. Already published remote effects are not undone.'
+                    : 'Abort this operation and restore the pre-operation state locally. In-progress resolutions are discarded.'
+                }
                 onClick={() =>
                   onRequest({
                     kind: 'confirm',
-                    title: `Skip current ${label.toLowerCase()} step?`,
-                    description:
-                      'The current commit will not be applied. Its conflict resolutions will be discarded.',
-                    label: 'Skip current commit',
-                    action: { type: 'operationSkip' },
+                    title: `Abort ${label.toLowerCase()}?`,
+                    description: stack
+                      ? 'Abort the current rebase and restore saved local tips where safe. In-progress resolutions are discarded. Newer external changes are never overwritten. Already published branches, PR changes and native membership effects are not undone.'
+                      : 'Restore the state before this operation. In-progress conflict resolutions will be discarded.',
+                    label: `Abort ${label.toLowerCase()}`,
+                    action: { type: stack ? 'stackAbort' : 'operationAbort' },
                     destructive: true,
                   })
                 }
               >
-                Skip…
+                Abort…
               </Button>
-            ) : null}
-            <Button
-              disabled={busy}
-              size="sm"
-              variant="secondary"
-              tooltip={
-                stack
-                  ? 'Abort the restack and restore completed branches to their saved tips. In-progress resolutions are discarded; changed external refs stop the rollback.'
-                  : 'Abort this operation and restore the pre-operation state locally. In-progress resolutions are discarded.'
-              }
-              onClick={() =>
-                onRequest({
-                  kind: 'confirm',
-                  title: `Abort ${label.toLowerCase()}?`,
-                  description: stack
-                    ? 'Abort the current rebase and restore completed stack branches to their saved tips. In-progress conflict resolutions will be discarded. Newer external changes are never overwritten.'
-                    : 'Restore the state before this operation. In-progress conflict resolutions will be discarded.',
-                  label: `Abort ${label.toLowerCase()}`,
-                  action: { type: stack ? 'stackAbort' : 'operationAbort' },
-                  destructive: true,
-                })
-              }
-            >
-              Abort…
-            </Button>
-          </>
-        ) : null}
-        {operation === 'other' ? (
-          <span className="workflow-note">Finish the active Git operation in your terminal.</span>
-        ) : null}
-      </div>
-    </section>
+            </>
+          ) : null}
+          {operation === 'other' ? (
+            <span className="workflow-note">Finish the active Git operation in your terminal.</span>
+          ) : null}
+        </div>
+      </section>
+    </>
   )
 }
 

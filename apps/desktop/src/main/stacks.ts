@@ -5165,7 +5165,7 @@ function mergePreviewFor(
     : ['default', 'direct_merge']
   if (!queueConfigured) {
     warnings.push(
-      `Neither GitHub's own merge-queue capability for ${selected.base} nor an accepted enqueue recorded here reports a queue, so this preview offers a direct merge or the repository default. Choosing the merge queue still works: GitHub reports whether it accepted it.`,
+      `Neither GitHub's own merge-queue capability for ${selected.base} nor an accepted enqueue recorded here reports a queue, so this preview offers a direct merge or the repository default. Merge queue is unavailable in this preview; reload after GitHub reports queue capability.`,
     )
   }
   const layerNumbers = layers.map((entry) => entry.pr?.number ?? 0)
@@ -7245,6 +7245,25 @@ export async function getStackProgress(
     completed,
     remaining,
     message: journal.message,
+    ...(journal.surgery
+      ? {
+          surgery: {
+            pullRequests: journal.surgery.pullRequests.map(({ number, action, status }) => ({
+              number,
+              action,
+              status,
+            })),
+            nativeStack: journal.surgery.stack
+              ? {
+                  number: journal.surgery.stack.stackNumber,
+                  action: journal.surgery.stack.action,
+                  unstackStatus: journal.surgery.stack.unstackStatus,
+                  createStatus: journal.surgery.stack.createStatus,
+                }
+              : null,
+          },
+        }
+      : {}),
   }
 }
 

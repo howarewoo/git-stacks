@@ -144,29 +144,37 @@ function recoveryApi(mode: string): WorkflowStackAPI {
       }
       return mode === 'mismatch' ? movedPreview : publishPreview
     },
-    submitStackProgress: async () =>
-      mode === 'non-retryable'
-        ? {
-            ...journal,
-            message: 'GitHub rejected the native stack chain.',
-            steps: [
-              {
-                kind: 'create-stack',
-                branch: null,
-                label: 'Register native stack',
-                status: 'failed',
-                pullRequest: null,
-                detail: '',
-                failure: {
-                  summary: 'Invalid chain (422).',
-                  recovery:
-                    'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
-                  retryable: false,
+    submitStackProgress: async () => ({
+      scope: {
+        repositoryPath: snapshot.path,
+        remoteUrl: snapshot.remoteUrl,
+        authority: 'recovery-specimen',
+      },
+      source: 'journal-read',
+      progress:
+        mode === 'non-retryable'
+          ? {
+              ...journal,
+              message: 'GitHub rejected the native stack chain.',
+              steps: [
+                {
+                  kind: 'create-stack',
+                  branch: null,
+                  label: 'Register native stack',
+                  status: 'failed',
+                  pullRequest: null,
+                  detail: '',
+                  failure: {
+                    summary: 'Invalid chain (422).',
+                    recovery:
+                      'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
+                    retryable: false,
+                  },
                 },
-              },
-            ],
-          }
-        : journal,
+              ],
+            }
+          : journal,
+    }),
     onSubmitStackProgress: () => noop,
     onMergeProgress: () => noop,
   }

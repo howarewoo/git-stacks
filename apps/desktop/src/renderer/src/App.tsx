@@ -57,7 +57,9 @@ import { ListWindowMore } from './components/list-window'
 import { useListWindow, useRovingListFocus } from './lib/list-window'
 import { createRequestGate, type RequestClaim } from './lib/request-gate'
 import { useSettingsMutation } from './lib/settings-query'
-import { cliAuthority, withoutReplacedCredential } from './credential-identity'
+import { cliAuthority } from '@git-stacks/shared/operation-scope'
+import { useRepositoryOperationAuthority } from './lib/repository-operation-authority'
+import { withoutReplacedCredential } from './credential-identity'
 import { Badge } from './components/ui/badge'
 import { Button, IconButton } from './components/ui/button'
 import { Checkbox } from './components/ui/checkbox'
@@ -123,6 +125,7 @@ import type {
   PullRequestInboxReport,
 } from '@git-stacks/shared/pr-inbox'
 import { checkLabel, checksVariant } from './lib/pull-request-state'
+import { branchDeleteReason } from './lib/branches'
 import type {
   PullRequestCheckDetail,
   PullRequestChecksReport,
@@ -452,19 +455,6 @@ function formatBranchDate(value: string): string {
   if (elapsed < 86_400_000) return `${Math.max(1, Math.floor(elapsed / 3_600_000))}h ago`
   if (elapsed < 604_800_000) return `${Math.max(1, Math.floor(elapsed / 86_400_000))}d ago`
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-function branchDeleteReason(branch: Branch, defaultBranch: string | null): string | null {
-  if (branch.remote) {
-    if (branch.ref.endsWith('/HEAD')) return 'The remote symbolic HEAD cannot be deleted.'
-    if (defaultBranch && branch.name.endsWith(`/${defaultBranch}`))
-      return 'The default remote branch cannot be deleted.'
-  } else {
-    if (branch.current) return 'Switch to another branch before deleting the current branch.'
-    if (branch.name === defaultBranch) return 'The default branch cannot be deleted.'
-  }
-  if (!branch.oid) return 'The branch tip is unknown. Refresh before selecting it.'
-  return null
 }
 
 function App() {
@@ -1359,6 +1349,8 @@ function App() {
   React.useEffect(() => {
     if (!desktop) return
     const stop = desktop.onGitHubCliStatus?.((status) => {
+      const host = inboxHostRef.current
+      if (host !== null && canonicalHostName(status.host) !== canonicalHostName(host)) return
       cliStatusRequest.current += 1
       applyCliStatus(status)
     })
@@ -1378,6 +1370,7 @@ function App() {
     () => cliAuthority(settings?.github.host ?? null, cliStatus),
     [cliStatus, settings?.github.host],
   )
+  const operationAuthority = useRepositoryOperationAuthority(desktop, snapshot)
 
   // The optional Notification Center. Its own state, its own request counter,
   // and two separate errors: a failed read must not report itself as a failed
@@ -2144,19 +2137,26 @@ function App() {
     setNewBranchOpen(true)
   }, [newBranchForm, snapshot])
 
-  const openPrDialog = React.useCallback(() => {
-    if (!snapshot || !selectedBranch?.current || selectedBranch.remote) return
-    const defaults = {
-      title: selectedBranch.subject || `Open ${selectedBranch.name}`,
-      base: selectedBranch.parent ?? snapshot.defaultBranch,
-      body: '',
-      draft: false,
-    }
-    setPrDefaults(defaults)
-    prForm.reset(defaults)
-    setPrNotice(null)
-    setPrOpen(true)
-  }, [prForm, selectedBranch, snapshot])
+  const openPrDialog = React.useCallback(
+    (branchOverride?: Branch) => {
+      const targetBranch = branchOverride ?? selectedBranch
+      if (!snapshot || !targetBranch?.current || targetBranch.remote) return
+      if (branchOverride) {
+        setSelectedBranchRef(branchOverride.ref)
+      }
+      const defaults = {
+        title: targetBranch.subject || `Open ${targetBranch.name}`,
+        base: targetBranch.parent ?? snapshot.defaultBranch,
+        body: '',
+        draft: false,
+      }
+      setPrDefaults(defaults)
+      prForm.reset(defaults)
+      setPrNotice(null)
+      setPrOpen(true)
+    },
+    [prForm, selectedBranch, setSelectedBranchRef, snapshot],
+  )
 
   const selectedDeleteBranches =
     branchSelection && branchSelection.repoPath === snapshot?.path
@@ -3203,7 +3203,7 @@ function App() {
               ? 'Switch to a local branch to open its pull request on GitHub.'
               : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.')
         }
-        onCreate={openPrDialog}
+        onCreate={() => openPrDialog()}
         onRequest={openWorkflow}
         onReviewNumber={(number) => {
           setReviewNumber(number)
@@ -3230,7 +3230,7 @@ function App() {
           requestId: INBOX_REQUEST_ID,
         })
       }
-      onSaveFilters={(drafts) => void saveInboxFilters(drafts)}
+      onSaveFilters={saveInboxFilters}
       savingFilters={inboxSavingFilters}
       refreshing={inboxRefreshing}
       report={inboxReport}
@@ -3338,6 +3338,10 @@ function App() {
           search={search}
           onSearchChange={setSearch}
           onCreate={openBranchDialog}
+          onCheckout={requestCheckoutBranch}
+          onOpenPr={openPrDialog}
+          onOpenExternal={openExternal}
+          onDeleteBranch={(branch) => openDeleteDialog([branch])}
           inspectorVisible={showDetails}
           onToggleInspector={() => setShowDetails((value) => !value)}
         />
@@ -3594,16 +3598,79 @@ function App() {
                 <Upload className="size-3.5" />
                 Publish stack…
               </Button>
+              <Button
+                variant="secondary"
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  !snapshot.github.available ||
+                  Boolean(shapeReason('executeStack'))
+                }
+                tooltip={
+                  shapeReason('executeStack') ??
+                  (!snapshot.github.available
+                    ? snapshot.github.message ||
+                      'Connect an authenticated GitHub repository to sync stacks.'
+                    : 'Preview synchronizing this stack with trunk and updating remote branches.')
+                }
+                onClick={() =>
+                  openWorkflow({ kind: 'stack', operation: 'sync', branch: selectedBranch.name })
+                }
+              >
+                <GitBranch className="size-3.5" />
+                Sync stack…
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={
+                  isBusy ||
+                  operationActive ||
+                  !snapshot.github.available ||
+                  !selectedPullRequest ||
+                  selectedPullRequest.state !== 'OPEN' ||
+                  Boolean(shapeReason('executeStack'))
+                }
+                tooltip={
+                  shapeReason('executeStack') ??
+                  (!snapshot.github.available
+                    ? snapshot.github.message ||
+                      'Connect an authenticated GitHub repository to merge pull requests.'
+                    : !selectedPullRequest
+                      ? 'A pull request is required to preview downstack merge.'
+                      : selectedPullRequest.state !== 'OPEN'
+                        ? 'Only open pull requests can be merged.'
+                        : 'Existing captured preview and confirmation gates determine the actual downstack scope.')
+                }
+                onClick={() =>
+                  openWorkflow({ kind: 'stack', operation: 'merge', branch: selectedBranch.name })
+                }
+              >
+                <GitPullRequest className="size-3.5" />
+                Preview merge…
+              </Button>
               <details className="detail-disclosure">
                 <summary>Edit stack layers</summary>
                 <div className="detail-disclosure-actions">
                   {(() => {
-                    // The three surgeries act on the selected layer, so each one is offered
-                    // only where it can be expressed: a parent to move down onto, a layer
-                    // above to move up past, and no layer above to remove.
-                    const parent = selectedBranch.parent ?? null
+                    const immediateParentName =
+                      selectedBranch.recordedParent ?? selectedBranch.parent ?? null
+                    const immediateParent = immediateParentName
+                      ? snapshot.branches.find(
+                          (branch) => !branch.remote && branch.name === immediateParentName,
+                        )
+                      : null
+                    const isTrunk =
+                      !immediateParentName || immediateParentName === snapshot.defaultBranch
+                    const lowerTarget = immediateParent
+                      ? (immediateParent.recordedParent ??
+                        immediateParent.parent ??
+                        snapshot.defaultBranch)
+                      : null
                     const above = snapshot.branches.find(
-                      (branch) => !branch.remote && branch.parent === selectedBranch.name,
+                      (branch) =>
+                        !branch.remote &&
+                        (branch.recordedParent === selectedBranch.name ||
+                          branch.parent === selectedBranch.name),
                     )
                     const common = isBusy || operationActive
                     return (
@@ -3627,21 +3694,26 @@ function App() {
                         </Button>
                         <Button
                           variant="ghost"
-                          disabled={common || !parent || Boolean(shapeReason('executeSurgery'))}
+                          disabled={
+                            common ||
+                            isTrunk ||
+                            !lowerTarget ||
+                            Boolean(shapeReason('executeSurgery'))
+                          }
                           tooltip={
                             shapeReason('executeSurgery') ??
-                            (parent
-                              ? `Preview reparenting ${selectedBranch.name} onto ${parent} and replaying the layers above it.`
-                              : 'This layer already sits directly on the stack trunk.')
+                            (isTrunk
+                              ? 'This layer already sits directly on the stack trunk.'
+                              : `Preview moving ${selectedBranch.name} below ${immediateParentName} onto ${lowerTarget} and replaying layers onto it.`)
                           }
                           onClick={() =>
-                            parent
+                            !isTrunk && lowerTarget
                               ? openWorkflow({
                                   kind: 'surgery',
                                   request: {
                                     kind: 'move',
                                     branch: selectedBranch.name,
-                                    target: parent,
+                                    target: lowerTarget,
                                   },
                                 })
                               : undefined
@@ -3651,9 +3723,7 @@ function App() {
                         </Button>
                         <Button
                           variant="ghost"
-                          disabled={
-                            common || !above?.parent || Boolean(shapeReason('executeSurgery'))
-                          }
+                          disabled={common || !above || Boolean(shapeReason('executeSurgery'))}
                           tooltip={
                             shapeReason('executeSurgery') ??
                             (above
@@ -3677,14 +3747,12 @@ function App() {
                         </Button>
                         <Button
                           variant="ghost"
-                          disabled={
-                            common || Boolean(above) || Boolean(shapeReason('executeSurgery'))
-                          }
+                          disabled={common || Boolean(shapeReason('executeSurgery'))}
                           tooltip={
                             shapeReason('executeSurgery') ??
                             (above
-                              ? 'Reorder the layers above this one first: removing a middle layer has to replay them, and the preview shows it.'
-                              : 'Preview deleting this local branch, retargeting nothing above it, and closing its pull request.')
+                              ? 'Preview deleting this local branch, replaying the layers above it onto its parent, and closing its pull request.'
+                              : 'Preview deleting this local branch and closing its pull request.')
                           }
                           onClick={() =>
                             openWorkflow({
@@ -3865,7 +3933,7 @@ function App() {
                       ? 'Switch to this branch to open its pull request on GitHub.'
                       : 'Review creating a PR from this branch’s published upstream. Unpushed commits are not included.')
                 }
-                onClick={openPrDialog}
+                onClick={() => openPrDialog()}
                 size="sm"
                 variant="secondary"
               >
@@ -4204,9 +4272,18 @@ function App() {
         {announcement}
       </div>
       {snapshot ? <section aria-label="Repository controls">{renderToolbar()}</section> : null}
-      {snapshot ? (
+      {snapshot && operationAuthority !== null ? (
         <OperationBanner
           snapshot={snapshot}
+          authority={operationAuthority}
+          desktop={desktop ?? undefined}
+          showingOperation={
+            workflow?.repoPath === snapshot.path &&
+            workflow.request.kind === 'stack' &&
+            (workflow.request.operation === 'publish' || workflow.request.operation === 'merge')
+              ? workflow.request.operation
+              : null
+          }
           busy={isBusy}
           runAction={runAction}
           onRequest={openWorkflow}
@@ -4223,12 +4300,15 @@ function App() {
         )}
         {detailsVisible ? renderDetails() : null}
       </div>
-      {workflow && snapshot && workflow.repoPath === snapshot.path ? (
+      {workflow &&
+      snapshot &&
+      operationAuthority !== null &&
+      workflow.repoPath === snapshot.path ? (
         <WorkflowDialog
           key={workflow.id}
           request={workflow.request}
           snapshot={snapshot}
-          authority={authority}
+          authority={operationAuthority}
           busy={isBusy}
           actionError={actionError}
           onClearActionError={() => setActionError(null)}
