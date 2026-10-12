@@ -47,6 +47,60 @@ storage, and model-provider usage have their own billing rules. After the hosted
 workflows pass, retire idle self-hosted runner registrations and stop their local
 services; do not interrupt jobs or delete retained runner data during the cutover.
 
+## Install the agent skills
+
+The repository's `.agents/skills/` directory contains two standalone skills:
+`flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack, and
+`ready-stack` prepares an existing stack for review and checks its readiness.
+Install them with the [Skills CLI](https://github.com/vercel-labs/skills) using
+Node.js and `npx`; cloning this repository, installing pnpm dependencies, or
+building the desktop app is not required.
+
+Discover the available skills from any directory:
+
+```sh
+npx skills add howarewoo/git-stacks --list
+```
+
+For a project install, run the command **in the target repository**, not in this
+source repository. `howarewoo/git-stacks` identifies the skill source; the current
+directory determines the project receiving the skills:
+
+```sh
+cd /path/to/your/repository
+npx skills add howarewoo/git-stacks
+```
+
+The CLI prompts for skills and host agents. To select both skills and a specific
+host non-interactively (Codex in this example):
+
+```sh
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --yes
+```
+
+Replace `codex` with your host's Skills CLI agent identifier, or omit both `--agent`
+and `--yes` to choose interactively. For a user-wide install available across
+projects, add `--global`; this writes to the selected agent's user-level skill
+location rather than the current project:
+
+```sh
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --global --yes
+```
+
+The CLI includes each skill's bundled files, including
+`ready-stack/references/verification.md`. Using these GitHub workflows requires
+Git and an authorized GitHub integration (such as authenticated `gh`), plus the
+target repository's own verification tools when the workflow calls for them.
+Installation alone does not authorize PR mutations.
+
+When changing skill packaging or these commands, verify discovery and actual
+project/global installation from outside this repository with the current Skills
+CLI. Use disposable project directories and an isolated `HOME` and XDG directories
+for the global check; confirm both installed `SKILL.md` files and the ready-stack
+relative reference match their source. Record the CLI version, commands, outcomes,
+and limits in the PR. Desktop builds/tests do not exercise skill installation;
+Biome does not format Markdown.
+
 ## Commands
 
 Use Node 24, pnpm 12.11.2 (pinned in `packageManager`), and the committed `pnpm-lock.yaml`. A local source build
@@ -2230,7 +2284,37 @@ using generated semantic CSS variables, plus actual boundary and focus controls.
 Inspect both themes and narrow reflow when changing those specimens; no palette
 values belong in the catalog.
 
-The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
+Tokens, Typography, and Typeset are adjacent Foundations entries in content and
+navigation; the original component anchors remain supported. The sidebar brand
+header links to the introduction at the genuine page top, and the command entry
+does the same; both clear search, transfer focus, and close narrow navigation.
+Explicit navigation wins over pre-search viewport restoration, including
+Back/Forward.
+Each category derives its count and links from one destination list. Foundations
+prepends the always-available Tokens destination, even while filtering. The brand
+title underlines on hover and retains keyboard focus treatment.
+
+Typeset is owned browser-safe CSS adapted from the MIT shadcn/typeset
+[distribution](https://github.com/shadcn-ui/ui/blob/main/apps/v4/app/%28app%29/%28typeset%29/typeset.css)
+and its [contract](https://ui.shadcn.com/docs/typeset), not a runtime package.
+`@git-stacks/ui/styles.css` includes it; `@git-stacks/ui/typeset.css` exposes the
+standalone stylesheet for consumers with their own token setup. Wrap semantic
+HTML or already-rendered markdown in `typeset typeset-docs` (15px, 1.75 leading,
+1.25em flow) or `typeset typeset-compact` (14px, 1.6 leading, 1em flow).
+The three rhythm variables and body/heading/mono font variables are overridable;
+fonts, colors and radius use existing shared roles. Layout owns reading measure.
+`typeset-scroll` wraps wide tables; `not-typeset` and `data-not-typeset` exclude
+the entire subtree, even nested activation. Components-layer rules and low
+specificity element selectors let utility overrides win. New blocks own their
+start spacing and new cells own separators, preserving existing block styles
+during appends. No markdown parser is needed for the catalog's semantic specimen.
+Opted-out component subtrees own their layout spacing; the specimen uses a 20px
+outer gap and an 8px inner gap without stretching the shared control. Captured
+branch and base identities use semantic inline code.
+The upstream reconciliation disclosure uses Typeset as actual reading content;
+catalog controls and desktop Git workflows are not globally restyled.
+
+The dated `apps/design/src/manifest.ts` records all 63 components plus Typography and Typeset, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
  
 Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
