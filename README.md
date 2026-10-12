@@ -47,6 +47,61 @@ storage, and model-provider usage have their own billing rules. After the hosted
 workflows pass, retire idle self-hosted runner registrations and stop their local
 services; do not interrupt jobs or delete retained runner data during the cutover.
 
+## Install the agent skills
+
+The repository's `.agents/skills/` directory contains two standalone skills:
+`flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack, and
+`submit-stack-for-review` submits an existing full stack for review, initially top-to-bottom.
+Install them with the [Skills CLI](https://github.com/vercel-labs/skills) using
+Node.js and `npx`; cloning this repository, installing pnpm dependencies, or
+building the desktop app is not required.
+
+Discover the available skills from any directory:
+
+```sh
+npx skills add howarewoo/git-stacks --list
+```
+
+For a project install, run the command **in the target repository**, not in this
+source repository. `howarewoo/git-stacks` identifies the skill source; the current
+directory determines the project receiving the skills:
+
+```sh
+cd /path/to/your/repository
+npx skills add howarewoo/git-stacks
+```
+
+The CLI prompts for skills and host agents. To select both skills and a specific
+host non-interactively (Codex in this example):
+
+```sh
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --yes
+```
+
+Replace `codex` with your host's Skills CLI agent identifier, or omit both `--agent`
+and `--yes` to choose interactively. For a user-wide install available across
+projects, add `--global`; this writes to the selected agent's user-level skill
+location rather than the current project:
+
+```sh
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --global --yes
+```
+
+Each skill is a self-contained `SKILL.md`. Using these GitHub workflows requires
+Git and an authorized GitHub integration (such as authenticated `gh`), plus the
+target repository's own verification tools when the workflow calls for them.
+Installation alone does not authorize PR mutations.
+
+When changing skill packaging or these commands, verify discovery and actual
+project/global installation from outside this repository with the current Skills
+CLI. Use disposable project directories and an isolated `HOME` and XDG directories
+for the global check; compare both installed `SKILL.md` files byte-for-byte with
+source and confirm only the current two skills are discovered and installed.
+For an unpushed candidate, substitute the absolute local checkout path for
+`howarewoo/git-stacks`; this proves local packaging, not remote availability.
+Record CLI version, exact commands, outcomes, source hashes, and limits in the PR.
+Desktop builds/tests do not exercise skill installation; Biome does not format Markdown.
+
 ## Commands
 
 Use Node 24, pnpm 12.11.2 (pinned in `packageManager`), and the committed `pnpm-lock.yaml`. A local source build
@@ -259,35 +314,45 @@ ephemeral and outside query keys, payloads, and mutation variables.
 Repository-owned agent skills live in `.agents/skills/`. They are optional agent
 workflows, not desktop features or a required stack-management CLI.
 
-Use [ready-stack](.agents/skills/ready-stack/SKILL.md) for an explicit request to
-prepare an existing PR stack bottom-to-top. Supply a canonical PR URL identifying
-the stack or an explicit PR list; invocation syntax depends on the agent host.
-For example:
+Use [submit-stack-for-review](.agents/skills/submit-stack-for-review/SKILL.md) for an
+explicit request to submit the full existing stack containing one canonical PR URL.
+Invocation syntax depends on the agent host. For example:
 
 ```text
-Prepare the stack containing <canonical PR URL> using ready-stack.
-Prepare these PRs using ready-stack: <bottom PR URL>, <top PR URL>.
-Prepare the stack containing <canonical PR URL> using ready-stack --preview.
+Submit the stack containing <canonical PR URL> using submit-stack-for-review.
 ```
 
-Preparation includes scoped corrections, review-thread handling, verification,
-publication, and restacking. After each layer's corrections and local verification,
-it submits drafts for review one at a time, bottom-to-top, and leaves already-ready
-PRs unchanged. Valid existing approval means no review resubmission or new request.
-Missing human approval does not prevent preparing descendants once author work and
-required checks are complete; the report distinguishes author-ready from merge-ready.
-The skill never merges, enqueues, or changes auto-merge. Preview is read-only,
-and loading the skill alone grants no mutation authority.
-The report is also the recovery handoff: it records verified state and the first
-unproved operation to resume.
+The initial pass is strictly top-to-bottom (most dependent PR first). Each layer
+is rebased onto its freshly fetched parent, conflicts are resolved before failing
+checks, and published-head changes are draft-gated. Submission means confirmed
+readiness with applicable PR CI checks on the exact published head, not waiting for
+human or automated review completion. These are the jobs configured by repository
+workflows for that PR, discovered from workflow definitions and current-head check
+runs/statuses, not branch-protection requirements, rulesets, approvals, or merge
+eligibility. All applicable checks must pass; a conditional skip is valid only when
+its workflow condition does not apply. Lower-parent rewrites require a final
+reconciliation of affected upper layers and a fresh ancestry/diff snapshot.
+Unchanged ready PRs remain unchanged. Ambiguous scope, unsafe writes, enabled or
+unknown auto-merge, pending, failing, or missing expected CI evidence, and continuing
+external drift block truthful completion. Denied mutations stop the workflow; a
+denied read blocks only when necessary evidence has no other authorized source.
+Protection/ruleset reads are not prerequisites, and their absence or read errors
+do not block established workflow/current-head CI evidence. The skill never merges,
+queues, changes auto-merge/protections, or handles review threads.
 
 Unlike [flatten-pr-graph](.agents/skills/flatten-pr-graph/SKILL.md), which orders PRs
-and deliberately skips checks, ready-stack verifies each changed layer. See its
-[verification scenarios](.agents/skills/ready-stack/references/verification.md)
-for activation, safety, recovery, and behavioral evaluation. For Markdown-only
-skill changes, review formatting manually and exercise the skill with disposable
-fixtures or read-only preview; Biome does not check Markdown, and application tests
-do not validate agent behavior.
+and deliberately skips checks, this skill verifies every changed layer. For
+Markdown-only changes, simplify and review the instructions, then exercise the
+actual authored skill with an agent on disposable Git fixtures and independent
+state oracles: include latest-parent rebasing, a lower rewrite invalidating upper
+layers, own-commit/diff preservation, and unrelated branch preservation. Include
+policy-read denial with valid workflow/current-head CI, old-head/pending/failing/
+missing expected CI, valid and invalid conditional skips, denied mutations, and
+essential denied reads without alternate evidence. Keep evaluation scripts/evidence
+outside the production repository. Provider simulation
+does not prove live GitHub draft/check/readiness integration; record that limit and
+any unavailable native agent evaluation. Do not mutate live PRs merely to test a skill.
+Application tests and Biome do not validate Markdown or agent workflow behavior.
 
 ## Live local and remote freshness
 
@@ -1944,7 +2009,6 @@ live availability and current implementations with stable forwarding identities,
 so account replacement and late-enabled CLI status remain observable through the
 actual status dialog. Pointer and keyboard exploration cover incomplete, stale,
 busy and replaced scopes without implying checkout or Git Fetch.
-
 The persistent operation surface stays outside destination content. Publication
 steps and observed merge outcomes retain their captured targets across Graph,
 Changes, Review and History; recovery opens the existing reviewed workflow without
@@ -2102,6 +2166,9 @@ and split modes at 1000×700, 1440×940, 1920×1080, and the 720×470 CSS viewpo
 equivalent of 200% zoom. Count complete code rows inside the local diff viewport:
 minimum eight and default fifteen, not merely a nonzero region height. Hold or
 refuse reads to verify selection retirement and explicit unknown metadata.
+For account-switch recovery with a moved PR head, publish the changed snapshot
+after restoring the original CLI owner and preserve it through repository refresh.
+Verify that saving the retained text does not re-enable submission at the old comparison.
 Set a unique `GALLERY_PORT` and cap Playwright workers on loaded hosts:
 
 ```sh
@@ -2311,7 +2378,37 @@ using generated semantic CSS variables, plus actual boundary and focus controls.
 Inspect both themes and narrow reflow when changing those specimens; no palette
 values belong in the catalog.
 
-The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
+Tokens, Typography, and Typeset are adjacent Foundations entries in content and
+navigation; the original component anchors remain supported. The sidebar brand
+header links to the introduction at the genuine page top, and the command entry
+does the same; both clear search, transfer focus, and close narrow navigation.
+Explicit navigation wins over pre-search viewport restoration, including
+Back/Forward.
+Each category derives its count and links from one destination list. Foundations
+prepends the always-available Tokens destination, even while filtering. The brand
+title underlines on hover and retains keyboard focus treatment.
+
+Typeset is owned browser-safe CSS adapted from the MIT shadcn/typeset
+[distribution](https://github.com/shadcn-ui/ui/blob/main/apps/v4/app/%28app%29/%28typeset%29/typeset.css)
+and its [contract](https://ui.shadcn.com/docs/typeset), not a runtime package.
+`@git-stacks/ui/styles.css` includes it; `@git-stacks/ui/typeset.css` exposes the
+standalone stylesheet for consumers with their own token setup. Wrap semantic
+HTML or already-rendered markdown in `typeset typeset-docs` (15px, 1.75 leading,
+1.25em flow) or `typeset typeset-compact` (14px, 1.6 leading, 1em flow).
+The three rhythm variables and body/heading/mono font variables are overridable;
+fonts, colors and radius use existing shared roles. Layout owns reading measure.
+`typeset-scroll` wraps wide tables; `not-typeset` and `data-not-typeset` exclude
+the entire subtree, even nested activation. Components-layer rules and low
+specificity element selectors let utility overrides win. New blocks own their
+start spacing and new cells own separators, preserving existing block styles
+during appends. No markdown parser is needed for the catalog's semantic specimen.
+Opted-out component subtrees own their layout spacing; the specimen uses a 20px
+outer gap and an 8px inner gap without stretching the shared control. Captured
+branch and base identities use semantic inline code.
+The upstream reconciliation disclosure uses Typeset as actual reading content;
+catalog controls and desktop Git workflows are not globally restyled.
+
+The dated `apps/design/src/manifest.ts` records all 63 components plus Typography and Typeset, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
  
 Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
@@ -2985,6 +3082,10 @@ Inbox entry can return to its same host/account queue without restoring the old
 repository's graph. Navigation does not fetch Git refs, check out branches, or
 dispatch a mutation.
 
+Active destinations keep their mounted identity while their existing scoped
+state handlers retire incompatible graph search, selection, and saved-view state.
+Changing authority does not reset the Inbox's local filter or collapse the
+reconciliation disclosure; retired remote rows and repair previews still disappear.
 Review read results remain Query-owned, while selection and unsent form values
 remain local. While a structured repository mutation is busy, a refreshed file
 set waits to replace the displayed comparison. Observed head/base changes still

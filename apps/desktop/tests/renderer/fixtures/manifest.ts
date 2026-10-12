@@ -31,6 +31,7 @@ export const SCENARIO_NAMES = [
   'github-cli-missing',
   'github-cli-signed-out',
   'github-cli-authenticated',
+  'github-cli-cross-host-operation',
   'github-cli-discovery',
   // Ancestry
   'ancestry-linear',

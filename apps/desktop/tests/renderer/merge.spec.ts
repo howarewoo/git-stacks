@@ -82,13 +82,15 @@ test.describe('Merge reads after a run', () => {
     // refusal as the failure it is, still carrying GitHub's own reason. `InlineAlert` only
     // carries `role="alert"` for an error tone, so this also proves the refusal is presented
     // as an error rather than as the success a fallback would have produced.
-    const refusal = dialog.getByRole('alert')
+    const refusal = dialog
+      .getByRole('region', { name: /^What GitHub reports now/ })
+      .getByRole('alert')
     await expect(refusal).toContainText('Required review is missing')
     await expect(dialog.getByText('failed', { exact: true })).toBeVisible()
 
-    // Reading again answers with the same refusal: no later read quietly resolves it.
+    // A later read must not erase the refusal, even when that read fails.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
-    await expect(dialog.getByRole('alert')).toContainText('Required review is missing')
+    await expect(refusal).toContainText('Required review is missing')
   })
 })
 
@@ -143,6 +145,124 @@ test('a merge that landed one captured target stays partial when a later target 
 })
 
 test.describe('Persistent remote recovery in the actual App', () => {
+  test('an unrelated origin-host push does not supersede a pending Settings status read', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-cross-host-operation' })
+    await expect(page.getByTitle('GitHub CLI status')).toHaveText('GitHub CLI: signed in')
+    await page.evaluate(() => {
+      window.fixture.serveCliStatus({
+        state: 'signed-out',
+        host: 'github.com',
+        login: null,
+        version: '2.62.0',
+        identity: null,
+        message: 'Public host signed out',
+      })
+      window.fixture.hold('githubCliStatus')
+    })
+    await page.getByTitle('GitHub CLI status').click()
+    const statusDialog = page.getByRole('dialog', { name: 'GitHub CLI authentication' })
+    await expect(statusDialog).toBeVisible()
+    await publishCliStatus(page, {
+      state: 'authenticated',
+      host: 'ghe.example.com',
+      login: 'account2',
+      version: '2.62.0',
+      identity: 'cli:ghe.example.com:account2:1',
+      message: null,
+    })
+    await releaseDoubleCalls(page, 'githubCliStatus')
+    await expect(page.getByTitle('GitHub CLI status')).toHaveText('GitHub CLI: signed out')
+    await expect(statusDialog).toContainText('github.com')
+    await expect(statusDialog).not.toContainText('account2')
+  })
+
+  test('a push while origin scope is unresolved retires the pending scope read', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-cross-host-operation' })
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => window.fixture.calls.filter((call) => call.call === 'mergeStatus').length,
+        ),
+      )
+      .toBeGreaterThan(0)
+    const retiredScope = await page.evaluate(() => window.fixture.operationScope())
+    const before = await page.evaluate(
+      () => window.fixture.calls.filter((call) => call.call === 'repositoryOperationScope').length,
+    )
+    await page.evaluate(async () => {
+      window.fixture.hold('repositoryOperationScope')
+      const snapshot = await window.desktop.refresh()
+      window.fixture.pushSnapshot({
+        ...snapshot,
+        remoteUrl: 'https://ghe.example.com/octo/git-stacks.git',
+      })
+    })
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            window.fixture.calls.filter((call) => call.call === 'repositoryOperationScope').length,
+        ),
+      )
+      .toBeGreaterThan(before)
+    await publishCliStatus(page, {
+      state: 'authenticated',
+      host: 'ghe.example.com',
+      login: 'account2',
+      version: '2.62.0',
+      identity: 'cli:ghe.example.com:account2:1',
+      message: null,
+    })
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            window.fixture.calls.filter((call) => call.call === 'repositoryOperationScope').length,
+        ),
+      )
+      .toBeGreaterThan(before + 1)
+    await page.evaluate(() => window.fixture.release('repositoryOperationScope', 'oldest'))
+    await expect(page.getByRole('region', { name: 'Remote operation recovery' })).toHaveCount(0)
+    await page.evaluate(() => window.fixture.release('repositoryOperationScope', 'newest'))
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => window.fixture.calls.filter((call) => call.call === 'mergeStatus').length,
+        ),
+      )
+      .toBeGreaterThan(1)
+    await page.evaluate((scope) => {
+      const current = window.fixture.operationScope()
+      const progress = {
+        action: 'default' as const,
+        status: 'running' as const,
+        message: 'Replacement origin scope result',
+        layers: [],
+      }
+      window.fixture.pushMergeProgress({ scope: current, source: 'action', progress })
+      window.fixture.pushMergeProgress({
+        scope: { ...current, authority: scope.authority },
+        source: 'action',
+        progress: { ...progress, message: 'Retired scope result' },
+      })
+      window.fixture.pushMergeProgress({
+        scope: { ...current, authority: scope.authority },
+        source: 'action',
+        progress: null,
+      })
+    }, retiredScope)
+    await expect(page.getByRole('region', { name: 'Remote operation recovery' })).toContainText(
+      'Replacement origin scope result',
+    )
+    await expect(page.getByRole('region', { name: 'Remote operation recovery' })).not.toContainText(
+      'Retired scope result',
+    )
+  })
+
   test('captured publication survives held and failed reads across workspace destinations without replay', async ({
     page,
   }) => {
@@ -237,6 +357,127 @@ test.describe('Persistent remote recovery in the actual App', () => {
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 
+  test('an enterprise-origin account retires operation progress without changing public-host Settings', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-cross-host-operation' })
+    await expect(page.getByTitle('GitHub CLI status')).toHaveText('GitHub CLI: signed in')
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => window.fixture.calls.filter((call) => call.call === 'mergeStatus').length,
+        ),
+      )
+      .toBeGreaterThan(0)
+    const retiredScope = await page.evaluate(() => window.fixture.operationScope())
+    expect(retiredScope.authority).toContain(
+      'ghe.example.com|ghe.example.com|authenticated|account1|',
+    )
+    await publishCliStatus(page, {
+      state: 'authenticated',
+      host: 'ghe.example.com',
+      login: 'account2',
+      version: '2.62.0',
+      identity: 'cli:ghe.example.com:account2:1',
+      message: null,
+    })
+    await page.evaluate((scope) => {
+      window.fixture.pushMergeProgress({
+        scope: window.fixture.operationScope(),
+        source: 'action',
+        progress: {
+          action: 'default',
+          status: 'running',
+          message: 'Current captured merge',
+          layers: [
+            {
+              branch: 'feature/checkout-tests',
+              pullRequest: 41,
+              status: 'pending',
+              detail: 'Current authority owns this request',
+              mergedOid: null,
+              queue: null,
+              requestUuid: 'current',
+            },
+          ],
+        },
+      })
+      window.fixture.pushMergeProgress({
+        scope,
+        source: 'action',
+        progress: {
+          action: 'default',
+          status: 'running',
+          message: 'Retired merge must not appear',
+          layers: [
+            {
+              branch: 'feature/retired',
+              pullRequest: 999,
+              status: 'pending',
+              detail: 'Retired result',
+              mergedOid: null,
+              queue: null,
+              requestUuid: 'retired',
+            },
+          ],
+        },
+      })
+      window.fixture.pushMergeProgress({ scope, source: 'action', progress: null })
+    }, retiredScope)
+    const recovery = page.getByRole('region', { name: 'Remote operation recovery' })
+    await expect(recovery).toContainText('Current captured merge')
+    await expect(recovery).not.toContainText('Retired merge must not appear')
+    await expect(recovery).not.toContainText('Retired result')
+    for (const destination of ['changes', 'review', 'history', 'branches'] as const) {
+      await switchDestination(page, destination)
+      await expect(recovery).toContainText('Current captured merge')
+      await expect(recovery).not.toContainText('Retired result')
+    }
+    await page.evaluate(() =>
+      window.fixture.failNext('mergeStatus', 'Recovery reentry unavailable'),
+    )
+    await recovery.getByRole('button', { name: 'Review merge outcomes' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('Current captured merge')
+    await expect(dialog).toContainText('Recovery reentry unavailable')
+    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
+    await expect(page.getByTitle('GitHub CLI status')).toHaveText('GitHub CLI: signed in')
+    expect(await page.evaluate(() => window.desktop.githubCliStatus!())).toMatchObject({
+      host: 'github.com',
+      login: 'octo',
+      identity: 'cli:github.com:octo:1',
+    })
+    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+  })
+
+  test('an initial recovery read failure remains visible inside its open modal', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'github-cli-authenticated' })
+    await page.getByRole('treeitem', { name: /^feature\/checkout-tests,/ }).click()
+    await page.getByRole('button', { name: 'Preview PR merge', exact: true }).first().click()
+    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
+    await page.evaluate(() => window.fixture.hold('mergeStatus'))
+    await publishCliStatus(page, {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'replacement',
+      version: '2.62.0',
+      identity: 'cli:github.com:replacement:initial-failure',
+      message: null,
+    })
+    await page.evaluate(() => {
+      window.fixture.failNext('mergeStatus', 'Initial recovery unavailable')
+      window.fixture.release('mergeStatus')
+    })
+    await expect(page.getByRole('region', { name: 'Remote operation recovery' })).toContainText(
+      'Recovery read unavailable',
+    )
+    await expect(dialog.getByRole('alert')).toContainText('Initial recovery unavailable')
+    await expect(dialog.getByText('Completed', { exact: true })).toHaveCount(0)
+    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+  })
   test('a retired producer cannot replace current merge outcomes after authority changes', async ({
     page,
   }) => {
@@ -310,35 +551,6 @@ test.describe('Persistent remote recovery in the actual App', () => {
     await expect(dialog).toContainText('Current captured merge')
     await expect(dialog).toContainText('Recovery reentry unavailable')
     await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
-    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
-  })
-
-  test('an initial recovery read failure remains visible inside its open modal', async ({
-    page,
-  }) => {
-    await openGallery(page, { scenario: 'github-cli-authenticated' })
-    await page.getByRole('treeitem', { name: /^feature\/checkout-tests,/ }).click()
-    await page.getByRole('button', { name: 'Preview PR merge', exact: true }).first().click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
-    await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
-    await page.evaluate(() => window.fixture.hold('mergeStatus'))
-    await publishCliStatus(page, {
-      state: 'authenticated',
-      host: 'github.com',
-      login: 'replacement',
-      version: '2.62.0',
-      identity: 'cli:github.com:replacement:initial-failure',
-      message: null,
-    })
-    await page.evaluate(() => {
-      window.fixture.failNext('mergeStatus', 'Initial recovery unavailable')
-      window.fixture.release('mergeStatus')
-    })
-    await expect(page.getByRole('region', { name: 'Remote operation recovery' })).toContainText(
-      'Recovery read unavailable',
-    )
-    await expect(dialog.getByRole('alert')).toContainText('Initial recovery unavailable')
-    await expect(dialog.getByText('Completed', { exact: true })).toHaveCount(0)
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 })

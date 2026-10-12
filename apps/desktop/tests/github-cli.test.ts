@@ -8,6 +8,8 @@ import test from 'node:test'
 import {
   GitHubCliStatusService,
   forgetGitHubCliServices,
+  gitHubCliStatusService,
+  onGitHubCliStatusChange,
   parseGhVersion,
   probeGitHubCliVersion,
   readGitHubCli,
@@ -737,6 +739,53 @@ process.exit(0)`,
     gate.resolve()
     await reads3
     assert.equal(concurrent, 1)
+  })
+})
+
+test('global status subscribers observe pre-existing origin services and every host independently', async () => {
+  await withTempDir(async (dir) => {
+    const cli = await installControlledGh(
+      `const args = process.argv.slice(2)
+if (args[0] === '--version') { process.stdout.write('gh version 2.62.0\\n'); process.exit(0) }
+const host = args[args.indexOf('--hostname') + 1]
+process.stdout.write(JSON.stringify({ hosts: { [host]: [{ host, state: 'success', active: true, login: 'octocat' }] } }))`,
+      dir,
+    )
+    let authority = 'authority-a'
+    // Both services are created by callers that supplied no status callback.
+    const origin = gitHubCliStatusService(ENTERPRISE, {
+      env: { PATH: cli.path },
+      transport: provingTransport(
+        () => ({ login: 'octocat' }),
+        () => authority,
+      ),
+    })
+    const configured = gitHubCliStatusService(CONCURRENT, {
+      env: { PATH: cli.path },
+      transport: provingTransport(() => ({ login: 'octocat' }), undefined, undefined, CONCURRENT),
+    })
+    const published: GitHubCliStatus[] = []
+    const unsubscribe = onGitHubCliStatusChange((status) => published.push(status))
+    try {
+      assert.equal(gitHubCliStatusService(ENTERPRISE.toUpperCase()), origin)
+      const first = await origin.read()
+      const other = await configured.read()
+      assert.deepEqual(published, [first, other])
+      await origin.read()
+      await configured.read()
+      assert.equal(published.length, 2, 'unchanged reads do not rebroadcast')
+      authority = 'authority-b'
+      const replaced = await origin.read()
+      assert.notEqual(replaced.identity, first.identity)
+      assert.deepEqual(published, [first, other, replaced])
+      unsubscribe()
+      authority = 'authority-c'
+      await origin.read()
+      assert.equal(published.length, 3)
+    } finally {
+      unsubscribe()
+      forgetGitHubCliServices()
+    }
   })
 })
 

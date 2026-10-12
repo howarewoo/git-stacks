@@ -1156,9 +1156,33 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     upstreamDoc: 'https://ui.shadcn.com/docs/components/typography',
     reconciledWith: 'shadcn Base UI catalog 2026-10-10; owned Quiet Workbench adaptation',
   },
+  {
+    id: 'typeset',
+    name: 'Typeset',
+    group: 'Foundations',
+    summary: 'Owned semantic HTML prose styles with theme-aware fonts, rhythm and stable appends.',
+    usage:
+      'Wrap reading content in typeset typeset-docs; keep compact controls and Git workflows outside prose or opt them out.',
+    anatomy:
+      '.typeset activates styles; typeset-docs and typeset-compact presets set --typeset-size, --typeset-leading and --typeset-flow. Layout owns measure. typeset-scroll wraps wide blocks.',
+    keyboard:
+      'Native semantic HTML and links retain keyboard behavior. not-typeset or data-not-typeset excludes the entire subtree, including nested typeset containers.',
+    tokens: [
+      'semantic.font.sans',
+      'semantic.font.mono',
+      'semantic.text.primary',
+      'semantic.surface.inset',
+      'semantic.radius.control',
+    ],
+    importExample: "import '@git-stacks/ui/typeset.css'",
+    upstreamDoc: 'https://ui.shadcn.com/docs/typeset',
+    reconciledWith:
+      'shadcn/typeset owned MIT CSS adaptation; theme tokens and local font roles, no runtime or markdown parser.',
+  },
 ]
 
 export const MANIFEST_GROUPS = [
+  'Foundations',
   'Actions',
   'Navigation',
   'Forms',
@@ -1167,5 +1191,4 @@ export const MANIFEST_GROUPS = [
   'Feedback',
   'Overlays',
   'Conversation',
-  'Foundations',
 ] as const

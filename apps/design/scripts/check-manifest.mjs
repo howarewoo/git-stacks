@@ -8,11 +8,11 @@ import { COMPONENT_MANIFEST, MANIFEST_DATE, UPSTREAM_RECONCILIATION } from '../s
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const expected =
-  'button button-group toggle toggle-group kbd breadcrumb sidebar navigation-menu menubar dropdown-menu context-menu command tabs pagination field label input input-group textarea checkbox radio-group switch select native-select combobox slider calendar date-picker input-otp card badge avatar table data-table item accordion collapsible chart aspect-ratio carousel resizable scroll-area separator direction alert empty progress spinner skeleton toast dialog alert-dialog sheet drawer popover hover-card tooltip attachment bubble message message-scroller marker questionnaire typography'.split(
+  'button button-group toggle toggle-group kbd breadcrumb sidebar navigation-menu menubar dropdown-menu context-menu command tabs pagination field label input input-group textarea checkbox radio-group switch select native-select combobox slider calendar date-picker input-otp card badge avatar table data-table item accordion collapsible chart aspect-ratio carousel resizable scroll-area separator direction alert empty progress spinner skeleton toast dialog alert-dialog sheet drawer popover hover-card tooltip attachment bubble message message-scroller marker questionnaire typography typeset'.split(
     ' ',
   )
 const ids = COMPONENT_MANIFEST.map((entry) => entry.id)
-assert.equal(ids.length, 64, '63 components plus Typography required')
+assert.equal(ids.length, 65, '63 components plus Typography and Typeset required')
 assert.equal(new Set(ids).size, ids.length, 'Duplicate component anchors')
 assert.deepEqual([...ids].sort(), [...expected].sort(), 'Missing or unexpected catalog entry')
 assert.equal(MANIFEST_DATE, '2026-10-10')
@@ -85,5 +85,5 @@ try {
   rmSync(temporary, { recursive: true, force: true })
 }
 console.log(
-  'Catalog manifest: 64 unique entries, valid canonical tokens and public import examples. Browser tests prove live specimens and state transitions.',
+  'Catalog manifest: 65 unique entries, valid canonical tokens and public import examples. Browser tests prove live specimens and state transitions.',
 )
