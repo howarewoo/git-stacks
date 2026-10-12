@@ -77,8 +77,21 @@ Local recovery refs are not authority to overwrite drift.
 3. **Resolve parent conflicts, then failing checks.** Diagnose attributable causes,
    make only scoped corrections, and run meaningful repository-local verification
    of the resulting layer/cumulative state. Never weaken, skip, or fake checks to
-   obtain green status. Unrelated failures or missing required tools are blockers,
-   not permission to broaden scope. Commit only real scoped changes.
+   obtain green status. Proven unrelated failures or actual investigation blockers
+   are blockers, not permission to broaden scope. Commit only real scoped changes.
+
+   **Do not classify a failure as unrelated merely because the failing files are
+   unchanged, the changed-path tests pass, or the cause is not yet known. Unknown
+   attribution requires continued investigation, not a blocker declaration.**
+
+   Before stopping for an unrelated failure, establish evidence that its cause is
+   independent of the stack’s changes. Check shared dependencies, concurrency,
+   timing, resource contention, and test isolation where relevant.
+
+   If investigation is genuinely blocked, identify the exact unavailable capability
+   or evidence, the attempts made to obtain it, and why no authorized next step
+   remains. “No scoped correction established” alone is not a valid stopping
+   condition.
 4. **Publish safely and read back.** Recheck auto-merge, head, base, and draft gates
    immediately before writing. Push only the selected branch; a rewrite requires
    explicit `--force-with-lease=refs/heads/<branch>:<observed-remote-head-oid>`.
