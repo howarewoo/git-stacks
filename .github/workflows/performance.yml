@@ -26,6 +26,12 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
+      - name: Configure Electron sandbox helper
+        working-directory: apps/desktop
+        run: |
+          sandbox="$(node -p 'require("node:path").join(require("node:path").dirname(require("electron")), "chrome-sandbox")')"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
       - name: Measure real desktop startup and interaction with bounded fixtures
         # Xvfb provides an actual Chromium paint surface on the Linux runner.
         # Fixtures use the runner's own git; no clone, token, or private repository.
