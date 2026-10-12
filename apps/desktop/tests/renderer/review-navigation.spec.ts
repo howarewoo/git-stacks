@@ -448,14 +448,14 @@ test('a late account rejection preserves only the latest qualified unsent edits 
   await expect(page.locator('.review-view')).not.toContainText(
     'Latest unsent original-account text.',
   )
+  await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
   await page.evaluate((snapshot) => window.fixture.pushSnapshot(snapshot), {
     ...scenarios['review-stacked'].snapshot!,
     pullRequests: scenarios['review-stacked'].snapshot!.pullRequests.map((pr) =>
       pr.number === 42 ? { ...pr, headOid: '6'.repeat(40) } : pr,
     ),
   })
-  await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
-  await refreshReviewChoices(page, true)
+  await refreshReviewChoices(page)
   await page.getByRole('button', { name: 'Conversation', exact: true }).click()
   await expect(comment).toHaveValue('Latest unsent original-account text.')
   expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toEqual(original.record)
