@@ -47,6 +47,60 @@ storage, and model-provider usage have their own billing rules. After the hosted
 workflows pass, retire idle self-hosted runner registrations and stop their local
 services; do not interrupt jobs or delete retained runner data during the cutover.
 
+## Install the agent skills
+
+The repository's `.agents/skills/` directory contains two standalone skills:
+`flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack, and
+`ready-stack` prepares an existing stack for review and checks its readiness.
+Install them with the [Skills CLI](https://github.com/vercel-labs/skills) using
+Node.js and `npx`; cloning this repository, installing pnpm dependencies, or
+building the desktop app is not required.
+
+Discover the available skills from any directory:
+
+```sh
+npx skills add howarewoo/git-stacks --list
+```
+
+For a project install, run the command **in the target repository**, not in this
+source repository. `howarewoo/git-stacks` identifies the skill source; the current
+directory determines the project receiving the skills:
+
+```sh
+cd /path/to/your/repository
+npx skills add howarewoo/git-stacks
+```
+
+The CLI prompts for skills and host agents. To select both skills and a specific
+host non-interactively (Codex in this example):
+
+```sh
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --yes
+```
+
+Replace `codex` with your host's Skills CLI agent identifier, or omit both `--agent`
+and `--yes` to choose interactively. For a user-wide install available across
+projects, add `--global`; this writes to the selected agent's user-level skill
+location rather than the current project:
+
+```sh
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph ready-stack --agent codex --global --yes
+```
+
+The CLI includes each skill's bundled files, including
+`ready-stack/references/verification.md`. Using these GitHub workflows requires
+Git and an authorized GitHub integration (such as authenticated `gh`), plus the
+target repository's own verification tools when the workflow calls for them.
+Installation alone does not authorize PR mutations.
+
+When changing skill packaging or these commands, verify discovery and actual
+project/global installation from outside this repository with the current Skills
+CLI. Use disposable project directories and an isolated `HOME` and XDG directories
+for the global check; confirm both installed `SKILL.md` files and the ready-stack
+relative reference match their source. Record the CLI version, commands, outcomes,
+and limits in the PR. Desktop builds/tests do not exercise skill installation;
+Biome does not format Markdown.
+
 ## Commands
 
 Use Node 24, pnpm 12.11.2 (pinned in `packageManager`), and the committed `pnpm-lock.yaml`. A local source build
