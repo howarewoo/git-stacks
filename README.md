@@ -51,7 +51,7 @@ services; do not interrupt jobs or delete retained runner data during the cutove
 
 The repository's `.agents/skills/` directory contains two standalone skills:
 `flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack, and
-`submit-stack-for-review` submits an existing full stack for review, initially top-to-bottom.
+`submit-stack-for-review` submits an existing full stack for review, strictly bottom-up.
 Install them with the [Skills CLI](https://github.com/vercel-labs/skills) using
 Node.js and `npx`; cloning this repository, installing pnpm dependencies, or
 building the desktop app is not required.
@@ -322,16 +322,21 @@ Invocation syntax depends on the agent host. For example:
 Submit the stack containing <canonical PR URL> using submit-stack-for-review.
 ```
 
-The initial pass is strictly top-to-bottom (most dependent PR first). Each layer
-is rebased onto its freshly fetched parent, conflicts are resolved before failing
-checks, and published-head changes are draft-gated. Submission means confirmed
+Every pass is strictly bottom-up (the PR based on target trunk first). Each parent
+completes rebasing, scoped fixes, publication, exact-current-head CI verification,
+and confirmed readiness before its child begins. Each layer is rebased onto its
+freshly fetched published parent; conflicts precede failing checks and published-head
+changes are draft-gated. Submission means confirmed
 readiness with applicable PR CI checks on the exact published head, not waiting for
 human or automated review completion. These are the jobs configured by repository
 workflows for that PR, discovered from workflow definitions and current-head check
 runs/statuses, not branch-protection requirements, rulesets, approvals, or merge
 eligibility. All applicable checks must pass; a conditional skip is valid only when
-its workflow condition does not apply. Lower-parent rewrites require a final
-reconciliation of affected upper layers and a fresh ancestry/diff snapshot.
+its workflow condition does not apply. External head/base drift stops processing;
+resume only after independently reconciling it, preserving external work and proving
+old own-layer boundaries. Recovery is bounded and always bottom-up, never
+top-to-bottom. A final fresh whole-stack ancestry/base/diff/CI/readiness snapshot
+must prove completion.
 Unchanged ready PRs remain unchanged. Ambiguous scope, unsafe writes, enabled or
 unknown auto-merge, pending, failing, or missing expected CI evidence, and continuing
 external drift block truthful completion. Denied mutations stop the workflow; a
@@ -344,8 +349,10 @@ Unlike [flatten-pr-graph](.agents/skills/flatten-pr-graph/SKILL.md), which order
 and deliberately skips checks, this skill verifies every changed layer. For
 Markdown-only changes, simplify and review the instructions, then exercise the
 actual authored skill with an agent on disposable Git fixtures and independent
-state oracles: include latest-parent rebasing, a lower rewrite invalidating upper
-layers, own-commit/diff preservation, and unrelated branch preservation. Include
+state oracles: prove bottom-middle-top execution and lower rewrite propagation onto
+freshly published, completed parents, own-commit/diff and unrelated branch preservation,
+external drift recovery bottom-up or a bounded blocker, unchanged ready PR behavior,
+and final ancestry/base/current-head CI/readiness. Include
 policy-read denial with valid workflow/current-head CI, old-head/pending/failing/
 missing expected CI, valid and invalid conditional skips, denied mutations, and
 essential denied reads without alternate evidence. Keep evaluation scripts/evidence
