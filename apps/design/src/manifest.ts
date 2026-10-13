@@ -45,6 +45,7 @@ export const UPSTREAM_RECONCILIATION = {
     'Typography adds canonical compact heading/body/label/metadata/code roles beside upstream content styles. Recipes use a soft rounded card system with solid neutral surfaces, ink primary actions, pastel microaccents, circular icon controls, and explicit spacing. Whitespace and tonal contrast separate groups; structural outlines are absent. Sparse diffuse shadows and secondary-card offsets support purposeful layers without changing operational workflows.',
     'Iconography is an owned foundation using direct named lucide-react imports; Lucide documentation is its source, not a shadcn component.',
     'Examples are catalog-only local simulations, not desktop product features or Git/GitHub transports.',
+    'WorkbenchPane is an owned composition, not an upstream inventory entry: header/footer slots remain persistent around an independently scrolling body; bodyClassName styles that scroll region. The catalog Git composition and desktop v5 workbench consume the same exported implementation.',
   ],
 } as const
 

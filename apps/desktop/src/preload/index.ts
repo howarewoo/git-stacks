@@ -50,6 +50,11 @@ const desktop: DesktopAPI = {
   recentRepositories: () => ipcRenderer.invoke('repositories:recent'),
   openRepository: (path) => ipcRenderer.invoke('repositories:open', path),
   addRepository: (path) => ipcRenderer.invoke('repositories:add', path),
+  worktreeInventory: (request) => ipcRenderer.invoke('repositories:inventory', request),
+  onWorktreeInventory: (listener) => subscribe('repositories:inventory-updated', listener),
+  cancelInventory: (requestId) => ipcRenderer.invoke('repositories:inventory-cancel', requestId),
+  adoptWorktrees: (ids, requestId) =>
+    ipcRenderer.invoke('repositories:adopt-worktrees', ids, requestId),
   searchRepositories: (request) => ipcRenderer.invoke('repositories:search', request),
   gitEnvironment: (requestId) => ipcRenderer.invoke('git-environment', requestId),
   cloneRepository: (request) => ipcRenderer.invoke('repositories:clone', request),

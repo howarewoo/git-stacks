@@ -886,6 +886,8 @@ export async function gitPathExists(
 export async function getOperationState(
   repoPath: string,
   signal?: AbortSignal,
+  /** Discovery may supply its already validated administrative directory to avoid seven subprocesses. */
+  gitDirectory?: string,
 ): Promise<OperationState> {
   const names = [
     'rebase-merge',
@@ -896,13 +898,20 @@ export async function getOperationState(
     'sequencer',
     'BISECT_LOG',
   ]
-  const reads = names.map((name) => gitPathExists(repoPath, name, signal))
   let existing: boolean[]
-  try {
-    existing = await Promise.all(reads)
-  } catch (error) {
-    await Promise.allSettled(reads)
-    throw error
+  if (gitDirectory) {
+    if (signal?.aborted) throw new CommandCancelled()
+    const entries = new Set(await fs.readdir(gitDirectory))
+    if (signal?.aborted) throw new CommandCancelled()
+    existing = names.map((name) => entries.has(name))
+  } else {
+    const reads = names.map((name) => gitPathExists(repoPath, name, signal))
+    try {
+      existing = await Promise.all(reads)
+    } catch (error) {
+      await Promise.allSettled(reads)
+      throw error
+    }
   }
   const rebase = existing[0] || existing[1]
   const operation = rebase

@@ -1,4 +1,5 @@
 import type { SnapshotLimits } from './performance'
+import type { InventoryRequest, WorktreeInventory, InventoryId } from './worktree-inventory'
 import type { OperationProgress, OperationScope } from './operation-scope'
 
 import type { GitHubHostStatus } from './host'
@@ -1251,6 +1252,12 @@ export interface DesktopAPI {
   openRepository(path?: string): Promise<RepositorySnapshot | null>
   /** Adds an existing local repository by absolute path, for a folder dialog or a dropped folder. */
   addRepository?(path: string): Promise<RepositorySnapshot | null>
+  /** Main-owned read-only discovery and bounded simultaneous worktree facts. */
+  worktreeInventory?(request: InventoryRequest): Promise<WorktreeInventory>
+  onWorktreeInventory?(listener: (inventory: WorktreeInventory) => void): () => void
+  cancelInventory?(requestId: string): Promise<void>
+  /** Register selected discovered existing directories; never checks out or recreates them. */
+  adoptWorktrees?(ids: InventoryId[], requestId: string): Promise<RecentRepository[]>
   /** Accessible repositories for the signed-in account; paginated and cancellable. */
   searchRepositories?(
     request: RepositoryDiscoveryRequest,

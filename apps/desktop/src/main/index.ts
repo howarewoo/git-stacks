@@ -1,3 +1,6 @@
+import { LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
+import type { InventoryRequest } from '@git-stacks/shared/worktree-inventory'
+import { WorktreeInventoryService, adoptionPaths } from './worktree-inventory'
 import { cliAuthority, type OperationScope } from '@git-stacks/shared/operation-scope'
 import {
   app,
@@ -105,7 +108,6 @@ import {
   RepositorySyncCoordinator,
   type SyncIntervals,
 } from './sync-coordinator'
-import { RepositoryWatcher } from './git-watcher'
 import {
   configureGitRuntime,
   gitRuntimeStatus,
@@ -242,11 +244,22 @@ let inboxRegistrationGeneration = 0
 function setRecents(next: RecentRepository[]): void {
   recents = next
   inboxRegistrationGeneration += 1
+  inventory.register(next.map((item) => item.path))
 }
 const operations = new RepositoryOperations()
 
 const scheduler = new RepositoryScheduler()
-let watcher: RepositoryWatcher | null = null
+const inventory = new WorktreeInventoryService(
+  scheduler,
+  (value) => {
+    if (window && !window.isDestroyed())
+      window.webContents.send('repositories:inventory-updated', value)
+  },
+  (registeredPaths) => {
+    if (activeRepository && registeredPaths.includes(activeRepository)) sync.notifyLocalChange()
+  },
+)
+const inventoryKeys = new RequestRegistry()
 
 /**
  * Background refresh reads run on the scheduler rather than the foreground
@@ -349,6 +362,7 @@ sync.onEvent((event) => {
         prIndex.adopt(event.snapshot.path, host.host, origin.fullName, event.snapshot.pullRequests)
     }
     const { githubStale, ...snapshot } = event.snapshot
+    inventory.adoptRemote(event.snapshot)
     window.webContents.send('repository:background-snapshot', snapshot)
     return
   }
@@ -361,20 +375,7 @@ sync.onEvent((event) => {
   }
 })
 
-function startBackgroundSync(root: string, snapshot: RepositorySnapshot): void {
-  watcher?.stop()
-  watcher = new RepositoryWatcher(root, () => {
-    // A commit, a branch switch, or a ref update made outside this window — and
-    // the repository coming back after a move — all land the same way.
-    sync.notifyLocalChange()
-  })
-  void watcher.start()
-  sync.attach(root, snapshot)
-}
-
 function stopBackgroundSync(): void {
-  watcher?.stop()
-  watcher = null
   prIndex.invalidate()
   sync.detach()
 }
@@ -661,6 +662,7 @@ onGitHubCliStatusChange((status) => {
     // or a row that now belongs to another account. Local Git is untouched:
     // none of these readers can reach it.
     readKeys.cancelGitHub()
+    inventory.retireRemote()
     retireConfirmedGitHubPayloads()
     prIndex.invalidate()
     retirePullRequestChecks()
@@ -799,6 +801,7 @@ function applySettings(settings: AppSettings): void {
   for (const controller of hostWork) controller.abort()
   hostWork.clear()
   hostGeneration += 1
+  inventory.retireRemote()
   // The selected host is part of the queue's identity, and a host change can
   // arrive without a CLI status to announce it. The services of every host are
   // dropped with it, so a returning host reads its CLI afresh rather than
@@ -995,15 +998,21 @@ function readRepository<T>(
     .finally(() => readKeys.release(root, requestId, controller))
 }
 
-async function remember(path: string) {
-  const next = [
-    { path, name: basename(path) },
-    ...recents.filter((item) => item.path !== path),
-  ].slice(0, 12)
-  await mkdir(dirname(settingsPath()), { recursive: true })
-  await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), { mode: 0o600 })
-  await rename(`${settingsPath()}.tmp`, settingsPath())
-  setRecents(next)
+let registrationWrite: Promise<void> = Promise.resolve()
+async function remember(selected: string | string[]) {
+  const paths = typeof selected === 'string' ? [selected] : [...new Set(selected)]
+  const write = registrationWrite.then(async () => {
+    const next = [
+      ...paths.map((path) => ({ path, name: basename(path) })),
+      ...recents.filter((item) => !paths.includes(item.path)),
+    ]
+    await mkdir(dirname(settingsPath()), { recursive: true })
+    await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), { mode: 0o600 })
+    await rename(`${settingsPath()}.tmp`, settingsPath())
+    setRecents(next)
+  })
+  registrationWrite = write.catch(() => {})
+  await write
 }
 
 function requirePullRequestNumber(value: unknown): number {
@@ -1129,6 +1138,7 @@ async function activateRepository(selected: string, signal?: AbortSignal) {
   // Retire old reads before waiting for the operation queue; a long-running
   // history/diff must not delay switching to a newly selected repository.
   if (activeRepository) readKeys.cancelRoot(activeRepository)
+  inventoryKeys.cancelRoot('inventory')
   stopBackgroundSync()
   return operations.switchRepository(path, async () => {
     if (signal?.aborted) throw new CommandCancelled()
@@ -1140,10 +1150,10 @@ async function activateRepository(selected: string, signal?: AbortSignal) {
       // recents and the active repository must name the same folder.
       await remember(path)
       activeRepository = path
-      startBackgroundSync(path, snapshot)
-      // The local workspace opens without waiting for every GitHub page. The
-      // existing coordinator owns the subsequent complete remote refresh.
-      void sync.refreshNow().catch(() => {
+      sync.attach(path, snapshot)
+      // Selection reuses qualified remote knowledge across local authorities.
+      // Explicit refresh and mutation preflight still request live provider reads.
+      void sync.selectNow().catch(() => {
         // The coordinator already reports background failure; a repository switch
         // can also retire this refresh before it obtains a snapshot.
       })
@@ -1560,6 +1570,50 @@ function installHandlers() {
   ipcMain.handle('repositories:recent', (event) => {
     return recents
   })
+  ipcMain.handle('repositories:inventory', async (_event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('Invalid inventory request.')
+    const request: InventoryRequest = {
+      requestId: requireString(value.requestId, 'request id', 256),
+    }
+    if (value.selectedWorktreeId !== undefined)
+      request.selectedWorktreeId = requireString(value.selectedWorktreeId, 'worktree identity')
+    if (value.visibleWorktreeIds !== undefined) {
+      if (
+        !Array.isArray(value.visibleWorktreeIds) ||
+        value.visibleWorktreeIds.length > LIST_PAGE_SIZE
+      )
+        throw new Error('Invalid visible worktree selection.')
+      request.visibleWorktreeIds = value.visibleWorktreeIds.map((id) =>
+        requireString(id, 'worktree identity'),
+      )
+    }
+    const controller = inventoryKeys.claim('inventory', request.requestId)
+    try {
+      return await inGitRuntime(() => inventory.read(request, controller.signal))
+    } finally {
+      inventoryKeys.release('inventory', request.requestId, controller)
+    }
+  })
+  ipcMain.handle('repositories:inventory-cancel', (_event, id: unknown) => {
+    inventoryKeys.cancel('inventory', requireString(id, 'request id', 256))
+  })
+  ipcMain.handle('repositories:adopt-worktrees', async (_event, ids: unknown, id: unknown) => {
+    if (!Array.isArray(ids) || !ids.length || ids.length > LIST_PAGE_SIZE)
+      throw new Error('Choose discovered worktree directories.')
+    const requested = ids.map((value) => requireString(value, 'worktree identity'))
+    const requestId = requireString(id, 'request id', 256)
+    const controller = inventoryKeys.claim('inventory', requestId)
+    try {
+      const paths = await inGitRuntime(() =>
+        adoptionPaths(inventory.current(), requested, scheduler, controller.signal),
+      )
+      // Registration alone does not change the active repository or its checkout.
+      await remember(paths)
+      return recents
+    } finally {
+      inventoryKeys.release('inventory', requestId, controller)
+    }
+  })
   ipcMain.handle('repositories:open', async (event, requestedPath: unknown) => {
     if (requestedPath !== undefined) {
       if (
@@ -1714,6 +1768,7 @@ function installHandlers() {
       throw new Error('Window activity must report focus and visibility.')
     }
     sync.reportActivity(activity as SyncActivity)
+    inventory.setActive((activity as SyncActivity).focused && (activity as SyncActivity).visible)
   })
   ipcMain.handle('repository:dismiss-pending-mutation', (event, id: unknown) => {
     if (typeof id !== 'string' || !id) throw new Error('A pending mutation id is required.')
@@ -2605,6 +2660,7 @@ async function createWindow() {
     window = null
     // Nothing watches or polls for a window that no longer exists.
     stopBackgroundSync()
+    inventory.stop()
   })
   if (devUrl) await window.loadURL(devUrl)
   else await window.loadURL(`${productionOrigin}/index.html`)

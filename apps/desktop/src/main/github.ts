@@ -328,6 +328,7 @@ export async function getGitHubData(
   repoPath: string,
   originUrl: string | null,
   signal?: AbortSignal,
+  includeTracked = true,
 ): Promise<GitHubResult> {
   const remote = parseRemote(originUrl)
   const host = remoteHostContext(remote)
@@ -400,7 +401,7 @@ export async function getGitHubData(
       endCursor = next
     }
     const known = new Set(pullRequests.map((entry) => entry.number))
-    for (const number of await trackedPullRequestNumbers(repoPath, signal)) {
+    for (const number of includeTracked ? await trackedPullRequestNumbers(repoPath, signal) : []) {
       if (signal?.aborted) throw new CommandCancelled()
       if (known.has(number)) continue
       const exact = await getPullRequest(repoPath, number, signal)
@@ -432,6 +433,85 @@ export async function getGitHubData(
     if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
     observeGraphqlFailure(host, error)
     return unavailableGitHubResult(githubErrorMessage(error), typedFailure(error))
+  }
+}
+
+const trackedPayloads = new Map<string, PullRequest & { headRepository?: string | null }>()
+
+export function retireTrackedGitHubPayloads(): void {
+  trackedPayloads.clear()
+}
+
+/** Adds only this local authority's tracked closed PRs to shared provider knowledge. */
+export async function withTrackedPullRequests(
+  repoPath: string,
+  originUrl: string | null,
+  data: GitHubResult,
+  signal?: AbortSignal,
+  refresh = true,
+  mayFallBack = true,
+): Promise<GitHubResult> {
+  if (!data.available) return data
+  const numbers = await trackedPullRequestNumbers(repoPath, signal)
+  if (numbers.every((number) => data.pullRequests.some((entry) => entry.number === number)))
+    return data
+  const remote = parseRemote(originUrl)
+  if (!remote) return data
+  const host = remoteHostContext(remote)
+  if (!host) return data
+  const authority = await hostTransport(host).credentialAuthority()
+  const pullRequests = [...data.pullRequests]
+  const local = pullRequests.map((_, index) => data.sameRepository(index))
+  const known = new Set(pullRequests.map((entry) => entry.number))
+  let unavailable: GitHubResult | null = null
+  for (const number of numbers) {
+    if (known.has(number)) continue
+    const key = JSON.stringify([host.host, remote.fullName.toLowerCase(), authority, number])
+    const held = trackedPayloads.get(key)
+    if (!refresh && !held) continue
+    let exact = held
+    let refreshed = false
+    try {
+      if (refresh) {
+        exact = await getPullRequest(repoPath, number, signal)
+        refreshed = true
+      }
+    } catch (error) {
+      if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
+      observeGraphqlFailure(host, error)
+      unavailable = unavailableGitHubResult(githubErrorMessage(error), typedFailure(error))
+      if (!mayFallBack) exact = undefined
+    }
+    if (!exact) continue
+    if (refreshed) {
+      trackedPayloads.delete(key)
+      trackedPayloads.set(key, exact)
+      while (trackedPayloads.size > 128) {
+        const oldest = trackedPayloads.keys().next()
+        if (oldest.done) break
+        trackedPayloads.delete(oldest.value)
+      }
+    }
+    pullRequests.push(exact)
+    local.push(exact.headRepository?.toLowerCase() === remote.fullName.toLowerCase())
+    known.add(number)
+  }
+  const stacks = refresh ? await loadRepositoryNativeStacks(originUrl, pullRequests, signal) : null
+  return {
+    ...data,
+    ...(unavailable
+      ? { available: false, message: unavailable.message, failure: unavailable.failure }
+      : {}),
+    pullRequests,
+    sameRepository: (index) => typeof index === 'number' && local[index] === true,
+    ...(stacks
+      ? {
+          nativeStacks: stacks.nativeStacks,
+          nativeStackPreviewAvailable: stacks.available,
+          nativeStackPreviewReason: stacks.reason,
+          nativeStackMessage: stacks.message,
+        }
+      : {}),
   }
 }
 

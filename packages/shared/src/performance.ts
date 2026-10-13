@@ -36,6 +36,11 @@ export const SNAPSHOT_BRANCH_BUDGET = 1_500
 /** Native stack layers enriched in one readonly GraphQL summary batch. */
 export const REVIEW_STACK_METADATA_LIMIT = 32
 
+/** Simultaneous worktree status reads and non-recursive watcher fallback reads. */
+export const WORKTREE_READ_CONCURRENCY = 2
+/** Coalesce inventory topology refreshes after debounced worktree observations. */
+export const WORKTREE_REFRESH_SETTLE_MS = 400
+
 /** Graph discovery budgets; these do not change repository-list budgets. */
 export const GRAPH_OUTLINE_ROW_LIMIT = 64
 export const GRAPH_DETAIL_NODE_LIMIT = 32

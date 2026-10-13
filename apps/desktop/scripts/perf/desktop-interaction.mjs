@@ -164,12 +164,7 @@ export async function measureDesktop(repoRoot, fixture) {
   const started = performance.now()
   const child = spawn(
     electron,
-    [
-      '--no-sandbox',
-      '--disable-gpu',
-      `--remote-debugging-port=${port}`,
-      join(repoRoot, 'out/main/index.js'),
-    ],
+    ['--disable-gpu', `--remote-debugging-port=${port}`, join(repoRoot, 'out/main/index.js')],
     {
       cwd: repoRoot,
       detached: process.platform !== 'win32',

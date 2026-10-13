@@ -175,6 +175,25 @@ typechecks these test consumers as well as the application.
 Stale-preview publishing tests assert rejection and unchanged local and remote
 refs. Diagnostic wording is not part of that behavioral contract.
 
+The guarded commit transaction compares both the captured branch/HEAD identity
+and its expected old object ID. Some Git runtimes include `HEAD` alongside its
+symbolic branch in the prepared transaction: that companion is accepted only
+when its old and new IDs match the captured target's update in the same
+transaction. A standalone or mismatched `HEAD`, another namespaced ref update,
+or a stale captured target cannot authorize the commit. Detached `HEAD` remains
+the target itself. Native hooks and signing still run; compatibility does not
+disable them or change repository configuration.
+
+Runtime fixtures must isolate only their own configuration and restore process
+environment overrides. In particular, clean/smudge fixtures use an owned empty
+system/global configuration so installed Git LFS filters cannot replace the
+fixture's real filters. A repository with an explicit `extensions.refStorage=files`
+must be exercised with the provisioned runtime that supports that extension
+(Git 2.45 or newer), not made readable by deleting its configuration or skipping
+the recovery assertions. Clone cancellation fixtures distinguish SSH capability
+probes from a completed upload-pack transfer and attach rejection handling before
+requesting cancellation.
+
 Watcher tests use real filesystem events. Advancing a fake clock starts a
 coordinator refresh but does not complete its filesystem reads; await the
 emitted snapshot before asserting it. Observe watch readiness through events,
@@ -523,6 +542,60 @@ history — the sequence, the version, an unreadable feed, a signature with no
 manifest, a manifest with no signature — is tested on all three platforms by
 handing the helper the bytes a release would have published, because that is the
 only part of the read that talks to anything.
+
+## Many-worktree inventory contract
+
+`@git-stacks/shared/worktree-inventory` defines the main-owned inventory used by
+`DesktopAPI.worktreeInventory`, `onWorktreeInventory`, `cancelInventory`, and
+`adoptWorktrees`. The renderer's `useWorktreeInventory` consumes those typed
+methods; it has no filesystem, Git command, provider credential, or polling access.
+Subscribe before requesting a read. Publications have a monotonic revision
+independent of local read cancellation, so a delayed reply cannot restore
+credential-retired metadata. A newly mounted observer waits for main before
+exposing cached credential-owned facts.
+
+Local/common-directory, administrative worktree, full local/remote ref, logical
+remote host/repository, and PR identities are separate opaque IDs. Do not parse
+them or replace them with display names. Independent clones remain distinct local
+authorities even when provider knowledge is shared. Qualified fork-head refs join
+their own host/repository and published OID, separately from the PR's base repository
+and a local branch's current OID/upstream comparison. Ref records retain all
+explicit worktree associations; PR-only and branch-without-worktree records remain.
+
+Discovery and inspection use read-only Git commands. Adoption revalidates captured
+path, administrative/common-directory authority and availability, then only writes
+the application's repository registrations. It does not switch checkout or
+selection, clone, edit Git configuration, recreate directories, or register sessions.
+Filesystem directory incarnation metadata must be available; an unsupported
+identity read fails explicitly rather than inventing a path-based authority.
+
+Status summaries use `WORKTREE_READ_CONCURRENCY` and capped status/ref output from
+`packages/shared/src/performance.ts`. Selected and visible contexts have priority;
+completed unchanged summaries are reused. Common metadata is watched once per
+local authority, with per-worktree watches and the existing bounded sparse-event
+sweep. Inactive windows retire automatic watches/detail batches and revalidate on
+resume; explicit discovery, inspection and adoption remain available. Partial
+counts are lower bounds; failed counts are unavailable, not zero. Bare/missing,
+detached/prunable and administrative lock states are explicit. A clean tree, lock
+or observation timestamp is not external-tool liveness, a lease or mutation permission.
+
+Provider selection reuses confirmed host/repository/credential-qualified knowledge
+or shares an initial request across clones. Cancelling a selection promptly detaches
+its scheduler wait without aborting the independently credential-fenced shared
+provider work. Explicit refresh and mutation preflight still request live provider
+data. Closed tracked-PR augmentation remains local-context
+qualified. Provider failure/retirement does not block local discovery or invent fresh
+remote facts; remote freshness remains separate from local observation.
+
+The deterministic `#/inventory-consumer` gallery route mounts the production hook,
+including partial/failed/offline, held replies, credential retirement, cached-context
+revisit and 120-row scenarios. Run its behavior checks with
+`GALLERY_PORT=5276 pnpm --filter git-stacks exec playwright test tests/renderer/worktree-inventory.spec.ts --grep-invert @visual`.
+Real Git authority/sparse-watch coverage is in `tests/worktree-inventory.test.ts`;
+provider clone reuse is in `tests/remote-payload.test.ts` under the desktop package.
+Gallery dispatch does not prove native IPC or adoption: use the packaged desktop
+smoke for the trusted preload/sender boundary and real registration. The downstream
+shell group owns inventory projection into the complete v5 workbench.
 
 ## GitHub sign-in
 
@@ -1701,11 +1774,20 @@ command palette, and ends after the filtered branch result completes two
 animation frames. The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
 CI installs `xvfb` and `xauth` on GitHub's standard `ubuntu-24.04-arm` hosted
-runner, builds the app, and runs Electron under Xvfb. Local runs need a display
-server. Compare trend results on the same runner class and Git/Node versions,
+runner, builds the app, materializes the pinned Electron distribution with
+`pnpm --filter git-stacks exec install-electron`, and configures its
+`chrome-sandbox` helper with root ownership and mode `4755` before running
+Electron under Xvfb. Local runs need a display server and a supported sandbox.
+Compare trend results on the same runner class and Git/Node versions,
 since filesystem and process startup costs vary by machine. Hosted-runner
 measurements start a new comparison series; the old self-hosted timings are not
 a directly comparable baseline. The existing performance budgets still apply.
+
+Desktop benchmarks retain Electron's OS sandbox. Linux runs need the official
+pinned Electron sandbox helper installed with its supported ownership and mode,
+or an environment that supports Chromium's namespace sandbox. A helper setup
+failure is an unmet runtime prerequisite, not permission to use `--no-sandbox`
+or `ELECTRON_DISABLE_SANDBOX` to report passing startup/interaction budgets.
 
 It writes `benchmarks/latest.json` and appends one line per run to
 `benchmarks/trend.jsonl` (capped at the last 200 runs). The `Performance budgets`
@@ -1853,7 +1935,71 @@ These are the extreme cases the app states rather than hanging or crashing on.
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
 
-### Approved migration references
+### v5 workbench foundation and matched visual evidence
+
+The current visual/product contract is [#243](https://github.com/howarewoo/git-stacks/issues/243)
+and root [DESIGN.md](DESIGN.md#layout), not historical graph parity. The immutable
+[`git-stacks-workbench-v5.html`](apps/desktop/tests/renderer/references/ui-243/git-stacks-workbench-v5.html)
+is the unmodified approved reference from retained commit
+`40ade209a2855c68a2834e3d49d96814432c5f3a`, SHA-256
+`e46de09e3502ac917589b4fb1c2f3cb0419f2f9cadb899709bed5a5adc3e3db2`.
+The linked original ZIP's SHA-256 is
+`8b0d48f11e774a365f621b0b8f8496380b8f1efddcb808f2f804bc533f1e5a44`.
+Biome excludes this reference rather than rewriting its bytes.
+
+`BranchWorkbench` in `apps/desktop/src/renderer/src/components/branch-workbench.tsx`
+is the real React foundation composition. It accepts explicit readonly
+`BranchWorkbenchSnapshot` presentation facts, qualified repository/branch selection,
+main-derived capabilities and an `onAction(action, context)` callback carrying
+repository/ref/worktree/PR IDs. Missing capability/detail data stays unavailable;
+displayed readiness is not mutation authority. The main-owned inventory contract
+is projected at shell integration, together with source-qualified dependency and
+review facts; no filesystem/Git/credential read belongs in this component.
+This foundation does not add a second production route or change the existing
+App before the downstream shell replacement.
+
+Repository count fields are nullable main-owned complete totals, not counts
+inferred from mounted branch rows (which cannot include every PR-only identity).
+Partial/unavailable totals display Unknown. The optional `density` prop is
+`compact` or `standard`; standard grows branch/trunk rows to 92/76px.
+PR association metadata uses `null` for confirmed absence and `undefined` for
+unavailable metadata; unavailable associations are not labelled “No pull request”.
+
+Only the separate gallery imports `fixtures/workbench-v5.ts`. Open
+`/?scenario=shell-connected#/workbench-v5` or append `&workbench=degraded`
+before the hash for partial local/offline-provider facts. Stable qualified tuple
+IDs follow inventory identity boundaries; fixture directories are synthetic.
+The fixture observer shows requested intents with their exact IDs and explicitly
+does not report Git/GitHub success. Selecting, filtering, folding and inspecting
+never dispatches an operation.
+
+After the normal type/build prerequisites, from the repository root:
+
+```sh
+GALLERY_PORT=5264 pnpm --filter git-stacks exec playwright test tests/renderer/workbench-v5.spec.ts tests/renderer/workbench-v5.visual.spec.ts
+```
+
+The visual scenario captures immutable v5 and the actual consumer at 1536×1000
+and 1440×940 in both themes, with identical compact density, registry selection
+and initial scroll. It attaches reference/React/side-by-side/50% overlay PNGs
+under `apps/desktop/test-results/renderer`; it does not overwrite historical
+goldens or declare pixel parity from a generic catalog pass. Review differences
+explicitly in PR evidence. Native window chrome, shared 44px icon/checkbox targets
+and shared line-tab focus styling can differ for accessibility; lane orientation,
+hierarchy, pane proportions and selection may not be dismissed as equivalent
+functionality. This fixture proves composition and intent, not live inventory,
+provider writes, native zoom, manual screen-reader use or downstream shell cutover.
+
+`WorkbenchPane` is exported by `@git-stacks/ui`: persistent `header` and optional
+`footer` slots surround independently scrolling children; `bodyClassName` styles
+the owned scroll region. It uses existing surface/radius tokens and is exercised
+by the catalog's bounded Git composition as well as the actual desktop consumer.
+Branch relationship layout remains desktop-owned.
+
+### Historical ui-131 references
+
+These references are retained history, not current v5 baselines or obligations to
+reintroduce development destinations. Do not overwrite or delete their bytes.
 
 The immutable #131 Stacks reference is
 [`approved-stacks-demo.html`](apps/desktop/tests/renderer/references/ui-131/approved-stacks-demo.html),
@@ -1877,7 +2023,7 @@ These fixture captures prove renderer composition, not native Git success,
 OS window behavior, VoiceOver, actual browser zoom, signed updates, or final
 integrated graph parity. Existing packaged smoke and manual gates remain required.
 
-### Graph workbench fixtures and checks
+### Historical graph workbench fixtures and checks
 
 The production Stacks destination imports `GraphWorkbench`, using the shared
 `projectPrGraph` and graph discovery model. Gallery scenarios `graph-250`,
