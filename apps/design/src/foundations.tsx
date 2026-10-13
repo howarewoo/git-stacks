@@ -450,66 +450,89 @@ export function GitCompositions() {
         Deterministic local simulations. No Git, GitHub, repository access, or desktop bridge. PR
         chains have no team or stack names.
       </p>
-      <h3>Branching PR graph</h3>
+      <h3>Bounded workbench pane</h3>
       <p>
-        Checked out: <code>{checkedOut}</code> · inspected: PR #{inspected}
+        WorkbenchPane accepts header, footer and children slots. Chrome remains visible while the
+        body scrolls; bodyClassName styles the owned scroll region. Domain relationships stay in the
+        desktop consumer, not the shared library.
       </p>
-      <div className="git-graph" role="list" aria-label="Branching pull request graph">
-        {[branches[0], branches[1], branches[3], branches[2]].map((branch) => (
-          <div
-            role="listitem"
-            key={branch.id}
-            className="git-row"
-            data-inspected={inspected === branch.id}
-            data-depth={branch.parent === null ? 0 : branch.parent === 41 ? 1 : 2}
-          >
-            <span className="git-ancestry" aria-hidden="true">
-              <span className="git-node" />
-            </span>
-            <div className="git-identity">
-              <div className="git-ref">
-                <code>{branch.branch}</code>
-                {checkedOut === branch.branch && <UI.Badge variant="accent">Checked out</UI.Badge>}
-              </div>
-              <span className="git-parent">
-                {branch.parent ? `PR #${branch.parent} → ` : 'main → '}PR #{branch.id} ·{' '}
-                {branch.author}
-              </span>
-            </div>
-            <div className="git-actions">
-              <UI.Button
-                size="sm"
-                variant={inspected === branch.id ? 'accent' : 'ghost'}
-                aria-pressed={inspected === branch.id}
-                onClick={() => setInspected(branch.id)}
-              >
-                Inspect #{branch.id}
-              </UI.Button>
-              <UI.Button size="sm" variant="secondary" onClick={() => setCheckedOut(branch.branch)}>
-                Simulate checkout #{branch.id}
-              </UI.Button>
-            </div>
-            <div className="git-facts">
-              <UI.Badge variant={branch.lifecycle === 'Merged' ? 'merged' : 'secondary'}>
-                {branch.lifecycle}
-              </UI.Badge>
-              <UI.Badge
-                variant={
-                  branch.checks === 'Passing'
-                    ? 'success'
-                    : branch.checks === 'Failing'
-                      ? 'danger'
-                      : 'secondary'
-                }
-              >
-                Checks: {branch.checks}
-              </UI.Badge>
-              <span>Review: {branch.review}</span>
-              <span>Restack: {branch.restack}</span>
-            </div>
+      <UI.WorkbenchPane
+        className="h-80"
+        aria-label="Workbench pane specimen"
+        header={
+          <div className="px-5 py-4">
+            <UI.Typography variant="label">Branches &amp; worktrees</UI.Typography>
           </div>
-        ))}
-      </div>
+        }
+        footer={
+          <div className="px-5 py-3 text-xs">
+            Checked out: <code>{checkedOut}</code> · inspected: PR #{inspected}
+          </div>
+        }
+      >
+        <div className="git-graph" role="list" aria-label="Branching pull request graph">
+          {[branches[0], branches[1], branches[3], branches[2]].map((branch) => (
+            <div
+              role="listitem"
+              key={branch.id}
+              className="git-row"
+              data-inspected={inspected === branch.id}
+              data-depth={branch.parent === null ? 0 : branch.parent === 41 ? 1 : 2}
+            >
+              <span className="git-ancestry" aria-hidden="true">
+                <span className="git-node" />
+              </span>
+              <div className="git-identity">
+                <div className="git-ref">
+                  <code>{branch.branch}</code>
+                  {checkedOut === branch.branch && (
+                    <UI.Badge variant="accent">Checked out</UI.Badge>
+                  )}
+                </div>
+                <span className="git-parent">
+                  {branch.parent ? `PR #${branch.parent} → ` : 'main → '}PR #{branch.id} ·{' '}
+                  {branch.author}
+                </span>
+              </div>
+              <div className="git-actions">
+                <UI.Button
+                  size="sm"
+                  variant={inspected === branch.id ? 'accent' : 'ghost'}
+                  aria-pressed={inspected === branch.id}
+                  onClick={() => setInspected(branch.id)}
+                >
+                  Inspect #{branch.id}
+                </UI.Button>
+                <UI.Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setCheckedOut(branch.branch)}
+                >
+                  Simulate checkout #{branch.id}
+                </UI.Button>
+              </div>
+              <div className="git-facts">
+                <UI.Badge variant={branch.lifecycle === 'Merged' ? 'merged' : 'secondary'}>
+                  {branch.lifecycle}
+                </UI.Badge>
+                <UI.Badge
+                  variant={
+                    branch.checks === 'Passing'
+                      ? 'success'
+                      : branch.checks === 'Failing'
+                        ? 'danger'
+                        : 'secondary'
+                  }
+                >
+                  Checks: {branch.checks}
+                </UI.Badge>
+                <span>Review: {branch.review}</span>
+                <span>Restack: {branch.restack}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </UI.WorkbenchPane>
       <h3 id="diff">Diff preview</h3>
       <p>
         <code>src/graph.ts</code> · 1 addition, 1 removal · display only

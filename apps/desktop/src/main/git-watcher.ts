@@ -26,6 +26,8 @@ export interface RepositoryWatcherOptions {
    * and filesystems that refuse one, where only the top level delivers events.
    */
   recursiveWatch?: boolean
+  /** Bounded scheduler-owned fallback for many worktrees on non-recursive filesystems. */
+  readContentSignature?: (root: string) => Promise<string>
 }
 
 const DEFAULT_DEBOUNCE_MS = 400
@@ -198,6 +200,7 @@ export class RepositoryWatcher {
   /** False where only the top level delivers events, so the sweep reads content. */
   private deepWatch = true
   private presenceTimer: NodeJS.Timeout | undefined
+  private sweeping = false
   constructor(
     root: string,
     onEvent: (event: RepositoryWatchEvent) => void,
@@ -211,6 +214,7 @@ export class RepositoryWatcher {
       sweepMs: options.sweepMs ?? DEFAULT_SWEEP_MS,
       resolveGitDirectories: options.resolveGitDirectories ?? defaultGitDirectories,
       recursiveWatch: options.recursiveWatch !== false,
+      readContentSignature: options.readContentSignature ?? repositoryContentSignature,
     }
   }
 
@@ -363,9 +367,11 @@ export class RepositoryWatcher {
     if (!this.deepWatch) this.attach(root, false)
   }
   private attachGitDirectory(directory: string): void {
-    if (this.attach(directory, this.options.recursiveWatch) && this.options.recursiveWatch) return
-    // Recursive watches are unavailable here; cover the state a snapshot reads.
-    this.attach(directory, false)
+    if (directory === this.root && this.deepWatch) return
+    if (directory !== this.root && this.options.recursiveWatch && this.attach(directory, true))
+      return
+    // The path watch already covers this root; sparse fallback adds only its metadata children.
+    if (directory !== this.root) this.attach(directory, false)
     for (const child of WATCHED_SUBDIRECTORIES) this.attach(join(directory, child), false)
   }
 
@@ -546,26 +552,28 @@ export class RepositoryWatcher {
   private async currentSignature(): Promise<string> {
     const metadata = await gitStateSignature(this.gitDirectories)
     if (this.deepWatch) return metadata
-    return `${metadata}\u0000${await repositoryContentSignature(this.root)}`
+    return `${metadata}\u0000${await this.options.readContentSignature(this.root)}`
   }
 
   private async sweep(): Promise<void> {
-    if (!this.started || this.stopping) return
+    if (!this.started || this.stopping || this.sweeping) return
+    this.sweeping = true
     const gen = this.generation
-    if (!this.targetSettled) {
-      // A root that kept being replaced during the arm has no Git directory
-      // that can be watched, so there is no state here to fingerprint yet.
-      // The path watches are still armed; this is where it gets settled.
-      await this.settleTarget(gen)
-      return
+    try {
+      if (!this.targetSettled) {
+        // Re-arm only after an authority that kept moving has settled.
+        await this.settleTarget(gen)
+        return
+      }
+      await this.checkPresence()
+      if (!this.started || this.stopping || this.generation !== gen || !this.present) return
+      const next = await this.currentSignature()
+      if (!this.started || this.stopping || this.generation !== gen) return
+      if (next === this.signature) return
+      this.signature = next
+      this.noteChange(this.root)
+    } finally {
+      this.sweeping = false
     }
-    await this.checkPresence()
-    if (!this.started || this.stopping || this.generation !== gen) return
-    if (!this.present) return
-    const next = await this.currentSignature()
-    if (!this.started || this.stopping || this.generation !== gen) return
-    if (next === this.signature) return
-    this.signature = next
-    this.noteChange(this.root)
   }
 }

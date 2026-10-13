@@ -16,6 +16,8 @@ export const GALLERY_ROUTES = {
   shell: '#/design-system-shell-specimen',
   data: '#/design-system-data-specimen',
   dialog: '#/design-system-dialog-specimen',
+  inventory: '#/inventory-consumer',
+  workbenchV5: '#/workbench-v5',
 } as const
 
 export type GalleryRouteId = keyof typeof GALLERY_ROUTES

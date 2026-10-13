@@ -8,7 +8,8 @@
       "!**/.impeccable",
       "!**/.turbo",
       "!packages/ui/src/tokens/tokens.css",
-      "!apps/desktop/tests/renderer/references/ui-131/approved-stacks-demo.html"
+      "!apps/desktop/tests/renderer/references/ui-131/approved-stacks-demo.html",
+      "!apps/desktop/tests/renderer/references/ui-243/git-stacks-workbench-v5.html"
     ]
   },
   "formatter": {

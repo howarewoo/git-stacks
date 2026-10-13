@@ -8,20 +8,30 @@ web
 
 ## Users
 
-Developers working with Git and GitHub who manage dependent changes as stacked
-pull requests and want a desktop workflow without learning a new stack-management
-CLI.
+Developers managing many branches and pull requests across many existing worktrees
+and repositories, while developing in Orca, an editor, a terminal, or another
+external tool.
 
 ## Product Purpose
 
-Git Stacks is an open-source, local-first desktop alternative to Graphite's
-pull-request management for developers working with Git and GitHub. Its core
-workflow is managing dependent changes as stacked pull requests: organizing
-branches, publishing, reviewing, synchronizing, and landing changes without
-requiring users to install or learn a new stack-management CLI.
+Git Stacks is an open-source, local-first desktop workbench to organize, inspect,
+review, synchronize, publish, and land branches and pull requests. Dependent
+changes remain ordinary Git branches and GitHub pull requests; no new
+stack-management CLI or Graphite dependency is required.
 
-The desktop app owns that workflow while repositories remain usable with ordinary
-Git tools. Local changes, history, and stashes support the pull-request workflow.
+One Branches surface combines qualified branches with attached worktree context
+and bottom-up dependency lanes. Selecting a branch, repository, or pull request
+changes inspection, never a checkout. Existing-worktree discovery is primary;
+creating a directory is a secondary, explicitly previewed workflow.
+
+Development stays in external tools. Agent execution, launching or pausing agents,
+agent approvals, model selection, terminals, and assumed Orca integration are
+intentionally outside the product. Ordinary staging, commit, amend, discard,
+development cherry-pick/revert, and stash-editing destinations are intentionally
+removed from the unreleased UI; historical parity tickets do not reinstate them.
+Local changes, history, and conflicts remain available as read-only inspection
+with validated external-tool/path handoff. Operational recovery, including
+supported continue/abort decisions, remains part of Git Stacks.
 
 ## Operating Context
 
@@ -40,9 +50,11 @@ reads GitHub through the required GitHub CLI.
 - **Open a repository:** add an existing local repository, drop a folder, or search
   accessible GitHub repositories and clone one. Adding a repository is read-only;
   cloning previews the terminal commands and refuses destination collisions.
-- **Do local Git work:** navigate branches and ancestry, inspect and stage changes,
-  commit, browse history, manage stashes, and resolve supported file conflicts.
-  Local Git remains available when GitHub metadata cannot be read.
+- **Inspect many worktrees:** discover and adopt existing directories read-only,
+  inspect branch/worktree/ref identities, local changes and conflicts, unpublished
+  commits, and committed history without switching checkouts. Detached, bare,
+  missing, locked, partial, and unknown facts are explicit. Local inspection stays
+  available when GitHub cannot answer.
 - **Manage dependent changes:** create branch layers, preview restacks and stack
   synchronization, insert/move/remove layers, and recover interrupted operations.
 - **Publish and reconcile stacks:** publish chained pull requests and use GitHub
@@ -53,6 +65,13 @@ reads GitHub through the required GitHub CLI.
   review diffs and conversations, keep unsent review drafts, submit reviews, and
   merge the reviewed downstack scope. Report confirmed outcomes separately from
   pending or unconfirmed remote state.
+- **Find work across repositories:** use sidebar-only pinned repositories and
+  global search; retain each repository's selection, view, filters, folds and
+  scroll context. Needs attention and Activity aggregate source-backed Git/PR
+  facts across repositories, not agent liveness or permission requests.
+- **Review separately from branches:** Pull requests is a list/review surface,
+  never a second lane graph. A PR without a local branch or worktree remains
+  reviewable, with durable authored drafts and operational recovery preserved.
 - **Configure the desktop:** choose Git runtime and GitHub host, inspect the
   host's `gh` authentication as a read-only report, adjust appearance and
   shortcuts, inspect diagnostics, preview support bundles, and use signed updates
@@ -89,6 +108,17 @@ Detailed behavior and limitations remain in the [README](README.md), including
 - Mutation scope and recovery matter more than implicit automation. Refresh and
   reconciliation reporting do not silently repair refs or pull-request bases;
   uncertain remote outcomes are not permission to replay a mutation.
+- Worktrees sharing a common Git directory share repository authority; independent
+  clones of one remote do not. Remote metadata may be deduplicated without
+  conflating local indexes, HEADs, directories, or mutation locks.
+- Local cleanliness, conflicts, unpublished commits, PR lifecycle, checks,
+  review, dependency/restack state, freshness, and capabilities are separate
+  facts. Failed or truncated reads are not clean, passing, safe, or zero.
+- A clean tree, filesystem activity, timestamps, and Git's administrative
+  worktree lock do not establish external-tool inactivity or mutation safety.
+  Scoped operations name exact directories/refs, revalidate captured state,
+  preserve confirmation gates, leases and journals, and never implicitly stash
+  or check out another worktree.
 - Large repositories use bounded reads and incremental presentation. A partial
   preview must not be presented as complete or authorize a bulk action over
   omitted data. Existing numerical budgets are owned by

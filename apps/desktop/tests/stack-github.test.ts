@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import * as fs from 'node:fs'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { createGitHubHarness } from './fixtures/github-harness'
@@ -30,6 +30,8 @@ const {
 } = await import('../src/main/github-transport')
 const { retireConfirmedGitHubPayloads } = await import('../src/main/git')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
+// Load after github-harness patches child_process; a static import captures native execution.
+const { gitCommandEnvironment, platformKey } = await import('../src/main/git-runtime')
 
 function git(harness: GitHubHarness, args: string[]): string {
   return harness.runGit(['-C', harness.repo, ...args])
@@ -81,6 +83,37 @@ async function withHarness(
       else process.env[key] = value
     }
     await harness.close()
+  }
+}
+
+/** The literal refStorage extension needs real Git 2.45+, not the host's older Git. */
+async function withPinnedGitHarness(run: (harness: GitHubHarness) => Promise<void>): Promise<void> {
+  const original = { ...process.env }
+  const platform = platformKey(process.platform, process.arch)
+  const executable = resolve(
+    'resources',
+    'git',
+    platform,
+    process.platform === 'win32' ? 'cmd' : 'bin',
+    process.platform === 'win32' ? 'git.exe' : 'git',
+  )
+  fs.accessSync(executable, fs.constants.X_OK)
+  const environment = gitCommandEnvironment({ source: 'bundled', executable, platform })
+  environment.PATH = `${dirname(executable)}${delimiter}${environment.PATH ?? ''}`
+  try {
+    for (const [key, value] of Object.entries(environment)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    await withHarness(run)
+  } finally {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in original)) delete process.env[key]
+    }
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 }
 
@@ -1777,8 +1810,10 @@ test('branch lock recovery accepts an exact custom files ref-storage lock path',
 test('branch lock recovery accepts the literal files ref-storage setting', {
   concurrency: false,
 }, async () => {
-  await withHarness(async (harness) => {
+  await withPinnedGitHarness(async (harness) => {
     await createStack(harness)
+    const refsBefore = git(harness, ['show-ref', '--heads'])
+    const headBefore = git(harness, ['symbolic-ref', 'HEAD'])
     git(harness, ['config', 'core.repositoryFormatVersion', '1'])
     git(harness, ['config', 'extensions.refStorage', 'files'])
 
@@ -1800,6 +1835,10 @@ test('branch lock recovery accepts the literal files ref-storage setting', {
     await recoverStaleBranchLocks(harness.repo)
     await assert.rejects(readFile(lockPath), { code: 'ENOENT' })
     await assert.rejects(readFile(journalPath), { code: 'ENOENT' })
+    assert.equal(git(harness, ['config', '--get', 'extensions.refStorage']), 'files')
+    assert.equal(git(harness, ['config', '--get', 'core.repositoryFormatVersion']), '1')
+    assert.equal(git(harness, ['show-ref', '--heads']), refsBefore)
+    assert.equal(git(harness, ['symbolic-ref', 'HEAD']), headBefore)
 
     await publishStack(harness)
     assert.ok(prFor(await harness.readState(), 'child'))

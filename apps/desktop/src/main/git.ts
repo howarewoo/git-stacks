@@ -120,6 +120,8 @@ import {
 import {
   getGitHubData,
   getGitHubIssues,
+  withTrackedPullRequests,
+  retireTrackedGitHubPayloads,
   unavailableGitHubResult,
   type GitHubResult,
 } from './github'
@@ -686,14 +688,32 @@ if [ "$1" = "prepared" ]; then
   matched=false
   mismatch=false
   unexpected=false
+  target_new=
+  companion=false
+  companion_old=
+  companion_new=
   while IFS=' ' read -r old new ref; do
     if [ "$ref" = "$GIT_STACKS_EXPECTED_HEAD_REF" ]; then
       matched=true
+      if [ -n "$target_new" ]; then unexpected=true; fi
+      target_new=$new
       if [ "$old" != "$GIT_STACKS_EXPECTED_HEAD_OLD" ]; then mismatch=true; fi
-    elif [ "\${ref#refs/heads/}" != "$ref" ] || { [ "$ref" = "HEAD" ] && [ "$GIT_STACKS_EXPECTED_HEAD_REF" != "HEAD" ]; }; then
+    elif [ "$ref" = "HEAD" ]; then
+      if [ "$companion" = true ]; then unexpected=true; fi
+      companion=true
+      companion_old=$old
+      companion_new=$new
+    elif [ "\${ref#refs/}" != "$ref" ]; then
       unexpected=true
     fi
   done < "$input"
+  # Older Git reports the symbolic HEAD alongside its branch; authorize only
+  # the identical old/new pair in this same prepared transaction.
+  if [ "$companion" = true ]; then
+    if [ "$matched" != true ] || [ "$companion_old" != "$GIT_STACKS_EXPECTED_HEAD_OLD" ] || [ "$companion_new" != "$target_new" ]; then
+      unexpected=true
+    fi
+  fi
   if [ "$mismatch" = true ] || [ "$unexpected" = true ]; then
     echo "$GIT_STACKS_EXPECTED_HEAD_ERROR" >&2
     rm -f "$input"
@@ -4682,10 +4702,10 @@ function knownAncestor(
 }
 /**
  * How a snapshot obtains its GitHub half. `live` always asks GitHub, `reuse`
- * renders this repository's last confirmed payload without a request, and
- * `on-failure` asks GitHub but keeps that payload when the answer is lost.
+ * renders qualified confirmed provider knowledge without a metadata request,
+ * `select` reuses it or joins an initial read, and `on-failure` retains it offline.
  */
-export type SnapshotGitHubRemote = 'live' | 'reuse' | 'on-failure'
+export type SnapshotGitHubRemote = 'live' | 'reuse' | 'on-failure' | 'select'
 
 interface ConfirmedGitHubPayload {
   originUrl: string | null
@@ -4709,6 +4729,52 @@ let confirmedReadOrder = 0
 
 const MAX_CONFIRMED_PAYLOADS = 8
 const confirmedPayloads = new Map<string, ConfirmedGitHubPayload>()
+const payloadAuthorities = new Map<string, { originUrl: string | null; key: string }>()
+type RemotePayloadRead = [GitHubResult, { issues: RepositoryIssue[]; message: string }]
+const pendingPayloads = new Map<string, { work: Promise<RemotePayloadRead> }>()
+
+/** Detaches a local selection without cancelling its independently owned provider read. */
+function waitForPayload(
+  work: Promise<RemotePayloadRead>,
+  signal?: AbortSignal,
+): Promise<RemotePayloadRead> {
+  if (!signal) return work
+  const { promise, resolve, reject } = Promise.withResolvers<RemotePayloadRead>()
+  const onAbort = () => {
+    signal.removeEventListener('abort', onAbort)
+    reject(new CommandCancelled())
+  }
+  work.then(
+    (value) => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(value)
+    },
+    (error: unknown) => {
+      signal.removeEventListener('abort', onAbort)
+      reject(error)
+    },
+  )
+  signal.addEventListener('abort', onAbort, { once: true })
+  if (signal.aborted) onAbort()
+  return promise
+}
+
+async function payloadAuthority(originUrl: string | null): Promise<string | null> {
+  const remote = parseRemote(originUrl)
+  const host = remoteHostContext(remote)
+  if (!remote || !host) return null
+  try {
+    const authority = await hostTransport(host).credentialAuthority()
+    return JSON.stringify([
+      host.host,
+      remote.fullName.toLowerCase(),
+      authority,
+      confirmedPayloadGeneration,
+    ])
+  } catch {
+    return null
+  }
+}
 
 /**
  * The generation of the credential these confirmed payloads belong to. A
@@ -4727,6 +4793,9 @@ let confirmedPayloadGeneration = 0
 export function retireConfirmedGitHubPayloads(): void {
   confirmedPayloadGeneration += 1
   confirmedPayloads.clear()
+  retireTrackedGitHubPayloads()
+  payloadAuthorities.clear()
+  pendingPayloads.clear()
 }
 
 /**
@@ -4766,15 +4835,13 @@ export function confirmedGitHubPayload(
   root: string,
   originUrl?: string | null,
 ): ConfirmedGitHubPayload | null {
-  const cached = confirmedPayloads.get(root) ?? null
+  const binding = payloadAuthorities.get(root)
+  if (!binding || (originUrl !== undefined && binding.originUrl !== originUrl)) return null
+  const cached = confirmedPayloads.get(binding.key) ?? null
   if (!cached) return null
   // A payload a replaced credential confirmed is not an answer for this one.
   if (cached.generation !== confirmedPayloadGeneration) {
-    confirmedPayloads.delete(root)
-    return null
-  }
-  if (originUrl !== undefined && cached.originUrl !== originUrl) {
-    confirmedPayloads.delete(root)
+    confirmedPayloads.delete(binding.key)
     return null
   }
   return cached
@@ -4931,6 +4998,18 @@ export async function getSnapshot(
   // itself, which is what the person asked of it and the only thing this app can
   // show without an account. That also means it cannot be overtaken the same way
   // again: there is nothing here for a second replacement to take away.
+  const authority = localOnly ? null : await payloadAuthority(originUrl)
+  if (authority) {
+    payloadAuthorities.delete(root)
+    payloadAuthorities.set(root, { originUrl, key: authority })
+    while (payloadAuthorities.size > MAX_CONFIRMED_PAYLOADS) {
+      const oldest = payloadAuthorities.keys().next()
+      if (oldest.done) break
+      payloadAuthorities.delete(oldest.value)
+    }
+  } else {
+    payloadAuthorities.delete(root)
+  }
   const confirmed = localOnly ? null : confirmedGitHubPayload(root, originUrl)
   // The generation this payload was confirmed under, read beside it and not at
   // the read's entry: this read may have outlived one credential already, and the
@@ -4943,26 +5022,67 @@ export async function getSnapshot(
   // rather than emptying the pull-request and stack workspace.
   // A local refresh ('reuse') must never hit the network, even when no confirmed
   // payload exists yet: it preserves local independence and spends zero GitHub quota.
-  const live =
-    remote === 'reuse'
-      ? null
-      : await Promise.all([
-          getGitHubData(root, originUrl, signal),
-          getGitHubIssues(root, originUrl, signal),
-        ])
+  let live: RemotePayloadRead | null = null
+  if (remote !== 'reuse' && !(remote === 'select' && confirmed)) {
+    const pending = authority && remote === 'select' ? pendingPayloads.get(authority) : undefined
+    if (pending) {
+      live = await waitForPayload(pending.work, signal)
+    } else {
+      let work: Promise<RemotePayloadRead> = Promise.all([
+        getGitHubData(root, originUrl, remote === 'select' ? undefined : signal, false),
+        getGitHubIssues(root, originUrl, remote === 'select' ? undefined : signal),
+      ])
+      // Selection owns only its local read, never a shared provider request.
+      // Scheduled refresh and preflight retain their own cancellable live read.
+      if (remote === 'select') {
+        // Confirmation belongs to the provider work, not its first local waiter.
+        // Keep its sequence and credential fence even if every selection detaches.
+        work = work
+          .then(async (payload) => {
+            if (authority && authority !== (await payloadAuthority(originUrl)))
+              throw new CommandCancelled()
+            if (payload[0].available) {
+              rememberConfirmedPayload(
+                authority ?? root,
+                {
+                  originUrl,
+                  data: payload[0],
+                  issues:
+                    payload[1].message === '' ? payload[1] : (confirmed?.issues ?? payload[1]),
+                  fetchedAt: confirmedAt,
+                  read,
+                  generation,
+                },
+                generation,
+              )
+            }
+            return payload
+          })
+          .finally(() => {
+            if (authority && pendingPayloads.get(authority)?.work === work)
+              pendingPayloads.delete(authority)
+          })
+      }
+      if (authority && remote === 'select' && pendingPayloads.size < MAX_CONFIRMED_PAYLOADS) {
+        pendingPayloads.set(authority, { work })
+      }
+      live = remote === 'select' ? await waitForPayload(work, signal) : await work
+    }
+    if (authority && authority !== (await payloadAuthority(originUrl))) throw new CommandCancelled()
+  }
   const answered = live !== null && live[0].available
   // The inbox is a second read with its own outcome. A pull-request answer
   // says nothing about it: an issue read that failed carries its reason in its
   // message, and an empty list is then unknown, not "there are no issues".
   const issuesAnswered = live !== null && live[1].message === ''
-  if (answered) {
+  if (remote !== 'select' && live !== null && answered) {
     // A failed issue read never becomes the confirmed inbox, so the last
     // confirmed one survives a refresh that could not reach the issues. The
     // generation is this read's own: a credential replaced while it ran means
     // these answers describe pull requests and issues that are not this
     // account's, so nothing about them is kept.
     rememberConfirmedPayload(
-      root,
+      authority ?? root,
       {
         originUrl,
         data: live[0],
@@ -4984,13 +5104,15 @@ export async function getSnapshot(
   const fallbackIssues = confirmed
     ? confirmed.issues
     : { issues: [] as RepositoryIssue[], message: '' }
-  const github = answered
-    ? live![0]
-    : mayFallBack
-      ? fallbackData
-      : live
-        ? live[0]
-        : unavailableGitHubResult('GitHub could not be read')
+  const providerData =
+    live !== null && answered
+      ? live[0]
+      : mayFallBack
+        ? fallbackData
+        : live
+          ? live[0]
+          : unavailableGitHubResult('GitHub could not be read')
+  const github = await withTrackedPullRequests(root, originUrl, providerData, signal, answered)
   // Without a confirmed inbox, keep the issues last confirmed and say why this
   // read could not refresh them, rather than passing off an empty list as one.
   const issueData =
@@ -5007,8 +5129,10 @@ export async function getSnapshot(
     : {
         reason:
           mayFallBack && confirmed
-            ? remote === 'reuse'
-              ? 'A GitHub refresh is not due yet; showing the last confirmed state'
+            ? live === null
+              ? remote === 'select'
+                ? 'Showing qualified provider knowledge from the last confirmed read'
+                : 'A GitHub refresh is not due yet; showing the last confirmed state'
               : 'GitHub could not be read; showing the last confirmed state'
             : github.message,
         fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
@@ -5235,6 +5359,9 @@ export async function getSnapshot(
   snapshot.reconciliation = await buildReconciliationReport(root, snapshot, configParents)
   if (signal?.aborted) throw new CommandCancelled()
   if (staleCredential()) throw new CommandCancelled()
+  if ((await getOriginUrl(root, signal)) !== originUrl) throw new CommandCancelled()
+  const authorityRetired = authority !== null && authority !== (await payloadAuthority(originUrl))
+  if (live !== null && authorityRetired) throw new CommandCancelled()
   // The account behind a confirmed payload can also be replaced while that last
   // local report was being built. Retirement drops the payload, and a payload
   // already read into this snapshot cannot be recalled: the accessor refused a
@@ -5249,7 +5376,7 @@ export async function getSnapshot(
     !localOnly &&
     live === null &&
     confirmed !== null &&
-    confirmedGeneration !== confirmedPayloadGeneration
+    (confirmedGeneration !== confirmedPayloadGeneration || authorityRetired)
   ) {
     // The payload this read would hand over was confirmed by an account that has
     // since been replaced, and an answer already taken cannot be recalled by

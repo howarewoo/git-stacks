@@ -1,0 +1,860 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Git Stacks — Branches & worktrees</title>
+<style>
+/* Source: git-stacks main @ 9ec11e9. DESIGN.md + packages/ui/src/tokens/tokens.json.
+   Revision 5: bottom-up branch lanes; descendants above parents and trunk.
+   Unified branch/worktree surface; separate Stacks graph remains removed.
+   Standalone prototype: shared React controls are represented in native HTML.
+   No fonts, packages, images, or network access are required. */
+:root{--canvas:#e8ecf3;--surface:#fff;--inset:#f2f4f8;--hover:#e1e6ef;--ink:#171c24;--ink-hover:#2a3340;--secondary:#536176;--border:#d7dde7;--essential:#7c879a;--selection:#edf2fc;--blue:#3155a6;--focus:#355bc5;--info-bg:#dfe8fc;--info:#3155a6;--green-bg:#dceee3;--green:#276449;--amber-bg:#f4e3b9;--amber:#865b13;--red-bg:#f9dfdf;--red:#9d3d43;--violet-bg:#e4dff5;--violet:#635097;--scrim:rgba(20,24,32,.34);--shadow:0 8px 32px rgba(23,28,36,.06);--float-shadow:0 12px 40px rgba(23,28,36,.08);--sans:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;--row:76px;--rail:224px;--inspector:376px}
+html[data-theme=dark]{color-scheme:dark;--canvas:#11151b;--surface:#1a1f27;--inset:#151a21;--hover:#242b36;--ink:#e8ecf3;--ink-hover:#f2f4f8;--secondary:#9aa7bd;--border:#2c3440;--essential:#657185;--selection:#1e2a44;--blue:#7fa4f0;--focus:#7fa4f0;--info-bg:#1b2740;--info:#9dbcff;--green-bg:#162e22;--green:#7fc9a0;--amber-bg:#33280f;--amber:#e0b263;--red-bg:#3a1c1e;--red:#f0a0a4;--violet-bg:#251f3d;--violet:#b3a1ec}
+*{box-sizing:border-box}html,body{height:100%;margin:0;overflow:hidden}body{font-family:var(--sans);font-size:14px;line-height:1.5;background:var(--canvas);color:var(--ink);overflow:hidden}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer;user-select:none}button:disabled{cursor:not-allowed;opacity:.5}button,a,input,textarea,select{outline:none}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--focus);outline-offset:3px}button{border:0;background:none}a{color:var(--blue)}h1,h2,h3,h4,p{margin:0}h1,h2{font-size:20px;line-height:1.25;font-weight:650;letter-spacing:-.45px}h3,h4{font-size:13px;line-height:1.35;font-weight:650}svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;vertical-align:middle}code,.mono{font-family:var(--mono)}code{font-size:12px}small,.meta{font-size:12px;line-height:1.4;color:var(--secondary)}.muted{color:var(--secondary)}.label{font-size:13px;line-height:1.35}.green{color:var(--green)}.red{color:var(--red)}.blue{color:var(--blue)}.amber{color:var(--amber)}.violet{color:var(--violet)}.sr-only{position:absolute;top:0;left:0;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}.truncate{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}.spacer{flex:1}.row{display:flex;align-items:center;gap:8px;min-width:0}.between{display:flex;align-items:center;justify-content:space-between;gap:12px}.stack{display:flex;flex-direction:column;gap:12px}.gap4{gap:4px}.wrap{flex-wrap:wrap}.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 12px;border-radius:12px;font-size:13px;line-height:1.35;font-weight:550;white-space:nowrap;transition:background 120ms,color 120ms}.btn:hover:not(:disabled){background:var(--hover)}.btn.primary{background:var(--ink);color:var(--surface)}.btn.primary:hover:not(:disabled){background:var(--ink-hover)}.btn.secondary{background:var(--inset)}.btn.accent{background:var(--selection);color:var(--blue)}.btn.danger{background:var(--red-bg);color:var(--red)}.btn.ghost{color:var(--secondary)}.btn.small{height:36px}.btn.full{width:100%}.icon-btn{width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;border-radius:12px;color:var(--secondary);flex-shrink:0}.icon-btn:hover{background:var(--hover);color:var(--ink)}.icon-btn svg{width:17px;height:17px}.badge{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;border-radius:999px;padding:3px 8px;font-size:12px;line-height:1.4;font-weight:500;background:var(--inset);color:var(--secondary)}.badge svg{width:12px;height:12px}.badge.success{background:var(--green-bg);color:var(--green)}.badge.info{background:var(--info-bg);color:var(--info)}.badge.warning{background:var(--amber-bg);color:var(--amber)}.badge.error{background:var(--red-bg);color:var(--red)}.badge.merged{background:var(--violet-bg);color:var(--violet)}.count{font-variant-numeric:tabular-nums;font-size:12px;min-width:20px;text-align:center;color:var(--secondary)}kbd{font:12px var(--sans);line-height:18px;min-width:19px;padding:0 4px;text-align:center;color:var(--secondary);background:var(--surface);border:1px solid var(--border);border-radius:5px}.field{width:100%;height:40px;border:1px solid var(--essential);border-radius:12px;padding:8px 12px;background:var(--surface);font-size:13px}.field:focus{border-color:var(--focus)}textarea.field{resize:vertical;min-height:96px;line-height:1.6}select.field{appearance:auto}.check{appearance:none;width:15px;height:15px;flex-shrink:0;border:1px solid var(--essential);border-radius:4px;background:var(--surface);margin:0;cursor:pointer;display:grid;place-content:center}.check:checked{background:var(--blue);border-color:var(--blue)}.check:checked:after{content:'';width:7px;height:4px;border-left:1.5px solid var(--surface);border-bottom:1.5px solid var(--surface);transform:translateY(-1px) rotate(-45deg)}.check:indeterminate{background:var(--blue);border-color:var(--blue)}.check:indeterminate:after{content:'';width:7px;height:1.5px;background:var(--surface)}.check:disabled{opacity:.45;cursor:not-allowed}.empty{padding:48px 24px;text-align:center;display:flex;align-items:center;flex-direction:column;gap:12px;color:var(--secondary)}.empty>svg{width:28px;height:28px}.empty h3{color:var(--ink)}
+/* Persistent shell */
+.app{height:100%;display:flex;flex-direction:column;padding:0 12px}.topbar{height:64px;flex-shrink:0;display:flex;align-items:center;gap:24px;padding:0 12px}.brand{display:flex;align-items:center;gap:10px;width:calc(var(--rail) - 24px);flex-shrink:0;font-weight:680;font-size:16px;letter-spacing:-.4px}.brand-mark{width:28px;height:28px;background:var(--ink);color:var(--surface);border-radius:9px;display:grid;place-content:center}.brand-mark svg{width:18px;height:18px}.global-search{height:36px;max-width:440px;flex:1;background:var(--surface);border-radius:12px;display:flex;align-items:center;gap:8px;padding:0 12px;text-align:left;color:var(--secondary);font-size:13px}.global-search:hover{background:var(--inset)}.global-search .hint{margin-left:auto;display:flex;gap:3px}.top-right{margin-left:auto;display:flex;align-items:center;gap:8px}.concept-label{font-size:12px;color:var(--secondary);padding:0 8px}.avatar{border-radius:50%;width:28px;height:28px;display:grid;place-content:center;background:var(--inset);font-size:12px;font-weight:650;color:var(--secondary);flex-shrink:0}.top-right>.avatar{background:var(--surface)}.shell{display:grid;grid-template-columns:var(--rail) minmax(0,1fr);gap:12px;min-height:0;flex:1}.sidebar{border-radius:24px;background:var(--surface);padding:20px 12px 12px;display:flex;flex-direction:column;min-height:0;overflow:auto}.workspace-name{padding:0 8px 22px}.workspace-name strong{font-size:13px;display:block}.workspace-name small{display:block;margin-top:4px}.nav-heading{font-size:12px;color:var(--secondary);display:flex;justify-content:space-between;align-items:center;margin:20px 8px 8px}.nav-heading:first-child{margin-top:0}.nav-item{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;padding:8px 12px;text-align:left;border-radius:12px;font-size:13px;color:var(--secondary);position:relative}.nav-item:hover{background:var(--inset);color:var(--ink)}.nav-item.active{background:var(--selection);color:var(--blue);font-weight:600}.nav-item>.count{margin-left:auto}.nav-item.active .count{color:var(--blue)}.nav-item.attention>.count{background:var(--amber-bg);color:var(--amber);border-radius:6px;padding:1px 5px}.nav-item .shortcut{margin-left:auto;font-size:12px;color:var(--secondary);opacity:0}.nav-item:hover .shortcut{opacity:1}.repo-nav{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;border-radius:12px;text-align:left;margin:2px 0}.repo-nav:hover{background:var(--inset)}.repo-nav.active{background:var(--inset)}.repo-mark{width:28px;height:28px;background:var(--canvas);border-radius:9px;display:grid;place-content:center;font-size:12px;letter-spacing:.1px;font-weight:700;flex-shrink:0;color:var(--secondary)}.repo-nav.active .repo-mark{background:var(--ink);color:var(--surface)}.repo-nav .repo-name{font-size:13px;font-weight:550;display:block}.repo-nav small{font-size:12px;display:block;margin-top:2px}.repo-pulse{margin-left:auto;color:var(--green)}.sidebar-bottom{margin-top:auto;padding-top:24px}.shipping-summary{display:flex;gap:10px;align-items:center;padding:12px;background:var(--inset);border-radius:16px;width:100%;text-align:left}.shipping-summary .signal{width:28px;height:28px;display:grid;place-content:center;border-radius:9px;background:var(--green-bg);color:var(--green)}.shipping-summary strong{display:block;font-size:12px;font-weight:600}.shipping-summary small{display:block;font-size:12px;margin-top:2px}.sidebar-footer{padding:12px 8px 0;display:flex;align-items:center;justify-content:space-between}.sidebar-footer button{height:32px;font-size:12px}.workspace{display:flex;flex-direction:column;gap:12px;min-height:0;min-width:0}.pane-grid{display:grid;grid-template-columns:minmax(0,1fr) var(--inspector);gap:12px;flex:1;min-height:0;min-width:0}.pane-grid.inspector-hidden{grid-template-columns:minmax(0,1fr)}.main-panel,.inspector{background:var(--surface);border-radius:24px;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}.panel-head{padding:24px 20px 16px;flex-shrink:0}.eyebrow{font-size:12px;color:var(--secondary);display:flex;align-items:center;gap:6px;margin-bottom:12px}.eyebrow svg{width:12px;height:12px}.head-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.head-title .actions{display:flex;gap:8px;align-items:center}.panel-subtitle{font-size:12px;line-height:1.5;color:var(--secondary);margin-top:8px}.filters{display:flex;align-items:center;gap:4px;flex-wrap:wrap;padding:0 20px 16px}.filter{height:32px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 10px;font-size:12px;color:var(--secondary);border-radius:12px;white-space:nowrap}.filter:hover{background:var(--inset)}.filter.active{background:var(--inset);color:var(--ink);font-weight:600}.filter.active .count{color:var(--ink)}.filter .dot{width:5px;height:5px}.filter .count{font-size:12px;min-width:15px}.table-toolbar{display:flex;align-items:center;gap:8px;padding:0 20px 12px;flex-shrink:0}.local-search{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:12px;height:36px;flex:1;max-width:320px;padding:0 10px;color:var(--secondary)}.local-search:focus-within{border-color:var(--focus);outline:2px solid var(--selection)}.local-search input{width:100%;background:none;border:0;outline:0;font-size:12px;padding:0;min-width:0}.local-search input:focus-visible{outline:none}.table-toolbar>.btn{margin-left:auto}.view-toggle{display:flex;background:var(--inset);padding:3px;border-radius:12px;gap:2px}.view-toggle button{width:29px;height:28px;border-radius:9px;color:var(--secondary);display:grid;place-content:center}.view-toggle button.active{background:var(--surface);color:var(--ink);box-shadow:0 1px 4px rgba(23,28,36,.06)}.main-scroll{overflow:auto;min-height:0;flex:1;padding:0 12px 12px;scrollbar-gutter:stable}.table-labels,.work-row{display:grid;grid-template-columns:20px minmax(185px,1fr) 108px 79px 107px 24px;align-items:center;column-gap:12px}.table-labels{position:sticky;top:0;padding:10px 8px;background:var(--surface);z-index:1;color:var(--secondary);font-size:12px}.table-labels .sort-label{color:var(--secondary);padding:0;text-align:left;font-size:12px;display:flex;align-items:center;gap:5px}.table-labels .sort-label svg{width:11px;height:11px}.group-head{padding:16px 8px 8px;display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--secondary)}.group-head:first-of-type{padding-top:12px}.group-title{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;padding:0;color:inherit}.group-title svg{width:12px;height:12px}.group-head .group-hint{font-size:12px;font-weight:400}.work-row{position:relative;min-height:var(--row);border-radius:16px;padding:12px 8px;margin:2px 0;cursor:pointer;transition:background 120ms}.work-row:hover{background:var(--inset)}.work-row.selected{background:var(--selection)}.work-row.selected:before{content:'';position:absolute;left:0;top:18px;bottom:18px;width:3px;background:var(--blue);border-radius:3px}.branch-cell{padding:0;background:none;text-align:left;width:100%;min-width:0;display:flex;flex-direction:column;gap:6px}.branch-name{font-family:var(--mono);font-size:13px;font-weight:550;line-height:1.35;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.branch-sub{display:flex;align-items:center;gap:6px;font-size:12px;line-height:1.4;color:var(--secondary);min-width:0}.branch-sub .pr-num{flex-shrink:0;font-variant-numeric:tabular-nums}.branch-sub .pr-num svg{width:12px;height:12px}.change-cell{font-size:12px;display:flex;flex-direction:column;gap:5px;line-height:1.4}.change-cell .delta{font-family:var(--mono);font-size:12px;display:flex;gap:6px;white-space:nowrap}.github-cell{font-size:12px;display:flex;flex-direction:column;gap:5px;line-height:1.4}.github-cell .state-line{display:flex;align-items:center;gap:4px}.github-cell svg{width:12px;height:12px}.github-cell .state-detail{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-menu{width:24px;height:30px;border-radius:8px;color:var(--secondary);display:grid;place-content:center;opacity:.45}.work-row:hover .row-menu,.work-row.selected .row-menu,.row-menu:focus-visible{opacity:1}.row-menu:hover{background:var(--hover)}.panel-bottom{padding:12px 20px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--secondary);background:var(--surface)}.panel-bottom .key-help{display:flex;align-items:center;gap:4px;white-space:nowrap}.panel-bottom kbd{font-size:12px;line-height:16px;min-width:16px}.bulk-bar{padding:8px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--selection);border-radius:16px;margin:0 20px 12px;font-size:12px;flex-shrink:0}.bulk-bar .btn{height:32px;font-size:12px}.statusbar{height:32px;flex-shrink:0;display:flex;align-items:center;gap:16px;padding:0 12px;font-size:12px;color:var(--secondary)}.statusbar .right{margin-left:auto;display:flex;align-items:center;gap:6px}.statusbar button{font-size:12px;color:var(--secondary);padding:0;display:flex;align-items:center;gap:5px}.statusbar svg{width:12px;height:12px}
+/* Worktree-bound inspector */
+.inspector-head{padding:20px 20px 0;flex-shrink:0}.inspector-topline{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}.inspector-topline .icon-btn{height:28px;width:28px}.context-label{font-size:12px;color:var(--secondary);display:flex;align-items:center;gap:6px}.context-label svg{width:13px;height:13px}.inspector-ref{font:13px/1.5 var(--mono);color:var(--secondary);overflow-wrap:anywhere;margin-bottom:8px}.inspector-title{font-size:20px;line-height:1.35;letter-spacing:-.4px;font-weight:630;margin-bottom:12px}.inspector-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--secondary)}.inspector-tabs{display:flex;padding:16px 20px 4px;gap:14px;flex-shrink:0}.inspector-tab{position:relative;color:var(--secondary);font-size:12px;padding:8px 0 12px;white-space:nowrap}.inspector-tab.active{color:var(--ink);font-weight:600}.inspector-tab.active:after{content:'';position:absolute;bottom:3px;left:0;right:0;height:2px;background:var(--ink);border-radius:2px}.inspector-tab .tab-count{font-size:12px;margin-left:3px;color:var(--secondary)}.inspector-scroll{padding:16px 20px 20px;overflow:auto;flex:1;min-height:0}.detail-section{margin-top:24px}.detail-section:first-child{margin-top:0}.section-label{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.section-label .btn{height:24px;font-size:12px;padding:0 4px}.context-box{padding:12px;background:var(--inset);border-radius:16px}.context-box .path{font:12px/1.55 var(--mono);display:block;overflow-wrap:anywhere;color:var(--secondary)}.context-box .icon-btn{width:28px;height:28px}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.facts strong{font-size:13px;font-weight:600;display:block}.facts small{font-size:12px;display:block;margin-top:4px}.status-note{display:flex;gap:10px;align-items:flex-start;background:var(--inset);padding:12px;border-radius:16px}.status-note>svg{margin-top:2px;width:16px;height:16px}.status-note strong{font-size:13px;display:block;font-weight:600}.status-note p{font-size:12px;line-height:1.55;margin-top:4px;color:var(--secondary)}.status-note .btn{margin-top:12px}.status-note.warning{background:var(--amber-bg)}.status-note.warning>svg,.status-note.warning strong{color:var(--amber)}.status-note.success{background:var(--green-bg)}.status-note.success>svg,.status-note.success strong{color:var(--green)}.status-note.error{background:var(--red-bg)}.status-note.error>svg,.status-note.error strong{color:var(--red)}.stack-tree{display:flex;flex-direction:column;gap:0}.stack-node{display:flex;align-items:center;gap:10px;position:relative;min-height:34px;padding:7px 8px;text-align:left;border-radius:10px;font:12px/1.4 var(--mono);color:var(--secondary)}.stack-node:hover{background:var(--inset)}.stack-node svg{width:13px;height:13px}.stack-node.child{margin-left:20px}.stack-node.child:before{content:'';position:absolute;left:-12px;bottom:-10px;width:10px;height:28px;border-left:1px solid var(--border);border-top:1px solid var(--border);border-radius:5px 0 0 0}.stack-node.active{background:var(--selection);color:var(--blue)}.stack-node span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stack-node .pr-side{margin-left:auto;font:12px var(--sans);color:var(--secondary);flex-shrink:0}.readiness-item{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px;font-size:12px}.readiness-item .row svg{width:14px;height:14px}.inspector-actions{padding:12px 20px 16px;background:var(--surface);display:flex;flex-direction:column;gap:8px;flex-shrink:0}.inspector-actions .two{display:flex;gap:8px}.inspector-actions .two .btn{flex:1;font-size:12px}.context-footer{font-size:12px;text-align:center;color:var(--secondary);padding-top:2px}.file-item{display:flex;gap:8px;align-items:center;min-height:44px;padding:8px;border-radius:12px;font-size:12px;text-align:left;width:100%}.file-item:hover{background:var(--inset)}.file-item .file-status{font:12px var(--mono);color:var(--green);width:15px;text-align:center;flex-shrink:0}.file-item .file-path{font:12px/1.5 var(--mono);overflow-wrap:anywhere;min-width:0}.mini-code{font:12px/1.7 var(--mono);overflow:auto;background:var(--inset);border-radius:12px;padding:12px;color:var(--secondary);white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0}.diff-line{font:12px/1.7 var(--mono);display:grid;grid-template-columns:30px 30px 20px minmax(0,1fr);padding:1px 8px;white-space:pre;min-width:max-content}.diff-line.add{background:var(--green-bg);color:var(--green)}.diff-line.remove{background:var(--red-bg);color:var(--red)}.diff-line.hunk{color:var(--blue);background:var(--selection)}.diff-line .num{font-size:12px;text-align:right;padding-right:10px;color:var(--secondary);user-select:none}.comment{margin-bottom:20px}.comment-header{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px}.comment-header .avatar{width:24px;height:24px;font-size:12px}.comment-header small{font-size:12px;margin-left:auto}.comment p{font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.draft-state{font-size:12px;color:var(--secondary);margin-top:8px;display:flex;align-items:center;gap:4px}.check-row{padding:12px 0;font-size:12px}.check-row summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;justify-content:space-between}.check-row summary::-webkit-details-marker{display:none}.check-row small{font-size:12px}.check-log{margin-top:12px;border-radius:12px;background:var(--inset);padding:12px;white-space:pre-wrap;font:12px/1.7 var(--mono);color:var(--secondary);overflow-wrap:anywhere}.segment{display:flex;background:var(--inset);padding:4px;border-radius:12px;gap:3px}.segment button{flex:1;padding:6px 8px;border-radius:9px;font-size:12px;color:var(--secondary)}.segment button.active{background:var(--surface);color:var(--ink)}
+/* Alternate perspectives */
+.attention-card{display:flex;align-items:flex-start;gap:12px;padding:16px 12px;border-radius:16px;margin-bottom:4px;cursor:pointer}.attention-card:hover{background:var(--inset)}.attention-card.selected{background:var(--selection)}.reason-icon{width:32px;height:32px;border-radius:10px;background:var(--inset);color:var(--secondary);display:grid;place-content:center;flex-shrink:0}.reason-icon.warning{background:var(--amber-bg);color:var(--amber)}.reason-icon.error{background:var(--red-bg);color:var(--red)}.reason-icon.info{background:var(--info-bg);color:var(--info)}.attention-card h3{font-size:13px;margin-bottom:5px}.attention-card p{font-size:12px;color:var(--secondary);line-height:1.55;margin-top:6px}.attention-card .btn{margin-left:auto;font-size:12px;flex-shrink:0}.attention-card .attention-info{min-width:0}.repo-kicker{font-size:12px;color:var(--secondary);display:flex;align-items:center;gap:5px;margin-bottom:6px}.activity-item{display:flex;gap:12px;padding:16px 8px;position:relative}.activity-item .event-icon{width:28px;height:28px;border-radius:50%;background:var(--inset);display:grid;place-content:center;color:var(--secondary);flex-shrink:0}.activity-item strong{font-size:13px;font-weight:550;display:block}.activity-item p{font-size:12px;color:var(--secondary);line-height:1.5;margin-top:5px}.activity-item small{margin-left:auto;white-space:nowrap;font-size:12px}
+/* Native focus-trapped dialogs */
+dialog{border:0;padding:0;border-radius:24px;background:var(--surface);color:var(--ink);box-shadow:0 16px 56px rgba(23,28,36,.10);width:min(560px,calc(100vw - 32px));max-height:calc(100vh - 64px);overflow:hidden}dialog::backdrop{background:var(--scrim)}dialog[open]{display:flex;flex-direction:column}dialog.wide{width:min(960px,calc(100vw - 40px))}.dialog-head{padding:24px 24px 16px;flex-shrink:0}.dialog-head .icon-btn{margin:-6px -6px -6px 0}.dialog-head p{font-size:13px;line-height:1.6;color:var(--secondary);margin-top:8px}.dialog-body{padding:0 24px 24px;overflow:auto;min-height:0}.dialog-body label.form-label{display:block;font-size:13px;font-weight:550;margin-bottom:8px}.form-group{margin-top:16px}.form-group:first-child{margin-top:0}.form-group small{display:block;font-size:12px;margin-top:8px}.dialog-footer{padding:16px 24px;display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0;background:var(--surface)}.dialog-footer>.meta{margin-right:auto;font-size:12px}.scope-block{background:var(--inset);border-radius:16px;padding:16px;margin:16px 0;display:flex;flex-direction:column;gap:12px}.scope-fact{display:flex;justify-content:space-between;gap:16px;font-size:12px;align-items:flex-start}.scope-fact>span:first-child{color:var(--secondary);flex-shrink:0}.scope-fact code{font-size:12px;line-height:1.55;text-align:right;overflow-wrap:anywhere;min-width:0}.operation-item{padding:12px 0;display:flex;align-items:flex-start;gap:10px}.operation-item .operation-text{flex:1;min-width:0}.operation-item strong{font:12px/1.5 var(--mono);overflow-wrap:anywhere;display:block}.operation-item small{display:block;font-size:12px;margin-top:5px}.operation-item .badge{font-size:12px}.confirm-line{display:flex;align-items:flex-start;gap:10px;font-size:13px;line-height:1.6;margin-top:16px}.confirm-line .check{margin-top:3px}.inline-error{font-size:12px;color:var(--red);margin-top:8px}.command-dialog{margin-top:12vh;width:min(620px,calc(100vw - 32px))}.palette-input{display:flex;align-items:center;gap:12px;padding:20px 20px 16px;flex-shrink:0}.palette-input input{width:100%;border:0;background:none;font-size:14px;outline:none}.palette-input input:focus-visible{outline:none}.palette-input kbd{margin-left:auto}.palette-results{padding:0 12px 12px;overflow:auto;max-height:460px}.palette-heading{font-size:12px;color:var(--secondary);padding:12px 10px 6px}.palette-item{width:100%;display:flex;align-items:center;gap:12px;padding:12px 10px;text-align:left;border-radius:12px}.palette-item:hover,.palette-item.active{background:var(--selection)}.palette-item .palette-label{font-size:13px;font-weight:550;display:block}.palette-item small{font-size:12px;display:block;margin-top:4px}.palette-item .palette-trail{margin-left:auto;flex-shrink:0;font-size:12px;color:var(--secondary)}.palette-footer{font-size:12px;color:var(--secondary);padding:12px 20px;background:var(--inset);display:flex;gap:12px}.review-layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:16px}.review-files{background:var(--inset);padding:8px;border-radius:16px;align-self:start}.review-files button{font:12px/1.5 var(--mono);padding:10px;width:100%;border-radius:10px;text-align:left;overflow-wrap:anywhere;color:var(--secondary)}.review-files button.active{background:var(--surface);color:var(--ink)}.diff-frame{min-width:0;border-radius:16px;overflow:hidden;background:var(--inset)}.diff-file-head{padding:12px;font:12px var(--mono);display:flex;align-items:center;justify-content:space-between;gap:8px;overflow-wrap:anywhere}.diff-content{overflow:auto;padding-bottom:12px}.diff-note{margin-top:16px;font-size:12px;color:var(--secondary);line-height:1.6}.inline-review{margin-top:16px}.note-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}.note-grid h3{margin-bottom:8px}.note-grid p{font-size:13px;line-height:1.7;color:var(--secondary)}.token-swatches{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}.token-swatch{display:flex;align-items:center;gap:8px;font:12px var(--mono)}.token-swatch span{width:22px;height:22px;border-radius:7px;border:1px solid var(--border)}.menu-list{display:flex;flex-direction:column;gap:4px}.menu-action{display:flex;align-items:center;gap:10px;padding:12px;text-align:left;border-radius:12px;font-size:13px}.menu-action:hover{background:var(--inset)}.menu-action small{font-size:12px;display:block;margin-top:4px}.menu-action>svg{color:var(--secondary)}.setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0}.setting-row strong{display:block;font-size:13px;font-weight:550}.setting-row small{font-size:12px;display:block;margin-top:5px}.setting-row .segment{min-width:164px}.toast-stack{position:fixed;bottom:48px;left:50%;transform:translateX(-50%);z-index:90;display:flex;flex-direction:column;gap:8px;max-width:calc(100vw - 40px);pointer-events:none}.toast{pointer-events:auto;background:var(--ink);color:var(--surface);padding:12px 16px;border-radius:16px;box-shadow:var(--float-shadow);font-size:12px;display:flex;align-items:center;gap:10px;animation:toast-in 180ms ease-out}.toast .toast-undo{color:var(--surface);font-weight:650;text-decoration:underline;text-underline-offset:3px}.toast svg{width:15px;height:15px}.toast .toast-close{color:var(--surface);opacity:.7;padding:0;margin-left:8px}.toast .toast-close svg{width:13px;height:13px}@keyframes toast-in{from{transform:translateY(8px);opacity:0}to{transform:translateY(0);opacity:1}}@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+html[data-density=compact]{--row:64px}html[data-density=compact] .work-row{padding-top:8px;padding-bottom:8px}html[data-density=compact] .group-head{padding-top:12px}
+@media(min-width:1680px){:root{--rail:236px;--inspector:408px}.table-labels,.work-row{grid-template-columns:20px minmax(220px,1fr) 126px 90px 118px 24px;column-gap:16px}.inspector-tabs{gap:20px}}
+@media(max-width:1350px){:root{--rail:204px;--inspector:348px}.table-labels,.work-row{grid-template-columns:18px minmax(160px,1fr) 92px 88px 22px;column-gap:10px}.table-labels>.change-label,.work-row>.change-cell{display:none}.head-title .actions .btn span.optional{display:none}.inspector-tabs{gap:11px}.inspector-tabs .inspector-tab{font-size:12px}.branch-name{font-size:13px}.panel-head{padding-top:20px}.panel-subtitle{max-width:440px}.attention-card{flex-wrap:wrap}.attention-card .btn{margin-left:44px}.group-hint{display:none}.concept-label{display:none}}
+@media(max-width:1199px){:root{--rail:188px;--inspector:324px}.app{padding:0 8px}.shell,.pane-grid,.workspace{gap:8px}.topbar{gap:16px}.table-labels,.work-row{grid-template-columns:16px minmax(150px,1fr) 90px 20px;column-gap:10px}.panel-head,.inspector-head{padding-left:16px;padding-right:16px}.table-toolbar,.filters,.inspector-tabs{padding-left:16px;padding-right:16px}.inspector-scroll,.inspector-actions{padding-left:16px;padding-right:16px}.main-scroll{padding-left:8px;padding-right:8px}.sidebar{padding-left:8px;padding-right:8px}.repo-nav{padding-left:10px;padding-right:10px}.filter{padding:0 8px;font-size:12px}.filter .count{font-size:12px}.head-title .actions .secondary{display:none}.panel-bottom .key-help{display:none}.review-layout{grid-template-columns:170px minmax(0,1fr)}}
+@media(max-width:1039px){:root{--rail:188px}.pane-grid{grid-template-columns:minmax(0,1fr)}.inspector{position:fixed;top:64px;right:12px;bottom:40px;width:376px;z-index:20;box-shadow:0 12px 50px rgba(23,28,36,.18);outline:1px solid var(--border)}.table-labels,.work-row{grid-template-columns:18px minmax(185px,1fr) 105px 90px 20px}.top-right{gap:2px}.global-search{max-width:360px}.attention-card{flex-wrap:nowrap}.attention-card .btn{margin-left:auto}.inspector-tabs{gap:16px}.inspector-tabs .inspector-tab{font-size:12px}}
+@media(max-width:759px){:root{--rail:64px}.brand{width:auto}.brand>span:last-child{display:none}.topbar{padding:0 4px;gap:12px}.top-right>.avatar,.top-right>#theme-button{display:none}.global-search .search-placeholder{font-size:12px}.sidebar{padding:12px 6px}.workspace-name,.nav-heading,.nav-item>span,.sidebar-bottom,.repo-nav .repo-info,.repo-nav .repo-pulse{display:none}.nav-item{justify-content:center;min-height:44px;padding:10px}.repo-nav{justify-content:center;padding:10px 0;margin-top:8px}.inspector{width:min(376px,calc(100vw - 32px));right:12px}.table-labels,.work-row{grid-template-columns:16px minmax(130px,1fr) 80px 20px;gap:8px}.panel-head .eyebrow{display:none}.head-title{flex-wrap:wrap}.panel-head h1{font-size:20px}.table-toolbar,.filters{padding-left:12px;padding-right:12px}.table-toolbar>.btn{display:none}.filter{font-size:12px}.filters{gap:2px}.local-search{min-width:80px}.branch-name{font-size:13px}.branch-sub{font-size:12px}.group-title{font-size:12px}.panel-bottom{padding:8px 12px;font-size:12px}.statusbar .right{display:none}.statusbar{font-size:12px;padding:0 4px}.global-search .hint{display:none}.top-right>#notes-button{display:none}.attention-card{flex-wrap:wrap}.attention-card .btn{margin-left:44px}.review-layout,.note-grid{grid-template-columns:1fr}.review-files{display:flex;overflow:auto}.review-files button{min-width:120px;flex:1}.dialog-head{padding:20px 20px 16px}.dialog-body{padding:0 20px 20px}.dialog-footer{padding:12px 20px}.dialog-footer>.meta{display:none}.dialog-footer{flex-wrap:wrap}.setting-row{flex-wrap:wrap}}
+
+
+/* Revision 2: independent local, review, and check facts. */
+.main-panel{container-type:inline-size;container-name:worklist}
+.repo-attention{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:12px;color:var(--amber)}
+.table-labels,.work-row{grid-template-columns:18px minmax(210px,1fr) 104px 114px 100px 24px;column-gap:12px}
+.state-line{display:inline-flex;align-items:center;gap:5px;min-width:0}.state-line svg{width:13px;height:13px;flex-shrink:0}
+.local-cell,.review-cell,.checks-cell{display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:4px;min-width:0;font-size:12px;line-height:1.4;text-align:left}
+.local-cell .meta,.review-cell .meta,.checks-cell .meta{font-size:12px;line-height:1.4}
+.review-cell .state-line{white-space:normal;align-items:flex-start}
+.review-cell .state-line svg{margin-top:1px}
+.checks-cell{padding:4px 0;border-radius:8px;align-self:center}
+.checks-cell:hover:not(:disabled){color:var(--blue)}
+.checks-cell:disabled{opacity:1}.checks-cell .state-line{white-space:nowrap}
+.branch-sub{min-width:0}.branch-sub .issue-label{flex-shrink:0}
+.compact-review{display:none;font-size:12px;line-height:1.4;margin-top:3px;font-family:var(--sans);font-weight:400}
+.inspector-secondary{display:flex;gap:8px;align-items:center;margin-top:8px}.inspector-secondary>.btn{flex:1}
+.readiness-link{display:inline-flex;align-items:center;gap:8px;font-size:12px;padding:4px 0;border-radius:4px;text-align:left}
+.readiness-link:hover{color:var(--blue)}
+.attention-branch{text-align:left;padding:2px 0;overflow-wrap:anywhere;white-space:normal}
+.attention-branch:hover{color:var(--blue);text-decoration:underline;text-underline-offset:3px}
+.discovery-row{display:flex;align-items:flex-start;gap:12px;padding:16px 0;font-size:13px;cursor:pointer}
+.discovery-row .check{margin-top:3px}
+.discovery-row>span{display:flex;flex-direction:column;gap:8px;min-width:0}
+.discovery-row strong{font-size:13px;overflow-wrap:anywhere}
+.discovery-row small{font-size:12px;line-height:1.5}
+@container worklist (max-width:700px){
+ .table-labels,.work-row{grid-template-columns:18px minmax(150px,1fr) 92px 102px 96px 24px;column-gap:8px}
+ .group-hint{display:none}
+ .review-cell .state-line{font-size:12px}
+}
+@container worklist (max-width:610px){
+ .table-labels,.work-row{grid-template-columns:18px minmax(160px,1fr) 96px 96px 24px;column-gap:8px}
+ .review-label,.review-cell{display:none}
+ .compact-review{display:block}
+ .group-title{font-size:12px}
+ .filters{gap:2px;flex-wrap:wrap}
+ .filter{padding:0 8px}
+ .table-toolbar{gap:8px}
+ .head-title{flex-wrap:wrap}
+}
+@container worklist (max-width:440px){
+ .table-labels,.work-row{grid-template-columns:16px minmax(130px,1fr) 86px 22px;column-gap:8px}
+ .local-label,.local-cell{display:none}
+ .table-toolbar>.btn{display:none}
+ .filters{row-gap:4px}
+ .panel-head{padding:16px 12px}
+}
+@media(max-width:759px){.repo-attention{display:none}.shipping-summary{display:none}}
+
+
+/* Revision 4 — one branch/worktree surface. PR-list styles above are unchanged. */
+.is-lanes .panel-subtitle{max-width:none}
+.worktree-scope{height:36px;max-width:158px;min-width:136px;background:var(--inset);border:1px solid transparent;border-radius:12px;padding:0 10px;font-size:12px;color:var(--secondary);cursor:pointer}
+.worktree-scope:hover{background:var(--hover)}
+.is-lanes .local-search{max-width:360px;min-width:120px}
+.is-lanes .table-toolbar{gap:8px}
+.is-lanes .table-toolbar>.btn{margin-left:auto}
+.lane-guide{display:flex;align-items:center;gap:12px;min-height:36px;margin:0 8px 4px;color:var(--secondary);font-size:12px}
+.lane-help{display:flex;align-items:center;gap:7px;font-size:12px;line-height:1.4;color:var(--secondary);padding:6px 0;white-space:nowrap}
+.lane-help:hover{color:var(--blue)}
+.lane-help svg{width:13px;height:13px}
+.lane-help svg:last-child{width:12px;height:12px}
+.lane-guide-detail{margin-left:auto;text-align:right}
+.lane-expand{color:var(--blue);font-size:12px;white-space:nowrap;padding:6px}
+.lane-group{--lane-step:20px;--lane-width:calc(28px + var(--max-lane) * var(--lane-step));margin-bottom:12px}
+.lane-group .lane-grid{display:grid;grid-template-columns:18px var(--lane-width) minmax(180px,1fr) 148px 124px 24px;column-gap:8px;align-items:center}
+.lane-labels{position:sticky;top:0;z-index:2;background:var(--surface);padding:8px;font-size:12px;color:var(--secondary);min-height:36px}
+.lane-track-label{font-size:12px;padding-left:1px}
+.lane-body{position:relative;isolation:isolate}
+.lane-group .lane-row{position:relative;min-height:76px;padding:12px 8px;margin:0;border-radius:16px;transition:background 120ms}
+.lane-group .lane-row.selected:before{display:none}
+.lane-group .lane-row.lane-trunk{min-height:64px}
+html[data-density=standard] .lane-group .lane-row{min-height:92px;padding-top:18px;padding-bottom:18px}
+html[data-density=standard] .lane-group .lane-trunk{min-height:76px}
+.lane-space{display:block;width:var(--lane-width);height:100%;align-self:stretch;pointer-events:none}
+.ancestry-lines{position:absolute;top:0;pointer-events:none;overflow:visible;z-index:1;fill:none;stroke-width:1.5;stroke:var(--essential)}
+.ancestry-lines .lane-edge{stroke:var(--essential);stroke-width:1.5;opacity:.65;fill:none}
+.ancestry-lines .lane-edge.highlight{stroke:var(--blue);opacity:.9;stroke-width:1.8}
+.ancestry-lines .lane-node{fill:var(--surface);stroke:var(--essential);stroke-width:1.6}
+.ancestry-lines .lane-node.related{stroke:var(--blue);stroke-width:1.8}
+.ancestry-lines .lane-node.active{fill:var(--blue);stroke:var(--surface);stroke-width:1.5}
+.ancestry-lines .lane-node-halo{stroke:none;fill:var(--info-bg)}
+.ancestry-lines .lane-node.main-node{stroke-width:2}
+.lane-identity{display:flex;flex-direction:column;gap:6px;min-width:0}
+.lane-identity-top{display:flex;align-items:center;gap:8px;min-width:0}
+.lane-identity .lane-select{padding:0;text-align:left;font-size:13px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;border-radius:3px}
+.lane-select:hover{color:var(--blue)}
+.lane-sub-select{padding:0;text-align:left;width:100%;border-radius:4px}
+.lane-sub-select:hover{color:var(--ink)}
+.fold-toggle{display:inline-flex;align-items:center;gap:2px;flex-shrink:0;margin-left:auto;padding:0 4px;min-height:24px;color:var(--secondary);font:12px/1.4 var(--sans);border-radius:6px;white-space:nowrap}
+.fold-toggle:hover{background:var(--hover);color:var(--ink)}
+.fold-toggle svg{width:12px;height:12px}
+.fold-toggle.folded{color:var(--blue);background:var(--selection)}
+.context-tag,.trunk-tag{font:12px/1.4 var(--sans);color:var(--secondary);background:var(--inset);padding:1px 6px;border-radius:5px;white-space:nowrap}
+.lane-context .lane-select{color:var(--secondary);font-weight:500}
+.lane-context:not(.selected){background:var(--inset)}
+.lane-local{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:12px;line-height:1.4}
+.directory-name{display:flex;align-items:center;gap:6px;min-width:0;color:var(--secondary)}
+.directory-name svg{width:13px;height:13px}
+.directory-facts{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;line-height:1.4;align-items:center}
+.lane-pr-state{display:flex;flex-direction:column;align-items:flex-start;gap:6px;font-size:12px;line-height:1.4;min-width:0}
+.lane-status-line{display:flex;align-items:center;gap:5px;font-size:12px;line-height:1.4;padding:0;text-align:left;max-width:100%;border-radius:4px}
+button.lane-status-line:hover span{text-decoration:underline;text-underline-offset:3px}
+.lane-status-line svg{width:12px;height:12px}
+.lane-inline-local{display:none;align-items:center;gap:5px;min-width:0}
+.lane-inline-local svg{width:12px;height:12px}
+.lane-inline-local>.truncate{max-width:160px}
+.lane-inline-local>span:not(.truncate){white-space:nowrap}
+.lane-repo-heading{display:flex;align-items:center;gap:8px;padding:20px 8px 8px;color:var(--secondary);font-size:12px}
+.lane-repo-heading strong{font-size:13px;color:var(--ink)}
+.lane-repo-heading>span{margin-left:auto}
+@container worklist (max-width:790px){
+ .lane-group .lane-grid{grid-template-columns:18px var(--lane-width) minmax(160px,1fr) 126px 112px 22px}
+ .directory-facts{gap:4px 8px}
+ .lane-guide-detail{font-size:12px}
+}
+@container worklist (max-width:700px){
+ .lane-group .lane-grid{grid-template-columns:18px var(--lane-width) minmax(160px,1fr) 114px 22px}
+ .lane-worktree-label,.lane-local{display:none}
+ .lane-inline-local{display:flex}
+ .lane-group .lane-row{min-height:88px}
+ .lane-guide-detail{max-width:220px}
+ .fold-toggle{padding:0 2px}
+}
+@container worklist (max-width:570px){
+ .lane-group{--lane-step:16px}
+ .lane-group .lane-grid{grid-template-columns:16px var(--lane-width) minmax(120px,1fr) 100px 20px;column-gap:6px}
+ .lane-guide-detail{display:none}
+ .is-lanes .table-toolbar{flex-wrap:wrap}
+ .worktree-scope{min-width:122px;width:122px}
+ .lane-inline-local>.truncate{max-width:110px}
+ .lane-guide .lane-expand{margin-left:auto}
+ .lane-pr-state .meta{overflow-wrap:anywhere}
+}
+@container worklist (max-width:440px){
+ .lane-group .lane-grid{grid-template-columns:16px var(--lane-width) minmax(96px,1fr) 96px 20px;column-gap:4px}
+ .is-lanes .table-toolbar>.btn{display:inline-flex}
+ .is-lanes .table-toolbar .local-search{max-width:none;flex-basis:100%}
+ .is-lanes .head-title{gap:12px}
+ .lane-inline-local{flex-wrap:wrap}
+ .trunk-tag{display:none}
+}
+@media(prefers-reduced-motion:reduce){.lane-row{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" id="brand-mark"></span><span>Git Stacks</span></div>
+    <button class="global-search" data-action="palette" aria-label="Search repositories, worktrees and pull requests. Control or Command K"><span data-icon="search"></span><span class="search-placeholder">Jump to a repository, worktree, or PR…</span><span class="hint"><kbd>⌘</kbd><kbd>K</kbd></span></button>
+    <div class="top-right"><span class="concept-label">Interactive concept <span class="muted">/</span> demo data</span><button class="icon-btn" id="theme-button" data-action="theme" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"><span data-icon="moon"></span></button><button class="icon-btn" id="notes-button" data-action="notes" title="Design notes and prototype scope" aria-label="Design notes and prototype scope"><span data-icon="info"></span></button><button class="icon-btn" data-action="settings" title="Display and demo settings" aria-label="Display and demo settings"><span data-icon="sliders"></span></button><div class="avatar" title="Personal workspace">W</div></div>
+  </header>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Workspace navigation" id="sidebar"></aside>
+    <div class="workspace">
+      <div class="pane-grid" id="pane-grid">
+        <main class="main-panel" id="main-panel" aria-label="Worktree workbench"></main>
+        <aside class="inspector" id="inspector" aria-label="Selected worktree details"></aside>
+      </div>
+    </div>
+  </div>
+  <footer class="statusbar"><span class="row gap4"><span data-icon="shield"></span> Local demo · no Git or GitHub writes</span><span id="status-context" class="truncate"></span><div class="right"><span class="dot green"></span><span>Selection changes focus, never checkout</span><button data-action="notes" aria-label="Read design notes"><span data-icon="arrow-up-right"></span></button></div></footer>
+</div>
+<dialog id="modal" aria-labelledby="modal-title"></dialog>
+<dialog id="palette" class="command-dialog" aria-label="Jump to repository, worktree, or pull request"></dialog>
+<div class="toast-stack" id="toasts" aria-live="polite" aria-atomic="false"></div>
+<div class="sr-only" id="announcement" aria-live="polite" aria-atomic="true"></div>
+<script>
+'use strict';
+const ICONS={
+ layers:'<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>',
+ worktree:'<path d="M7 3v12a4 4 0 0 0 4 4h6M7 7h10"/><rect x="3.5" y="2" width="7" height="5" rx="1.5"/><rect x="16" y="5" width="5" height="5" rx="1.5"/><rect x="16" y="16" width="5" height="5" rx="1.5"/>',
+ search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/>',
+ branch:'<circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9M18 7.5a8 8 0 0 1-8 8H6"/>',
+ pr:'<circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M6 7.5v9M18 16.5V8a3 3 0 0 0-3-3h-2M15 2l-3 3 3 3"/>',
+ merge:'<circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M6 7.5v9M6 8a8 8 0 0 0 8 8h4"/>',
+ folder:'<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>',
+ inbox:'<path d="m4 4-2 10v6h20v-6L20 4H4Z"/><path d="M2 14h6l2 3h4l2-3h6"/>',
+ bell:'<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>',
+ pulse:'<path d="M2 12h4l3-8 6 16 3-8h4"/>',
+ history:'<path d="M3 10a9 9 0 1 1 1 7M3 4v6h6M12 7v5l3 2"/>',
+ check:'<path d="m5 12 4 4L19 6"/>',
+ checkcircle:'<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+ circle:'<circle cx="12" cy="12" r="8"/>',
+ warning:'<path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v4M12 17h.01"/>',
+ error:'<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
+ info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
+ arrow:'<path d="M5 12h14m-5-5 5 5-5 5"/>',
+ 'arrow-up-right':'<path d="M7 17 17 7M7 7h10v10"/>',
+ chevron:'<path d="m9 5 7 7-7 7"/>',
+ up:'<path d="m6 15 6-6 6 6"/>',
+ down:'<path d="m6 9 6 6 6-6"/>',
+ plus:'<path d="M12 5v14M5 12h14"/>',
+ more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+ close:'<path d="m6 6 12 12M6 18 18 6"/>',
+ refresh:'<path d="M20 8a8 8 0 0 0-14-3L3 8M3 3v5h5M4 16a8 8 0 0 0 14 3l3-3M21 21v-5h-5"/>',
+ sliders:'<path d="M4 7h4m4 0h8M4 17h8m4 0h4"/><circle cx="10" cy="7" r="2"/><circle cx="14" cy="17" r="2"/>',
+ list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+ terminal:'<path d="m4 5 6 6-6 6M12 19h8"/>',
+ code:'<path d="m7 6-5 6 5 6m10-12 5 6-5 6M14 3l-4 18"/>',
+ copy:'<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+ shield:'<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/>',
+ lock:'<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>',
+ clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+ file:'<path d="M14 2H5v20h14V7l-5-5Z"/><path d="M14 2v6h5M8 13h8M8 17h5"/>',
+ comment:'<path d="M21 11a8 8 0 0 1-8 8H5l-3 3V5a2 2 0 0 1 2-2h9a8 8 0 0 1 8 8Z"/><path d="M6 8h10M6 12h7"/>',
+ upload:'<path d="M12 16V3M7 8l5-5 5 5M4 15v6h16v-6"/>',
+ trash:'<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
+ archive:'<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v13h14V8M10 12h4"/>',
+ moon:'<path d="M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10Z"/>',
+ sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1 1M18 18l1 1M5 19l1-1M18 6l1-1"/>',
+ panel:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M14 3v18"/>',
+ external:'<path d="M14 3h7v7M21 3 10 14M10 3H3v18h18v-7"/>',
+ pin:'<path d="m16 3 5 5-3 1-5 6v3l-3-3-5-5h3l6-5 2-2ZM9 15l-6 6"/>',
+ keyboard:'<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M10 13h.01M14 13h.01M18 13h.01M8 16h8"/>',
+ sort:'<path d="M8 4v16m-3-3 3 3 3-3M16 20V4m-3 3 3-3 3 3"/>',
+ eye:'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>'
+};
+const icon=(name,cls='')=>`<svg aria-hidden="true" class="${cls}" viewBox="0 0 24 24">${ICONS[name]||ICONS.circle}</svg>`;
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=s=>document.querySelector(s);
+const $$=s=>[...document.querySelectorAll(s)];
+const fallbackMemory=new Map();
+const storage={get(k,f){try{const v=localStorage.getItem('gs-workbench-v5:'+k);return v?JSON.parse(v):(fallbackMemory.has(k)?fallbackMemory.get(k):f)}catch{return fallbackMemory.has(k)?fallbackMemory.get(k):f}},set(k,v){fallbackMemory.set(k,v);try{localStorage.setItem('gs-workbench-v5:'+k,JSON.stringify(v))}catch{}}};
+const repos=[
+ {id:'gs',name:'git-stacks',owner:'howarewoo',mark:'GS',path:'/Users/woo/Code/git-stacks'},
+ {id:'ak',name:'toolkit',owner:'howarewoo',mark:'TK',path:'/Users/woo/Code/toolkit'},
+ {id:'wp',name:'web-platform',owner:'howarewoo',mark:'WP',path:'/Users/woo/Code/web-platform'}
+];
+const repoBy=id=>repos.find(r=>r.id===id)||repos[0];
+// Git, GitHub, and local review facts are independent of the development tool.
+// There is deliberately no session/provider/activity model in this prototype.
+const STATE={
+ awaiting:{label:'Awaiting review',tone:'neutral',icon:'eye',group:'quiet'},
+ review:{label:'New commits to review',tone:'info',icon:'eye',group:'attention'},
+ changes:{label:'Changes requested',tone:'warning',icon:'comment',group:'attention'},
+ failed:{label:'Check failed',tone:'error',icon:'error',group:'attention'},
+ conflict:{label:'Rebase conflict',tone:'warning',icon:'warning',group:'attention'},
+ restack:{label:'Restack needed',tone:'warning',icon:'layers',group:'attention'},
+ local:{label:'Local changes',tone:'neutral',icon:'file',group:'inprogress'},
+ unpublished:{label:'Unpublished commits',tone:'info',icon:'upload',group:'inprogress'},
+ ready:{label:'Ready to merge',tone:'success',icon:'checkcircle',group:'ready'},
+ quiet:{label:'No new updates',tone:'neutral',icon:'circle',group:'quiet'},
+ merged:{label:'Merged',tone:'merged',icon:'merge',group:'quiet'},
+ remote:{label:'No worktree',tone:'neutral',icon:'branch',group:'unattached'}
+};
+// id, repository, branch, title, PR, attention state, uncommitted files, parent, unpushed commits.
+const seed=[
+ ['w1','gs','feat/worktree-registry','Discover and track linked worktrees',247,'review',0,'main',0],
+ ['w2','gs','feat/worktree-switcher','Keep context when switching worktrees',248,'changes',3,'w1',2],
+ ['w3','gs','fix/parallel-refresh','Avoid stale results during parallel refresh',250,'failed',0,'main',0],
+ ['w4','gs','feat/stack-order','Preserve PR order across restacks',251,'conflict',2,'w1',0],
+ ['w5','gs','feat/background-fetch','Refresh repositories independently',252,'local',4,'main',1],
+ ['w6','gs','feat/repository-history','Browse changes across repositories',null,'unpublished',6,'main',3],
+ ['w7','gs','feat/keyboard-navigation','Navigate worktrees without the mouse',253,'restack',0,'w5',0],
+ ['w8','gs','perf/large-repo-index','Bound reads for large repositories',254,'local',8,'main',2],
+ ['w9','gs','fix/stale-check-status','Invalidate checks when the head changes',245,'ready',0,'main',0],
+ ['w10','gs','feat/branch-search','Search branches by name and PR title',244,'ready',0,'main',0],
+ ['w11','gs','chore/design-token-sync','Use shared tokens in every work surface',243,'ready',0,'main',0],
+ ['w12','gs','main','Primary worktree',null,'quiet',0,null,0],
+ ['w13','gs','docs/worktree-workflows','Document the parallel development workflow',null,'unpublished',0,'w2',2],
+ ['w14','gs','fix/review-scroll','Keep review position when opening a thread',241,'merged',0,'main',0],
+ ['w15','gs','chore/remove-legacy-cache','Remove the old repository snapshot cache',239,'merged',1,'main',0],
+ ['a1','ak','feat/request-tracing','Carry request context across services',86,'changes',2,'main',1],
+ ['a2','ak','feat/tool-permissions','Scope permissions to each tool',87,'local',4,'main',2],
+ ['a3','ak','fix/stream-buffer','Keep streamed messages in order',88,'local',2,'main',1],
+ ['a4','ak','fix/retry-budget','Stop retries after the configured budget',82,'ready',0,'main',0],
+ ['a5','ak','main','Primary worktree',null,'quiet',0,null,0],
+ ['a6','ak','chore/typed-events','Add typed application events',79,'merged',0,'main',0],
+ ['p1','wp','fix/hydration-order','Avoid a hydration mismatch in navigation',412,'failed',0,'main',0],
+ ['p2','wp','feat/account-settings','Build the account settings page',415,'local',6,'main',2],
+ ['p3','wp','feat/accessibility-audit','Improve keyboard and screen reader support',411,'review',0,'main',0],
+ ['p4','wp','fix/avatar-fallback','Show initials when an image is unavailable',410,'ready',0,'main',0],
+ ['p5','wp','main','Primary worktree',null,'quiet',0,null,0],
+ ['b1','gs','feat/remote-pr-search','Search pull requests without a local branch',256,'remote',0,'main',0],
+ ['b2','gs','fix/notification-count','Count unique repository notifications',257,'remote',0,'main',0],
+ ['b3','gs','experiment/diff-layout','Explore a side-by-side diff layout',null,'remote',0,'w1',0],
+ ['b4','gs','release/next','Prepare the next release',null,'remote',0,'main',0]
+];
+function buildItem(s,index){
+ const [id,repo,branch,title,pr,status,dirty,parent,ahead=0]=s;
+ const path=repoBy(repo).path,isMain=branch==='main';
+ const head=('d8c4'+(24731+index*135).toString(16)+'b').slice(0,8);
+ return {id,repo,branch,title,pr,status,dirty,parent,ahead,isMain,
+  worktree:status==='remote'?null:isMain?path:`${path}/.worktrees/${branch.split('/').slice(1).join('-')||branch}`,
+  checks:!pr?'none':status==='failed'?'fail':status==='conflict'||id==='b2'?'unknown':status==='local'?'running':'pass',
+  review:status==='ready'||status==='merged'?'approved':status==='changes'?'changes':status==='review'?'requested':id==='b2'?'unknown':'none',
+  draft:status==='local'&&!!pr,author:'howarewoo',pushed:!!pr||isMain,
+  added:dirty?dirty*18+13:128+index*3,removed:dirty?dirty*3+2:18+index,
+  age:index+2,size:128+index*13,head,publishedHead:pr?(ahead?(parseInt(head,16)-17).toString(16):head):null,
+  commits:pr?3:ahead,unresolved:status==='changes'?2:0,
+  needsRestack:status==='restack',operation:status==='conflict'?'rebase':null,adminLocked:false,
+  pendingLocalReview:status==='review',comments:[],viewed:[],localReviewed:false};
+}
+let items=seed.map(buildItem);
+const stored=storage.get('state',null);
+const initial=stored?.version===5&&Array.isArray(stored.items)?stored:null;
+if(initial)items=initial.items;
+const ui={repo:initial?.repo||'gs',view:initial?.view||'branches',filter:'all',query:'',selected:initial?.selected||'w1',tab:'overview',changesMode:'working',showInspector:innerWidth>=1040,selectedIds:new Set(),collapsed:new Set(['quiet','unattached']),limit:30,theme:storage.get('theme','light'),density:storage.get('density','compact'),sort:'attention',grouped:true,repoMemory:storage.get('repo-memory',{}),stress:initial?.stress||false,worktreeScope:'all',folded:new Set(),lastLaneModel:null};
+let events=initial?.events||[
+ {title:'New commits on pull request #247',body:'feat/worktree-registry · review progress needs another look',repo:'gs',icon:'branch',time:'9 min ago'},
+ {title:'Changes requested on #248',body:'feat/worktree-switcher · 2 unresolved review threads',repo:'gs',icon:'comment',time:'11 min ago'},
+ {title:'Pull request #245 is ready to merge',body:'fix/stale-check-status · published head passed checks and review',repo:'gs',icon:'pr',time:'16 min ago'},
+ {title:'New review feedback in toolkit',body:'feat/request-tracing · changes requested on #86',repo:'ak',icon:'comment',time:'18 min ago'}
+];
+let modalContext=null,paletteResults=[],paletteIndex=0,reviewFile=0;
+const byId=id=>items.find(w=>w.id===id);
+const selected=()=>byId(ui.selected);
+const reviewHead=w=>w.publishedHead||w.head;
+const hasUnpublished=w=>w.ahead>0||(!w.pushed&&w.commits>0);
+const reviewLabel=w=>!w.pr?'No PR':({approved:'Approved',requested:'Requested',changes:'Changes requested',unknown:'Unavailable',none:'Not requested'}[w.review]||'Unavailable');
+const checksLabel=w=>!w.pr?'No PR':({pass:'6 / 6 passed',fail:'1 failed',running:'Running',unknown:'Unavailable',none:'No checks'}[w.checks]||'Unavailable');
+function refreshStatus(w){
+ if(w.status==='merged')return;
+ w.status=w.operation==='rebase'?'conflict':w.checks==='fail'?'failed':w.needsRestack?'restack':w.unresolved||w.review==='changes'?'changes':w.pendingLocalReview?'review':mergeReady(w)?'ready':hasUnpublished(w)?'unpublished':w.dirty||w.draft?'local':!w.worktree?'remote':w.pr?'awaiting':'quiet';
+}
+function operationFingerprint(w){return JSON.stringify([w.repo,w.worktree,w.branch,w.head,w.publishedHead,w.dirty,w.ahead,w.operation,w.adminLocked,w.status,w.checks,w.review,w.draft,w.needsRestack,w.unresolved]);}
+const needs=w=>STATE[w.status]?.group==='attention';
+const mergeReady=w=>!!w.pr&&!w.draft&&w.status!=='merged'&&w.checks==='pass'&&w.review==='approved'&&!w.needsRestack&&!w.unresolved&&!w.operation;
+const inRepo=w=>ui.repo==='all'||w.repo===ui.repo;
+const worktrees=()=>items.filter(w=>!!w.worktree);
+const scoped=()=>items.filter(inRepo);
+function persist(){storage.set('state',{version:5,items,repo:ui.repo,view:ui.view,selected:ui.selected,events,stress:ui.stress});storage.set('repo-memory',ui.repoMemory)}
+function announce(text){$('#announcement').textContent=text}
+function addEvent(title,w,detail='',ic='checkcircle'){events.unshift({title,body:detail||w.branch,repo:w.repo,icon:ic,time:'Just now · demo'});persist()}
+function badge(text,tone='neutral',ic){return`<span class="badge ${tone}">${ic?icon(ic):''}${esc(text)}</span>`}
+function stateBadge(w){const s=STATE[w.status]||STATE.quiet;return badge(s.label,s.tone,s.icon)}
+
+
+
+function pathLabel(w){return w.worktree?w.worktree.replace('/Users/woo','~'):'No local worktree'}
+function branchParent(w){return byId(w.parent)?.branch||w.parent||'No parent'}
+
+function hydrateIcons(root=document){root.querySelectorAll('[data-icon]').forEach(e=>e.innerHTML=icon(e.dataset.icon))}
+function toast(text,undo){const el=document.createElement('div');el.className='toast';el.innerHTML=`${icon('checkcircle')}<span>${esc(text)}</span>${undo?'<button class="toast-undo">Undo</button>':''}<button class="toast-close" aria-label="Dismiss">${icon('close')}</button>`;$('#toasts').append(el);el.querySelector('.toast-close').onclick=()=>el.remove();if(undo)el.querySelector('.toast-undo').onclick=()=>{undo();el.remove()};setTimeout(()=>el.remove(),6500)}
+function currentName(){return ui.repo==='all'?'All repositories':repoBy(ui.repo).name}
+function render(){document.documentElement.dataset.theme=ui.theme;document.documentElement.dataset.density=ui.density;renderSidebar();renderMain();renderInspector();$('#status-context').textContent=`${worktrees().length} worktrees · ${repos.length} repositories · snapshot data`;$('#theme-button').innerHTML=icon(ui.theme==='light'?'moon':'sun');hydrateIcons();persist()}
+function renderSidebar(){
+ const attention=items.filter(needs).length,count=scoped().filter(w=>w.worktree).length;
+ const nav=(view,label,ic,n,extra='')=>`<button class="nav-item ${ui.view===view?'active':''} ${extra}" data-action="nav" data-view="${view}" ${ui.view===view?'aria-current="page"':''} title="${label}">${icon(ic)}<span>${label}</span>${n!==undefined?`<span class="count">${n}</span>`:''}</button>`;
+ $('#sidebar').innerHTML=`<div class="workspace-name"><strong>Personal workspace</strong><small>One developer. Many worktrees.</small></div><nav aria-label="Personal workspace"><div class="nav-heading">Your workspace</div>${nav('attention','Needs attention','inbox',attention,'attention')}${nav('activity','Activity','history')}<div class="nav-heading"><span>Repository</span><span class="meta">${ui.repo==='all'?'all':repoBy(ui.repo).mark}</span></div>${nav('branches','Branches','branch',scoped().length)}${nav('prs','Pull requests','pr',scoped().filter(w=>w.pr&&w.status!=='merged').length)}<div class="nav-heading"><span>Pinned repositories</span><button data-action="repos" title="Switch repository" aria-label="Switch repository">${icon('plus')}</button></div><div role="group" aria-label="Pinned repositories">${repos.map((r,i)=>{
+  const list=items.filter(w=>w.repo===r.id),n=list.filter(needs).length;
+  return `<button class="repo-nav ${ui.repo===r.id?'active':''}" data-action="repo" data-repo="${r.id}" aria-label="Switch to ${r.name}" aria-pressed="${ui.repo===r.id}" aria-keyshortcuts="Control+${i+1} Meta+${i+1}" title="${esc(r.path)} · ${navigator.platform.includes('Mac')?'⌘':'Ctrl'}+${i+1}"><span class="repo-mark">${r.mark}</span><span class="repo-info"><span class="repo-name">${r.name}</span><small>${list.filter(w=>w.worktree).length} worktrees</small></span>${n?`<span class="repo-attention" title="${n} items need attention">${n}<span class="dot"></span></span>`:''}</button>`;
+ }).join('')}</div></nav><div class="sidebar-bottom"><button class="shipping-summary" data-action="all-ready"><span class="signal">${icon('merge')}</span><span><strong>${items.filter(mergeReady).length} ready to merge</strong><small>Across all repositories</small></span>${icon('chevron')}</button><div class="sidebar-footer"><button class="btn ghost" data-action="notes">${icon('info')}Design notes</button><button class="icon-btn" data-action="shortcuts" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">${icon('keyboard')}</button></div></div>`;
+}
+function baseItems(){let list=scoped();if(ui.view==='prs')list=list.filter(w=>w.pr);if(ui.view==='attention')list=list.filter(needs);return list}
+function visibleItems(){
+ let list=baseItems();
+ if(ui.view==='branches'&&ui.worktreeScope==='with')list=list.filter(w=>w.worktree);
+ if(ui.view==='branches'&&ui.worktreeScope==='without')list=list.filter(w=>!w.worktree);
+ if(ui.filter==='attention')list=list.filter(needs);
+ if(ui.filter==='unpublished')list=list.filter(hasUnpublished);
+ if(ui.filter==='ready')list=list.filter(mergeReady);
+ if(ui.filter==='open')list=list.filter(w=>w.pr&&w.status!=='merged');
+ if(ui.filter==='merged')list=list.filter(w=>w.status==='merged');
+ if(ui.filter==='reviews')list=list.filter(w=>['review','changes'].includes(w.status));
+ if(ui.filter==='stack')list=list.filter(w=>['restack','conflict'].includes(w.status));
+ if(['failed','conflict','review','changes','restack'].includes(ui.filter))list=list.filter(w=>w.status===ui.filter);
+ if(ui.query){const q=ui.query.toLowerCase();list=list.filter(w=>`${w.branch} ${w.title} ${w.pr||''} ${repoBy(w.repo).name} ${w.worktree||''}`.toLowerCase().includes(q))}
+ if(ui.view==='branches'){const ids=new Set(list.map(w=>w.id));return branchTopology().order.filter(w=>ids.has(w.id))}
+ return list.sort((a,b)=>((ui.grouped||ui.sort==='attention')?groupRank(a)-groupRank(b):0)||(ui.sort==='name'?a.branch.localeCompare(b.branch):a.age-b.age));
+}
+function groupRank(w){return{attention:0,inprogress:1,ready:2,quiet:3,unattached:4}[STATE[w.status]?.group]??4}
+/* Branch lanes are a projection of explicit branch-parent relationships.
+   They are not a commit DAG or a claim about GitHub native-stack membership.
+   Layout always uses the full repository topology; filters never reconnect an
+   edge to a different parent. Context rows cannot enter bulk action selection.
+   Emit descendants before their parent for bottom-up visual and keyboard order.
+   Sibling priority stays stable; execution scopes keep their own parent-first order. */
+function branchTopology(){
+ const order=[],lane=new Map(),children=new Map(),parent=new Map(),visited=new Set();
+ const all=scoped(),ids=new Set(all.map(w=>w.id));
+ for(const w of all){const p=parentOf(w);const valid=p&&p.repo===w.repo&&ids.has(p.id)?p:null;parent.set(w.id,valid);if(valid){if(!children.has(valid.id))children.set(valid.id,[]);children.get(valid.id).push(w)}}
+ const stable=(a,b)=>Number(b.isMain)-Number(a.isMain)||a.age-b.age||a.id.localeCompare(b.id);
+ for(const xs of children.values())xs.sort(stable);
+ function walk(w,track){if(visited.has(w.id))return;visited.add(w.id);lane.set(w.id,track);const kids=children.get(w.id)||[];for(const c of kids)walk(c,track+(w.isMain||kids.length>1?1:0));order.push(w)}
+ for(const repo of repos){const local=all.filter(w=>w.repo===repo.id);for(const w of local.filter(w=>!parent.get(w.id)).sort(stable))walk(w,0);for(const w of local.sort(stable))walk(w,0)}
+ return{order,lane,children,parent};
+}
+function laneModel(list){
+ const topology=branchTopology();
+ const filtering=!!ui.query||ui.filter!=='all'||ui.worktreeScope!=='all';
+ const displayed=list.filter(w=>filtering||!ancestors(w).some(p=>ui.folded.has(p.id)));
+ const page=displayed.slice(0,ui.limit),matches=new Set(page.map(w=>w.id)),included=new Set(matches);
+ for(const w of page)for(const p of ancestors(w))if(p.repo===w.repo)included.add(p.id);
+ const entries=topology.order.filter(w=>included.has(w.id)).map(w=>({w,lane:topology.lane.get(w.id)||0,context:!matches.has(w.id)}));
+ return{topology,entries,page,matches,filtering,contextCount:entries.filter(e=>e.context).length,foldedCount:list.length-displayed.length,hasMore:displayed.length>ui.limit,total:list.length};
+}
+function renderLanes(list){
+ const model=laneModel(list);ui.lastLaneModel=model;
+ if(!list.length)return`<div class="empty">${icon('branch')}<h3>No matching branches</h3><p>Try a different status, worktree filter, branch name, or path.</p><button class="btn secondary" data-action="clear-filters">Clear filters</button></div>`;
+ const global=ui.repo==='all';
+ let html=`<div class="lane-guide"><button class="lane-help" data-action="lane-help">${icon('branch')}<span>Branches ↑ · base ↓</span>${icon('info')}</button><span class="lane-guide-detail">${model.contextCount?`${model.contextCount} ancestor${model.contextCount===1?'':'s'} kept as context`:model.filtering?'Matching branches with their ancestry':'Relationships, not a commit timeline'}</span>${ui.folded.size&&!model.filtering?`<button class="lane-expand" data-action="expand-lanes">Expand all</button>`:''}</div>`;
+ let firstGroup=true;
+ for(const r of repos){
+  const entries=model.entries.filter(e=>e.w.repo===r.id);if(!entries.length)continue;
+  // Stable track positions, even when filtering or folding hides a sibling.
+  const maxLane=Math.max(2,...model.topology.order.filter(w=>w.repo===r.id).map(w=>model.topology.lane.get(w.id)||0));
+  html+=`<section class="lane-group" aria-label="${esc(r.name)} branch relationships" data-repo="${r.id}" style="--max-lane:${maxLane}">${global?`<div class="lane-repo-heading">${icon('folder')}<strong>${esc(r.name)}</strong><span>${entries.filter(e=>!e.context).length} matching branches</span></div>`:''}<div class="lane-grid lane-labels">${firstGroup?'<input id="select-page" class="check" type="checkbox" aria-label="Select visible matching branches; excludes trunk and context" data-action="select-page">':'<span></span>'}<span class="lane-track-label">Lanes</span><span>Branch / pull request</span><span class="lane-worktree-label">Working directory</span><span>PR status</span><span></span></div><div class="lane-body"><svg class="ancestry-lines" aria-hidden="true"></svg>${entries.map(e=>renderLaneRow(e,model)).join('')}</div></section>`;
+  firstGroup=false;
+ }
+ return html;
+}
+function renderLaneRow(entry,model){
+ const {w,lane,context}=entry,isSelected=w.id===ui.selected;
+ const local=w.worktree?(w.dirty?`${w.dirty} ${w.operation?'conflicts':'files'}`:'Clean'):'No worktree';
+ const unpublished=hasUnpublished(w)?`↑ ${w.ahead} unpushed`:w.isMain?'Primary':w.pushed?'Published':'Local branch';
+ const shortPath=w.worktree?w.worktree.split('/').filter(Boolean).pop():'';
+ const children=model.topology.children.get(w.id)||[];
+ const folded=ui.folded.has(w.id)&&!model.filtering,below=children.length?descendants(w).length:0;
+ const rawParent=parentOf(w),relation=rawParent?.repo===w.repo?rawParent:null,relationText=relation?`Parent: ${relation.branch}`:w.parent?`Parent unavailable: ${branchParent(w)}`:w.isMain?'Default branch':'No recorded parent';
+ const review=reviewLabel(w),check=checksLabel(w);
+ const rt=w.status==='merged'?'violet':w.review==='approved'?'green':w.review==='changes'?'amber':'muted';
+ const ct=w.checks==='pass'?'green':w.checks==='fail'?'red':'muted';
+ const reviewText=w.status==='merged'?'Merged':w.review==='requested'?'Review requested':review;
+ const localMarkup=`${w.worktree?icon('folder'):icon('branch')}<span class="truncate" title="${esc(pathLabel(w))}">${w.isMain?'Primary worktree':w.worktree?esc(shortPath):'No worktree'}</span>`;
+ return`<div class="work-row lane-grid lane-row ${isSelected?'selected':''} ${context?'lane-context':''} ${w.isMain?'lane-trunk':''}" data-id="${w.id}" data-lane="${lane}" data-context="${context}" role="group" tabindex="${isSelected?'0':'-1'}" aria-label="${esc(w.branch)}. ${esc(relationText)}. ${context?'Ancestor context, not selected by the filter. ':''}${esc(pathLabel(w))}. ${esc(local)}. ${esc(review)}. ${esc(check)}."><input class="check row-check" type="checkbox" data-select="${w.id}" ${ui.selectedIds.has(w.id)?'checked':''} ${context||w.isMain?'disabled':''} aria-label="${context?'Context only: ':w.isMain?'Protected trunk: ':'Select branch for bulk action: '}${esc(w.branch)}"><span class="lane-space" aria-hidden="true"></span><div class="lane-identity"><div class="lane-identity-top"><button class="lane-select branch-name" data-action="select" data-id="${w.id}" aria-pressed="${isSelected}" title="${esc(w.branch)} · ${esc(relationText)}">${esc(w.branch)}</button>${context?'<span class="context-tag">Context</span>':''}${w.isMain?'<span class="trunk-tag">Trunk</span>':''}${children.length&&!w.isMain&&!model.filtering?`<button class="fold-toggle ${folded?'folded':''}" data-action="lane-fold" data-id="${w.id}" aria-expanded="${!folded}" aria-label="${folded?'Expand':'Collapse'} ${below} descendants of ${esc(w.branch)}" title="${folded?'Expand':'Collapse'} ${below} descendant branches">${icon(folded?'chevron':'up')}<span>${below}${folded?' hidden':''}</span></button>`:''}</div><button class="lane-sub-select branch-sub" data-action="select" data-id="${w.id}" title="${esc(w.title)}">${w.pr?`<span class="pr-num ${w.status==='merged'?'violet':w.draft?'muted':'green'}">${icon(w.status==='merged'?'merge':w.draft?'circle':'pr')} #${w.pr}</span><span>·</span>`:''}${w.operation||w.needsRestack?`<span class="issue-label amber">${w.operation?'Conflict':'Restack'}</span><span>·</span>`:''}${w.draft?'<span class="muted">Draft ·</span>':''}<span class="truncate">${w.isMain?'Default branch':esc(w.title)}</span></button><div class="lane-inline-local meta">${localMarkup}${w.worktree?`<span>·</span><span class="${w.dirty?'amber':''}">${esc(local)}</span>${w.ahead?`<span class="blue">↑ ${w.ahead}</span>`:''}`:''}</div>${w.parent&&!relation?`<span class="meta amber">${esc(relationText)} · no edge shown</span>`:''}</div><div class="lane-local"><div class="directory-name">${localMarkup}</div><div class="directory-facts"><span class="${w.dirty?'amber':'muted'}">${w.worktree?local:'Inspect without checkout'}</span>${w.worktree&&!w.isMain?`<span class="${w.ahead?'blue':'muted'}">${w.ahead?`↑ ${w.ahead} unpushed`:w.pushed?'Published':'Local branch'}</span>`:''}</div></div><div class="lane-pr-state">${w.pr?`<button class="lane-status-line ${rt}" data-action="lane-discussion" data-id="${w.id}" title="GitHub review: ${esc(review)}">${icon(w.status==='merged'?'merge':w.review==='approved'?'checkcircle':w.review==='changes'?'comment':'eye')}<span>${esc(reviewText)}</span></button><button class="lane-status-line ${ct}" data-action="open-checks" data-id="${w.id}" title="Checks for published PR #${w.pr}">${icon(w.checks==='pass'?'checkcircle':w.checks==='fail'?'error':w.checks==='running'?'clock':'circle')}<span>${esc(check)}</span></button>`:`<span class="lane-status-line muted">${icon(w.isMain?'branch':'circle')}<span>${w.isMain?'Default branch':'No pull request'}</span></span><span class="meta ${hasUnpublished(w)?'blue':'muted'}">${w.isMain?'':hasUnpublished(w)?'Unpublished commits':'Local only'}</span>`}</div><button class="row-menu" data-action="row-menu" data-id="${w.id}" title="Actions for ${esc(w.branch)}" aria-label="Actions for ${esc(w.branch)}">${icon('more')}</button></div>`;
+}
+let laneFrame=0;
+function scheduleLaneDraw(){cancelAnimationFrame(laneFrame);laneFrame=requestAnimationFrame(drawLanes)}
+function drawLanes(){
+ if(ui.view!=='branches')return;
+ const focus=selected(),highlight=new Set(focus?[focus.id,...ancestors(focus).map(w=>w.id),...descendants(focus).map(w=>w.id)]:[]);
+ for(const group of $$('.lane-group')){
+  const body=group.querySelector('.lane-body'),svg=body.querySelector('.ancestry-lines'),rows=[...body.querySelectorAll('.lane-row')];if(!rows.length)continue;
+  const positions=new Map(),base=body.getBoundingClientRect(),step=parseFloat(getComputedStyle(group).getPropertyValue('--lane-step'))||20;
+  const gutter=rows[0].querySelector('.lane-space').getBoundingClientRect();
+  const width=gutter.width,height=body.offsetHeight;
+  svg.style.left=`${gutter.left-base.left}px`;svg.style.width=`${width}px`;svg.style.height=`${height}px`;svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
+  rows.forEach(row=>{const rect=row.getBoundingClientRect();positions.set(row.dataset.id,{x:14+Number(row.dataset.lane)*step,y:rect.top-base.top+rect.height/2,row})});
+  const edges=[],nodes=[];
+  for(const row of rows){
+   const w=byId(row.dataset.id),p=parentOf(w),to=positions.get(w.id),from=positions.get(p?.id);
+   if(from&&p.repo===w.repo&&from.y>to.y){
+    // Grow upward from the parent below to the child above. At a fork,
+    // the parent's shared spine bends into the child's adjacent track.
+    const bend=Math.min(12,(from.y-to.y)/2),d=from.x===to.x?`M ${from.x} ${from.y} V ${to.y}`:`M ${from.x} ${from.y} V ${to.y+bend} Q ${from.x} ${to.y} ${from.x+bend} ${to.y} H ${to.x}`;
+    const active=highlight.has(w.id)&&highlight.has(p.id);
+    edges.push(`<path class="lane-edge ${active?'highlight':''}" data-from="${p.id}" data-to="${w.id}" d="${d}"/>`);
+   }
+   const active=w.id===ui.selected,related=highlight.has(w.id);
+   nodes.push(`${active?`<circle class="lane-node-halo" cx="${to.x}" cy="${to.y}" r="9"/>`:''}<circle class="lane-node ${active?'active':related?'related':''} ${w.isMain?'main-node':''}" data-node="${w.id}" cx="${to.x}" cy="${to.y}" r="${active?5:w.isMain?4.5:4}"/>`);
+  }
+  // Paint emphasized edges last, so shared parent spines keep their highlight.
+  svg.innerHTML=edges.filter(e=>!e.includes('highlight')).join('')+edges.filter(e=>e.includes('highlight')).join('')+nodes.join('');
+ }
+}
+function toggleFold(id){
+ const w=byId(id);if(!w||w.isMain)return;
+ const anchorTop=document.querySelector(`.fold-toggle[data-id="${id}"]`)?.getBoundingClientRect().top;
+ const closing=!ui.folded.has(id);if(closing){ui.folded.add(id);for(const child of descendants(w)){ui.selectedIds.delete(child.id);if(ui.selected===child.id)ui.selected=w.id}}else ui.folded.delete(id);
+ renderMainContent();renderInspector();persist();
+ // Children expand above this row. Preserve the fold control’s viewport position.
+ const control=document.querySelector(`.fold-toggle[data-id="${id}"]`),scroll=$('#main-scroll');
+ if(control&&scroll&&anchorTop!==undefined)scroll.scrollTop+=control.getBoundingClientRect().top-anchorTop;
+ control?.focus({preventScroll:true});
+ announce(`${closing?'Collapsed':'Expanded'} descendants of ${w.branch}. No branch or checkout changed.`);
+}
+function locateBranch(id){
+ const w=byId(id);if(!w)return;
+ if($('#modal').open)closeModal();if(ui.repo!==w.repo)switchRepo(w.repo);
+ ui.view='branches';ui.selected=w.id;ui.filter='all';ui.query='';ui.worktreeScope='all';ui.selectedIds.clear();
+ for(const p of ancestors(w))ui.folded.delete(p.id);
+ const index=branchTopology().order.findIndex(x=>x.id===w.id);ui.limit=Math.max(30,Math.ceil((index+1)/30)*30);
+ render();const row=document.querySelector(`.lane-row[data-id="${w.id}"]`);row?.scrollIntoView({block:'nearest'});row?.focus({preventScroll:true});
+ announce(`Located ${w.branch} in its branch lanes. No checkout changed.`);
+}
+function showLaneHelp(){
+ showModal('Read the branch lanes','Relationships live beside the work, not on a separate graph canvas.',`<div class="stack"><section><h3>Follow the lanes upward from the base</h3><p class="meta" style="margin-top:8px">Base branches sit below their children; each chain grows upward toward its tips. The trunk sits at the bottom of its connected branches. Each circle is a branch, not a commit. A fork uses a parallel track; a single-child chain can stay on the same track. Text in each branch’s accessible label identifies its direct parent.</p></section><section><h3>A worktree is optional context</h3><p class="meta" style="margin-top:8px">The directory and its local changes sit on the branch row. A branch without a worktree stays in the same hierarchy and remains inspectable.</p></section><section><h3>Filters preserve ancestry</h3><p class="meta" style="margin-top:8px">Required ancestors remain as Context rows. They are not matches and cannot be bulk-selected. Folding is temporarily expanded while a filter is active. Page-only selection never includes hidden or unloaded rows.</p></section><section><h3>These are illustrative parent relationships</h3><p class="meta" style="margin-top:8px">This demo uses explicit fixture parent IDs. It does not infer parents from branch names, directories, upstream refs, or PR titles; an unavailable parent gets no invented connection. Production must distinguish local parent hints from submitted GitHub stack membership.</p></section></div>`);
+}
+
+function renderMain(){
+ const titles={attention:'Needs attention',prs:'Pull requests',branches:'Branches & worktrees',activity:'Activity'};
+ const subtitles={attention:'Review feedback, failing checks, and the next changes to land.',prs:'Review, discuss, and land changes. No local checkout required.',branches:'One row per branch. Worktree context and dependencies, together.',activity:'Changes to branches, pull requests, and reviews across repositories.'};
+ const list=baseItems();
+ const filters=ui.view==='attention'?[['all','All',list.length],['reviews','Reviews',list.filter(w=>['review','changes'].includes(w.status)).length],['failed','Checks',list.filter(w=>w.status==='failed').length],['stack','Stack updates',list.filter(w=>['restack','conflict'].includes(w.status)).length]]:ui.view==='prs'?[['all','All PRs',list.length],['open','Open',list.filter(w=>w.status!=='merged').length],['ready','Ready to merge',list.filter(mergeReady).length],['merged','Merged',list.filter(w=>w.status==='merged').length]]:[['all','All branches',list.length],['attention','Needs you',list.filter(needs).length],['unpublished','Unpublished',list.filter(hasUnpublished).length],['ready','Ready to merge',list.filter(mergeReady).length]];
+ const isList=['branches','prs','attention'].includes(ui.view),lanes=ui.view==='branches';
+ $('#main-panel').classList.toggle('is-lanes',lanes);
+ $('#main-panel').innerHTML=`<div class="panel-head"><div class="eyebrow">${icon(ui.repo==='all'?'layers':'folder')} ${ui.repo==='all'?'Personal workspace':`howarewoo <span>/</span> ${esc(currentName())}`} <span class="spacer"></span><span>Demo snapshot</span></div><div class="head-title"><h1 id="workspace-heading" tabindex="-1">${titles[ui.view]||'Branches & worktrees'}</h1><div class="actions">${ui.view==='activity'?`<button class="btn secondary" data-action="notes">${icon('info')} Scope</button>`:ui.view==='attention'?`<button class="btn secondary" data-action="all-branches">${icon('branch')} Branches</button>`:`<button class="btn primary" data-action="discover">${icon('search')} Discover worktrees</button>`}</div></div><p class="panel-subtitle">${subtitles[ui.view]||''}</p></div>${isList?`<div class="filters" role="group" aria-label="Filter ${ui.view==='prs'?'pull requests':'branches'}">${filters.map(([key,label,n])=>`<button class="filter ${ui.filter===key?'active':''}" data-action="filter" data-filter="${key}" aria-pressed="${ui.filter===key}">${label}<span class="count">${n}</span></button>`).join('')}</div><div class="table-toolbar"><label class="local-search">${icon('search')}<input id="local-search" aria-label="Filter by branch, pull request or path" placeholder="Filter by branch, PR, or path…" value="${esc(ui.query)}" autocomplete="off"><kbd>/</kbd></label>${lanes?`<select class="worktree-scope" id="worktree-scope" aria-label="Worktree availability"><option value="all" ${ui.worktreeScope==='all'?'selected':''}>Any worktree</option><option value="with" ${ui.worktreeScope==='with'?'selected':''}>Has worktree</option><option value="without" ${ui.worktreeScope==='without'?'selected':''}>No worktree</option></select>`:''}<button class="btn ghost small" data-action="display">${icon('sliders')} Display</button></div>`:''}<div id="bulk-slot"></div><div class="main-scroll" id="main-scroll"></div><div class="panel-bottom" id="panel-bottom"></div>`;
+ renderMainContent();
+ $('#local-search')?.addEventListener('input',e=>{ui.query=e.target.value;ui.limit=30;ui.selectedIds.clear();renderMainContent()});
+ $('#worktree-scope')?.addEventListener('change',e=>{ui.worktreeScope=e.target.value;ui.limit=30;ui.selectedIds.clear();renderMainContent()});
+}
+function renderMainContent(){
+ const list=visibleItems(),box=$('#main-scroll');if(!box)return;const scroll=box.scrollTop;
+ if(ui.view==='activity')box.innerHTML=renderActivity();else if(ui.view==='attention')box.innerHTML=renderAttention(list);else if(ui.view==='branches')box.innerHTML=renderLanes(list);else box.innerHTML=renderList(list);
+ box.scrollTop=scroll;renderBulk();const shown=Math.min(list.length,ui.limit);
+ if(ui.view==='branches'){
+  const model=ui.lastLaneModel;
+  const hidden=model.foldedCount?` · ${model.foldedCount} folded`:'';
+  $('#panel-bottom').innerHTML=`<span>${model.page.length}${model.page.length!==list.length?` of ${list.length}`:''} ${ui.query||ui.filter!=='all'||ui.worktreeScope!=='all'?'matching ':''}branches${model.contextCount?` + ${model.contextCount} context`:''}${hidden}${ui.selectedIds.size?` · ${ui.selectedIds.size} selected`:''}</span>${model.hasMore?`<button class="btn ghost small" data-action="load-more">Show 30 more ${icon('down')}</button>`:`<span class="key-help"><kbd>↑</kbd><kbd>↓</kbd> navigate <span style="margin-left:8px"></span><kbd>⌘</kbd><kbd>K</kbd> jump</span>`}`;
+ }else{
+  $('#panel-bottom').innerHTML=ui.view==='activity'?`<span>Sample Git / GitHub activity + actions taken in this demo</span>`:`<span>${list.length>ui.limit?`${shown} of ${list.length}`:`${list.length}`} ${ui.view==='prs'?'pull requests':'items'}${ui.query?' match your search':''}${ui.selectedIds.size?` · ${ui.selectedIds.size} selected`:''}</span>${list.length>ui.limit?`<button class="btn ghost small" data-action="load-more">Show 30 more ${icon('down')}</button>`:`<span class="key-help"><kbd>↑</kbd><kbd>↓</kbd> navigate <span style="margin-left:8px"></span><kbd>⌘</kbd><kbd>K</kbd> jump</span>`}`;
+ }
+ setupRows();const selectAll=$('#select-page');if(selectAll){const ids=pageRows(list).map(w=>w.id);selectAll.checked=ids.length>0&&ids.every(id=>ui.selectedIds.has(id));selectAll.indeterminate=ids.some(id=>ui.selectedIds.has(id))&&!selectAll.checked;selectAll.disabled=ids.length===0}
+ scheduleLaneDraw();
+}
+function pageRows(list){if(ui.view==='branches')return laneModel(list).page.filter(w=>!w.isMain);return list.slice(0,ui.limit).filter(w=>!ui.grouped||ui.query||!ui.collapsed.has(STATE[w.status]?.group))}
+function renderList(list){
+ if(!list.length)return`<div class="empty">${icon('search')}<h3>No matching work</h3><p>Try another branch, PR number, repository, or path.</p><button class="btn secondary" data-action="clear-filters">Clear filters</button></div>`;
+ let html=`<div class="table-labels"><input id="select-page" class="check" type="checkbox" aria-label="Select only visible rows on this page" data-action="select-page"><button class="sort-label" data-action="sort">Branch / pull request ${icon('sort')}</button><span class="local-label">Local</span><span class="review-label">Review</span><span class="checks-label">Checks</span><span></span></div>`;
+ const groupNames={attention:'Needs your attention',inprogress:'Local & unpublished',ready:'Ready to merge',quiet:'No new updates & merged',unattached:'Without a worktree'};
+ const groupHints={attention:'Review feedback · checks · dependencies',inprogress:'Uncommitted files and unpushed commits',ready:'Published head · checks passed · approved',quiet:'Retained until you choose to clean up',unattached:'Inspect without checking out'};
+ let last='';for(const w of list.slice(0,ui.limit)){
+  const group=STATE[w.status]?.group||'quiet';
+  if(ui.grouped&&group!==last){const count=list.filter(x=>STATE[x.status]?.group===group).length;html+=`<div class="group-head"><button class="group-title" data-action="group" data-group="${group}" aria-expanded="${!ui.collapsed.has(group)}">${icon(ui.collapsed.has(group)?'chevron':'down')}<span>${groupNames[group]}</span><span class="count">${count}</span></button><span class="group-hint">${groupHints[group]}</span></div>`;last=group}
+  if(!ui.grouped||ui.query||!ui.collapsed.has(group))html+=renderRow(w);
+ }
+ return html;
+}
+function renderRow(w){
+ const isSelected=w.id===ui.selected;
+ const local=!w.worktree?'No worktree':w.dirty?`${w.dirty} ${w.operation==='rebase'?'conflicts':'files'}`:'Clean';
+ const upstream=w.ahead?`↑ ${w.ahead} unpushed`:w.pushed?'Published':w.isMain?'Trunk':'No upstream';
+ const review=reviewLabel(w),check=checksLabel(w);
+ const reviewTone=w.review==='approved'?'green':w.review==='changes'?'amber':'muted';
+ const checkTone=w.checks==='pass'?'green':w.checks==='fail'?'red':'muted';
+ const personal=w.pendingLocalReview?'New commits':w.localReviewed?'Read locally':w.unresolved?`${w.unresolved} threads`:w.pr?'':'Local branch';
+ return `<div class="work-row ${isSelected?'selected':''}" data-id="${w.id}" role="group" tabindex="${isSelected?'0':'-1'}" aria-label="${esc(w.branch)}, ${esc(w.title)}, ${esc(STATE[w.status]?.label||'')}, ${esc(local)}, ${esc(review)}, ${esc(check)}"><input class="check row-check" type="checkbox" data-select="${w.id}" ${ui.selectedIds.has(w.id)?'checked':''} aria-label="Select ${esc(w.branch)} for bulk action"><button class="branch-cell" data-action="select" data-id="${w.id}" aria-pressed="${isSelected}"><span class="branch-name" title="${esc(w.branch)}">${esc(w.branch)}</span><div class="branch-sub">${w.pr?`<span class="pr-num ${w.status==='merged'?'violet':w.draft?'muted':'green'}">${icon(w.status==='merged'?'merge':w.draft?'circle':'pr')} #${w.pr}${w.draft?' · Draft':w.status==='merged'?' · Merged':''}</span><span>·</span>`:w.isMain?`${icon('folder')}`:''}${w.needsRestack||w.operation?`<span class="amber issue-label">${w.needsRestack?'Restack needed':'Conflict'}</span><span>·</span>`:''}<span class="truncate" title="${esc(w.title)}">${esc(w.title)}</span></div><div class="compact-review ${reviewTone}">${w.pr?esc(review)+(personal?' · '+esc(personal):''):''}</div></button><div class="local-cell" title="${esc(local)} · ${upstream}"><span class="${w.dirty?'':'muted'}">${esc(local)}</span><span class="meta ${w.ahead?'blue':''}">${upstream}</span></div><div class="review-cell"><span class="state-line ${reviewTone}">${icon(w.review==='approved'?'checkcircle':w.review==='changes'?'comment':'eye')}${esc(review)}</span><span class="meta ${w.pendingLocalReview?'blue':''}">${personal}</span></div><button class="checks-cell" data-action="open-checks" data-id="${w.id}" ${!w.pr?'disabled':''} title="${w.pr?'Inspect checks for #'+w.pr:'No pull request checks'}"><span class="state-line ${checkTone}">${icon(w.checks==='pass'?'checkcircle':w.checks==='fail'?'error':w.checks==='running'?'clock':'circle')}${check}</span><span class="meta">${w.pr?`#${w.pr} head`:'Local only'}</span></button><button class="row-menu" data-action="row-menu" data-id="${w.id}" title="Actions for ${esc(w.branch)}" aria-label="Actions for ${esc(w.branch)}">${icon('more')}</button></div>`;
+}
+function setupRows(){$$('.work-row').forEach(row=>{row.onclick=e=>{if(e.target.closest('button,input'))return;selectWorktree(row.dataset.id)};row.onkeydown=e=>{if(e.target.closest('input')||(e.target.closest('button')&&['Enter',' '].includes(e.key)))return;const rows=$$('.work-row');const i=rows.indexOf(row);if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){e.preventDefault();const ni=e.key==='Home'?0:e.key==='End'?rows.length-1:Math.min(rows.length-1,Math.max(0,i+(e.key==='ArrowDown'?1:-1)));const id=rows[ni].dataset.id;selectWorktree(id,false);const target=document.querySelector(`.work-row[data-id="${id}"]`);target?.focus({preventScroll:true});target?.scrollIntoView({block:'nearest'})}else if(e.key==='Enter'){e.preventDefault();selectWorktree(row.dataset.id)}else if(e.key===' '){e.preventDefault();toggleSelect(row.dataset.id)}}});$$('.row-check').forEach(c=>c.onchange=()=>toggleSelect(c.dataset.select));if(!$$('.work-row').some(r=>r.tabIndex===0)&&$$('.work-row')[0])$$('.work-row')[0].tabIndex=0}
+function renderBulk(){$('#bulk-slot').innerHTML=ui.selectedIds.size?`<div class="bulk-bar"><strong>${ui.selectedIds.size} selected</strong><button class="btn accent" data-action="bulk-publish">${icon('upload')} Publish</button><button class="btn accent" data-action="bulk-restack">${icon('layers')} Restack</button><button class="btn accent" data-action="bulk-cleanup">${icon('archive')} Clean up</button><button class="icon-btn" style="margin-left:auto;width:28px;height:28px" data-action="clear-selection" aria-label="Clear selection">${icon('close')}</button></div>`:''}
+function toggleSelect(id){if(ui.view==='branches'&&!pageRows(visibleItems()).some(w=>w.id===id))return;ui.selectedIds.has(id)?ui.selectedIds.delete(id):ui.selectedIds.add(id);renderMainContent()}
+function rememberRepo(){if(ui.repo!=='all')ui.repoMemory[ui.repo]={selected:ui.selected,view:ui.view,filter:ui.filter,query:ui.query,tab:ui.tab,scroll:$('#main-scroll')?.scrollTop||0,worktreeScope:ui.worktreeScope,folded:[...ui.folded],limit:ui.limit}}
+function switchRepo(id){if(!repos.some(r=>r.id===id))return;rememberRepo();ui.repo=id;const memory=ui.repoMemory[id];ui.selected=memory?.selected&&byId(memory.selected)?memory.selected:items.find(w=>w.repo===id&&w.worktree&&!w.isMain)?.id;ui.view=memory?.view&&memory.view!=='attention'?memory.view:'branches';ui.filter=memory?.filter||'all';ui.query=memory?.query||'';ui.tab=memory?.tab||'overview';ui.worktreeScope=memory?.worktreeScope||'all';ui.folded=new Set(memory?.folded||[]);ui.selectedIds.clear();ui.limit=memory?.limit||30;render();if(memory)$('#main-scroll').scrollTop=memory.scroll;announce(`Viewing ${repoBy(id).name}. All existing worktrees remain in place.`)}
+function navigate(view){rememberRepo();ui.view=view;ui.worktreeScope='all';ui.filter='all';ui.query='';ui.limit=30;ui.selectedIds.clear();if(view==='attention'||view==='activity')ui.repo='all';if(ui.repo!=='all'&&selected()?.repo!==ui.repo)ui.selected=scoped().find(w=>w.worktree)?.id;render();$('#workspace-heading')?.focus({preventScroll:true})}
+function selectWorktree(id,reveal=true){const w=byId(id);if(!w)return;ui.selected=id;ui.selectedIds=ui.selectedIds||new Set();if(reveal)ui.showInspector=true;renderMainContent();renderInspector();persist();announce(`Inspecting ${w.branch} in ${repoBy(w.repo).name}. No checkout performed.`)}
+function renderAttention(list){
+ if(!list.length)return`<div class="empty">${icon('checkcircle')}<h3>Nothing needs your attention here</h3><p>No matching review feedback, failed checks, or stack blockers.</p><button class="btn secondary" data-action="clear-filters">Clear filters</button></div>`;
+ const reasons={changes:'Changes requested on your pull request',failed:'A required check needs attention',conflict:'A rebase stopped at a conflict',review:'New commits since your last review',restack:'The parent branch changed'};
+ const descriptions={changes:'Read the unresolved feedback here. Make the code changes in your development tool.',failed:'Inspect the failed log and decide whether to retry. No checkout is required.',conflict:'Inspect the affected files. Resolve them in the existing working directory.',review:'Review the published diff without disturbing this branch’s working directory.',restack:'Preview the affected branch and descendants before rebasing them onto the parent.'};
+ const actions={changes:'Read feedback',failed:'Open checks',conflict:'Inspect conflict',review:'Review diff',restack:'Preview restack'};
+ return list.slice(0,ui.limit).map(w=>{const status=STATE[w.status];return`<div class="attention-card ${w.id===ui.selected?'selected':''}" role="group"><span class="reason-icon ${status.tone}">${icon(status.icon)}</span><div class="attention-info"><div class="repo-kicker">${icon('folder')} ${repoBy(w.repo).name} <span>·</span> ${w.pr?'#'+w.pr:'Local only'}</div><h3>${reasons[w.status]}</h3><button class="attention-branch mono meta" data-action="select" data-id="${w.id}">${esc(w.branch)}</button><p>${descriptions[w.status]}</p></div><button class="btn secondary" data-action="attention-open" data-id="${w.id}">${actions[w.status]} ${icon('arrow')}</button></div>`}).join('');
+}
+
+function renderActivity(){return events.filter(e=>ui.repo==='all'||e.repo===ui.repo).map(e=>`<div class="activity-item"><span class="event-icon">${icon(e.icon)}</span><div><strong>${esc(e.title)}</strong><p>${repoBy(e.repo).name} · ${esc(e.body)}</p></div><small>${esc(e.time)}</small></div>`).join('')||`<div class="empty">${icon('history')}<h3>No demo activity yet</h3><p>Actions taken in this prototype will appear here.</p></div>`}
+function parentOf(w){if(!w||!w.parent)return null;return byId(w.parent)||items.find(x=>x.repo===w.repo&&x.branch===w.parent)||null}
+function descendants(w){const found=[],seen=new Set([w.id]);function walk(p){for(const x of items.filter(i=>i.repo===p.repo&&parentOf(i)?.id===p.id)){if(!seen.has(x.id)){seen.add(x.id);found.push(x);walk(x)}}}walk(w);return found}
+function ancestors(w){const found=[],seen=new Set([w.id]);let p=parentOf(w);while(p&&!seen.has(p.id)){seen.add(p.id);found.unshift(p);p=parentOf(p)}return found}
+function renderInspector(){
+ scheduleLaneDraw();
+ const w=selected(),pane=$('#inspector');if(!ui.showInspector||!w){pane.style.display='none';$('#pane-grid').classList.add('inspector-hidden');return}
+ pane.style.display='flex';$('#pane-grid').classList.remove('inspector-hidden');const remote=!w.worktree;
+ pane.innerHTML=`<header class="inspector-head"><div class="inspector-topline"><span class="context-label">${icon('worktree')} ${repoBy(w.repo).name} <span>/</span> Branch inspector</span><button class="icon-btn" data-action="close-inspector" aria-label="Close inspector" title="Close inspector">${icon('close')}</button></div><div class="inspector-ref">${esc(w.branch)}</div><h2 class="inspector-title">${esc(w.title)}</h2><div class="inspector-meta">${w.pr?`${badge(w.status==='merged'?'Merged':w.draft?'Draft':'Open',w.status==='merged'?'merged':w.draft?'neutral':'success',w.status==='merged'?'merge':'pr')}<span>#${w.pr}</span><span>·</span><span>${esc(w.author)}</span>`:`${badge(w.isMain?'Primary worktree':remote?'No worktree':'Local branch','neutral','branch')}<span>No pull request</span>`}</div></header><div class="inspector-tabs" role="tablist" aria-label="Branch details">${[['overview','Overview'],['changes','Changes'],['checks','Checks'],['discussion','Discussion']].map(([id,label])=>`<button class="inspector-tab ${ui.tab===id?'active':''}" role="tab" id="tab-${id}" aria-selected="${ui.tab===id}" aria-controls="inspector-tab-panel" tabindex="${ui.tab===id?0:-1}" data-action="inspector-tab" data-tab="${id}">${label}${id==='changes'&&w.dirty?`<span class="tab-count">${w.dirty}</span>`:''}</button>`).join('')}</div><div class="inspector-scroll" id="inspector-tab-panel" role="tabpanel" aria-labelledby="tab-${ui.tab}">${ui.tab==='overview'?inspectorOverview(w):ui.tab==='changes'?inspectorChanges(w):ui.tab==='checks'?inspectorChecks(w):inspectorDiscussion(w)}</div><footer class="inspector-actions">${w.pr?`<button class="btn primary full" data-action="review" data-id="${w.id}">${icon('code')} Review pull request <span class="spacer"></span>${icon('arrow')}</button>`:w.isMain?`<button class="btn primary full" data-action="history" data-id="${w.id}">${icon('history')} Inspect branch history</button>`:`<button class="btn primary full" data-action="publish" data-id="${w.id}">${icon('upload')} Publish pull request…</button>`}<div class="inspector-secondary"><button class="btn secondary" data-action="copy-path" data-id="${w.id}" ${remote?'disabled':''}>${icon('copy')} Copy worktree path</button><button class="icon-btn" data-action="row-menu" data-id="${w.id}" aria-label="More branch and worktree actions">${icon('more')}</button></div><span class="context-footer">${remote?'Review without creating a worktree':'Review here. Develop in your editor.'}</span></footer>`;
+ const draft=$('#comment-draft');if(draft)draft.addEventListener('input',()=>{storage.set('comment:'+w.id,draft.value);$('#comment-save-status').textContent='Draft saved on this device';$('#post-comment').disabled=!draft.value.trim()});
+ const tabButtons=$$('.inspector-tab');tabButtons.forEach((b,i)=>b.onkeydown=e=>{if(['ArrowRight','ArrowLeft','Home','End'].includes(e.key)){e.preventDefault();const ni=e.key==='Home'?0:e.key==='End'?3:(i+(e.key==='ArrowRight'?1:3))%4;ui.tab=tabButtons[ni].dataset.tab;renderInspector();$(`#tab-${ui.tab}`).focus()}});
+}
+function inspectorOverview(w){
+ let note='';
+ if(w.status==='changes')note=`<div class="status-note warning">${icon('comment')}<div><strong>Changes requested · ${w.unresolved} threads</strong><p>Read the feedback here; make the changes in your development tool.</p><button class="btn secondary small" data-action="inspector-tab" data-tab="discussion">Read feedback ${icon('arrow')}</button></div></div>`;
+ else if(w.operation==='rebase')note=`<div class="status-note warning">${icon('warning')}<div><strong>Rebase interrupted · ${w.dirty} conflicted files</strong><p>Inspect the conflict, then resolve it in this working directory.</p><button class="btn secondary small" data-action="conflict" data-id="${w.id}">Inspect conflicts</button></div></div>`;
+ else if(w.needsRestack)note=`<div class="status-note warning">${icon('layers')}<div><strong>The parent branch changed</strong><p>This branch needs restacking. Inspect the affected descendants before proceeding.</p><button class="btn secondary small" data-action="restack" data-id="${w.id}">Preview restack ${icon('arrow')}</button></div></div>`;
+ else if(w.status==='failed')note=`<div class="status-note error">${icon('error')}<div><strong>A required check failed</strong><p>Unit tests failed on the published PR head. Local changes are a separate snapshot.</p><button class="btn secondary small" data-action="inspector-tab" data-tab="checks">Open check log ${icon('arrow')}</button></div></div>`;
+ else if(w.pendingLocalReview||w.localReviewed)note=`<div class="status-note">${icon('eye','blue')}<div><strong>${w.localReviewed?'Reviewed locally':'New commits to review'}</strong><p>${w.localReviewed?'Your local read marker is saved. GitHub review approval is tracked separately.':'The published head changed since your last look. Review it without switching checkouts.'}</p></div></div>`;
+ else if(mergeReady(w))note=`<div class="status-note success">${icon('checkcircle')}<div><strong>Ready to merge</strong><p>The published head passed checks and review. Local cleanup is a separate action.</p><button class="btn secondary small" data-action="merge" data-id="${w.id}">Preview merge ${icon('arrow')}</button></div></div>`;
+ else if(w.status==='merged')note=`<div class="status-note">${icon('merge','violet')}<div><strong>Pull request merged</strong><p>${w.dirty?'This directory still has local changes. Cleanup is blocked.':'The local directory is retained until you explicitly clean it up.'}</p></div></div>`;
+ else if(!w.worktree)note=`<div class="status-note">${icon('eye')}<div><strong>Inspect without a checkout</strong><p>PR diffs, checks, and conversation do not require a local working directory.</p></div></div>`;
+ else if(hasUnpublished(w))note=`<div class="status-note">${icon('upload','blue')}<div><strong>${w.ahead} unpublished commit${w.ahead===1?'':'s'}</strong><p>These local commits are separate from ${w.pr?'the published PR diff':'a pull request'}. Preview publishing when the branch is ready.</p></div></div>`;
+ const p=parentOf(w),children=items.filter(x=>parentOf(x)?.id===w.id);
+ return `${note}<section class="detail-section"><div class="section-label"><h3>Working directory</h3>${w.worktree?`<button class="btn ghost" data-action="copy-path" data-id="${w.id}" aria-label="Copy full worktree path">${icon('copy')}</button>`:''}</div><div class="context-box"><div class="row" style="margin-bottom:8px">${icon('folder')}<strong class="label">${w.isMain?'Primary worktree':w.worktree?esc(w.branch.split('/').pop()):'Not checked out'}</strong><span class="spacer"></span>${w.worktree?badge(w.dirty?`${w.dirty} changed`:'Clean',w.dirty?'warning':'neutral'):''}</div><span class="path">${esc(pathLabel(w))}</span></div><div class="facts"><div><strong>${w.commits}</strong><small>branch commits</small></div><div><strong>${w.worktree?w.dirty:'—'}</strong><small>uncommitted files</small></div><div><strong>${w.ahead}</strong><small>unpushed commits</small></div></div></section>${w.pr?`<section class="detail-section"><div class="section-label"><h3>Pull request status</h3><button class="btn ghost" data-action="merge" data-id="${w.id}" ${w.status==='merged'?'disabled':''}>Preview merge ${icon('arrow-up-right')}</button></div><div class="readiness-item"><button class="readiness-link" data-action="inspector-tab" data-tab="checks">${icon(w.checks==='pass'?'checkcircle':w.checks==='fail'?'error':'circle',w.checks==='pass'?'green':w.checks==='fail'?'red':'muted')}Checks</button><span class="muted">${checksLabel(w)}</span></div><div class="readiness-item"><button class="readiness-link" data-action="inspector-tab" data-tab="discussion">${icon(w.review==='approved'?'checkcircle':'eye',w.review==='approved'?'green':'muted')}GitHub review</button><span class="muted">${reviewLabel(w)}</span></div><div class="readiness-item"><span class="row">${icon('branch')}Published head</span><code class="muted">${reviewHead(w)}</code></div>${w.ahead?`<p class="meta" style="margin-top:8px">${w.ahead} local commits are not included in this PR head.</p>`:''}</section>`:''}${!w.isMain?`<section class="detail-section"><div class="section-label"><h3>Branch relationships</h3><button class="btn ghost" data-action="locate-branch" data-id="${w.id}">Locate in lanes ${icon('arrow-up-right')}</button></div><div class="stack-tree">${children.length>3?`<span class="meta">${children.length-3} more children above · locate in lanes for context</span>`:''}${children.slice(0,3).map(c=>`<button class="stack-node child" style="margin-left:40px" data-action="select" data-id="${c.id}" aria-label="Child branch: ${esc(c.branch)}">${icon('branch')}<span>${esc(c.branch)}</span><span class="pr-side">${c.pr?'#'+c.pr:'local'}</span></button>`).join('')}<button class="stack-node active ${p?'child':''}" data-action="select" data-id="${w.id}" aria-label="Selected branch: ${esc(w.branch)}">${icon('branch')}<span>${esc(w.branch)}</span><span class="pr-side">${w.pr?'#'+w.pr:'local'}</span></button>${p?`<button class="stack-node" data-action="select" data-id="${p.id}" aria-label="Parent branch: ${esc(p.branch)}">${icon('branch')}<span>${esc(p.branch)}</span><span class="pr-side">${p.pr?'#'+p.pr:'base'}</span></button>`:''}</div></section>`:''}`;
+}
+function filePaths(w){if(w.id==='w1')return['apps/desktop/src/main/worktree-registry.ts','packages/shared/src/worktrees.ts','apps/desktop/tests/worktree-registry.test.ts'];if(w.id==='w2')return['apps/desktop/src/renderer/src/components/worktree-switcher.tsx','apps/desktop/src/renderer/src/lib/worktree-context.ts','apps/desktop/tests/worktree-switcher.test.ts'];return[`apps/desktop/src/main/${w.branch.split('/').pop()}.ts`,`packages/shared/src/${w.branch.split('/').pop()}.ts`,`apps/desktop/tests/${w.branch.split('/').pop()}.test.ts`]}
+function workingFiles(w){if(Array.isArray(w.files)&&w.files.length===w.dirty)return w.files;const files=filePaths(w);return Array.from({length:w.dirty},(_,i)=>files[i]||`apps/desktop/src/renderer/src/lib/${w.branch.split('/').pop()}-${i+1}.ts`)}
+function inspectorChanges(w){
+ const paths=workingFiles(w);
+ return `<div class="segment" role="group" aria-label="Diff source"><button data-action="change-mode" data-mode="working" class="${ui.changesMode==='working'?'active':''}">Working tree ${w.worktree?w.dirty:'—'}</button><button data-action="change-mode" data-mode="pr" class="${ui.changesMode==='pr'?'active':''}" ${!w.pr?'disabled':''}>PR diff ${w.pr?filePaths(w).length:''}</button></div>${ui.changesMode==='pr'&&w.pr?`<p class="meta" style="margin:16px 0">Published pull request changes, not uncommitted files or unpushed commits.</p>${filePaths(w).map(f=>`<button class="file-item" data-action="review" data-id="${w.id}"><span class="file-status">M</span><span class="file-path">${esc(f)}</span>${icon('chevron')}</button>`).join('')}<button class="btn secondary full" style="margin-top:16px" data-action="review" data-id="${w.id}">Open review workspace ${icon('arrow')}</button>`:!w.worktree?`<div class="empty" style="padding:36px 8px">${icon('worktree')}<h3>No local working directory</h3><p>${w.pr?'Use the PR diff above. No checkout is needed.':'This branch remains inspectable in the history view.'}</p></div>`:!w.dirty?`<div class="empty" style="padding:36px 8px">${icon('checkcircle')}<h3>No uncommitted changes</h3><p>This is a snapshot of the directory, not a signal that external tools are inactive.</p>${w.pr?`<button class="btn secondary" data-action="change-mode" data-mode="pr">View the PR diff ${icon('arrow')}</button>`:''}</div>`:`<div class="status-note" style="margin-top:16px">${icon('eye')}<div><strong>Read-only local changes</strong><p>Inspect changes here. Edit, stage, and commit in your development tool.</p></div></div>${w.operation?`<div class="status-note warning" style="margin-top:12px">${icon('warning')}<div><strong>Interrupted ${esc(w.operation)}</strong><button class="btn secondary" data-action="conflict" data-id="${w.id}">Inspect conflicts</button></div></div>`:''}<section class="detail-section"><div class="section-label"><h3>${w.dirty} changed files</h3>${badge('Snapshot','neutral','eye')}</div>${paths.map((f,i)=>`<button class="file-item" data-action="local-diff" data-id="${w.id}" data-index="${i}"><span class="file-status">${w.operation?'U':'M'}</span><span class="file-path">${esc(f)}</span>${icon('chevron')}</button>`).join('')}</section><p class="meta">Local changes never appear in the PR diff until committed and published.</p>`}`;
+}
+function inspectorChecks(w){if(!w.pr)return`<div class="empty" style="padding:32px 8px">${icon('shield')}<h3>No pull request checks</h3><p>Publish a pull request to see its GitHub checks here.</p></div>`;if(w.checks==='unknown')return`<div class="status-note">${icon('info')}<div><strong>Check status unavailable</strong><p>This snapshot cannot establish the result for this head. Unknown does not mean passing.</p></div></div>`;const names=['Typecheck','Unit tests','Renderer tests','Build desktop','Formatting','Accessibility'];return`<div class="between" style="margin-bottom:8px"><h3>${w.checks==='pass'?'All checks passed':w.checks==='fail'?'1 check failed':'Checks in progress'}</h3>${badge(w.checks==='pass'?'6 / 6':w.checks==='fail'?'5 / 6':'Pending',w.checks==='pass'?'success':w.checks==='fail'?'error':'neutral')}</div><p class="meta" style="margin-bottom:16px">Captured head <code>${reviewHead(w)}</code> · simulated results</p>${names.map((n,i)=>{const failed=w.checks==='fail'&&i===1;const running=w.checks==='running'&&i>1;return`<details class="check-row" ${failed?'open':''}><summary><span class="row">${icon(failed?'error':running?'clock':'checkcircle',failed?'red':running?'muted':'green')}${n}</span><small class="${failed?'red':'muted'}">${failed?'Failed':running?'Running':`${32+i*19}s`} ${icon('down')}</small></summary><pre class="check-log">${failed?'FAIL  tests/parallel-refresh.test.ts\n\nExpected the most recent repository snapshot.\nReceived a response from an older request.\n\nAssertionError: stale response was not discarded\n\n1 failed · 47 passed':running?'Job is in progress in this demo snapshot.\nNo final result is available.':`✓ ${n} completed successfully\nHead: ${reviewHead(w)}\nThis is an illustrative check log.`}</pre></details>`}).join('')}${w.checks==='fail'?`<button class="btn secondary full" style="margin-top:16px" data-action="retry-checks" data-id="${w.id}">${icon('refresh')} Retry failed check…</button>`:''}<p class="meta" style="margin-top:16px">Retry is an explicit GitHub action. It does not edit or check out this branch.</p>`}
+function inspectorDiscussion(w){
+ if(!w.pr)return`<div class="empty" style="padding:32px 8px">${icon('comment')}<h3>No pull request conversation</h3><p>Publish this branch to start a discussion.</p></div>`;
+ const draft=storage.get('comment:'+w.id,'');
+ return `<div class="comment"><div class="comment-header"><span class="avatar">W</span><strong>howarewoo</strong><small>PR description</small></div><p>${esc(w.title)}. Keep operations scoped to the selected repository and worktree, and preserve the safety checks.</p></div><div class="comment"><div class="comment-header"><span class="avatar">R</span><strong>reviewer · demo</strong><small>${w.review==='changes'?'Changes requested':'Comment'}</small></div><p>${w.review==='changes'?'Please retain the previous repository’s selected worktree and review position. Switching focus should never change a checkout.':'Please keep selection independent from checkout. Opening another branch’s details should leave existing working directories untouched.'}</p>${w.unresolved?`<div style="margin-top:12px">${badge(`${w.unresolved} unresolved threads`,'warning','comment')}</div>`:''}</div>${(w.comments||[]).map(c=>`<div class="comment"><div class="comment-header"><span class="avatar">W</span><strong>You</strong><small>Saved in demo</small></div><p>${esc(c.text)}</p></div>`).join('')}<section class="detail-section"><label for="comment-draft" class="label" style="display:block;margin-bottom:8px">Add to the conversation</label><textarea class="field" id="comment-draft" placeholder="Leave a comment on #${w.pr}…">${esc(draft)}</textarea><div class="draft-state">${icon('shield')}<span id="comment-save-status">Drafts stay with this PR when you switch repositories.</span></div><button id="post-comment" class="btn primary full" style="margin-top:12px" data-action="post-comment" data-id="${w.id}" ${draft.trim()?'':'disabled'}>${icon('comment')} Post comment · demo</button><p class="meta" style="margin-top:12px">You authored this PR. A local read marker does not approve your own pull request.</p></section>`;
+}
+function showModal(title,desc,body,footer='',wide=false){const m=$('#modal');m.className=wide?'wide':'';m.innerHTML=`<div class="dialog-head"><div class="between"><h2 id="modal-title">${title}</h2><button class="icon-btn" data-action="close-modal" aria-label="Close dialog">${icon('close')}</button></div>${desc?`<p>${desc}</p>`:''}</div><div class="dialog-body">${body}</div><div class="dialog-footer">${footer||'<button class="btn secondary" data-action="close-modal">Done</button>'}</div>`;if(!m.open)m.showModal();m.scrollTop=0;const first=m.querySelector('[autofocus]');if(first)setTimeout(()=>first.focus(),0)}
+function closeModal(){const m=$('#modal');if(m.open)m.close();modalContext=null}
+function scopeBlock(w){return`<div class="scope-block"><div class="scope-fact"><span>Repository</span><code>${repoBy(w.repo).owner}/${repoBy(w.repo).name}</code></div><div class="scope-fact"><span>Branch</span><code>${esc(w.branch)}</code></div><div class="scope-fact"><span>Worktree</span><code>${esc(w.worktree||'No local worktree')}</code></div><div class="scope-fact"><span>Captured head</span><code>${esc(w.head)}</code></div></div>`}
+
+
+
+
+function openRowMenu(w){
+ if(!w)return;modalContext={kind:'row-menu',id:w.id};
+ showModal('Branch & worktree actions',`<code>${esc(w.branch)}</code> · ${repoBy(w.repo).name}`,`<div class="menu-list">${w.worktree?`<button class="menu-action" data-action="copy-path" data-id="${w.id}">${icon('copy')}<span>Copy working directory<small>${esc(pathLabel(w))}</small></span></button><button class="menu-action" data-action="inspect-changes" data-id="${w.id}">${icon('file')}Inspect local changes</button>`:`<button class="menu-action" data-action="create-for-branch" data-id="${w.id}">${icon('worktree')}Create a worktree for this branch…</button>`}<button class="menu-action" data-action="publish" data-id="${w.id}" ${w.isMain?'disabled':''}>${icon('upload')}Preview publish branch / pull request…</button><button class="menu-action" data-action="restack" data-id="${w.id}" ${w.isMain?'disabled':''}>${icon('layers')}Preview restack and descendants…</button><button class="menu-action" data-action="merge" data-id="${w.id}" ${!w.pr||w.status==='merged'?'disabled':''}>${icon('merge')}Preview merge…</button><button class="menu-action" data-action="history" data-id="${w.id}">${icon('history')}Inspect history and stashes</button><button class="menu-action" data-action="cleanup" data-id="${w.id}" ${!w.worktree?'disabled':''}>${icon('archive')}Preview worktree cleanup…</button></div>`,`<button class="btn secondary" data-action="close-modal">Close</button>`);
+}
+function operationScope(kind,ids){const map=new Map();for(const id of ids){const w=byId(id);if(!w)continue;const scope=kind==='restack'?[w,...descendants(w)]:['merge','publish'].includes(kind)?[...ancestors(w).filter(x=>!x.isMain&&x.status!=='merged'),w]:[w];for(const x of scope)map.set(x.id,x)}return [...map.values()].sort((a,b)=>a.repo.localeCompare(b.repo)||ancestors(a).length-ancestors(b).length)}
+function blockReason(kind,w){
+ if(kind==='cleanup'){
+  if(!w.worktree)return'No local worktree';if(w.isMain)return'Primary worktree is protected';
+  if(w.adminLocked)return'Worktree is administratively locked';if(w.operation)return'An interrupted Git operation must be completed first';
+  if(w.dirty)return`${w.dirty} uncommitted files must be preserved`;if(w.status!=='merged')return'Pull request has not been merged';
+  if(hasUnpublished(w))return'Unpublished commits must be preserved';return'';
+ }
+ if(w.isMain)return'Trunk is not an operation target';
+ if(kind==='merge'){
+  if(!w.pr)return'No pull request exists';if(w.status==='merged')return'Already merged';if(w.draft)return'Pull request is still a draft';
+  if(w.needsRestack||w.operation)return'This pull request has an unresolved stack dependency';
+  if(w.checks!=='pass')return w.checks==='unknown'?'Check status unavailable':'Required checks have not passed';
+  if(w.review!=='approved')return w.review==='unknown'?'Review status unavailable':'Independent review approval is required';
+  if(w.unresolved)return'Unresolved review threads remain';return'';
+ }
+ if(w.operation)return'An interrupted Git operation must be completed first';
+ if(w.dirty)return`${w.dirty} uncommitted files in this worktree`;
+ if(kind==='restack'&&w.adminLocked)return'Worktree is administratively locked';
+ if(kind==='restack'&&!w.worktree)return'An isolated worktree is required for this local operation';
+ if(kind==='publish'&&w.needsRestack)return'Restack this branch before publishing';
+ return'';
+}
+function openOperation(kind,ids){
+ const targets=operationScope(kind,ids);if(!targets.length)return;
+ const mixed=new Set(targets.map(w=>w.repo)).size>1,eligible=targets.filter(w=>!blockReason(kind,w));
+ const allowed=kind==='cleanup'?eligible:eligible.length===targets.length&&!mixed?eligible:[];
+ const local=['cleanup','restack'].includes(kind);
+ const names={cleanup:'Clean up worktrees',restack:'Preview restack',merge:'Preview merge',publish:'Preview publish'};
+ const desc={cleanup:'Remove only the eligible local directories. Branches and pull requests are retained.',restack:'Inspect selected branches and their descendants before rebasing. Unrelated checkouts are not switched.',merge:'Land the published downstack PR heads. Local directories and unpublished changes are retained.',publish:'Push captured local commits and create or update their pull requests, in parent-first order.'};
+ modalContext={kind:'operation',operation:kind,targets:targets.map(w=>({id:w.id,fingerprint:operationFingerprint(w)})),allowed:allowed.map(w=>w.id),bases:kind==='restack'?[...new Set(targets.flatMap(w=>ancestors(w).map(p=>p.id)))].map(id=>({id,fingerprint:operationFingerprint(byId(id))})):[],local,capturedAt:Date.now()};
+ const warning=kind==='cleanup'?`${targets.length-eligible.length} of ${targets.length} directories are protected.`:mixed?'A shared-ref operation must stay within one repository.':allowed.length?'The snapshot passes the fixture checks.':'The affected scope has blockers.';
+ const command={cleanup:'Remove',restack:'Restack',merge:'Merge',publish:'Publish'}[kind];
+ showModal(names[kind],desc[kind],`<div class="scope-block"><div class="scope-fact"><span>Repository scope</span><code>${[...new Set(targets.map(w=>repoBy(w.repo).name))].join(', ')}</code></div><div class="scope-fact"><span>Explicit targets</span><code>${ids.length} selected → ${targets.length} affected</code></div><div class="scope-fact"><span>Outside this scope</span><code>No other branches or directories are targeted</code></div></div>${targets.map(w=>{const reason=blockReason(kind,w);return`<div class="operation-item">${icon(reason?'lock':'checkcircle',reason?'amber':'green')}<div class="operation-text"><strong>${esc(w.branch)} ${w.pr&&kind==='merge'?'· #'+w.pr:''}</strong><small>${reason||`${repoBy(w.repo).name} · ${kind==='cleanup'?`${w.size} MB sample disk usage`:'captured '+(kind==='merge'?'PR ':'local ')+'head '+(kind==='merge'?reviewHead(w):w.head)}`}</small>${w.worktree?`<small class="mono" style="overflow-wrap:anywhere">${esc(w.worktree)}</small>`:''}</div>${badge(reason?'Blocked':'Included',reason?'warning':'neutral')}</div>`}).join('')}<div class="status-note ${!allowed.length?'warning':''}" style="margin-top:16px">${icon(!allowed.length?'warning':'shield')}<div><strong>${warning}</strong><p>${kind==='cleanup'?'No force removal. Dirty, locked, primary, unmerged, unpublished, and interrupted-operation directories are excluded.':kind==='restack'?'Revalidate branch tips, paths, index state, and parent tips before rebasing. Serialize shared-reference writes by repository.':kind==='merge'?'Recheck remote heads, review decisions, and checks before each merge. Stop on an unconfirmed outcome. Cleanup and restacking are separate steps.':'No rebase, conflict repair, or inclusion of uncommitted files. Changed branch tips require a new preview.'}</p></div></div>${allowed.length&&local?`<div class="status-note warning" style="margin-top:12px">${icon('info')}<div><strong>External tool activity is not tracked</strong><p>A clean directory is not proof it is unused. Stop work in these directories in your development tool before a local mutation.</p></div></div><label class="confirm-line"><input class="check" type="checkbox" id="external-ack"><span>I have stopped external work in the ${allowed.length} included directories. This acknowledgement is not a process lock.</span></label>`:''}${allowed.length?`<label class="confirm-line"><input class="check" type="checkbox" id="operation-ack"><span>I reviewed the ${allowed.length} included ${kind==='cleanup'?'directories':'branches'} and the effects above.</span></label>`:''}`,`<span class="meta">${kind==='cleanup'?`${eligible.reduce((a,w)=>a+w.size,0)} MB sample reclaim`:'Demo records only'}</span><button class="btn secondary" data-action="close-modal">Cancel</button><button class="btn ${kind==='cleanup'?'danger':'primary'}" data-action="confirm-operation" id="confirm-operation" disabled>${command} ${allowed.length} ${kind==='cleanup'?'worktrees':kind==='merge'?'PRs':'branches'} · demo</button>`);
+ const gate=()=>$('#confirm-operation').disabled=!$('#operation-ack')?.checked||(local&&!$('#external-ack')?.checked);
+ $('#operation-ack')?.addEventListener('change',gate);$('#external-ack')?.addEventListener('change',gate);
+}
+function executeOperation(){
+ const ctx=modalContext;
+ if(!ctx||ctx.kind!=='operation'||!ctx.allowed.length||!$('#operation-ack')?.checked||(ctx.local&&!$('#external-ack')?.checked))return;
+ if([...ctx.targets,...ctx.bases].some(t=>!byId(t.id)||operationFingerprint(byId(t.id))!==t.fingerprint)){toast('Scope changed. Capture a fresh preview.');closeModal();return}
+ const list=ctx.allowed.map(byId);if(list.some(w=>blockReason(ctx.operation,w))){toast('Preflight changed. No demo action applied.');closeModal();return}
+ const old=list.map(w=>({...w}));
+ for(const w of list){
+  if(ctx.operation==='cleanup')w.worktree=null;
+  if(ctx.operation==='merge'){w.status='merged';w.draft=false;w.pendingLocalReview=false;for(const child of items.filter(x=>parentOf(x)?.id===w.id&&x.status!=='merged')){child.needsRestack=true;refreshStatus(child)}}
+  if(ctx.operation==='restack'){w.head=((parseInt(w.head,16)+37)>>>0).toString(16).padStart(8,'0');w.needsRestack=false;w.ahead+=1;w.localReviewed=false;refreshStatus(w)}
+  if(ctx.operation==='publish'){if(!w.pr){w.pr=Math.max(100,...items.filter(x=>x.repo===w.repo).map(x=>x.pr||0))+1;w.draft=true}const changed=w.publishedHead!==w.head;w.pushed=true;w.ahead=0;w.publishedHead=w.head;if(changed){w.checks='unknown';w.review='unknown';w.viewed=[];w.localReviewed=false;w.pendingLocalReview=false}refreshStatus(w)}
+  addEvent({cleanup:'Worktree removed from demo',merge:'Pull request merged in demo',restack:'Branch restacked in demo',publish:'Branch published in demo'}[ctx.operation],w,`${w.branch} · captured scope rechecked`,ctx.operation==='merge'?'merge':ctx.operation==='cleanup'?'archive':'branch');
+ }
+ closeModal();ui.selectedIds.clear();render();
+ toast(`Demo: ${list.length} ${ctx.operation==='cleanup'?'worktrees removed':ctx.operation==='merge'?'pull requests merged':ctx.operation==='publish'?'branches published':'branches restacked'}.`,ctx.operation==='cleanup'?()=>{for(const prev of old)Object.assign(byId(prev.id),prev);render();toast('Demo records restored. No filesystem changed.');}:null);
+}
+function newWorktree(existingId=null,repoId=null){const existing=byId(existingId);const repo=repoBy(repoId||existing?.repo||(ui.repo==='all'?'gs':ui.repo));modalContext={kind:'new-form',existingId:existing?.id||null,repo:repo.id};showModal(existing?'Create a worktree for this branch':'New worktree','Start another line of work without disturbing any existing checkout.',`<div class="form-group"><label class="form-label" for="new-repo">Repository</label><select class="field" id="new-repo" ${existing?'disabled':''}>${repos.map(r=>`<option value="${r.id}" ${r.id===repo.id?'selected':''}>${r.owner} / ${r.name}</option>`).join('')}</select></div><div class="form-group"><label class="form-label" for="new-branch">Branch</label><input class="field mono" id="new-branch" placeholder="feat/parallel-work" value="${esc(existing?.branch||'')}" ${existing?'readonly':''} autofocus autocomplete="off"><small>Enter a new name or an existing branch. Occupied branches open their existing worktree.</small></div><div class="form-group"><label class="form-label" for="new-base">Base branch</label><select class="field mono" id="new-base" ${existing?'disabled':''}>${items.filter(w=>w.repo===repo.id).sort((a,b)=>a.isMain?-1:b.isMain?1:a.branch.localeCompare(b.branch)).map(w=>`<option value="${w.id}" ${w.isMain?'selected':''}>${esc(w.branch)}</option>`).join('')}</select></div><div class="form-group"><label class="form-label" for="new-path">Working directory</label><input class="field mono" id="new-path" value="${esc(existing?.worktree||repo.path+'/.worktrees/'+(existing?.branch.split('/').slice(1).join('-')||'parallel-work'))}"><small>Sample local path. The prototype only checks collisions against its demo records.</small></div><div id="new-notice" class="inline-error" role="status"></div>`,`<button class="btn secondary" data-action="close-modal">Cancel</button><button class="btn primary" data-action="preview-new-worktree" id="preview-new">Preview worktree ${icon('arrow')}</button>`);$('#new-repo').onchange=e=>newWorktree(null,e.target.value);$('#new-branch').oninput=e=>{const name=e.target.value.trim();const match=items.find(w=>w.repo===repo.id&&w.branch===name);$('#new-path').value=match?.worktree||repo.path+'/.worktrees/'+(name.split('/').filter(Boolean).join('-')||'parallel-work');$('#new-notice').textContent=match?.worktree?'This branch is already checked out. Focus its existing directory instead.':'';$('#preview-new').innerHTML=match?.worktree?'Focus existing worktree':`Preview worktree ${icon('arrow')}`}}
+function validRef(name){return name&&!name.startsWith('-')&&!name.startsWith('/')&&!name.endsWith('/')&&!name.endsWith('.')&&!name.endsWith('.lock')&&!name.includes('..')&&!name.includes('//')&&!name.includes('@{')&&!/[\s~^:?*\[\\]/.test(name)&&name.split('/').every(p=>p&&!p.startsWith('.'))&&name!=='@'}
+function previewNewWorktree(){
+ if(modalContext?.kind!=='new-form')return;
+ const repo=repoBy($('#new-repo').value),branch=$('#new-branch').value.trim(),path=$('#new-path').value.trim(),base=byId($('#new-base').value),error=$('#new-notice');
+ if(!validRef(branch)){error.textContent='Use a valid branch name, such as feat/parallel-work. Spaces and revision syntax are not allowed.';$('#new-branch').focus();return}
+ const exists=items.find(w=>w.repo===repo.id&&w.branch===branch);
+ if(exists?.worktree){closeModal();if(ui.repo!==repo.id)switchRepo(repo.id);selectWorktree(exists.id);toast('Focused the existing worktree. Nothing was checked out.');return}
+ if(!path.startsWith('/')||path.includes('/../')||path.endsWith('/..')){error.textContent='Use an absolute sample directory without parent traversal.';return}
+ if(items.some(w=>w.worktree===path)){error.textContent='That directory is already used by a demo worktree. Choose a different path.';return}
+ const candidate=exists||buildItem(['new-'+Date.now(),repo.id,branch,branch.split('/').pop().replace(/-/g,' '),null,'quiet',0,base?.id||'main',0],items.length);
+ modalContext={kind:'create-worktree',candidate:{...candidate,worktree:path,status:candidate.status==='remote'?'quiet':candidate.status},existingId:exists?.id||null,baseId:base?.id,baseHead:base?.head};
+ showModal('Preview new worktree','Only a new directory and its local branch context are created. Existing checkouts remain in place.',`${scopeBlock(modalContext.candidate)}<div class="scope-block"><div class="scope-fact"><span>Branch action</span><code>${exists?'Use existing branch':'Create from '+esc(base?.branch||'main')}</code></div><div class="scope-fact"><span>Remote changes</span><code>None. No push or pull request.</code></div></div><div class="status-note">${icon('shield')}<div><strong>No development environment is launched</strong><p>The desktop must validate the destination, branch occupancy, repository identity, and base tip again before creation.</p></div></div>`,`<span class="meta">Demo records only</span><button class="btn secondary" data-action="close-modal">Cancel</button><button class="btn primary" data-action="confirm-new-worktree">${icon('plus')} Create worktree · demo</button>`);
+}
+function createWorktree(){const ctx=modalContext;if(ctx?.kind!=='create-worktree')return;const w=ctx.candidate;if(items.some(x=>x.worktree===w.worktree)||(!ctx.existingId&&items.some(x=>x.repo===w.repo&&x.branch===w.branch))||(ctx.baseId&&byId(ctx.baseId)?.head!==ctx.baseHead)){toast('Creation scope changed. Open a fresh preview.');closeModal();return}if(ctx.existingId)Object.assign(byId(ctx.existingId),w);else items.push(w);addEvent('Worktree created in demo',w,`${w.branch} · existing directories unchanged`,'worktree');closeModal();if(ui.repo!==w.repo)switchRepo(w.repo);ui.view='branches';ui.filter='all';ui.query='';ui.collapsed.delete('quiet');ui.selected=w.id;ui.showInspector=true;locateBranch(w.id);toast('Demo worktree created. No existing checkout changed.')}
+
+const DIFFS=[[
+ ['hunk','','','@@ -18,6 +18,10 @@ export async function refreshWorktree'],
+ ['context',18,18,'export async function refreshWorktree(worktreeId: string) {'],
+ ['remove',19,'','  const path = selectedRepository.path;'],
+ ['remove',20,'','  const snapshot = await readSnapshot(path);'],
+ ['add','',19,'  const context = registry.require(worktreeId);'],
+ ['add','',20,'  const request = requests.capture(context.id);'],
+ ['add','',21,'  const snapshot = await readSnapshot(context.path);'],
+ ['add','',22,''],
+ ['add','',23,'  // Switching focus never changes the request owner.'],
+ ['add','',24,'  if (!requests.isCurrent(request)) return;'],
+ ['context',21,25,''],
+ ['remove',22,'','  setCurrentSnapshot(snapshot);'],
+ ['add','',26,'  snapshots.set(context.id, snapshot);'],
+ ['context',23,27,'}'],
+ ['context',24,28,''],
+ ['add','',29,'// Each worktree retains its own HEAD, index, and directory.'],
+ ['add','',30,'// Shared repository mutations use a separate operation queue.']
+],[['hunk','','','@@ -4,4 +4,11 @@'],['context',4,4,'export type WorktreeContext = {'],['context',5,5,'  id: string;'],['add','',6,'  repositoryId: string;'],['add','',7,'  path: string;'],['add','',8,'  branchRef: string | null;'],['add','',9,'  headOid: string;'],['add','',10,'  publishedHeadOid: string | null;'],['add','',11,'  dirtyFileCount: number;'],['context',6,12,'};']],[['hunk','','','@@ -22,4 +22,12 @@'],['context',22,22,'test("switching focus preserves working directories", async () => {'],['add','',23,'  const before = worktree.path;'],['add','',24,'  await workbench.select(otherWorktree.id);'],['add','',25,''],['add','',26,'  expect(worktree.path).toBe(before);'],['add','',27,'  expect(workbench.selectedId).toBe(otherWorktree.id);'],['add','',28,'  expect(git.checkout).not.toHaveBeenCalled();'],['context',23,29,'});']]];
+function openReview(w,file=0){if(!w?.pr)return;if(w.viewedHead!==reviewHead(w)){w.viewed=[];w.viewedHead=reviewHead(w);w.localReviewed=false}reviewFile=file;w.viewed=w.viewed||[];const paths=filePaths(w),draftKey=`review:${w.id}:${reviewHead(w)}:${file}`,draft=storage.get(draftKey,'');modalContext={kind:'review',id:w.id,head:reviewHead(w),file,draftKey};showModal(`Review #${w.pr}`,`<code>${esc(w.branch)}</code> → <code>${esc(branchParent(w))}</code> · ${repoBy(w.repo).name} · captured head <code>${reviewHead(w)}</code>`,`<div class="between" style="margin-bottom:16px"><span class="row">${badge('Read-only diff','info','eye')}<span class="meta">Illustrative committed changes</span></span><span class="meta">${w.viewed.length} / ${paths.length} files viewed</span></div><div class="review-layout"><nav class="review-files" aria-label="Changed files">${paths.map((f,i)=>`<button class="${i===file?'active':''}" data-action="review-file" data-index="${i}" title="${esc(f)}">${icon(w.viewed.includes(i)?'checkcircle':'file',w.viewed.includes(i)?'green':'')} ${esc(f.split('/').slice(-2).join('/'))}</button>`).join('')}</nav><div><div class="diff-frame"><div class="diff-file-head"><span>${esc(paths[file].split('/').pop())}</span><label class="row" style="font-family:var(--sans);font-size:12px"><input type="checkbox" class="check" id="mark-file-viewed" ${w.viewed.includes(file)?'checked':''}>Viewed</label></div><div class="diff-content">${DIFFS[file].map(([kind,old,n,text])=>`<div class="diff-line ${kind}"><span class="num">${old}</span><span class="num">${n}</span><span>${kind==='add'?'+':kind==='remove'?'−':' '}</span><span>${esc(text)}</span></div>`).join('')}</div></div><p class="diff-note">This diff is illustrative, not a fetched patch. PR inspection does not touch a working directory or switch a checkout.</p><div class="inline-review"><label class="label" for="review-note" style="display:block;margin-bottom:8px">Review note · ${esc(paths[file].split('/').pop())}</label><textarea class="field" id="review-note" placeholder="Leave feedback on this file…">${esc(draft)}</textarea><p class="draft-state">${icon('shield')}Draft saved per file and captured head, even across repository switches.</p></div></div></div>`,`<span class="meta">Your PR · local review is not GitHub approval</span><button class="btn secondary" data-action="mark-reviewed" id="mark-reviewed" ${w.viewed.length===paths.length?'':'disabled'}>${icon('check')} Mark reviewed locally</button><button class="btn primary" data-action="post-review-note" id="post-review-note" ${draft.trim()?'':'disabled'}>${icon('comment')} Post note · demo</button>`,true);$('#review-note').oninput=e=>{storage.set(draftKey,e.target.value);$('#post-review-note').disabled=!e.target.value.trim()};$('#mark-file-viewed').onchange=e=>{if(e.target.checked&&!w.viewed.includes(file))w.viewed.push(file);if(!e.target.checked)w.viewed=w.viewed.filter(i=>i!==file);persist();openReview(w,file)}}
+function openConflict(w){
+ modalContext={kind:'conflict',id:w.id,head:w.head};
+ showModal('Inspect the rebase conflict',`<code>${esc(w.branch)}</code> · read-only snapshot of this directory.`,`${scopeBlock(w)}<h3>Conflicted files</h3>${workingFiles(w).map(f=>`<div class="file-item"><span class="file-status">U</span><span class="file-path">${esc(f)}</span></div>`).join('')}<pre class="mini-code">&lt;&lt;&lt;&lt;&lt;&lt;&lt; captured parent\nconst order = submittedPullRequestOrder;\n=======\nconst order = localBranchOrder;\n&gt;&gt;&gt;&gt;&gt;&gt;&gt; ${esc(w.branch)}</pre><div class="status-note warning">${icon('warning')}<div><strong>Resolve in your development tool</strong><p>This view does not edit files, mark conflicts resolved, or continue the rebase. Finish the operation in this directory, then refresh the workbench.</p></div></div>`,`<button class="btn secondary" data-action="close-modal">Close</button><button class="btn primary" data-action="copy-path" data-id="${w.id}">${icon('copy')} Copy working directory</button>`);
+}
+function openHistory(w){
+ modalContext={kind:'history',id:w.id};
+ showModal('Inspect history and stashes',`Read <code>${esc(w.branch)}</code> without checking it out.`,`${scopeBlock(w)}<h3>Branch history · sample</h3>${['Keep snapshot results bound to a worktree','Add targeted worktree tests','Introduce worktree identity'].map((t,i)=>`<div class="activity-item" style="padding-left:0;padding-right:0"><span class="event-icon">${icon('branch')}</span><div><strong>${t}</strong><p><code>${i===0?w.head:('c2f6'+(918+i*11).toString(16)).slice(0,8)}</code> · howarewoo</p></div></div>`).join('')}<section class="detail-section"><h3>Repository stashes</h3><p class="meta" style="margin:8px 0 12px">Stashes are shared repository data. This prototype inspects them; apply them in your development tool.</p><div class="context-box"><div class="between"><strong class="label">stash@{0}</strong>${badge('Sample stash','neutral')}</div><p class="meta" style="margin-top:8px">WIP on experiment/diff-layout: compare split layouts</p></div></section>`,`<button class="btn primary" data-action="close-modal">Done</button>`);
+}
+
+
+function retryChecks(w){modalContext={kind:'retry',id:w.id,head:reviewHead(w)};showModal('Retry the failed check?',`Request a new <strong>Unit tests</strong> run for #${w.pr}.`,`${scopeBlock(w)}<p class="label">The request is scoped to the captured pull request head. A queued request is not a passing check.</p>`,`<button class="btn secondary" data-action="close-modal">Cancel</button><button class="btn primary" data-action="confirm-retry">Queue retry · demo</button>`)}
+function showSettings(displayOnly=false){modalContext={kind:displayOnly?'display':'settings'};showModal(displayOnly?'Configure this view':'Workbench settings',displayOnly?'Keep the list focused without hiding work from the underlying repository.':'Appearance uses the app’s existing light and dark token sets.',`${!displayOnly?`<div class="setting-row"><div><strong>Theme</strong><small>Exact Git Stacks palette</small></div><div class="segment"><button class="${ui.theme==='light'?'active':''}" data-action="set-theme" data-theme="light">${icon('sun')} Light</button><button class="${ui.theme==='dark'?'active':''}" data-action="set-theme" data-theme="dark">${icon('moon')} Dark</button></div></div>`:''}<div class="setting-row"><div><strong>Information density</strong><small>Same typography, tighter row spacing</small></div><div class="segment"><button class="${ui.density==='standard'?'active':''}" data-action="density" data-density="standard">Standard</button><button class="${ui.density==='compact'?'active':''}" data-action="density" data-density="compact">Compact</button></div></div>${ui.view==='branches'?`<div class="setting-row"><div><strong>Dependency order</strong><small>Parents stay below children. Status filters keep the ancestor path.</small></div>${badge('Lanes','neutral','branch')}</div><div class="setting-row"><div><strong>Folded branches</strong><small>Collapse descendants without changing refs.</small></div><button class="btn secondary" data-action="expand-lanes">Expand all</button></div>`:`<div class="setting-row"><div><strong>Group by attention state</strong><small>Attention → local / unpublished → ready → retained</small></div><label class="row"><input class="check" type="checkbox" id="group-setting" ${ui.grouped?'checked':''}> Grouped</label></div><div class="setting-row"><div><strong>Sort order</strong><small>Within the current view</small></div><select class="field" id="sort-setting" style="width:166px"><option value="attention" ${ui.sort==='attention'?'selected':''}>Attention first</option><option value="name" ${ui.sort==='name'?'selected':''}>Branch name</option></select></div>`}<div class="setting-row"><div><strong>120-worktree scenario</strong><small>Paginated fixture data, not a performance benchmark</small></div><button class="btn secondary" data-action="stress">${ui.stress?'Remove extra data':'Load scenario'}</button></div>${!displayOnly?`<div class="status-note" style="margin-top:16px">${icon('shield')}<div><strong>Standalone and local</strong><p>No remote calls, external assets, shell execution, or provider connection. Demo records and drafts are stored in this browser when local storage is available.</p></div></div><div class="setting-row"><div><strong>Reset this demo</strong><small>Remove only this prototype’s records and drafts</small></div><button class="btn danger" data-action="reset-preview">Reset…</button></div>`:''}`,`<button class="btn primary" data-action="close-modal">Done</button>`);$('#group-setting')?.addEventListener('change',e=>{ui.grouped=e.target.checked;renderMainContent()});$('#sort-setting')?.addEventListener('change',e=>{ui.sort=e.target.value;renderMainContent()})}
+function showNotes(){
+ modalContext={kind:'notes'};
+ showModal('Review and ship. Keep your development tool.','A worktree-aware Git / GitHub workbench, not another development environment.',`<div class="status-note">${icon('worktree')}<div><strong>The boundary for this revision</strong><p>Develop in Orca or your preferred editor. Use Git Stacks to inspect, organize, review, synchronize, and land the branches and PRs that work produces.</p></div></div><div class="note-grid"><section><h3>01 · One branch surface</h3><p>Branches and worktrees share one row-based surface. A worktree is optional context attached to its checked-out branch, not a second list of the same work. Pull requests keep their dedicated review list. The separate Stacks graph is removed.</p></section><section><h3>02 · Relationships stay in the list</h3><p>Bottom-up lanes show base branches below their descendants, with chains and forks growing upward beside aligned rows. Display order does not change the parent-first execution order of scoped Git operations. Lines represent the fixture’s declared branch-parent relationship, not a commit timeline, upstream tracking, or inferred GitHub stack membership. Selecting a row highlights ancestors and descendants; it never changes a checkout.</p></section><section><h3>03 · Adopt existing worktrees</h3><p>Discovery is the primary action. Directories created by any development tool can be inspected without recreating them or changing their checked-out branch. Creation remains secondary; branches without directories remain reviewable.</p></section><section><h3>04 · Attention across repositories</h3><p>New commits to review, changes requested, failing checks, conflicts, and required restacks share one queue. Each item opens the relevant diff, conversation, check log, or scoped preview.</p></section><section><h3>05 · Review here; edit elsewhere</h3><p>Local changes and conflicts are read-only. There is no code editor, terminal, staging, commit composer, or agent integration. PR conversations, file review notes, publishing, merge previews, and history remain available.</p></section><section><h3>06 · Honest local-operation safety</h3><p>External tool activity is unknown, not idle. A clean worktree does not prove exclusive access. Restack and cleanup require explicit external-work acknowledgement as well as scope confirmation. Production must still revalidate repository identity, path, HEAD, index, parent tips, and operation state; an acknowledgement is not a process lock.</p></section><section><h3>07 · Distinguish local and published heads</h3><p>Review drafts and check results bind to the published PR head. Unpushed commits remain separate. Publishing a changed head clears stale review/check assumptions. Merging preserves local directories; descendant restacks and cleanup are explicit follow-up operations.</p></section><section><h3>08 · Filter without losing ancestry</h3><p>Attention, unpublished, readiness, search, and worktree-availability filters retain required ancestors as labelled context rows. Context rows and trunk cannot enter bulk selection. Pagination and branch folding disclose omitted rows. Lanes reuse tracks for single-child chains and preserve forks. Unknown parents get no invented edge. No stack names or separate graph canvas.</p></section></div><section class="detail-section"><h3>Same Quiet Workbench design system</h3><p class="meta" style="margin-top:8px">Cool-gray canvas, neutral ink primary actions, labelled semantic colors, local/system fonts, 12 / 16 / 24 px radii, and the repository’s light and dark token palettes. Lane rows keep branch identity, optional directory, local changes, and PR status together. At narrower pane widths, worktree context moves under the branch; all values remain available in the inspector.</p><div class="token-swatches"><span class="token-swatch"><span style="background:var(--canvas)"></span>Canvas</span><span class="token-swatch"><span style="background:var(--surface)"></span>Surface</span><span class="token-swatch"><span style="background:var(--ink)"></span>Ink</span><span class="token-swatch"><span style="background:var(--selection)"></span>Selection</span><span class="token-swatch"><span style="background:var(--amber-bg)"></span>Attention</span></div></section><section class="detail-section"><h3>Prototype scope</h3><p class="meta" style="margin-top:8px;line-height:1.8">This revision edits the existing HTML prototype and preserves its design-system baseline from <code>howarewoo/git-stacks @ 9ec11e9</code>: <code>DESIGN.md</code>, <code>packages/ui/src/tokens/tokens.json</code>, and shared UI treatments. It is dependency-free native HTML, not an Electron implementation or a new repository inspection. Production should compose <code>@git-stacks/ui</code> controls behind the typed desktop API. Every PR, path, diff, check, and discovered directory is illustrative. No filesystem scan, Git command, GitHub request, or Orca integration is performed. Demo data and drafts stay in this browser.</p></section>`,`<button class="btn secondary" data-action="shortcuts">${icon('keyboard')} Shortcuts</button><button class="btn primary" data-action="close-modal">Back to workbench</button>`,true);
+}
+function showShortcuts(){showModal('Keyboard shortcuts','Navigate context without changing a checkout.',`<div class="stack">${[['Jump to anything','⌘ / Ctrl + K'],['Switch pinned repository','⌘ / Ctrl + 1, 2, 3'],['Filter the current list','/'],['Move through branches','↑ / ↓'],['First / last visible branch','Home / End'],['Select focused row for bulk action','Space'],['Discover existing worktrees','D'],['Create a worktree (secondary)','N'],['Close a dialog or inspector','Esc']].map(([s,k])=>`<div class="between" style="padding:8px 0"><span class="label">${s}</span><kbd>${k}</kbd></div>`).join('')}</div><p class="meta" style="margin-top:16px">Single-key shortcuts do not run while you type in an input. The command palette supports arrow keys and Enter.</p>`)}
+function loadStress(){
+ const was=ui.stress;
+ if(was){items=items.filter(w=>!w.stress);ui.stress=false;if(!byId(ui.selected))ui.selected='w1'}else{
+  const count=items.filter(w=>w.repo==='gs'&&w.worktree).length,statuses=['local','ready','quiet','review','unpublished','changes','merged','restack'];
+  for(let i=count;i<120;i++){const n=i+1,status=statuses[i%statuses.length],w=buildItem([`stress-${n}`,'gs',`feat/parallel-change-${String(n).padStart(3,'0')}`,`Independent change ${n}`,1000+n,status,status==='local'?(i%6)+1:0,'main',status==='unpublished'?2:0],i);w.stress=true;if(i>count&&i%5!==0)w.parent=`stress-${n-1}`;items.push(w)}ui.stress=true;
+ }
+ closeModal();rememberRepo();ui.repo='gs';ui.view='branches';ui.filter='all';ui.query='';ui.worktreeScope='all';ui.folded.clear();ui.limit=30;ui.selectedIds.clear();render();toast(was?'Removed the additional fixture worktrees.':'Loaded the 120-worktree scenario. Results are paged 30 at a time.');
+}
+function openPalette(mode='all'){if($('#modal').open)closeModal();const p=$('#palette');p.dataset.mode=mode;p.innerHTML=`<div class="palette-input">${icon(mode==='repos'?'folder':'search')}<input id="palette-search" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="palette-results" aria-label="${mode==='repos'?'Find a repository':'Search all repositories, branches and pull requests'}" placeholder="${mode==='repos'?'Switch repository…':'Search repositories, branches, PRs, paths…'}" autocomplete="off" autofocus><kbd>Esc</kbd></div><div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div><div class="palette-footer"><span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span class="spacer"></span><span id="palette-match-count">No checkout performed</span></div>`;p.showModal();paletteIndex=0;updatePalette('');const input=$('#palette-search');input.oninput=e=>{paletteIndex=0;updatePalette(e.target.value)};input.onkeydown=e=>{if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();paletteIndex=(paletteIndex+(e.key==='ArrowDown'?1:-1)+paletteResults.length)%Math.max(1,paletteResults.length);renderPaletteHighlight()}if(e.key==='Enter'){e.preventDefault();choosePalette(paletteIndex)}};setTimeout(()=>input.focus(),0)}
+function updatePalette(query){
+ const q=query.trim().toLowerCase(),repoOnly=$('#palette').dataset.mode==='repos';
+ const rs=repos.filter(r=>`${r.owner} ${r.name}`.toLowerCase().includes(q)).map(r=>({kind:'repo',id:r.id,label:r.name,sub:`${items.filter(w=>w.repo===r.id&&w.worktree).length} worktrees · ${items.filter(w=>w.repo===r.id&&needs(w)).length} need attention`,icon:'folder'}));
+ const ws=repoOnly?[]:items.filter(w=>`${w.branch} ${w.title} ${w.pr||''} ${w.worktree||''} ${repoBy(w.repo).name}`.toLowerCase().includes(q)).sort((a,b)=>(a.repo===ui.repo?-1:1)-(b.repo===ui.repo?-1:1)).slice(0,q?25:6).map(w=>({kind:'worktree',id:w.id,label:w.branch,sub:`${repoBy(w.repo).name} · ${w.pr?'#'+w.pr+' · ':''}${w.title}`,icon:w.worktree?'worktree':'branch'}));
+ const actions=repoOnly?[]:[{kind:'action',id:'discover',label:'Discover existing worktrees',sub:'Inspect directories created by your development tool',icon:'search'},{kind:'action',id:'attention',label:'Open cross-repository attention queue',sub:'Review feedback, checks, conflicts, and required restacks',icon:'inbox'},{kind:'action',id:'new-worktree',label:'Create a new worktree',sub:'Secondary action · existing checkouts stay in place',icon:'plus'}].filter(a=>!q||a.label.toLowerCase().includes(q));
+ paletteResults=[...rs,...ws,...actions];let last='';
+ $('#palette-results').innerHTML=paletteResults.length?paletteResults.map((r,i)=>{const heading=r.kind!==last?`<div class="palette-heading">${r.kind==='repo'?'Repositories':r.kind==='worktree'?'Branches & pull requests':'Actions'}</div>`:'';last=r.kind;return`${heading}<button class="palette-item ${i===paletteIndex?'active':''}" data-action="palette-select" data-index="${i}" role="option" aria-selected="${i===paletteIndex}" id="palette-result-${i}"><span class="reason-icon">${icon(r.icon)}</span><span class="truncate"><span class="palette-label ${r.kind==='worktree'?'mono':''}" style="${r.kind==='worktree'?'font-size:12px':''}">${esc(r.label)}</span><small class="truncate">${esc(r.sub)}</small></span><span class="palette-trail">${r.kind==='repo'?'Switch':r.kind==='worktree'?'Inspect':'Open'} ${icon('arrow')}</span></button>`}).join(''):`<div class="empty" style="padding:32px">${icon('search')}<h3>No matching context</h3><p>Try a branch name, PR number, repository, or directory path.</p></div>`;
+ $('#palette-search').setAttribute('aria-activedescendant',paletteResults.length?'palette-result-'+paletteIndex:'');$('#palette-match-count').textContent=q&&ws.length===25?'First 25 matches · refine search':'No checkout performed';
+}
+function renderPaletteHighlight(){$$('.palette-item').forEach((e,i)=>{e.classList.toggle('active',i===paletteIndex);e.setAttribute('aria-selected',String(i===paletteIndex));if(i===paletteIndex)e.scrollIntoView({block:'nearest'})});$('#palette-search')?.setAttribute('aria-activedescendant','palette-result-'+paletteIndex)}
+function choosePalette(index){const result=paletteResults[index];if(!result)return;$('#palette').close();if(result.kind==='repo')switchRepo(result.id);else if(result.kind==='worktree'){const w=byId(result.id);if(ui.repo!==w.repo)switchRepo(w.repo);ui.view='branches';ui.filter='all';ui.query='';ui.worktreeScope='all';for(const p of ancestors(w))ui.folded.delete(p.id);ui.collapsed.delete(STATE[w.status].group);ui.limit=Math.max(30,Math.ceil((items.filter(x=>x.repo===w.repo).length)/30)*30);ui.selected=w.id;ui.showInspector=true;render();const row=document.querySelector(`.work-row[data-id="${w.id}"]`);row?.scrollIntoView({block:'nearest'});row?.focus({preventScroll:true});announce(`Inspecting ${w.branch}. No checkout performed.`)}else if(result.id==='new-worktree')newWorktree();else if(result.id==='discover')discoverWorktrees();else navigate('attention')}
+async function copyText(text,label){try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text)}else{const input=document.createElement('textarea');input.value=text;input.style.position='fixed';input.style.left='-9999px';const host=$('#modal').open?$('#modal'):document.body;host.append(input);input.focus();input.select();if(!document.execCommand('copy'))throw Error('copy');input.remove()}toast(label||'Copied to clipboard.')}catch{showModal('Copy this value','Clipboard access was unavailable. Select and copy the value below.',`<textarea class="field mono" readonly autofocus>${esc(text)}</textarea>`)}}
+function assertContext(kind){const ctx=modalContext,w=byId(ctx?.id);const head=w&&['review','retry'].includes(kind)?reviewHead(w):w?.head;if(!ctx||ctx.kind!==kind||!w||(ctx.head&&head!==ctx.head)){toast('The captured context changed. Open a new preview.');closeModal();return null}return w}
+document.addEventListener('click',async e=>{const el=e.target.closest('[data-action]');if(!el||el.disabled)return;const action=el.dataset.action;const w=byId(el.dataset.id)||selected();switch(action){
+case'nav':navigate(el.dataset.view);break;
+case'repo':switchRepo(el.dataset.repo);break;
+case'palette':openPalette();break;
+case'repos':openPalette('repos');break;
+case'palette-select':choosePalette(Number(el.dataset.index));break;
+case'all-branches':rememberRepo();ui.repo='all';navigate('branches');break;
+case'all-ready':rememberRepo();ui.repo='all';navigate('prs');ui.filter='ready';renderMain();break;
+case'discover':discoverWorktrees();break;
+case'discover-repo':discoverWorktrees(el.dataset.repo);break;
+case'import-discovered':importDiscovered();break;
+case'lane-discussion':selectWorktree(w.id);ui.tab='discussion';renderInspector();break;
+case'open-checks':selectWorktree(w.id);ui.tab='checks';renderInspector();break;
+case'inspect-changes':closeModal();selectWorktree(w.id);ui.tab='changes';ui.changesMode='working';renderInspector();break;
+case'local-diff':openLocalDiff(w,Number(el.dataset.index)||0);break;
+case'filter':ui.filter=el.dataset.filter;ui.limit=30;ui.selectedIds.clear();renderMain();break;
+case'clear-filters':ui.filter='all';ui.query='';ui.worktreeScope='all';ui.limit=30;ui.selectedIds.clear();renderMain();break;
+case'group':ui.collapsed.has(el.dataset.group)?ui.collapsed.delete(el.dataset.group):ui.collapsed.add(el.dataset.group);renderMainContent();break;
+case'sort':ui.sort=ui.sort==='attention'?'name':'attention';if(ui.sort==='name')ui.grouped=false;renderMainContent();break;
+case'select-page':{const ids=pageRows(visibleItems()).map(x=>x.id);const all=ids.every(id=>ui.selectedIds.has(id));ids.forEach(id=>all?ui.selectedIds.delete(id):ui.selectedIds.add(id));renderMainContent();break}
+case'clear-selection':ui.selectedIds.clear();renderMainContent();break;
+case'load-more':ui.limit+=30;renderMainContent();break;
+case'select':if($('#modal').open)closeModal();selectWorktree(el.dataset.id);break;
+case'close-inspector':ui.showInspector=false;renderInspector();break;
+case'inspector-tab':ui.tab=el.dataset.tab;renderInspector();break;
+case'change-mode':ui.changesMode=el.dataset.mode;renderInspector();break;
+case'row-menu':openRowMenu(w);break;
+case'locate-branch':locateBranch(w.id);break;
+case'lane-fold':toggleFold(w.id);break;
+case'expand-lanes':ui.folded.clear();renderMainContent();break;
+case'lane-help':showLaneHelp();break;
+case'attention-open':selectWorktree(w.id);if(w.status==='changes'){ui.tab='discussion';renderInspector()}else if(w.status==='failed'){ui.tab='checks';renderInspector()}else if(w.status==='conflict')openConflict(w);else if(w.status==='restack')openOperation('restack',[w.id]);else openReview(w);break;
+case'new-worktree':newWorktree();break;
+case'create-for-branch':newWorktree(w.id);break;
+case'preview-new-worktree':previewNewWorktree();break;
+case'confirm-new-worktree':createWorktree();break;
+case'copy-path':await copyText(w.worktree,'Full worktree path copied.');break;
+case'publish':openOperation('publish',[w.id]);break;
+case'merge':openOperation('merge',[w.id]);break;
+case'restack':openOperation('restack',[w.id]);break;
+case'cleanup':openOperation('cleanup',[w.id]);break;
+case'bulk-publish':openOperation('publish',[...ui.selectedIds]);break;
+case'bulk-restack':openOperation('restack',[...ui.selectedIds]);break;
+case'bulk-cleanup':openOperation('cleanup',[...ui.selectedIds]);break;
+case'confirm-operation':executeOperation();break;
+case'review':openReview(w);break;
+case'review-file':if(modalContext?.kind==='review')openReview(byId(modalContext.id),Number(el.dataset.index));break;
+case'post-review-note':{const x=assertContext('review');if(!x)break;const ctx=modalContext,text=$('#review-note').value.trim();if(!text)break;x.comments.push({text:`${filePaths(x)[ctx.file]}\n\n${text}`,head:ctx.head});storage.set(ctx.draftKey,'');addEvent('Review note saved in demo',x,`PR #${x.pr} · ${filePaths(x)[ctx.file].split('/').pop()}`,'comment');closeModal();ui.selected=x.id;ui.tab='discussion';ui.showInspector=true;render();toast('Demo review note saved. Nothing was posted to GitHub.');break}
+case'mark-reviewed':{const x=assertContext('review');if(!x||x.viewed.length!==filePaths(x).length)break;x.localReviewed=true;x.pendingLocalReview=false;refreshStatus(x);persist();closeModal();render();toast('Marked reviewed locally. No GitHub approval was submitted.');break}
+case'post-comment':{const text=$('#comment-draft')?.value.trim();if(!text||!w?.pr)break;w.comments.push({text});storage.set('comment:'+w.id,'');addEvent('PR comment saved in demo',w,`#${w.pr} · no remote request`,'comment');renderInspector();toast('Demo comment saved. Nothing was posted to GitHub.');break}
+case'conflict':openConflict(w);break;
+case'retry-checks':retryChecks(w);break;
+case'confirm-retry':{const x=assertContext('retry');if(!x||x.checks!=='fail')break;x.checks='running';refreshStatus(x);addEvent('Check retry queued in demo',x,'Result is pending, not passing','refresh');closeModal();render();toast('Demo retry queued. No final check result is available.');break}
+case'history':openHistory(w);break;
+case'theme':ui.theme=ui.theme==='light'?'dark':'light';storage.set('theme',ui.theme);render();break;
+case'set-theme':{const only=modalContext?.kind==='display';ui.theme=el.dataset.theme;storage.set('theme',ui.theme);render();showSettings(only);break}
+case'density':{const only=modalContext?.kind==='display';ui.density=el.dataset.density;storage.set('density',ui.density);render();showSettings(only);break}
+case'settings':showSettings();break;
+case'display':showSettings(true);break;
+case'notes':showNotes();break;
+case'shortcuts':showShortcuts();break;
+case'stress':loadStress();break;
+case'reset-preview':showModal('Reset this prototype?','Only this demo’s locally stored records and drafts will be removed. Your repositories and other browser data are not affected.','<p class="label">Restore the original 26-worktree example and its illustrative pull requests, reviews, and check results.</p>','<button class="btn secondary" data-action="close-modal">Cancel</button><button class="btn danger" data-action="reset">Reset demo</button>');break;
+case'reset':try{Object.keys(localStorage).filter(k=>k.startsWith('gs-workbench-v5:')).forEach(k=>localStorage.removeItem(k))}catch{}location.reload();break;
+case'close-modal':closeModal();break;
+}});
+document.addEventListener('keydown',e=>{const editable=e.target.closest('input,textarea,select,[contenteditable=true]');const mod=e.metaKey||e.ctrlKey;if(mod&&e.key.toLowerCase()==='k'){e.preventDefault();if($('#palette').open)$('#palette').close();else openPalette();return}if(mod&&['1','2','3'].includes(e.key)&&!$('#modal').open&&!$('#palette').open){e.preventDefault();switchRepo(repos[Number(e.key)-1].id);return}if($('#modal').open||$('#palette').open)return;if(editable)return;if(e.key==='/'){e.preventDefault();$('#local-search')?.focus()}else if(e.key.toLowerCase()==='d'&&!mod&&!e.altKey){e.preventDefault();discoverWorktrees()}else if(e.key.toLowerCase()==='n'&&!mod&&!e.altKey){e.preventDefault();newWorktree()}else if(e.key==='Escape'){ui.showInspector=false;renderInspector()}});
+$('#modal').addEventListener('cancel',()=>{modalContext=null});
+$('#modal').addEventListener('click',e=>{if(e.target!==$('#modal'))return;const r=$('#modal').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeModal()});
+$('#palette').addEventListener('click',e=>{if(e.target!==$('#palette'))return;const r=$('#palette').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('#palette').close()});
+window.addEventListener('resize',()=>{if(innerWidth<1040&&ui.showInspector&&$('#inspector').style.display==='none')ui.showInspector=false});
+
+function discoveryCandidates(repo){
+ const specs=[['import-'+repo.id+'-1',repo.id,'feat/quick-repository-switch','Restore context when switching repositories',repo.id==='gs'?259:repo.id==='ak'?91:420,'review',0,'main',0],['import-'+repo.id+'-2',repo.id,'fix/review-draft-cache','Keep review drafts bound to their PR',null,'unpublished',0,'main',2]];
+ return specs.map((v,i)=>buildItem(v,items.length+i)).filter(w=>!items.some(x=>x.repo===w.repo&&(x.branch===w.branch||x.worktree===w.worktree)));
+}
+function discoverWorktrees(repoId){
+ const repo=repoBy(repoId||(ui.repo==='all'?'gs':ui.repo)),candidates=discoveryCandidates(repo);
+ modalContext={kind:'discovery',repo:repo.id,candidates};
+ showModal('Discover existing worktrees','Inspect directories you already created. Nothing is checked out, recreated, or launched.',`<div class="form-group"><label class="form-label" for="discover-repository">Repository</label><select class="field" id="discover-repository">${repos.map(r=>`<option value="${r.id}" ${r.id===repo.id?'selected':''}>${r.owner} / ${r.name}</option>`).join('')}</select></div><div class="status-note" style="margin-top:16px">${icon('eye')}<div><strong>Read-only discovery · sample results</strong><p>${items.filter(w=>w.repo===repo.id&&w.worktree).length} directories already in the workbench. ${candidates.length} additional existing ${candidates.length===1?'directory':'directories'} shown below. This HTML does not scan your filesystem.</p></div></div><section class="detail-section"><div class="section-label"><h3>${candidates.length?'Not yet in your workbench':'Everything is already tracked'}</h3></div>${candidates.map(w=>`<label class="discovery-row"><input class="check" type="checkbox" data-discovered="${w.id}" checked><span><strong class="mono">${esc(w.branch)}</strong><small class="path">${esc(pathLabel(w))}</small><small>${w.pr?'PR #'+w.pr:'No PR'} · ${w.ahead?w.ahead+' unpublished commits':'No uncommitted files'}</small></span></label>`).join('')}${!candidates.length?'<p class="meta">Select another repository, or return to the existing worktree list.</p>':''}</section><p class="meta">No agent registration or development-tool integration is required.</p>`,`<button class="btn ghost" data-action="new-worktree">${icon('plus')} New worktree instead…</button><button class="btn primary" data-action="import-discovered" id="import-discovered" ${candidates.length?'':'disabled'}>Add ${candidates.length} to workbench · demo</button>`);
+ $('#discover-repository').onchange=e=>discoverWorktrees(e.target.value);
+ $$('[data-discovered]').forEach(c=>c.onchange=()=>{const count=$$('[data-discovered]:checked').length;$('#import-discovered').disabled=!count;$('#import-discovered').textContent=`Add ${count} to workbench · demo`});
+}
+function importDiscovered(){
+ const ctx=modalContext;if(ctx?.kind!=='discovery')return;
+ const ids=new Set($$('[data-discovered]:checked').map(c=>c.dataset.discovered));
+ const additions=ctx.candidates.filter(w=>ids.has(w.id));if(!additions.length)return;
+ if(additions.some(w=>items.some(x=>x.repo===w.repo&&(x.branch===w.branch||x.worktree===w.worktree)))){closeModal();toast('Directory records changed. Open discovery again.');return}
+ items.push(...additions);for(const w of additions)addEvent('Existing worktree added to demo',w,'Directory and checkout were not recreated','worktree');
+ closeModal();if(ui.repo!==ctx.repo)switchRepo(ctx.repo);ui.view='branches';ui.filter='all';ui.query='';ui.worktreeScope='all';ui.selected=additions[0].id;ui.showInspector=true;ui.collapsed.delete('inprogress');locateBranch(additions[0].id);toast(`Added ${additions.length} existing directory records. No checkout changed.`);
+}
+function openLocalDiff(w,index){
+ if(!w?.worktree||!w.dirty)return;const path=workingFiles(w)[index];if(!path)return;
+ modalContext={kind:'local-diff',id:w.id,head:w.head};
+ showModal('Inspect local changes',`<code>${esc(w.branch)}</code> · uncommitted working-directory snapshot`,`${scopeBlock(w)}<div class="diff-frame"><div class="diff-file-head">${esc(path)}</div><div class="diff-content">${DIFFS[0].map(([kind,old,n,text])=>`<div class="diff-line ${kind}"><span class="num">${old}</span><span class="num">${n}</span><span>${kind==='add'?'+':kind==='remove'?'−':' '}</span><span>${esc(text)}</span></div>`).join('')}</div></div><p class="diff-note">Illustrative local patch, not a fetched diff. Editing, staging, and commits stay in your development tool. These changes are not part of the published PR.</p>`,`<button class="btn secondary" data-action="copy-path" data-id="${w.id}">${icon('copy')} Copy directory</button><button class="btn primary" data-action="close-modal">Done</button>`,true);
+}
+
+
+// Keep keyboard navigation inside either open dialog, including wraparound.
+for(const dialog of [$('#modal'),$('#palette')]){
+ dialog.addEventListener('keydown',event=>{
+  if(event.key!=='Tab')return;
+  const controls=[...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')].filter(el=>el.getClientRects().length>0);
+  if(!controls.length){event.preventDefault();return}
+  const first=controls[0],last=controls.at(-1),current=document.activeElement;
+  if(event.shiftKey&&(current===first||!dialog.contains(current))){event.preventDefault();last.focus()}
+  else if(!event.shiftKey&&(current===last||!dialog.contains(current))){event.preventDefault();first.focus()}
+ });
+}
+
+$('#brand-mark').innerHTML=icon('layers');
+const laneObserver=new ResizeObserver(scheduleLaneDraw);laneObserver.observe($('#main-panel'));
+window.addEventListener('resize',scheduleLaneDraw);
+render();
+</script>
+</body>
+</html>

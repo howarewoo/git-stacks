@@ -10,6 +10,8 @@ import { DialogSpecimen } from '../../../src/renderer/src/design-system/DialogSp
 import { FoundationsSpecimen } from '../../../src/renderer/src/design-system/FoundationsSpecimen'
 import { ShellSpecimen } from '../../../src/renderer/src/design-system/ShellSpecimen'
 import { installFixtureControl } from '../fixtures/control'
+import { InventoryConsumer } from './inventory-consumer'
+import { WorkbenchV5Gallery } from './workbench-v5'
 import {
   DEFAULT_SCENARIO,
   GALLERY_ROUTES,
@@ -100,6 +102,10 @@ function GalleryIndex({ scenario }: { scenario: string }) {
 
 function renderRoute(route: GalleryRouteId, remountKey: string) {
   switch (route) {
+    case 'inventory':
+      return <InventoryConsumer />
+    case 'workbenchV5':
+      return <WorkbenchV5Gallery key={remountKey} />
     case 'index':
       return <GalleryIndex key={remountKey} scenario={remountKey} />
     case 'controls':

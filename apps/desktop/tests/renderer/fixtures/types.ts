@@ -1,3 +1,4 @@
+import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import type { GraphPreferences } from '@git-stacks/shared/graph-preferences'
 import type { GraphChange } from './graph'
@@ -34,6 +35,9 @@ import type { NotificationInbox } from '@git-stacks/shared/notifications'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
+  | 'worktreeInventory'
+  | 'cancelInventory'
+  | 'adoptWorktrees'
   | 'recentRepositories'
   | 'openRepository'
   | 'refresh'
@@ -140,6 +144,7 @@ export interface FixtureScenario {
    */
   readonly snapshotsByPath?: Readonly<Record<string, RepositorySnapshot>>
   readonly prIndex?: PullRequestIndex
+  readonly inventory?: WorktreeInventory
   readonly graphPreferences?: GraphPreferences
   /**
    * The settings file this window reads and the GitHub CLI status behind it.
@@ -320,6 +325,9 @@ export interface FixtureControl {
   pushSnapshot(value: RepositorySnapshot): void
   /** Publishes a typed progressive or retained index without a mutation. */
   pushPrIndex(value: PullRequestIndex): void
+  /** Replaces future read answers without publishing or rebuilding held replies. */
+  serveInventory(value: WorktreeInventory): void
+  pushInventory(value: WorktreeInventory): void
   /** Changes source head, same-head base, or status and publishes the new index. */
   changeGraphPr(number: number, change: GraphChange): void
   /** Simulates dropping folders onto the window, dispatching to preload listeners. */

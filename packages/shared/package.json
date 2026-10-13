@@ -24,6 +24,7 @@
     "./settings": "./src/settings.ts",
     "./shortcuts": "./src/shortcuts.ts",
     "./types": "./src/types.ts",
+    "./worktree-inventory": "./src/worktree-inventory.ts",
     "./update": "./src/update.ts"
   },
   "scripts": {

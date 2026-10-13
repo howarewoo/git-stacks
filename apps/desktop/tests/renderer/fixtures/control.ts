@@ -1,3 +1,5 @@
+import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
+import { inventoryFixture } from './inventory'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import {
   parseGraphPreferences,
@@ -306,6 +308,8 @@ export function installFixtureControl(options: {
   let scenario = scenarioFor(options.scenario)
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
+  let servedInventory = scenario.inventory ?? inventoryFixture()
+  const inventoryListeners = new Set<(value: WorktreeInventory) => void>()
   let active: RepositorySnapshot | null = scenario.snapshot
   const cliStatuses = new Map<string, GitHubCliStatus>()
   const statusForHost = (host: string | null): GitHubCliStatus | null => {
@@ -717,6 +721,30 @@ export function installFixtureControl(options: {
           return graphPreferenceResult(null)
         graphPreferenceState.delete(graphPreferenceKey(scope))
         return graphPreferenceResult(scope)
+      })
+    },
+    worktreeInventory: (request) => {
+      record('worktreeInventory', [request])
+      const admitted = structuredClone(servedInventory)
+      return answer('worktreeInventory', () => admitted)
+    },
+    onWorktreeInventory: (listener) => {
+      inventoryListeners.add(listener)
+      return () => {
+        inventoryListeners.delete(listener)
+      }
+    },
+    cancelInventory: (requestId) => {
+      record('cancelInventory', [requestId])
+      // Keep deferred replies deliverable to prove the renderer's late-answer fence.
+      return answer('cancelInventory', () => undefined)
+    },
+    adoptWorktrees: (ids, requestId) => {
+      record('adoptWorktrees', [ids, requestId])
+      return answer('adoptWorktrees', () => {
+        throw new Error(
+          'Adoption requires main-owned directory validation; this browser fixture does not simulate registration success.',
+        )
       })
     },
     prIndex: (options) => {
@@ -2173,6 +2201,7 @@ export function installFixtureControl(options: {
     setScenario(name) {
       scenario = scenarioFor(name)
       servedPrIndex = scenario.prIndex
+      servedInventory = scenario.inventory ?? inventoryFixture()
       seedGraphPreferences()
       // This double is installed once and outlives any number of scenario
       // changes. Only the answers change here: the mounted window keeps the
@@ -2304,6 +2333,13 @@ export function installFixtureControl(options: {
       if (owner) publishedSnapshotOwners.set(value, owner)
       active = value
       push('repository:background-snapshot', value)
+    },
+    serveInventory(value) {
+      servedInventory = structuredClone(value)
+    },
+    pushInventory(value) {
+      servedInventory = structuredClone(value)
+      for (const listener of inventoryListeners) listener(structuredClone(value))
     },
     pushPrIndex(value) {
       servedPrIndex = value
