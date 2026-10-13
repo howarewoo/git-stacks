@@ -809,7 +809,7 @@ export class WorktreeInventoryService {
   private async armWatchers(state: WorktreeInventory, signal: AbortSignal): Promise<void> {
     const targets = new Map<
       string,
-      { repository: RepositoryInventory; tree: InventoryWorktree | null; id: string }
+      { repository: RepositoryInventory | null; tree: InventoryWorktree | null; id: string }
     >()
     for (const repository of state.repositories) {
       for (const tree of repository.worktrees)
@@ -825,6 +825,10 @@ export class WorktreeInventoryService {
         ),
       })
     }
+    // Failed roots still need path monitoring, but carry no current Git authority.
+    for (const { path } of state.failures)
+      if (!targets.has(path))
+        targets.set(path, { repository: null, tree: null, id: inventoryId('presence', path) })
     for (const [path, watcher] of this.watchers)
       if (!targets.has(path) || targets.get(path)!.id !== this.watchedIds.get(path)) {
         watcher.stop()
@@ -836,6 +840,33 @@ export class WorktreeInventoryService {
       WORKTREE_READ_CONCURRENCY,
       async ([path, { repository, tree, id }]) => {
         if (!this.active || signal.aborted || this.watchers.has(path)) return
+        if (!repository) {
+          const watcher = new RepositoryWatcher(
+            path,
+            () => {
+              this.onLocalChange?.([path])
+              this.controller?.abort()
+              this.generation++
+              this.schedule()
+            },
+            {
+              recursiveWatch: false,
+              resolveGitDirectories: async () => [],
+              readContentSignature: async () => '',
+            },
+          )
+          this.watchers.set(path, watcher)
+          this.watchedIds.set(path, id)
+          await watcher.start()
+          if (!this.active || signal.aborted) {
+            watcher.stop()
+            if (this.watchers.get(path) === watcher) {
+              this.watchers.delete(path)
+              this.watchedIds.delete(path)
+            }
+          }
+          return
+        }
         const commonDirectory = repository.identity.commonDirectory
         const watcher = new RepositoryWatcher(
           path,

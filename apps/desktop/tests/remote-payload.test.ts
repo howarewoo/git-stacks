@@ -14,6 +14,121 @@ interface Gate {
   resolve: () => void
 }
 
+test('tracked detail failure degrades snapshots and retains only qualified background facts', {
+  timeout: 30_000,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tracked-payload-'))
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' })
+  let authority = 'tracked-account'
+  let detailFails = true
+  let offline = false
+  let cancel = false
+  const node = {
+    number: 7,
+    title: 'Recorded PR',
+    url: 'https://github.com/acme/widgets/pull/7',
+    headRefName: 'main',
+    headRefOid: 'a'.repeat(40),
+    baseRefName: 'main',
+    isDraft: false,
+    state: 'MERGED',
+    body: '',
+    headRepository: { nameWithOwner: 'acme/widgets' },
+  }
+  const transport: GitHubTransport = {
+    kind: 'gh',
+    destinationHost: 'github.com',
+    async credentialAuthority() {
+      return authority
+    },
+    async rest() {
+      throw new Error('Native stacks unavailable in fixture')
+    },
+    async paginate() {
+      throw new Error('Unexpected pagination')
+    },
+    async graphql<T>(query: string): Promise<T> {
+      if (offline) throw new Error('network offline')
+      if (query.includes('pullRequest(number:')) {
+        if (cancel) throw new CommandCancelled()
+        if (detailFails) throw new Error('tracked detail unavailable')
+        return { repository: { pullRequest: node } } as T
+      }
+      const connection = {
+        nodes: query.includes('issues(first:')
+          ? []
+          : [{ ...node, number: 8, state: 'OPEN', headRefName: 'feature' }],
+        pageInfo: { hasNextPage: false, endCursor: null },
+      }
+      return {
+        repository: query.includes('issues(first:')
+          ? { issues: connection }
+          : { pullRequests: connection },
+      } as T
+    },
+  }
+  try {
+    git('init', '-b', 'main')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('commit', '--allow-empty', '-m', 'base')
+    git('remote', 'add', 'origin', 'https://github.com/acme/widgets.git')
+    git('config', 'branch.main.gitstackspr', '7')
+    await writeFile(join(root, 'local.txt'), 'local facts\n')
+    setGitHubHostTransport('github.com', transport)
+    retireConfirmedGitHubPayloads()
+    const failed = await getSnapshot(root, undefined, 0, 'live')
+    assert.equal(failed.files.length, 1)
+    assert.deepEqual(
+      failed.pullRequests.map((pr) => pr.number),
+      [8],
+    )
+    assert.equal(failed.github.available, false)
+    assert.match(failed.githubStale!.reason, /tracked detail unavailable/)
+    detailFails = false
+    const confirmed = await getSnapshot(root, undefined, 0, 'live')
+    assert.equal(confirmed.github.available, true)
+    assert.deepEqual(
+      confirmed.pullRequests.map((pr) => pr.number),
+      [8, 7],
+    )
+    detailFails = true
+    const degraded = await getSnapshot(root, undefined, 0, 'on-failure')
+    assert.deepEqual(
+      degraded.pullRequests.map((pr) => pr.number),
+      [8, 7],
+    )
+    assert.equal(degraded.github.available, false)
+    assert.ok(degraded.githubStale)
+    const strict = await getSnapshot(root, undefined, 0, 'live')
+    assert.deepEqual(
+      strict.pullRequests.map((pr) => pr.number),
+      [8],
+    )
+    assert.equal(strict.github.available, false)
+    offline = true
+    const retained = await getSnapshot(root, undefined, 0, 'on-failure')
+    assert.deepEqual(
+      retained.pullRequests.map((pr) => pr.number),
+      [8, 7],
+    )
+    assert.ok(retained.githubStale)
+    offline = false
+    authority = 'another-account'
+    const replaced = await getSnapshot(root, undefined, 0, 'on-failure')
+    assert.deepEqual(
+      replaced.pullRequests.map((pr) => pr.number),
+      [8],
+    )
+    cancel = true
+    await assert.rejects(getSnapshot(root, undefined, 0, 'live'), CommandCancelled)
+  } finally {
+    retireConfirmedGitHubPayloads()
+    setGitHubHostTransport('github.com', null)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('independent clones share qualified provider reads without sharing local status', {
   timeout: 30_000,
 }, async () => {
