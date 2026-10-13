@@ -3976,9 +3976,10 @@ export async function getConflictView(
   repoPath: string,
   requestedPath: string,
   toolOverride?: string | null,
+  readOnly = false,
 ): Promise<ConflictFile> {
   const root = await resolveRepository(repoPath)
-  await recoverFileActionJournals(root)
+  if (!readOnly) await recoverFileActionJournals(root)
   const entry = changedEntry(await getStatus(root), requirePathInput(requestedPath, 'path'))
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path

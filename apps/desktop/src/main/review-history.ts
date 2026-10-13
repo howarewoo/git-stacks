@@ -109,6 +109,7 @@ async function diffEndpointWithGit(
   fromOid: string,
   toOid: string,
   signal?: AbortSignal,
+  readOnly = false,
 ): Promise<{
   files: ReviewFile[]
   additions: number
@@ -125,6 +126,7 @@ async function diffEndpointWithGit(
       .then(() => true)
       .catch(() => false)
     if (!fromExists) {
+      if (readOnly) return null
       try {
         await runGit(
           repoPath,
@@ -162,6 +164,7 @@ async function diffEndpointWithGit(
       .then(() => true)
       .catch(() => false)
     if (!toExists) {
+      if (readOnly) return null
       try {
         await runGit(
           repoPath,
@@ -325,6 +328,7 @@ export async function readReviewHistoryDiff(
   number: number,
   fromOid: string,
   signal?: AbortSignal,
+  readOnly = false,
 ): Promise<ReviewHistoryDiff> {
   const remote = await originRemote(repoPath, signal)
   const repo = reviewRepositoryIdentity(remote)
@@ -397,7 +401,7 @@ export async function readReviewHistoryDiff(
   }
 
   // 1. Try local Git endpoint diff first for a true tree-to-tree comparison across force-push/rebase.
-  const gitResult = await diffEndpointWithGit(repoPath, fromOid, currentHead, signal)
+  const gitResult = await diffEndpointWithGit(repoPath, fromOid, currentHead, signal, readOnly)
   if (gitResult) {
     const after = await readReviewIdentity(remote, number, signal)
     if (!sameReviewComparison(before.comparison, after.comparison)) {

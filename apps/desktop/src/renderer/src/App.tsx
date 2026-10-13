@@ -110,10 +110,27 @@ function App() {
   const [pendingReview, setPendingReview] = React.useState<{
     repositoryId: string
     number: number
+    generation: number
   } | null>(null)
+  const navigationGeneration = React.useRef(0)
+  const retirePendingReview = React.useCallback(() => {
+    navigationGeneration.current += 1
+    setPendingReview(null)
+  }, [])
   const [savingInboxFilters, setSavingInboxFilters] = React.useState(false)
   const attentionSearch = React.useRef<HTMLInputElement>(null)
   const [bindings, setBindings] = React.useState(defaultShortcutBindings)
+  const settingsRead = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => desktop!.settings!(),
+    enabled: Boolean(desktop?.settings),
+  })
+  React.useEffect(() => {
+    if (settingsRead.error) setError(settingsRead.error.message)
+    if (!settingsRead.data) return
+    setSettings(settingsRead.data.settings)
+    setBindings(settingsRead.data.settings.shortcuts)
+  }, [settingsRead.data, settingsRead.error])
   const [cliStatus, setCliStatus] = React.useState<GitHubCliStatus | null>(null)
   const [providerEpoch, setProviderEpoch] = React.useState(0)
   const configuredHost = React.useRef(settings?.github.host ?? 'github.com')
@@ -260,14 +277,23 @@ function App() {
     enabled: Boolean(desktop?.pullRequestInboxFilters && surface === 'attention'),
     queryFn: () => desktop!.pullRequestInboxFilters!(),
   })
-  const updateMemory = React.useCallback((id: string, patch: Partial<RepositoryViewMemory>) => {
-    setMemory((previous) => {
-      const next = { ...previous, [id]: { ...(previous[id] ?? emptyRepositoryMemory), ...patch } }
-      const refusal = saveWorkbenchMemory(next)
-      if (refusal) setError(refusal)
-      return next
-    })
-  }, [])
+  const updateMemory = React.useCallback(
+    (id: string, patch: Partial<RepositoryViewMemory>) => {
+      if (
+        patch.selectedId !== undefined ||
+        patch.surface !== undefined ||
+        patch.pullRequestId !== undefined
+      )
+        retirePendingReview()
+      setMemory((previous) => {
+        const next = { ...previous, [id]: { ...(previous[id] ?? emptyRepositoryMemory), ...patch } }
+        const refusal = saveWorkbenchMemory(next)
+        if (refusal) setError(refusal)
+        return next
+      })
+    },
+    [retirePendingReview],
+  )
   React.useEffect(() => {
     if (selectedTree && current.view.worktreeId === null)
       updateMemory(repositoryId, { view: { ...current.view, worktreeId: selectedTree.id } })
@@ -285,13 +311,6 @@ function App() {
   }, [snapshot.repositories, repositoryId])
   React.useEffect(() => {
     if (!desktop) return
-    void desktop
-      .settings?.()
-      .then((value) => {
-        setSettings(value.settings)
-        setBindings(value.settings.shortcuts)
-      })
-      .catch((value) => setError(String(value)))
     let retired = false
     let statusVersion = 0
     const principals = new Map<string, string>()
@@ -313,7 +332,7 @@ function App() {
       if (previous === undefined || previous === next) return
       setProviderEpoch((epoch) => epoch + 1)
       setDetails({})
-      setPendingReview(null)
+      retirePendingReview()
       setReturnOrigin(null)
       setNotificationInbox(null)
       const capturedReads = (query: { queryKey: readonly unknown[] }) =>
@@ -410,14 +429,30 @@ function App() {
     return () => clearTimeout(timer)
   }, [globalQuery, paletteOpen])
   const navigate = React.useCallback(
-    (id: string, nextSurface?: WorkbenchSurface, selectedId?: string) => {
+    (id: string, nextSurface?: WorkbenchSurface, selectedId?: string, worktreeId?: string) => {
       setRepositoryId(id)
       const saved = memoryRef.current[id] ?? emptyRepositoryMemory
       const next = nextSurface ?? saved.surface
       setSurface(next)
       updateMemory(id, {
         surface: next === 'attention' || next === 'activity' ? saved.surface : next,
-        ...(selectedId ? { selectedId } : {}),
+        ...(selectedId !== undefined || worktreeId !== undefined
+          ? {
+              selectedId: selectedId ?? null,
+              view: {
+                ...saved.view,
+                worktreeId:
+                  worktreeId ??
+                  (next === 'review' && saved.selectedId === selectedId
+                    ? saved.view.worktreeId
+                    : null),
+                tab:
+                  next === 'review' && saved.selectedId === selectedId
+                    ? saved.view.tab
+                    : 'overview',
+              },
+            }
+          : {}),
       })
     },
     [updateMemory],
@@ -451,7 +486,10 @@ function App() {
           tab: origin.tab ?? saved.view.tab,
         },
       })
-    } else setSurface('branches')
+    } else {
+      retirePendingReview()
+      setSurface('branches')
+    }
     setReturnOrigin(null)
   }
   const reviewSelected = () => {
@@ -470,6 +508,12 @@ function App() {
   }
   React.useEffect(() => {
     if (!pendingReview) return
+    if (
+      pendingReview.generation !== navigationGeneration.current ||
+      pendingReview.repositoryId !== repositoryId ||
+      surface !== 'review'
+    )
+      return
     const row = snapshot.branches.find(
       (branch) =>
         branch.repositoryId === pendingReview.repositoryId &&
@@ -482,7 +526,7 @@ function App() {
     })
     setSurface('review')
     setPendingReview(null)
-  }, [pendingReview, snapshot.branches, updateMemory])
+  }, [pendingReview, snapshot.branches, updateMemory, repositoryId, surface])
   React.useLayoutEffect(() => {
     if (surface === 'pull-requests' && pullRequestScroll.current)
       pullRequestScroll.current.scrollTop = current.pullRequestScroll
@@ -541,6 +585,7 @@ function App() {
       return
     }
     if (action === 'attention' || action === 'activity') {
+      retirePendingReview()
       setReturnOrigin(captureOrigin())
       setSurface(action)
       return
@@ -831,7 +876,7 @@ function App() {
           )?.id,
           worktreeId: tree.kind === 'bare' ? undefined : tree.id,
           label: `${tree.kind === 'bare' ? 'Bare administrative repository' : 'Worktree'} · ${tree.path}`,
-          context: `${repo.remote?.fullName ?? 'Local repository'} · ${tree.detached ? 'Detached HEAD' : (tree.refId ?? 'No resolved branch')} · ${tree.missing ? 'Directory missing' : tree.status}`,
+          context: `${repo.remote?.fullName ?? 'Local repository'} · ${tree.detached ? 'Detached HEAD' : (repo.refs.find((ref) => ref.id === tree.refId)?.name ?? 'No resolved branch')} · ${tree.missing ? 'Directory missing' : tree.status}`,
         })
     }
     const query = globalQuery.toLowerCase().trim()
@@ -980,7 +1025,11 @@ function App() {
               }
               setReturnOrigin({ ...captureOrigin(), surface: 'attention' })
               navigate(repo.identity.id, 'review')
-              setPendingReview({ repositoryId: repo.identity.id, number: item.number })
+              setPendingReview({
+                repositoryId: repo.identity.id,
+                number: item.number,
+                generation: navigationGeneration.current,
+              })
             }}
             onSaveFilters={async (drafts) => {
               if (!desktop?.savePullRequestInboxFilters)
@@ -1108,7 +1157,14 @@ function App() {
             selectedRefId || selectedLocalFact?.headOid
               ? {}
               : { reason: 'No committed local revision in this context' },
-          'open-directory': selectedTree ? {} : { reason: 'Choose an existing worktree' },
+          'open-directory':
+            selectedTree && !selectedLocalFact?.missing
+              ? {}
+              : {
+                  reason: selectedLocalFact?.missing
+                    ? 'Selected directory is missing'
+                    : 'Choose an existing worktree',
+                },
           ...(selected?.refKind === 'local' && selectedTree && !selectedLocalFact?.missing
             ? { restack: {}, sync: {}, publish: {} }
             : {}),
@@ -1189,23 +1245,37 @@ function App() {
             ? {
                 overview: (
                   <section className="bw-section">
-                    <h3>Independent revisions</h3>
+                    <h3>Directory observations</h3>
                     <p>
-                      Directory HEAD:{' '}
-                      <code>{selectedLocalFact?.headOid ?? 'No selected local directory'}</code>
+                      <code>{selectedLocalFact?.path ?? 'No selected working directory'}</code>
                     </p>
                     <p>
-                      Directory authority:{' '}
-                      <code>{selectedLocalFact?.id ?? 'No explicit directory'}</code> ·{' '}
-                      {selectedLocalFact?.kind ?? 'No worktree'} ·{' '}
+                      Local HEAD:{' '}
+                      <code>{selectedLocalFact?.headOid?.slice(0, 7) ?? 'Not observed'}</code>
+                      {' · '}
                       {selectedLocalFact?.missing
                         ? 'Directory missing'
-                        : (selectedLocalFact?.read.state ?? 'Unknown')}
+                        : (selectedTree?.status.label ?? 'Status unknown')}
                     </p>
+                    {selectedLocalFact?.headOid ? (
+                      <details>
+                        <summary>Full local revision</summary>
+                        <code>{selectedLocalFact.headOid}</code>
+                      </details>
+                    ) : null}
                     <p>
-                      Index observation:{' '}
-                      <code>{selectedLocalFact?.indexSignature ?? 'Unavailable'}</code> ·{' '}
-                      {selectedLocalFact?.read.observedAt ?? 'Not observed'}
+                      Index: {selectedLocalFact?.indexSignature ? 'Observed' : 'Not observed'}
+                      {' · '}
+                      {selectedLocalFact?.read.state ?? 'Unknown'}
+                      {selectedLocalFact?.read.observedAt ? (
+                        <>
+                          {' '}
+                          ·{' '}
+                          <time dateTime={selectedLocalFact.read.observedAt}>
+                            {new Date(selectedLocalFact.read.observedAt).toLocaleString()}
+                          </time>
+                        </>
+                      ) : null}
                     </p>
                     {selectedLocalFact?.locked || selectedLocalFact?.prunable ? (
                       <p>
@@ -1343,15 +1413,7 @@ function App() {
                         key={item.id}
                         value={item.id}
                         onSelect={() => {
-                          navigate(item.repositoryId, 'branches', item.branchId)
-                          if (item.worktreeId) {
-                            const saved =
-                              memoryRef.current[item.repositoryId] ?? emptyRepositoryMemory
-                            updateMemory(item.repositoryId, {
-                              selectedId: item.branchId ?? null,
-                              view: { ...saved.view, worktreeId: item.worktreeId, tab: 'overview' },
-                            })
-                          }
+                          navigate(item.repositoryId, 'branches', item.branchId, item.worktreeId)
                           setPaletteOpen(false)
                         }}
                       >

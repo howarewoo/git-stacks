@@ -83,6 +83,10 @@ html[data-native-mac="true"] .bw-topbar {
 .bw-inspector-actions p {
   overflow-wrap: anywhere;
 }
+.bw-inspector-actions > .bw-between > .bw-directory-actions {
+  flex: none;
+  display: inline-flex;
+}
 @media (max-width: 1039px) {
   .wb-error {
     left: 16px;
