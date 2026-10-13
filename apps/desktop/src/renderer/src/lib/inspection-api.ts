@@ -50,7 +50,9 @@ export function inspectionAPI(
           throw new Error('Selected-context inspection is unavailable in this runtime.')
         const id = `inspection-${crypto.randomUUID()}`
         const explicitId =
-          operation === 'history' || operation === 'reviewHistoryDiff'
+          operation === 'history' ||
+          operation === 'reviewHistoryDiff' ||
+          operation === 'pullRequestLayer'
             ? args[2]
             : operation === 'commitDiff' ||
                 [

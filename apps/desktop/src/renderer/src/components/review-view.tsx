@@ -69,7 +69,11 @@ import type {
   ReviewDraftRecovery,
   ReviewOwner,
 } from '@git-stacks/shared/review-threads'
-import { sameReviewDraft, sameReviewComposerDraft } from '@git-stacks/shared/review-threads'
+import {
+  sameReviewDraft,
+  sameReviewComposerDraft,
+  newReviewDraftId,
+} from '@git-stacks/shared/review-threads'
 import { ReviewDiff } from './review-diff'
 import type { ReviewHistory } from '@git-stacks/shared/review-snapshots'
 import {
@@ -644,7 +648,15 @@ export function ReviewView({
     },
     retry: false,
   })
-  const saveDrafts = (drafts: ReviewDraft[], composer = liveDraftRecord.current?.composer) => {
+  const saveDrafts = (
+    drafts: ReviewDraft[],
+    composer = liveDraftRecord.current?.composer ?? {
+      id: newReviewDraftId(),
+      summary: '',
+      event: 'COMMENT' as const,
+      replies: [],
+    },
+  ) => {
     if (number === null || !draftOwner?.viewer) return
     const preservesSavedComparison =
       draftRecord !== null &&
@@ -653,7 +665,7 @@ export function ReviewView({
           draftRecord.composer &&
             (draftRecord.composer.summary ||
               draftRecord.composer.event !== 'COMMENT' ||
-              draftRecord.composer.replies.some((reply) => reply.body)),
+              draftRecord.composer.replies.length),
         ) ||
         !files)
     const comparison = preservesSavedComparison ? draftRecord.comparison : files?.comparison
@@ -985,7 +997,7 @@ export function ReviewView({
       (draftRecord.drafts.length ||
         draftRecord.composer?.summary ||
         (draftRecord.composer?.event && draftRecord.composer.event !== 'COMMENT') ||
-        draftRecord.composer?.replies.some((reply) => reply.body)) &&
+        draftRecord.composer?.replies.length) &&
       !sameReviewComparison(draftRecord.comparison, files.comparison),
   )
   const frozenReason = draftComparisonChanged

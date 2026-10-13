@@ -613,9 +613,24 @@ checks, commits and conversation reuse the existing review engine. Diff, viewed
 files and authored anchors are comparison-bound, including same-head base movement.
 Inline text, overall review decisions/summaries and per-thread replies share the
 existing host/repository/account-owned private draft journal and versioned full-set
-write queue. Only matching confirmed text retires; unknown provider outcomes are
-not replayed. A summary-only comment, approval or request-changes review uses the
-same live permission, comparison and dispatched-attempt guards.
+write queue. Each overall summary/decision version has a minted durable composition
+identity. Confirmed receipts retire only that original version; recovered earlier
+inline reviews leave a newer summary/decision visibly unsent. A zero-inline review
+reconciles its original provider boundary, author, head, event and exact body, not
+an arbitrary similar historical review. Missing review identity or an unexpected
+provider decision leaves the outcome unknown, with text and its guard retained.
+Reply editors open only after the owned journal is admitted. Saved replies remain
+copyable, editable and explicitly discardable under their original thread,
+comparison and account even when the thread is absent, truncated or unreadable.
+Such absence disables sending rather than hiding text or moving its anchor.
+Incomplete conversation reads never establish an empty conversation.
+Native-member navigation outside the bounded inventory performs a captured exact
+provider read after confirming current submitted membership, then adopts qualified
+facts and routes without checkout. Retired actor/origin reads cannot adopt or route.
+Failed exact reads name the captured-source refusal rather than remaining in a
+loading state; later facts from a different remote namespace cannot satisfy that
+pending route. The canonical `review-uncached-native-layer` gallery scenario
+declares complete 201-member source order and a 200-PR inventory.
 
 PR management captures its original source and operation authority. Provider edit
 permission is read from that source rather than inferred from a cached local
@@ -623,7 +638,9 @@ snapshot. Title/body/draft and close/reopen use their real validators and confir
 readback. Body saves carry the original expected body; a changed published body is
 compared in-app while authored input stays intact. Related issue links are local
 context, separate from provider-body closing keywords, which require a confirmed
-default branch and permission and are revalidated before writing.
+default branch and permission. Each contextual config mutation rechecks the captured
+directory/ref/origin after awaits, including each unlink rewrite; cancellation and
+refusal propagate rather than being treated as an already-unset success.
 
 **Needs attention** works across registered repositories with none selected.
 One qualified provider PR counts once even with several reasons; clone-local

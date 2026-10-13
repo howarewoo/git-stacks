@@ -180,6 +180,8 @@ function App() {
     repositoryId: string
     number: number
     generation: number
+    remoteId?: string
+    error?: string
   } | null>(null)
   const navigationGeneration = React.useRef(0)
   const retirePendingReview = React.useCallback(() => {
@@ -685,7 +687,12 @@ function App() {
     })
   }
   React.useEffect(() => {
-    if (!pendingReview) return
+    if (
+      !pendingReview ||
+      pendingReview.error ||
+      (pendingReview.remoteId !== undefined && pendingReview.remoteId !== repository?.remote?.id)
+    )
+      return
     if (
       pendingReview.generation !== navigationGeneration.current ||
       pendingReview.repositoryId !== repositoryId ||
@@ -704,7 +711,14 @@ function App() {
     })
     setSurface('review')
     setPendingReview(null)
-  }, [pendingReview, snapshot.branches, updateMemory, repositoryId, surface])
+  }, [
+    pendingReview,
+    snapshot.branches,
+    updateMemory,
+    repositoryId,
+    repository?.remote?.id,
+    surface,
+  ])
   /** Explicit operational adoption only; navigation never activates a checkout or recovers journals. */
   const captureOperationalTarget = async (target: InspectionContext = context) => {
     if (!desktop || operationBusy)
@@ -1337,13 +1351,52 @@ function App() {
                 (branch) =>
                   branch.repositoryId === repositoryId && branch.pullRequest?.number === number,
               )
-              if (row)
+              if (row) {
                 updateMemory(repositoryId, {
                   selectedId: row.id,
                   pullRequestId: row.pullRequest!.id,
                   view: { ...current.view, worktreeId: null },
                 })
-              else setError('This PR has no current qualified inventory association.')
+                return
+              }
+              const sourceNumber = selected.pullRequest?.number
+              if (!desktop || !sourceNumber) {
+                setError('Captured native-layer reading is unavailable.')
+                return
+              }
+              const generation = providerGeneration.current
+              const api = inspectionAPI(
+                desktop,
+                publishedContext,
+                () => providerGeneration.current === generation,
+              )
+              if (!api.pullRequestLayer) {
+                setError('Captured native-layer reading is unavailable.')
+                return
+              }
+              updateMemory(repositoryId, {
+                selectedId: null,
+                pullRequestId: null,
+                view: { ...current.view, worktreeId: null },
+              })
+              const navigation = navigationGeneration.current
+              setPendingReview({
+                repositoryId,
+                number,
+                generation: navigation,
+                remoteId: repository.remote?.id,
+              })
+              void api.pullRequestLayer(sourceNumber, number).catch((cause) => {
+                if (
+                  providerGeneration.current !== generation ||
+                  navigationGeneration.current !== navigation
+                )
+                  return
+                const message = cause instanceof Error ? cause.message : String(cause)
+                setPendingReview((pending) =>
+                  pending?.generation === navigation ? { ...pending, error: message } : pending,
+                )
+              })
             }}
             onManageNumber={(number) => {
               const target = repository.pullRequests.find((pr) => pr.number === number)
@@ -1365,7 +1418,9 @@ function App() {
         ) : surface === 'review' ? (
           <p>
             {pendingReview
-              ? `Loading qualified PR #${pendingReview.number} in the selected repository…`
+              ? pendingReview.error
+                ? `Could not open qualified PR #${pendingReview.number}: ${pendingReview.error}`
+                : `Loading qualified PR #${pendingReview.number} in the selected repository…`
               : 'Choose a qualified pull request.'}{' '}
             {repoRead.error?.message}
           </p>

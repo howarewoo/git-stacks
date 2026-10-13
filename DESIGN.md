@@ -238,6 +238,15 @@ The reference is `git-stacks-workbench-v5.html` at retained commit `40ade209a285
 - Return routes restore the originating repository, view, filters, folds and
   scroll. Open forms retain their original source; authored review, reply and PR
   body text is not relocated or discarded by navigation or source refresh.
+- Overall summary/decision versions retain durable composition identity. A recovered
+  earlier receipt never clears newer unsent words. Missing or unusable provider
+  confirmation holds text and replay guards, never displays a sent state.
+- Retained reply recovery remains reachable independently of the live thread list,
+  including unreadable, missing or truncated threads. Show original owner/thread/
+  comparison, copy/edit and explicit qualified discard; absence disables send.
+- Native rail members outside the bounded list show their requested qualified
+  pending destination while an exact source-confirmed captured read completes.
+  Actor/origin retirement never adopts or redirects to those stale results.
 - Settings, local entry, clone and optional Notifications remain compact shared
   focus-managed secondary surfaces, with bounded scrolling, reachable actions,
   errors, cancellation and nested focus return. Local entry and primary provider

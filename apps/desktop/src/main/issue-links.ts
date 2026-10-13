@@ -13,6 +13,7 @@ import { isRecord } from '@git-stacks/shared/guards'
 import { getPullRequest, githubErrorMessage } from './github'
 import { hostTransport, remoteHostContext, type GitHubHostContext } from './github-host'
 import { patchPullRequest } from './stacks'
+import { validateInspectionDispatch } from './inspection-context'
 
 /**
  * Concurrency Note (Read-Compare-Write API Race):
@@ -236,7 +237,8 @@ export async function readLocalContextualIssueLinks(
       .map((v: string) => Number(v.trim()))
       .filter((n: number) => Number.isInteger(n) && n > 0)
     return [...new Set(numbers)]
-  } catch {
+  } catch (error) {
+    if (isCancelled(error)) throw error
     return []
   }
 }
@@ -251,6 +253,7 @@ export async function addLocalContextualIssueLink(
     return false
   }
   const key = `${CONFIG_PREFIX}${prNumber}.relatedissue`
+  await validateInspectionDispatch()
   await runGit(repoPath, ['config', '--local', '--add', key, String(issueNumber)])
   return true
 }
@@ -267,12 +270,10 @@ export async function removeLocalContextualIssueLink(
   }
   const remaining = current.filter((n) => n !== issueNumber)
   const key = `${CONFIG_PREFIX}${prNumber}.relatedissue`
-  try {
-    await runGit(repoPath, ['config', '--local', '--unset-all', key])
-  } catch {
-    // Already unset
-  }
+  await validateInspectionDispatch()
+  await runGit(repoPath, ['config', '--local', '--unset-all', key])
   for (const num of remaining) {
+    await validateInspectionDispatch()
     await runGit(repoPath, ['config', '--local', '--add', key, String(num)])
   }
   return true

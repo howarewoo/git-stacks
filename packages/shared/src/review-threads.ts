@@ -80,19 +80,14 @@ export function sameReviewDraft(left: ReviewDraft, right: ReviewDraft): boolean 
   )
 }
 
-/**
- * The pending drafts of one pull request, recorded beside the repository.
- *
- * A draft's line numbers are only an address at the comparison they were read
- * at. GitHub diffs a head against the merge base of head and base, so the base
- * moving under a fixed head changes every line number in the same way a
- * force-push does. A record therefore carries the whole comparison, and a
- * record written at one is never re-sent against another.
- */
-/** Authored non-inline text shares the existing account/comparison-owned journal. */
-export interface ReviewComposerDraft {
+/** A minted overall decision/summary version, stable across reopen and receipt recovery. */
+export interface ReviewComposition {
+  id: string
   summary: string
   event: ReviewEvent
+}
+
+export interface ReviewComposerDraft extends ReviewComposition {
   replies: Array<{ threadId: string; body: string }>
 }
 
@@ -100,6 +95,9 @@ export function parseReviewComposerDraft(value: unknown): ReviewComposerDraft | 
   if (typeof value !== 'object' || value === null) return null
   const input = value as Record<string, unknown>
   if (
+    typeof input.id !== 'string' ||
+    !input.id ||
+    input.id.length > 128 ||
     typeof input.summary !== 'string' ||
     input.summary.length > 65536 ||
     !REVIEW_EVENTS.includes(input.event as ReviewEvent) ||
@@ -124,7 +122,7 @@ export function parseReviewComposerDraft(value: unknown): ReviewComposerDraft | 
     ids.add(row.threadId)
     replies.push({ threadId: row.threadId, body: row.body })
   }
-  return { summary: input.summary, event: input.event as ReviewEvent, replies }
+  return { id: input.id, summary: input.summary, event: input.event as ReviewEvent, replies }
 }
 
 export function sameReviewComposerDraft(
@@ -135,6 +133,7 @@ export function sameReviewComposerDraft(
   if (
     !a ||
     !b ||
+    a.id !== b.id ||
     a.summary !== b.summary ||
     a.event !== b.event ||
     a.replies.length !== b.replies.length
@@ -146,6 +145,15 @@ export function sameReviewComposerDraft(
   )
 }
 
+/**
+ * The pending drafts of one pull request, recorded beside the repository.
+ *
+ * A draft's line numbers are only an address at the comparison they were read
+ * at. GitHub diffs a head against the merge base of head and base, so the base
+ * moving under a fixed head changes every line number in the same way a
+ * force-push does. A record therefore carries the whole comparison, and a
+ * record written at one is never re-sent against another.
+ */
 export interface ReviewDraftRecord {
   number: number
   /**
@@ -291,6 +299,8 @@ export interface ReviewMutationResult {
    * reviewer's own unsent work is not thrown away by a recovery.
    */
   delivered?: string[]
+  /** Recovery certifies original words, never a newer edited composition. */
+  deliveredComposition?: ReviewComposition
 }
 
 const SIDE_NAMES: Record<ReviewSide, string> = { base: 'base', head: 'head' }
@@ -359,6 +369,8 @@ export interface ReviewThreadRead {
 export interface ReviewSubmission extends ReviewOwner {
   event: ReviewEvent
   body: string
+  /** Mandatory for non-inline intent; inline draft identities retain their overlap rules. */
+  compositionId?: string
   drafts: ReviewDraft[]
   /** The comparison the diff on screen was read at. */
   comparison: ReviewComparison
@@ -383,6 +395,7 @@ export interface ReviewUncertainWrite {
   kind: 'review' | 'reply' | 'resolve'
   /** The words of the write, so a reconciliation can recognise it on GitHub. */
   summary: string
+  compositionId?: string
   /** Exact reply payload; absent historical evidence cannot certify reply delivery. */
   authoredReplyBody?: string
   /** A reply's thread, or a review's head commit — where to look for it. */

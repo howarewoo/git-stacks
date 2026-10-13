@@ -62,6 +62,7 @@ import {
   readReviewCommits,
   readReviewFiles,
   readReviewHeadline,
+  readNativeStackLayer,
   reviewRepositoryIdentity,
 } from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
@@ -89,7 +90,7 @@ import {
   rerunPullRequestCheck,
 } from './pull-request-checks'
 import type { PullRequestChecksOptions } from './pull-request-checks'
-import type { PullRequestPage, PullRequest } from '@git-stacks/shared/types'
+import type { PullRequestPage, PullRequest, PullRequestLayerRead } from '@git-stacks/shared/types'
 import type {
   ReviewDraft,
   ReviewDraftRecord,
@@ -1324,10 +1325,20 @@ function requireSubmission(value: unknown): ReviewSubmission {
   if (typeof submission.comparison !== 'object' || submission.comparison === null) {
     throw new Error('Invalid review submission.')
   }
+  if (
+    submission.compositionId !== undefined &&
+    (typeof submission.compositionId !== 'string' ||
+      !submission.compositionId ||
+      submission.compositionId.length > 128)
+  )
+    throw new Error('Invalid review composition identity.')
   return {
     ...requireReviewOwner(submission),
     event: event as ReviewEvent,
     body: submission.body,
+    ...(typeof submission.compositionId === 'string'
+      ? { compositionId: submission.compositionId }
+      : {}),
     drafts: submission.drafts.map(requireDraft),
     // The comparison the diff was rendered from. Without it the backend cannot
     // tell a review of what the reviewer read from a review of whatever the head
@@ -1631,6 +1642,24 @@ function installHandlers() {
       )
     },
   )
+  ipcMain.handle(
+    'repository:pull-request-layer',
+    (event, sourceValue: unknown, memberValue: unknown, requestId: unknown) => {
+      if (!inspectionAuthority.getStore())
+        throw new Error('Captured pull request context is required.')
+      return readRepository(
+        (root, signal) =>
+          readNativeStackLayer(
+            root,
+            requirePullRequestNumber(sourceValue),
+            requirePullRequestNumber(memberValue),
+            signal,
+          ),
+        requestIdClaim(requestId, 'pull-request-layer'),
+        'github',
+      )
+    },
+  )
   ipcMain.handle('inspection:snapshot', () => {
     if (!inspectionAuthority.getStore()) throw new Error('Captured repository context is required.')
     return readRepository(
@@ -1693,6 +1722,7 @@ function installHandlers() {
         operation.startsWith('review') ||
         operation === 'pullRequestPage' ||
         operation === 'pullRequest' ||
+        operation === 'pullRequestLayer' ||
         operation === 'pullRequestAction' ||
         operation === 'searchIssues' ||
         operation === 'pullRequestIssueLinks' ||
@@ -1772,6 +1802,7 @@ function installHandlers() {
               if (
                 operation.startsWith('review') ||
                 operation === 'pullRequest' ||
+                operation === 'pullRequestLayer' ||
                 operation === 'pullRequestAction' ||
                 operation === 'pullRequestIssueLinks' ||
                 operation === 'previewIssueLink' ||
@@ -1784,6 +1815,7 @@ function installHandlers() {
             } else if (
               operation.startsWith('review') ||
               operation === 'pullRequest' ||
+              operation === 'pullRequestLayer' ||
               operation === 'pullRequestAction' ||
               operation === 'searchIssues' ||
               operation === 'pullRequestIssueLinks' ||
@@ -1878,6 +1910,15 @@ function installHandlers() {
                 page.pullRequests,
                 originUrl,
                 page.observedAt,
+              )
+            }
+            if (operation === 'pullRequestLayer' && originUrl) {
+              const layer = result as PullRequestLayerRead
+              inventory.adoptPullRequestPage(
+                context.repositoryId,
+                [layer.pullRequest, layer.sourcePullRequest],
+                originUrl,
+                layer.observedAt,
               )
             }
             return result

@@ -42,6 +42,11 @@ function parseUncertain(value: unknown): ReviewUncertainWrite | null {
     number: value.number,
     kind: value.kind,
     summary: typeof value.summary === 'string' ? value.summary : '',
+    ...(typeof value.compositionId === 'string' &&
+    value.compositionId &&
+    value.compositionId.length <= 128
+      ? { compositionId: value.compositionId }
+      : {}),
     ...(value.kind === 'reply' &&
     typeof value.authoredReplyBody === 'string' &&
     value.authoredReplyBody === value.summary
@@ -495,6 +500,43 @@ export async function writeReviewDrafts(
   )
 }
 
+/** The saved version or original dispatched attempt owns a composition, not caller-generated text. */
+export async function assertReviewCompositionOwner(
+  repoPath: string,
+  repo: string,
+  viewer: string,
+  number: number,
+  comparison: ReviewComparison,
+  id: string,
+  summary: string,
+  event: ReviewEvent,
+  signal?: AbortSignal,
+): Promise<void> {
+  const record = await readReviewDrafts(repoPath, repo, viewer, number, signal)
+  if (
+    record?.composer?.id === id &&
+    record.composer.summary === summary &&
+    record.composer.event === event &&
+    sameReviewComparison(record.comparison, comparison)
+  )
+    return
+  const attempts = await readUncertainWrites(repoPath, repo, number, viewer, signal)
+  if (
+    attempts.some(
+      (attempt) =>
+        attempt.kind === 'review' &&
+        attempt.compositionId === id &&
+        attempt.summary === summary &&
+        attempt.event === event &&
+        sameReviewComparison(attempt.comparison, comparison),
+    )
+  )
+    return
+  throw new Error(
+    'The original saved review composition is unavailable or changed; no review was sent.',
+  )
+}
+
 /**
  * Retires only the exact authored versions confirmed by the submitting operation.
  * Another window's additions or same-identity edits remain unsent. Empty records
@@ -559,7 +601,7 @@ export async function retireDeliveredComposerText(
   viewer: string,
   number: number,
   delivered:
-    | { summary: string; event: ReviewEvent; comparison: ReviewComparison }
+    | { compositionId: string; summary: string; event: ReviewEvent; comparison: ReviewComparison }
     | { threadId: string; body: string },
   authorize: () => Promise<void>,
 ): Promise<void> {
@@ -574,6 +616,7 @@ export async function retireDeliveredComposerText(
       if ('summary' in delivered) {
         if (
           !sameReviewComparison(record.comparison, delivered.comparison) ||
+          composer.id !== delivered.compositionId ||
           composer.summary !== delivered.summary ||
           composer.event !== delivered.event
         )
@@ -664,30 +707,40 @@ async function publishUncertainWrite(
       const existing = await readUncertain(file)
       await authorize()
       if (reserve) {
-        const conflict = existing.find(
-          (entry) =>
-            entry.number === write.number &&
-            entry.kind === write.kind &&
-            entry.repo === write.repo &&
-            entry.viewer === write.viewer &&
-            (entry.settled === null
-              ? entry.id === write.id ||
-                (write.kind === 'review' &&
-                  sameReviewComparison(entry.comparison, write.comparison) &&
-                  entry.draftIds.some((id) => write.draftIds.includes(id)))
-              : write.kind === 'review' &&
+        const conflict = existing.find((entry) => {
+          if (
+            entry.number !== write.number ||
+            entry.kind !== write.kind ||
+            entry.repo !== write.repo ||
+            entry.viewer !== write.viewer
+          )
+            return false
+          const compositionOverlap = Boolean(
+            write.compositionId && entry.compositionId === write.compositionId,
+          )
+          if (entry.settled === null)
+            return (
+              entry.id === write.id ||
+              (write.kind === 'review' &&
                 sameReviewComparison(entry.comparison, write.comparison) &&
-                entry.comments.some((comment) =>
-                  write.comments.some(
-                    (mine) =>
-                      comment.draftId !== null &&
-                      comment.draftId === mine.draftId &&
-                      (comment.authoredDraft === undefined ||
-                        mine.authoredDraft === undefined ||
-                        sameReviewDraft(comment.authoredDraft, mine.authoredDraft)),
-                  ),
-                )),
-        )
+                (compositionOverlap || entry.draftIds.some((id) => write.draftIds.includes(id))))
+            )
+          return (
+            write.kind === 'review' &&
+            sameReviewComparison(entry.comparison, write.comparison) &&
+            (compositionOverlap ||
+              entry.comments.some((comment) =>
+                write.comments.some(
+                  (mine) =>
+                    comment.draftId !== null &&
+                    comment.draftId === mine.draftId &&
+                    (comment.authoredDraft === undefined ||
+                      mine.authoredDraft === undefined ||
+                      sameReviewDraft(comment.authoredDraft, mine.authoredDraft)),
+                ),
+              ))
+          )
+        })
         // Settled evidence blocks stale preflights of the same authored version,
         // not genuinely edited drafts that retain their original identity.
         if (conflict) return conflict
@@ -801,6 +854,7 @@ export async function retireSettledWrites(
   draftIds: readonly string[],
   authorize: () => Promise<void>,
   signal?: AbortSignal,
+  compositionId?: string,
 ): Promise<void> {
   const file = await repositoryJournalPath(repoPath, UNCERTAIN_JOURNAL, signal)
   await withJournalLock(
@@ -817,7 +871,10 @@ export async function retireSettledWrites(
           return true
         }
         if (!sameReviewComparison(entry.comparison, comparison)) return false
-        return entry.draftIds.some((theirs) => draftIds.includes(theirs))
+        return (
+          (entry.compositionId !== undefined && entry.compositionId === compositionId) ||
+          entry.draftIds.some((theirs) => draftIds.includes(theirs))
+        )
       })
       if (kept.length === existing.length) return
       await authorize()

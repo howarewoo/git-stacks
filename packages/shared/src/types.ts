@@ -1277,6 +1277,13 @@ export interface PullRequestPage {
   nativeMessage?: string
 }
 
+/** Exact provider read of a source-confirmed native member, not a cached-list lookup. */
+export interface PullRequestLayerRead {
+  sourcePullRequest: PullRequest
+  pullRequest: PullRequest
+  observedAt: string
+}
+
 export interface DesktopAPI {
   /**
    * What the configured GitHub host was observed to support. Every field is a
@@ -1365,6 +1372,11 @@ export interface DesktopAPI {
     state: PullRequest['state'] | 'ALL',
     cursor: string | null,
   ): Promise<PullRequestPage>
+  pullRequestLayer?(
+    sourceNumber: number,
+    memberNumber: number,
+    requestId?: string,
+  ): Promise<PullRequestLayerRead>
   pullRequestAction?(
     action: PullRequestAction,
     expectedScope: OperationScope,

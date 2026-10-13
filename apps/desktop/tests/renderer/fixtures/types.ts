@@ -38,6 +38,7 @@ export type FixtureCall =
   | 'inspect'
   | 'pullRequestAction'
   | 'pullRequestPage'
+  | 'pullRequestLayer'
   | 'worktreeInventory'
   | 'cancelInventory'
   | 'adoptWorktrees'

@@ -28,7 +28,7 @@ import {
   stagedOnlyChanges,
   unstagedOnlyChanges,
 } from '../../../src/renderer/src/design-system/data-fixtures'
-import { EMPTY_SNAPSHOT_LIMITS } from '@git-stacks/shared/performance'
+import { EMPTY_SNAPSHOT_LIMITS, LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 import { DEFAULT_SETTINGS } from '@git-stacks/shared/settings'
 import type { NotificationInbox } from '@git-stacks/shared/notifications'
 import {
@@ -52,6 +52,7 @@ import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 import { reviewRail, stackMember } from './review'
 import { graphIndex, graphSnapshot } from './graph'
+import { snapshotInventory } from './inventory'
 
 /**
  * Deterministic snapshot data for every gallery scenario. Repository shapes are reused from
@@ -296,6 +297,36 @@ function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnap
     ...overrides,
   }
 }
+
+const uncachedNativePullRequests: PullRequest[] = Array.from(
+  { length: LIST_PAGE_SIZE + 1 },
+  (_, index) => ({
+    ...reviewStackPullRequests[0],
+    number: 501 + index,
+    title: `Provider-confirmed native layer ${501 + index}`,
+    url: `https://github.com/howarewoo/git-stacks/pull/${501 + index}`,
+    head: `feature/uncached-native-${index + 1}`,
+    base: index === 0 ? 'main' : `feature/uncached-native-${index}`,
+    headOid: oid(`uncached-native-${index + 1}`),
+    baseOid: oid(`uncached-native-${index}`),
+    state: index === LIST_PAGE_SIZE ? 'MERGED' : 'OPEN',
+    draft: false,
+    stack: {
+      stackNumber: 42,
+      position: index + 1,
+      size: LIST_PAGE_SIZE + 1,
+      base: 'main',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  }),
+)
+const uncachedNativeSnapshot = repository({
+  branches: [mainBranch],
+  currentBranch: 'main',
+  pullRequests: uncachedNativePullRequests,
+  nativeStacks: nativeReviewFixture(uncachedNativePullRequests),
+})
 
 /** Connected baseline: one stacked branch with a draft pull request and a clean tree. */
 const connected = repository()
@@ -1760,6 +1791,27 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       nativeStacks: nativeReviewFixture(longReviewStackPullRequests),
     }),
     recentRepositories,
+  },
+  'review-uncached-native-layer': {
+    name: 'review-uncached-native-layer',
+    summary:
+      'Complete submitted native membership includes a merged top layer beyond the bounded PR inventory, without a local branch or worktree.',
+    snapshot: uncachedNativeSnapshot,
+    inventory: snapshotInventory([
+      {
+        ...uncachedNativeSnapshot,
+        pullRequests: uncachedNativePullRequests.slice(0, LIST_PAGE_SIZE),
+      },
+    ]),
+    recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'acme-viewer',
+      version: '2.62.0',
+      identity: 'cli:github.com:acme-viewer:uncached-native-fixture',
+      message: null,
+    },
   },
   'review-stack-partial': {
     name: 'review-stack-partial',

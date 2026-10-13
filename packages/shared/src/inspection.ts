@@ -37,6 +37,7 @@ export const INSPECTION_CHANNELS = {
   commitDiff: 'repository:commit-diff',
   pullRequest: 'repository:pull-request',
   pullRequestPage: 'repository:pull-request-page',
+  pullRequestLayer: 'repository:pull-request-layer',
   pullRequestAction: 'repository:pull-request-action',
   searchIssues: 'repository:search-issues',
   pullRequestIssueLinks: 'repository:pull-request-issue-links',
