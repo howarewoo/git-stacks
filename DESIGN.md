@@ -234,6 +234,32 @@ Depth starts with whitespace, grouping, and neutral background contrast. Complet
 
 Retain the generous rounded identity: 12px text controls, 16px items, 24px work surfaces/dialogs and complete cards, with supported 999px pill badges and segmented controls. Icon buttons are circular with generous 44px targets; existing utility-specific corners and genuine circles remain valid. Use the canvas, content, and inset tones with explicit spacing to distinguish panels and sections in both themes. Essential editable controls keep visible 1px boundaries; generic surfaces, section headers, rows, and feedback badges do not. Clipping follows the owning work surface.
 
+## Iconography
+
+Use the existing [Lucide icon catalog](https://lucide.dev/icons/) through direct
+static named imports from `lucide-react`. No generic Icon wrapper, runtime registry, duplicate SVG collection
+or shared re-export is needed. Icons are supporting meaning, not decoration.
+
+- Use 16px glyphs beside compact control labels and Git-object metadata; use 20px
+  glyphs for standard control compositions. Existing small inline status contexts,
+  such as remote freshness, may use 12px beside explicit text. Glyph size never
+  determines the action target: icon-only controls retain a 44px target.
+- Preserve Lucide's consistent default 2px outline stroke; do not mix filled and
+  outline treatments or vary stroke weight to imply state.
+- Inherit `currentColor` from the surrounding semantic foreground. Use primary or
+  secondary text for objects and neutral unknown/unavailable states, and labelled
+  success/warning foreground roles for those states. Never hard-code theme colors
+  or use color alone as the status.
+- Center glyphs with adjacent labels, prevent flex shrinking and use the existing
+  8px related-control gap. Keep icons and text together during reflow.
+- Decorative icons beside text or inside a named control use `aria-hidden="true"`.
+  A meaningful standalone icon has an accessible name (for example `role="img"`
+  with `aria-label`). `IconButton` requires an actionable `label`; its tooltip
+  supplements that name. Ambiguous actions require visible labels.
+- Keep explicit success, warning, unavailable and unknown text. Preserve the shared
+  loading `Button` / `Spinner` contract, action name and disabled dispatch rather
+  than spinning an action glyph. Respect existing reduced-motion behavior.
+
 ## Components
 
 The shared [shadcn/ui](https://ui.shadcn.com/)-style component library lives in `packages/ui/src/components/ui` and is consumed through `@git-stacks/ui` by desktop and the design catalog. `packages/ui/components.json` selects `base-nova` with CSS variables and the configured aliases. Base UI (`@base-ui/react`) supplies accessible interaction primitives; the shared wrappers supply the workbench's token roles and composition contracts. Buttons remain CVA-based (`class-variance-authority`) and compose variants through `cn()` (`clsx` + `tailwind-merge`), with Tailwind CSS v4 and Lucide icons (`lucide-react`). Shadcn is owned source and configuration, not a runtime or CLI application dependency.

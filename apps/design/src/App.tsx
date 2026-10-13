@@ -51,6 +51,7 @@ import { displaySpecimens } from './display-specimens'
 import { overlaySpecimens } from './overlay-specimens'
 import { Foundations, GitCompositions, TypographySpecimen, TypesetSpecimen } from './foundations'
 import { AdoptionExample } from './adoption-examples'
+import { IconographySpecimen } from './iconography-specimen'
 
 const ADOPTION_RECIPES = [
   {
@@ -97,6 +98,7 @@ export const SPECIMENS: Record<string, ComponentType> = {
   ...overlaySpecimens,
   typography: TypographySpecimen,
   typeset: TypesetSpecimen,
+  iconography: IconographySpecimen,
 }
 
 export default function App() {
@@ -438,9 +440,9 @@ function CatalogWorkspace() {
             implementation once; inspect it here and in desktop.
           </p>
           <p>
-            63 components + Typography + Typeset · reconciled with shadcn Base UI base-nova on{' '}
-            {MANIFEST_DATE}. Catalog-only recipes demonstrate capabilities, not new desktop product
-            workflows.
+            63 components + Typography, Typeset and Iconography · component inventory reconciled
+            with shadcn Base UI base-nova on {MANIFEST_DATE}. Catalog-only recipes demonstrate
+            capabilities, not new desktop product workflows.
           </p>
           <h3>Start with the interaction</h3>
           <dl className="catalog-recipes">

@@ -2305,7 +2305,7 @@ using generated semantic CSS variables, plus actual boundary and focus controls.
 Inspect both themes and narrow reflow when changing those specimens; no palette
 values belong in the catalog.
 
-Tokens, Typography, and Typeset are adjacent Foundations entries in content and
+Tokens, Typography, Typeset, and Iconography are adjacent Foundations entries in content and
 navigation; the original component anchors remain supported. The sidebar brand
 header links to the introduction at the genuine page top, and the command entry
 does the same; both clear search, transfer focus, and close narrow navigation.
@@ -2314,6 +2314,33 @@ Back/Forward.
 Each category derives its count and links from one destination list. Foundations
 prepends the always-available Tokens destination, even while filtering. The brand
 title underlines on hover and retains keyboard focus treatment.
+
+Iconography uses the existing `lucide-react` dependency and the
+[Lucide icon catalog](https://lucide.dev/icons/), with direct static named
+imports rather than an Icon wrapper, registry or shared re-export:
+
+```tsx
+import { GitBranch, RefreshCw } from 'lucide-react'
+import { Button, IconButton } from '@git-stacks/ui'
+
+<Button variant="secondary" onClick={browseBranches}>
+  <GitBranch size={16} aria-hidden="true" /> Browse branches
+</Button>
+<IconButton label="Refresh repository" variant="ghost" onClick={refreshRepository}>
+  <RefreshCw size={20} aria-hidden="true" />
+</IconButton>
+```
+
+Keep ambiguous actions visibly labelled. Follow [Iconography](DESIGN.md#iconography)
+for semantic colors, inline status sizes and accessibility. The catalog actions
+only update local feedback: verify Foundations navigation, search for Lucide,
+the Iconography command result and `/#iconography`, then Tab/Enter/Space through
+the examples. Inspect 16px/20px glyphs, 44px icon targets and explicit status text
+in light/dark, 390px narrow browsing and 640×450 reflow. Run `pnpm run typecheck`,
+`pnpm --filter design check:manifest`, `pnpm --filter design build` and
+`pnpm --filter design test:catalog`; the manifest checks Lucide's genuine
+documentation only for this owned foundation while retaining shadcn provenance
+for the existing entries.
 
 Typeset is owned browser-safe CSS adapted from the MIT shadcn/typeset
 [distribution](https://github.com/shadcn-ui/ui/blob/main/apps/v4/app/%28app%29/%28typeset%29/typeset.css)
@@ -2335,7 +2362,7 @@ branch and base identities use semantic inline code.
 The upstream reconciliation disclosure uses Typeset as actual reading content;
 catalog controls and desktop Git workflows are not globally restyled.
 
-The dated `apps/design/src/manifest.ts` records all 63 components plus Typography and Typeset, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing. Essential control boundaries and visible focus colors are measured against adjacent surfaces at ≥3:1 in both themes, including opened menus/dialogs; Axe supplies separate automated text/semantic checks.
+The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, Typeset and the owned Iconography foundation, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing.
  
 Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 

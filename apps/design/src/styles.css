@@ -346,6 +346,51 @@ body {
   gap: var(--gs-semantic-space-2);
 }
 
+.iconography-specimen {
+  display: grid;
+  gap: var(--gs-semantic-space-6);
+}
+
+.iconography-specimen h3 {
+  font-weight: 600;
+}
+
+.iconography-specimen p {
+  max-width: 72ch;
+  margin-top: var(--gs-semantic-space-2);
+}
+
+.iconography-specimen .design-specimen-row,
+.iconography-list {
+  margin-top: var(--gs-semantic-space-3);
+}
+
+.iconography-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gs-semantic-space-3) var(--gs-semantic-space-5);
+}
+
+.iconography-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--gs-semantic-space-2);
+}
+
+.iconography-specimen svg {
+  flex-shrink: 0;
+}
+
+.iconography-success {
+  color: var(--gs-semantic-feedback-success-text);
+}
+.iconography-warning {
+  color: var(--gs-semantic-feedback-warning-text);
+}
+.iconography-neutral {
+  color: var(--gs-semantic-text-secondary);
+}
+
 .catalog-composition {
   display: grid;
   gap: var(--gs-semantic-space-3);
