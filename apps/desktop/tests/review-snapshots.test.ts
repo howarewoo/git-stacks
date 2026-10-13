@@ -1492,6 +1492,13 @@ test('main service diffEndpointWithGit performs object-only fetch preserving FET
     2,
     authorizeTestJournal(local),
   )
+  // Passive inspection must not import a missing object, even from a reachable local origin.
+  const inspected = await readReviewHistoryDiff(local, 26, localOid, undefined, true)
+  assert.equal(inspected.state, 'unavailable')
+  assert.throws(() =>
+    execFileSync('git', ['cat-file', '-e', remoteOid], { cwd: local, stdio: 'pipe' }),
+  )
+  assert.equal(await readFile(join(local, '.git', 'FETCH_HEAD'), 'utf8'), sentinelContent)
 
   // Call readReviewHistoryDiff: endpoint diff between localOid and remoteOid
   const diff = await readReviewHistoryDiff(local, 26, localOid)

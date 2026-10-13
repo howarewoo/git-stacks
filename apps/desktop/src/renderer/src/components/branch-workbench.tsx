@@ -393,6 +393,12 @@ export function BranchWorkbench({
     worktreeId: worktree?.id,
     pullRequestId: selected?.pullRequest?.id,
   }
+  const editorReason = !worktree
+    ? selected && selected.worktrees.length > 1
+      ? 'Choose a working directory first'
+      : 'No associated working directory'
+    : (capabilities['open-directory']?.reason ??
+      (!capabilities['open-directory'] ? 'Editor handoff is unavailable' : undefined))
   const hidden = new Set<string>()
   if (!filtering) {
     for (let index = topology.length - 1; index >= 0; index--) {
@@ -519,9 +525,11 @@ export function BranchWorkbench({
   function inspect(id: string) {
     setFocusedBranchId(id)
     onSelectionChange(id)
-    setWorktreeId(null)
+    if (!controlledInspector) {
+      setLocalWorktreeId(null)
+      setLocalTab('overview')
+    }
     setCopyResult('')
-    setTab('overview')
     setInspectorOpen(true)
   }
   function switchRepository(id: string) {
@@ -650,6 +658,26 @@ export function BranchWorkbench({
                   <Copy />
                   Copy worktree path
                 </Button>
+                <span className="bw-directory-actions">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      render={
+                        <IconButton label="Selected working directory actions" variant="ghost">
+                          <MoreHorizontal />
+                        </IconButton>
+                      }
+                    />
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        disabled={Boolean(editorReason)}
+                        onClick={() => onAction('open-directory', context)}
+                      >
+                        Open working directory
+                        {editorReason ? <small className="ml-2">{editorReason}</small> : null}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </span>
               </div>
               <small>
                 {worktree
@@ -1305,7 +1333,15 @@ export function BranchWorkbench({
                         role="group"
                         aria-label={`${branch.ref}. ${entry.parentId ? `Parent: ${byId.get(entry.parentId)?.branch.ref}.` : (entry.issue ?? 'No recorded parent.')} ${isContext ? 'Context: does not match current filter.' : ''} ${tree?.status.label ?? 'No worktree'}. ${branch.pullRequest?.review.label ?? (branch.pullRequest === null ? 'No pull request' : 'PR association unknown')}. ${branch.pullRequest?.checks.label ?? ''}`}
                         onKeyDown={(event) => {
-                          if (event.defaultPrevented) return
+                          if (
+                            event.defaultPrevented ||
+                            event.altKey ||
+                            event.ctrlKey ||
+                            event.metaKey ||
+                            event.shiftKey ||
+                            event.nativeEvent.isComposing
+                          )
+                            return
                           const identityControl =
                             event.target instanceof HTMLElement &&
                             event.target.closest('.bw-branch-name, .bw-subtitle')

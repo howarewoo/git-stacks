@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
+import { inspectionAuthority, validateInspectionDispatch } from './inspection-context'
 import {
   INSPECTION_CHANNELS,
   type InspectionContext,
@@ -966,11 +966,6 @@ function repository() {
   return activeRepository
 }
 
-const inspectionAuthority = new AsyncLocalStorage<{
-  root: string
-  context: InspectionContext
-  signal: AbortSignal
-}>()
 const inspectionReads = new RepositoryScheduler(WORKTREE_READ_CONCURRENCY)
 
 async function repositoryOperationScope(
@@ -1601,7 +1596,6 @@ function installHandlers() {
           false,
           true,
         )
-        if (!local) inventory.adoptRemote(snapshot)
         return snapshot
       },
       `inspection-snapshot:${inspectionAuthority.getStore()?.context.worktreeId ?? 'repository'}`,
@@ -1741,9 +1735,83 @@ function installHandlers() {
             }
             const listener = inspectionHandlers.get(INSPECTION_CHANNELS[operation])
             if (!listener) throw new Error('This inspection operation is unavailable.')
-            return inspectionAuthority.run({ root, context, signal }, () =>
-              listener(event, ...argsValue),
+            const origin = await inGitRuntime(() =>
+              getConfigValue(root, 'remote.origin.url', signal),
             )
+            const originUrl = await inGitRuntime(() => getOriginUrl(root, signal))
+            const initialTree = fresh.worktrees.find((tree) =>
+              known ? tree.id === known.id : tree.path === root,
+            )
+            const initialRef = fresh.refs.find((ref) => ref.id === context.refId)
+            const validate = async () => {
+              signal.throwIfAborted()
+              const observed = inventory.current()
+              const current = observed.repositories.find(
+                (repo) => repo.identity.id === context.repositoryId,
+              )
+              if (
+                !current ||
+                !current.registeredPaths.some((path) =>
+                  recents.some((recent) => recent.path === path),
+                )
+              )
+                throw new Error('The captured repository registration was retired.')
+              if (initialTree && initialTree.kind !== 'bare')
+                await inGitRuntime(() =>
+                  adoptionPaths(observed, [initialTree.id], scheduler, signal),
+                )
+              const after = await inGitRuntime(() => discoverWorktrees(root, signal))
+              const tree = initialTree
+                ? after.worktrees.find((tree) => tree.id === initialTree.id)
+                : undefined
+              const ref = initialRef
+                ? after.refs.find((ref) => ref.id === initialRef.id)
+                : undefined
+              if (
+                after.identity.id !== fresh.identity.id ||
+                (initialTree &&
+                  (!tree ||
+                    tree.path !== initialTree.path ||
+                    tree.missing ||
+                    tree.gitDirectory !== initialTree.gitDirectory ||
+                    tree.refId !== initialTree.refId ||
+                    tree.headOid !== initialTree.headOid)) ||
+                (initialRef &&
+                  (!ref || ref.oid !== initialRef.oid || ref.kind !== initialRef.kind)) ||
+                after.remote?.id !== fresh.remote?.id
+              )
+                throw new Error(
+                  'The captured directory, ref or remote authority changed; this request was retired.',
+                )
+              const currentOrigin = await inGitRuntime(() =>
+                getConfigValue(root, 'remote.origin.url', signal),
+              )
+              if (currentOrigin !== origin)
+                throw new Error('The captured origin changed; this request was retired.')
+              const currentOriginUrl = await inGitRuntime(() => getOriginUrl(root, signal))
+              if (currentOriginUrl !== originUrl)
+                throw new Error('The captured origin changed; this request was retired.')
+              if (
+                context.pullRequestId &&
+                !current.pullRequests.some(
+                  (pr) =>
+                    pr.id === context.pullRequestId &&
+                    pr.remoteId === after.remote?.id &&
+                    (!context.refId || pr.refIds.includes(context.refId)),
+                )
+              )
+                throw new Error('The captured pull request association was retired.')
+              signal.throwIfAborted()
+            }
+            const result = await inspectionAuthority.run(
+              { root, context, signal, origin, originUrl, validate },
+              () => listener(event, ...argsValue),
+            )
+            await validate()
+            signal.throwIfAborted()
+            if (operation === 'refresh' && !context.worktreeId)
+              inventory.adoptRemote(result as RepositorySnapshot)
+            return result
           },
           controller.signal,
         )
@@ -2017,7 +2085,14 @@ function installHandlers() {
     // The conflict view reports the tool it would use, so the configured value
     // the merge action honours is the one the resolver shows.
     const settings = (await readSettingsFile(settingsFile())).settings
-    return readRepository((root) => getConflictView(root, filePath, settings.git.mergeTool))
+    return readRepository((root) =>
+      getConflictView(
+        root,
+        filePath,
+        settings.git.mergeTool,
+        Boolean(inspectionAuthority.getStore()),
+      ),
+    )
   })
   ipcMain.handle('repository:history', (event, ref: string, skip: number, requestId?: string) => {
     return readRepository((root, signal) => getHistory(root, ref, skip, signal), requestId)
@@ -2431,6 +2506,7 @@ function installHandlers() {
             requirePullRequestNumber(number),
             requireCommitOid(fromOid),
             signal,
+            Boolean(inspectionAuthority.getStore()),
           ),
         requestIdClaim(requestId, 'review-history-diff'),
         'github',
@@ -2748,6 +2824,7 @@ function installHandlers() {
     const root = inspectionAuthority.getStore()?.root ?? activeRepository
     if (!root) return { opened: false, reason: 'No selected repository is available.' }
     const settings = (await readSettingsFile(settingsFile())).settings
+    await validateInspectionDispatch()
     return openInEditor(settings.git.editor, root, relativePath)
   })
   // CLI status only: a real read of the installed CLI and the account it holds.

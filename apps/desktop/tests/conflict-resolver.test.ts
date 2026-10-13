@@ -1326,3 +1326,51 @@ test('a stash apply conflict is only named a stash apply because a stash entry p
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('read-only conflict inspection preserves an interrupted file-action journal', async () => {
+  const { root, repo, git, gitExpectedFailure } = await fixture()
+  try {
+    await writeFile(join(repo, 'shared.txt'), 'base\n')
+    git('add', '.')
+    git('commit', '-m', 'base')
+    git('switch', '-c', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'topic\n')
+    git('commit', '-am', 'topic')
+    git('switch', 'main')
+    await writeFile(join(repo, 'shared.txt'), 'main\n')
+    git('commit', '-am', 'main')
+    gitExpectedFailure('merge', 'topic')
+    const directory = join(repo, '.git', 'git-stacks-file-actions')
+    await mkdir(directory, { mode: 0o700 })
+    const info = await stat(repo)
+    const transactionId = '00000000-0000-4000-8000-000000000246'
+    const journalPath = join(directory, `${transactionId}.json`)
+    const journal = JSON.stringify({
+      version: 1,
+      transactionId,
+      ownerPid: 0,
+      phase: 'committed',
+      repoPath: repo,
+      relativePath: 'already-deleted.txt',
+      stagingName: `.git-stacks-${transactionId}`,
+      stagingIdentity: { dev: '0', ino: '0' },
+      parentDirectories: [{ relativePath: '', dev: String(info.dev), ino: String(info.ino) }],
+      originalIdentity: null,
+      replacementIdentity: null,
+    })
+    await writeFile(journalPath, journal)
+    const beforeIndex = await readFile(join(repo, '.git', 'index'))
+    const beforeHead = git('rev-parse', 'HEAD')
+    const view = await getConflictView(repo, 'shared.txt', undefined, true)
+    assert.equal(view.current, 'main\n')
+    assert.equal(view.incoming, 'topic\n')
+    assert.equal(await readFile(journalPath, 'utf8'), journal)
+    assert.deepEqual(await readFile(join(repo, '.git', 'index')), beforeIndex)
+    assert.equal(git('rev-parse', 'HEAD'), beforeHead)
+    // The legacy operational read still performs its authorized recovery.
+    await getConflictView(repo, 'shared.txt')
+    await assert.rejects(access(journalPath), { code: 'ENOENT' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

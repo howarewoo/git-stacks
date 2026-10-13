@@ -2053,16 +2053,28 @@ Account retirement cancels captured reads and retires PR targets without deletin
 original authored text. Attention/Review return restores the originating surface.
 Global search is independent of local lane filters and includes full path/ref-kind
 context, debounce, bounded pages, keyboard selection and explicit read errors.
+Branch-only selection resets the directory and tab atomically; worktree selection
+retains only the exact chosen directory. Pending Attention→Review navigation is
+generation-fenced and retired by a newer explicit destination. The single shortcut
+dispatcher observes the existing confirmed settings query, including live remaps.
 
 `DesktopAPI.inspect(context, operation, args, requestId)` is the typed captured-read
 boundary. Main validates sender and the fixed operation table, resolves registered
 repository authority, freshly discovers and verifies worktree administrative/path
-identity, and validates qualified ref/PR associations before dispatch. Cancellation
-retires only that captured boundary request, not a running mutation. The renderer
-`inspectionAPI` facade never falls back to the active root or exposes Git actions.
+identity, and validates qualified ref/PR associations before dispatch and again
+before publishing a completed result. The captured common/worktree identity, ref/
+HEAD and raw/resolved origin must remain unchanged; cancellation is checked at
+completion. Provider origin getters reject another origin, and provider/editor
+dispatches revalidate after preceding awaits. Remote inventory adoption occurs only
+after that completion fence. Cancellation retires only that captured boundary
+request, not a running mutation. The renderer `inspectionAPI` facade never falls
+back to the active root or exposes Git actions.
 `worktreeStatus` is available only on this captured facade: a bounded local status
 read with no remote/graph/stash/history collection or recovery replay.
-Snapshot inspections explicitly skip stash-drop, file-action and stale-lock recovery.
+Snapshot and captured conflict inspections skip automatic journal/lock recovery.
+Captured historical comparison never fetches missing Git objects: it uses local
+objects, a validated provider endpoint comparison, or an explicit unavailable
+result. Existing explicit operational recovery and object-fetch behavior is retained.
 
 Overview, Changes, Checks and Discussion belong to the exact selected context.
 Multiple associated directories require an explicit choice. Changes shows staged
@@ -2071,8 +2083,11 @@ untracked/rename/conflict stages and binary/LFS/submodule/sparse/truncation fact
 Files, histories and diff lines use shared canonical page/byte budgets. No local
 editing, staging, commit, discard, stash or hidden mutation menu lives in the
 inspector. A PR without a directory opens published committed Review, not a local
-working diff. Copy uses the exact chosen path; configured editor launch is validated
-by main. Missing directories are not substituted.
+working diff. Copy uses the exact chosen path; the selected-context footer menu
+offers only configured editor handoff, including multi-worktree selection and
+useful no-choice/missing refusal. Main revalidates before launch; missing directories
+are not substituted. Overview shows readable directory/revision/observation facts,
+not opaque authority IDs or index fingerprints; full local OID is explicitly disclosed.
 
 Explicit existing operational workflows use a separately captured `OperationScope`
 and snapshot. They revalidate root, origin and public provider authority before
@@ -2085,6 +2100,7 @@ Useful focused checks:
 ```sh
 pnpm run typecheck
 pnpm --filter git-stacks exec tsx --test tests/workbench-model.test.ts
+pnpm --filter git-stacks exec tsx --test --test-name-pattern="read-only conflict inspection|object-only fetch" --import ./tests/setup/owned-cli-boundary.cjs tests/conflict-resolver.test.ts tests/review-snapshots.test.ts
 pnpm --filter git-stacks gallery --host 127.0.0.1 --port 4317
 ```
 
