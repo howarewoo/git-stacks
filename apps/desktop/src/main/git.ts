@@ -5151,7 +5151,14 @@ export async function getSnapshot(
         : live
           ? live[0]
           : unavailableGitHubResult('GitHub could not be read')
-  const github = await withTrackedPullRequests(root, originUrl, providerData, signal, answered)
+  const github = await withTrackedPullRequests(
+    root,
+    originUrl,
+    providerData,
+    signal,
+    answered,
+    mayFallBack,
+  )
   // Without a confirmed inbox, keep the issues last confirmed and say why this
   // read could not refresh them, rather than passing off an empty list as one.
   const issueData =
@@ -5162,20 +5169,23 @@ export async function getSnapshot(
           ? live[1]
           : fallbackIssues
       : live[1]
-  const githubFailure = live === null ? null : (live[0].failure ?? null)
-  const githubStale: RepositorySnapshot['githubStale'] = answered
-    ? null
-    : {
-        reason:
-          mayFallBack && confirmed
-            ? live === null
-              ? remote === 'select'
-                ? 'Showing qualified provider knowledge from the last confirmed read'
-                : 'A GitHub refresh is not due yet; showing the last confirmed state'
-              : 'GitHub could not be read; showing the last confirmed state'
-            : github.message,
-        fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
-      }
+  const githubFailure = github.failure ?? (live === null ? null : (live[0].failure ?? null))
+  const githubStale: RepositorySnapshot['githubStale'] =
+    answered && github.available
+      ? null
+      : {
+          reason:
+            !github.available && answered
+              ? github.message
+              : mayFallBack && confirmed
+                ? live === null
+                  ? remote === 'select'
+                    ? 'Showing qualified provider knowledge from the last confirmed read'
+                    : 'A GitHub refresh is not due yet; showing the last confirmed state'
+                  : 'GitHub could not be read; showing the last confirmed state'
+                : github.message,
+          fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
+        }
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {

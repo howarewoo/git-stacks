@@ -1774,8 +1774,11 @@ Workbench measurement contract, rather than the retired onboarding/list shell.
 The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
 CI installs `xvfb` and `xauth` on GitHub's standard `ubuntu-24.04-arm` hosted
-runner, builds the app, and runs Electron under Xvfb. Local runs need a display
-server. Compare trend results on the same runner class and Git/Node versions,
+runner, builds the app, materializes the pinned Electron distribution with
+`pnpm --filter git-stacks exec install-electron`, and configures its
+`chrome-sandbox` helper with root ownership and mode `4755` before running
+Electron under Xvfb. Local runs need a display server and a supported sandbox.
+Compare trend results on the same runner class and Git/Node versions,
 since filesystem and process startup costs vary by machine. Hosted-runner
 measurements start a new comparison series; the old self-hosted timings are not
 a directly comparable baseline. The existing performance budgets still apply.

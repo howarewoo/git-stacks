@@ -449,6 +449,7 @@ export async function withTrackedPullRequests(
   data: GitHubResult,
   signal?: AbortSignal,
   refresh = true,
+  mayFallBack = true,
 ): Promise<GitHubResult> {
   if (!data.available) return data
   const numbers = await trackedPullRequestNumbers(repoPath, signal)
@@ -462,13 +463,27 @@ export async function withTrackedPullRequests(
   const pullRequests = [...data.pullRequests]
   const local = pullRequests.map((_, index) => data.sameRepository(index))
   const known = new Set(pullRequests.map((entry) => entry.number))
+  let unavailable: GitHubResult | null = null
   for (const number of numbers) {
     if (known.has(number)) continue
     const key = JSON.stringify([host.host, remote.fullName.toLowerCase(), authority, number])
     const held = trackedPayloads.get(key)
     if (!refresh && !held) continue
-    const exact = refresh ? await getPullRequest(repoPath, number, signal) : held!
-    if (refresh) {
+    let exact = held
+    let refreshed = false
+    try {
+      if (refresh) {
+        exact = await getPullRequest(repoPath, number, signal)
+        refreshed = true
+      }
+    } catch (error) {
+      if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
+      observeGraphqlFailure(host, error)
+      unavailable = unavailableGitHubResult(githubErrorMessage(error), typedFailure(error))
+      if (!mayFallBack) exact = undefined
+    }
+    if (!exact) continue
+    if (refreshed) {
       trackedPayloads.delete(key)
       trackedPayloads.set(key, exact)
       while (trackedPayloads.size > 128) {
@@ -484,6 +499,9 @@ export async function withTrackedPullRequests(
   const stacks = refresh ? await loadRepositoryNativeStacks(originUrl, pullRequests, signal) : null
   return {
     ...data,
+    ...(unavailable
+      ? { available: false, message: unavailable.message, failure: unavailable.failure }
+      : {}),
     pullRequests,
     sameRepository: (index) => typeof index === 'number' && local[index] === true,
     ...(stacks

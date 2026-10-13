@@ -84,6 +84,41 @@ function nextInventory(
   return promise
 }
 
+test('a failed registered root automatically recovers when its directory returns', {
+  timeout: 30_000,
+}, async () => {
+  const { root, repo } = await fixture()
+  let listener = (_value: WorktreeInventory) => {}
+  const service = new WorktreeInventoryService(new RepositoryScheduler(), (value) =>
+    listener(value),
+  )
+  try {
+    service.register([repo])
+    const initial = await service.read({ requestId: 'initial' })
+    const moved = join(root, 'moved')
+    const failed = nextInventory(
+      service,
+      (next) => {
+        listener = next
+      },
+      (value) => value.state === 'failed' && value.repositories.length === 0,
+    )
+    await rename(repo, moved)
+    assert.equal((await failed).failures[0].path, repo)
+    const restored = nextInventory(
+      service,
+      (next) => {
+        listener = next
+      },
+      (value) => value.state === 'complete' && value.repositories.length === 1,
+    )
+    await rename(moved, repo)
+    assert.equal((await restored).repositories[0].identity.id, initial.repositories[0].identity.id)
+  } finally {
+    service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 test('NUL discovery preserves unusual paths and incomplete records never become directories', () => {
   const path = '/fixture/space Ω\nline '
   const result = parseWorktreeList(
