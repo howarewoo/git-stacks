@@ -1,0 +1,90 @@
+.bw-topbar {
+  -webkit-app-region: drag;
+}
+html[data-native-mac="true"] .bw-topbar {
+  padding-left: 80px;
+}
+.bw-topbar :is(button, input, a, [role="button"]) {
+  -webkit-app-region: no-drag;
+}
+.bw-top-right {
+  display: flex;
+  gap: 8px;
+}
+.wb-secondary {
+  grid-column: 2 / -1;
+}
+.wb-secondary-list,
+.wb-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+.wb-search-results {
+  max-height: 56dvh;
+}
+.wb-secondary-list > button,
+.wb-search-results > button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  height: auto;
+  white-space: normal;
+  text-align: left;
+  min-height: 44px;
+}
+.wb-code {
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre;
+  font: 12px / 1.6 var(--gs-semantic-font-mono);
+  padding: 12px;
+  background: var(--gs-semantic-surface-inset);
+  border-radius: var(--gs-semantic-radius-control);
+  scrollbar-color: var(--gs-semantic-border-essential) transparent;
+}
+.wb-code:focus-visible {
+  outline: 2px solid var(--gs-semantic-focus-ring);
+}
+.wb-comment {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wb-history-dialog {
+  width: min(1000px, calc(100vw - 32px));
+  max-width: 1000px;
+  max-height: 90dvh;
+  overflow: auto;
+}
+.wb-error {
+  position: fixed;
+  bottom: 40px;
+  left: 248px;
+  right: 24px;
+  z-index: var(--gs-semantic-z-floating);
+  background: var(--gs-semantic-feedback-error-surface);
+  color: var(--gs-semantic-feedback-error-text);
+  padding: 12px;
+  border-radius: var(--gs-semantic-radius-control);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.bw-panel-bottom {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.bw-inspector code {
+  overflow-wrap: anywhere;
+}
+.bw-inspector-actions p {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1039px) {
+  .wb-error {
+    left: 16px;
+  }
+}

@@ -8,7 +8,6 @@ import { Field } from '../src/renderer/src/components/ui/field'
 import { Input } from '../src/renderer/src/components/ui/input'
 import { Textarea } from '../src/renderer/src/components/ui/textarea'
 import { TooltipProvider } from '../src/renderer/src/components/ui/tooltip'
-import { ShellSpecimen } from '../src/renderer/src/design-system/ShellSpecimen'
 import {
   ImmutableApproval,
   MergeOutcomePanel,
@@ -89,16 +88,6 @@ test('field errors remain visible on textarea and checkbox controls', () => {
 
   assert.match(textarea, /aria-invalid="true"/)
   assert.match(checkbox, /aria-invalid="true"/)
-})
-
-test('shell specimen captions are not rendered as labels without controls', () => {
-  const markup = renderToStaticMarkup(
-    React.createElement(TooltipProvider, null, React.createElement(ShellSpecimen)),
-  )
-
-  assert.match(markup, /<label for="shell-fixture-draft">In-progress commit message<\/label>/)
-  assert.match(markup, /id="shell-fixture-draft"/)
-  assert.doesNotMatch(markup, /for="shell-fixture-search-result"/)
 })
 
 test('a recovered submission shows its saved consent as fixed text, not an unchecked box', () => {

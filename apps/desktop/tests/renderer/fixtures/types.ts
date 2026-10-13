@@ -35,6 +35,7 @@ import type { NotificationInbox } from '@git-stacks/shared/notifications'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
+  | 'inspect'
   | 'worktreeInventory'
   | 'cancelInventory'
   | 'adoptWorktrees'
