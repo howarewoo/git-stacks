@@ -1764,14 +1764,14 @@ benchmark version; older measurements with different definitions are not
 carried into the current trend.
 
 The `startup` measurement runs the built Electron app against the 3,000-ref
-fixture. It starts before process launch and ends after the automation activates
-the pre-seeded recent repository with Enter and its first 200 branch rows complete
-two animation frames. Keyboard activation avoids stale coordinates when the
-asynchronous Git environment report shifts the onboarding layout. The
-`interaction` measurement starts at an actual input event
-in the “Filter current view branches, files, and pull requests” field, not the
-command palette, and ends after the filtered branch result completes two
-animation frames. The separate `diff-render-ssr` measurement is server-side
+fixture. It starts before process launch and ends after the Workbench inventory
+reports all 3,001 local branches and its first 200 lane rows complete two animation
+frames. The seeded repository opens directly; no onboarding activation is needed.
+The `interaction` measurement starts at an actual input event in the
+“Filter branches by branch, PR, or path” field and ends after the single matching
+branch result completes two animation frames. Benchmark version 3 uses this
+Workbench measurement contract, rather than the retired onboarding/list shell.
+The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
 CI installs `xvfb` and `xauth` on GitHub's standard `ubuntu-24.04-arm` hosted
 runner, builds the app, and runs Electron under Xvfb. Local runs need a display
