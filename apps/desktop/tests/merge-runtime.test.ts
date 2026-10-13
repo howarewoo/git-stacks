@@ -13,14 +13,14 @@ import type { GitHubFixtureState, GitHubHarness } from './fixtures/github-harnes
 // above would hand Git Stacks the unpatched `execFile`.
 const { getSnapshot, runAction } = await import('../src/main/git')
 const { getMergeStatus, previewStack } = await import('../src/main/stacks')
-const { setGitHubTransport } = await import('../src/main/github-transport')
+const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 const { GITHUB_API_URL_ENV } = await import('../src/main/github-transport')
 
 /**
  * The asynchronous merge flow, end to end through the production read path: a real
- * disposable repository, the real `DirectGitHubTransport` the main process builds,
- * real HTTP over a socket, and the real API double answering as a server.
+ * disposable repository, the real `DirectGitHubTransport` with an explicit
+ * fixture-only credential, real HTTP over a socket, and the API double as a server.
  *
  * The point is the layer a stubbed `fetch` cannot reach. A throw injected into a
  * fixture answers a different question than a 500 or a dropped connection does: the
@@ -67,8 +67,7 @@ async function serveGitHub(): Promise<LiveGitHub> {
 }
 
 /**
- * Runs `body` with Git Stacks' own transport built from the environment, pointed at
- * the local server, so nothing about the request path is injected.
+ * Runs `body` with the real socket transport authenticated only to this fixture.
  */
 async function withLiveGitHub(
   run: (harness: GitHubHarness, live: LiveGitHub) => Promise<void>,
@@ -83,7 +82,9 @@ async function withLiveGitHub(
       else process.env[key] = value
     }
     process.env[GITHUB_API_URL_ENV] = live.url
-    process.env.GH_TOKEN = 'fixture-token'
+    setGitHubTransport(
+      new DirectGitHubTransport({ host: 'github.com', token: 'fixture-token', apiUrl: live.url }),
+    )
     await run(harness, live)
   } finally {
     setGitHubTransport(null)

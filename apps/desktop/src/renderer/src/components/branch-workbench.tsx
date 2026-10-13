@@ -89,12 +89,16 @@ function BranchActions({
   context,
   capabilities,
   onAction,
-}: Pick<BranchWorkbenchProps, 'capabilities' | 'onAction'> & { context: WorkbenchActionContext }) {
+  label = 'More branch and worktree actions',
+}: Pick<BranchWorkbenchProps, 'capabilities' | 'onAction'> & {
+  context: WorkbenchActionContext
+  label?: string
+}) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         render={
-          <IconButton label="More branch and worktree actions" variant="ghost">
+          <IconButton label={label} variant="ghost">
             <MoreHorizontal />
           </IconButton>
         }
@@ -103,9 +107,24 @@ function BranchActions({
         {(
           [
             ['create-worktree', 'Create worktree…'],
+            ['remove-worktree', 'Preview worktree directory removal…'],
+            ['unregister-worktree', 'Remove app registration only…'],
+            ['native-stack', 'Inspect native stack management…'],
+            ['fetch', 'Fetch Git refs…'],
+            ['refresh-metadata', 'Refresh metadata (read-only)'],
+            ['reconcile', 'Inspect source discrepancies and repairs…'],
             ['restack', 'Preview restack…'],
             ['sync', 'Preview synchronization…'],
             ['publish', 'Preview publication…'],
+            ['merge', 'Preview reviewed downstack merge…'],
+            ['rename', 'Rename local branch…'],
+            ['upstream', 'Edit tracking upstream…'],
+            ['parent', 'Edit dependency parent…'],
+            ['insert-layer', 'Insert layer…'],
+            ['move-layer', 'Move layer…'],
+            ['remove-layer', 'Remove layer…'],
+            ['delete-local', 'Delete local branch…'],
+            ['delete-remote', 'Delete remote branch…'],
             ['open-directory', 'Open working directory'],
           ] as const
         ).map(([kind, label]) => {
@@ -397,12 +416,6 @@ export function BranchWorkbench({
     worktreeId: worktree?.id,
     pullRequestId: selected?.pullRequest?.id,
   }
-  const editorReason = !worktree
-    ? selected && selected.worktrees.length > 1
-      ? 'Choose a working directory first'
-      : 'No associated working directory'
-    : (capabilities['open-directory']?.reason ??
-      (!capabilities['open-directory'] ? 'Editor handoff is unavailable' : undefined))
   const hidden = new Set<string>()
   if (!filtering) {
     for (let index = topology.length - 1; index >= 0; index--) {
@@ -479,8 +492,7 @@ export function BranchWorkbench({
         matchIds.has(branch.id) &&
         !branch.trunk &&
         branch.bulkEligible === true &&
-        branch.conflicted === false &&
-        !branch.parentIssue,
+        (branch.refKind === 'remote' || (branch.conflicted === false && !branch.parentIssue)),
     )
     .map(({ branch }) => branch.id)
   const eligibility = selectable.join('\0')
@@ -663,24 +675,12 @@ export function BranchWorkbench({
                   Copy worktree path
                 </Button>
                 <span className="bw-directory-actions">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger
-                      render={
-                        <IconButton label="Selected working directory actions" variant="ghost">
-                          <MoreHorizontal />
-                        </IconButton>
-                      }
-                    />
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        disabled={Boolean(editorReason)}
-                        onClick={() => onAction('open-directory', context)}
-                      >
-                        Open working directory
-                        {editorReason ? <small className="ml-2">{editorReason}</small> : null}
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <BranchActions
+                    context={context}
+                    capabilities={capabilities}
+                    onAction={onAction}
+                    label="Selected branch and worktree actions"
+                  />
                 </span>
               </div>
               <small>
@@ -1230,6 +1230,42 @@ export function BranchWorkbench({
                   <div className="bw-bulk" role="status">
                     {checked.size} selected on this page only · filters, folds and pages clear
                     selection
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() =>
+                        onAction?.('delete-local', {
+                          repositoryId,
+                          branchIds: [...checked],
+                        })
+                      }
+                    >
+                      Preview selected local branch deletion…
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() =>
+                        onAction('delete-remote', {
+                          repositoryId,
+                          branchIds: [...checked],
+                        })
+                      }
+                    >
+                      Preview selected remote branch deletion…
+                    </Button>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      onClick={() =>
+                        onAction?.('remove-worktree', {
+                          repositoryId,
+                          branchIds: [...checked],
+                        })
+                      }
+                    >
+                      Preview selected worktree cleanup…
+                    </Button>
                     <Button size="xs" variant="ghost" onClick={() => setChecked(new Set())}>
                       Clear selection
                     </Button>

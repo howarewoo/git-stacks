@@ -154,6 +154,8 @@ export const leasePreview: PushPreview = {
 }
 
 export const pausedRestackProgress: StackProgress = {
+  operationId: 'specimen-owned-restack',
+  allowForce: null,
   kind: 'restack',
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',
@@ -163,6 +165,8 @@ export const pausedRestackProgress: StackProgress = {
 }
 
 export const unstartedRestackProgress: StackProgress = {
+  operationId: 'specimen-owned-restack',
+  allowForce: null,
   kind: 'restack',
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout',
@@ -172,6 +176,8 @@ export const unstartedRestackProgress: StackProgress = {
 }
 
 export const completedRestackProgress: StackProgress = {
+  operationId: 'specimen-owned-restack',
+  allowForce: null,
   kind: 'restack',
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',

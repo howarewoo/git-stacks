@@ -165,6 +165,12 @@ const runtimeStatus = (useSystemGit: boolean): GitRuntimeStatus => ({
 /** Deterministic status message per action, so success notices are screenshot-stable. */
 function actionMessage(action: GitAction): string {
   switch (action.type) {
+    case 'executeNativeOperation':
+      return 'Executed the reviewed native membership change'
+    case 'executeWorktreeLifecycle':
+      return 'Executed the reviewed worktree lifecycle'
+    case 'unregisterWorktrees':
+      return 'Removed selected registrations only; files, branches and PRs retained'
     case 'switch':
       return `Switched to ${action.ref}`
     case 'createBranch':
@@ -309,6 +315,7 @@ export function installFixtureControl(options: {
   }
   /** Saved filters, as the main process keeps them: whole-list writes, identities preserved. */
   let inboxFilters: PullRequestInboxSavedFilter[] = []
+  const operationApprovals = new Map<string, InspectionContext>()
 
   const scenarioFor = (name: string): FixtureScenario =>
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
@@ -710,6 +717,81 @@ export function installFixtureControl(options: {
     return { ...before, ...after, reference, state, message }
   }
   const desktop: DesktopAPI = {
+    captureOperation: async (context) => {
+      record('captureOperation', [context])
+      const repo = servedInventory.repositories.find(
+        (item) => item.identity.id === context.repositoryId,
+      )
+      const tree = repo?.worktrees.find((item) => item.id === context.worktreeId)
+      if (!repo || !tree || tree.missing)
+        throw new Error('Selected fixture execution directory is unavailable.')
+      const scope = await desktop.inspect!(context, 'repositoryOperationScope', [])
+      const token = crypto.randomUUID()
+      operationApprovals.set(token, structuredClone(context))
+      return {
+        token,
+        context: structuredClone(context),
+        scope,
+        repositoryId: repo.identity.id,
+        directoryIdentity: tree.id,
+        commonIdentity: repo.identity.id,
+        gitDirectory: tree.gitDirectory ?? repo.identity.commonDirectory,
+        gitDirectoryIdentity: tree.id,
+        commonDirectory: repo.identity.commonDirectory,
+        worktreeId: tree.id,
+        worktreePath: tree.path,
+        operationCommitOid: null,
+        headOid: tree.headOid,
+        fingerprint: 'fixture-captured-facts',
+        refs: repo.refs.map((ref) => ({ id: ref.id, ref: ref.name, oid: ref.oid })),
+        capturedAt: new Date().toISOString(),
+        coordination: 'Fixture app locks do not lock external tools.',
+      }
+    },
+    executeOperation: async (token, action) => {
+      record('executeOperation', [token, action])
+      const context = operationApprovals.get(token)
+      if (!context) throw new Error('Fixture approval was already spent.')
+      operationApprovals.delete(token)
+      const previous = active
+      const source = await desktop.inspect!(context, 'refresh', [])
+      active = source
+      try {
+        return await desktop.runAction(action)
+      } finally {
+        active = previous
+      }
+    },
+    operationRecords: () => {
+      record('operationRecords', [])
+      return answer('operationRecords', () =>
+        structuredClone([...(scenario.operationRecords ?? [])]),
+      )
+    },
+    worktreeLifecyclePreview: (request) => {
+      record('worktreeLifecyclePreview', [request])
+      return answer('worktreeLifecyclePreview', () => {
+        if (!scenario.worktreeLifecyclePreview)
+          throw new Error('This scenario has no lifecycle preview fixture.')
+        return structuredClone(scenario.worktreeLifecyclePreview)
+      })
+    },
+    nativeOperationPreview: (request) => {
+      record('nativeOperationPreview', [request])
+      return answer('nativeOperationPreview', () => {
+        if (!scenario.nativeOperationPreview)
+          throw new Error('This scenario has no native-operation preview fixture.')
+        return structuredClone(scenario.nativeOperationPreview)
+      })
+    },
+    reviewedMergePreview: (number) => {
+      record('reviewedMergePreview', [number])
+      return answer('reviewedMergePreview', () =>
+        structuredClone(
+          scenario.reviewedMergePreview ?? scenario.stackPreviews?.merge ?? mergePreview,
+        ),
+      )
+    },
     inspect: async <K extends InspectionOperation>(
       context: InspectionContext,
       operation: K,
@@ -1212,7 +1294,10 @@ export function installFixtureControl(options: {
       }
       return answer<ActionResult>(
         'runAction',
-        () => ({ message: actionMessage(action) }),
+        () =>
+          structuredClone(
+            scenario.actionResults?.[action.type] ?? { message: actionMessage(action) },
+          ),
         scenario.actionFailures?.[action.type],
       )
     },

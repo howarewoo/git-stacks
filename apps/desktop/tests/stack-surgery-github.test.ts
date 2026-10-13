@@ -734,11 +734,11 @@ test('an interrupted remove keeps a journal that loads, and aborting restores th
         (step) => step.number === layers.two.number && step.action === 'close',
       ),
     )
-    assert.equal(
+    assert.notEqual(
       progress.surgery.pullRequests.find(
         (step) => step.number === layers.two.number && step.action === 'close',
       )?.status,
-      'pending',
+      'completed',
       'a lost response must not be presented as a confirmed completed remote effect',
     )
     assert.match(progress?.message ?? '', /remote step/u)

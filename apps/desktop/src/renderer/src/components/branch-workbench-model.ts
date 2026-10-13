@@ -87,6 +87,20 @@ export type WorkbenchAction =
   | 'branches'
   | 'discover'
   | 'create-worktree'
+  | 'remove-worktree'
+  | 'native-stack'
+  | 'unregister-worktree'
+  | 'fetch'
+  | 'refresh-metadata'
+  | 'reconcile'
+  | 'rename'
+  | 'parent'
+  | 'upstream'
+  | 'delete-local'
+  | 'delete-remote'
+  | 'insert-layer'
+  | 'move-layer'
+  | 'remove-layer'
   | 'review'
   | 'history'
   | 'restack'
@@ -105,6 +119,9 @@ export interface WorkbenchActionContext {
   branchId?: string
   worktreeId?: string
   pullRequestId?: string
+  /** Explicit page-only seeds; never include hidden context ancestors. */
+  branchIds?: string[]
+  worktreeIds?: string[]
 }
 
 /** Availability is supplied by the integration owner, not inferred from display badges. */

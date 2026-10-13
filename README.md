@@ -2174,19 +2174,82 @@ Multiple associated directories require an explicit choice. Changes shows staged
 HEAD→index and unstaged index→directory independently, including dual edits,
 untracked/rename/conflict stages and binary/LFS/submodule/sparse/truncation facts.
 Files, histories and diff lines use shared canonical page/byte budgets. No local
-editing, staging, commit, discard, stash or hidden mutation menu lives in the
-inspector. A PR without a directory opens published committed Review, not a local
-working diff. Copy uses the exact chosen path; the selected-context footer menu
-offers only configured editor handoff, including multi-worktree selection and
-useful no-choice/missing refusal. Main revalidates before launch; missing directories
+editing, staging, commit, discard or stash lives in the inspector. Explicit named
+management actions open separate captured previews from its footer, row menus and
+command palette; they are not implied by selection. A PR without a directory opens
+published committed Review, not a local working diff. Copy and configured editor
+handoff use the exact chosen path, with explicit multi-worktree choice and useful
+no-choice/missing refusal. Main revalidates before launch; missing directories
 are not substituted. Overview shows readable directory/revision/observation facts,
 not opaque authority IDs or index fingerprints; full local OID is explicitly disclosed.
 
-Explicit existing operational workflows use a separately captured `OperationScope`
-and snapshot. They revalidate root, origin and public provider authority before
-dispatch; browsing neither retargets nor cancels them. Original preview/confirmation,
-force-with-lease, journals and main permission checks still govern writes. Downstream
-operational work should extend these captured contracts, not the inspection facade.
+### Captured safe operations
+
+`DesktopAPI.captureOperation(context)` requires an explicit discovered worktree.
+Its single-use `OperationCapture` names the common-local repository, worktree,
+physical directory/common/admin incarnations, HEAD, paused commit, complete refs,
+index/status/content/dependency fingerprint and original public provider authority.
+`executeOperation(token, action)` spends that authority before entering the common
+repository mutation lane. Main revalidates it under the participating journal lock;
+inspection, selection and the ambient open repository never authorize a write.
+Independent clones remain separate local domains even when their remotes match.
+These locks exclude participating app operations, not external tools or agents.
+
+Prepared reads carry `InspectionContext.operationToken`, binding preview dispatch
+and publication to the original provider and physical authority across intervening
+awaits. Restack, Sync, publication, surgery, reviewed merge, native registration and
+worktree lifecycle use the real existing main engines and typed preload boundary.
+Hidden/unloaded dependency members participate base-first; incomplete full-scope
+facts refuse the operation instead of shrinking it to visible rows. Branch hints,
+tracking, published PR bases and provider-owned native membership remain distinct.
+Local replay switches only the explicitly disclosed execution directory and refuses
+to overwrite ignored contents. A branch without a directory requires an explicit
+eligible existing execution choice; there is no implicit primary activation,
+checkout, stash, reset or creation of an isolated contribution workspace.
+
+**Operations and recovery** and Activity retain main-owned records independently of
+a modal or current repository. Synced owner-only records live in the common
+directory's `git-stacks-operations`; original captures, actions and previews remain
+immutable. Stable recovery IDs prevent historical approvals from borrowing a newer
+journal at the same path. Continue, current-commit Skip, Abort, publication retry
+and dismissal require the original physical/provider authority and original force,
+close and publication choices. Later explicit completion, abort or dismissal is
+projected without rewriting the original approval. Unknown dispatched pushes,
+retargets, closes, merges and native requests are not blindly replayed. Readback may
+adopt only source-confirmed effects; an unchanged pre-state does not prove a
+dispatched write failed. Hiding a running operation does not abort it; independent
+inspection and its durable status remain available.
+
+Worktree creation qualifies an absent normalized destination and an explicit local
+branch or new branch from a captured base. It never switches an existing checkout
+or falsely adopts a failed/partial creation. Cleanup preflights the exact whole
+subset and excludes primary/bare, locked, detached/unborn, missing/uncertain,
+dirty/untracked/**ignored**, active/interrupted, unmerged and unpublished contexts.
+Ignored files are unpublished local data: Git itself deletes them without force.
+Every directory is revalidated before removal; completed/failed/not-run/uncertain
+partial effects are retained, never called a rollback. Removing a worktree retains
+its branch and PR; registration-only removal and protected local/remote branch
+deletion are separately named captured operations. Local batches use a ref
+transaction; multi-remote-ref deletion requires atomic push and exact leases, with
+no non-atomic fallback.
+
+Reviewed merge captures actual source-confirmed downstack membership and live
+head/base/rules/check/review/permission/default/direct/queue evidence, including PRs
+without local branches. Accepted, pending, enqueued, confirmed, failed, dropped and
+unconfirmed outcomes remain distinct. It never implicitly restacks, fetches,
+checks out, deletes or cleans up local contexts. Native create/extend/unstack
+separately captures complete membership and canonical heads/bases; unknown prior
+native dispatches cannot be turned into repeat writes by preparing another token.
+
+Focused disposable regression coverage:
+
+```sh
+pnpm --filter git-stacks exec tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/operation-authority.test.ts tests/sync-stack.test.ts tests/merge-runtime.test.ts tests/stack-surgery-github.test.ts tests/native-stacks.test.ts
+```
+
+Gallery action history proves renderer intent, not Git, IPC or live provider
+success. Packaged native, manual assistive-technology, live provider and performance
+acceptance remain separate verification procedures.
 
 Useful focused checks:
 
@@ -3048,7 +3111,7 @@ When a tracked text file also changes executable mode, staging a text hunk does 
 
 ## Stack synchronization and recovery
 
-Sync Stack (`Mod+Shift+S`, or the `Sync stack…` command in the command palette) fetches and prunes remotes, discovers the native stack trunk, compares local vs. remote trunk tips, and plans a safe bottom-up restack of the entire stack.
+Sync Stack (`Mod+Shift+S`, or the `Sync stack…` command in the command palette) inspects existing fetched refs without fetching or pruning, discovers the native stack trunk, compares local vs. remote trunk tips, and plans a safe bottom-up restack of the entire captured stack. Use the separate **Fetch Git refs…** action when fetched authority needs updating, then prepare a fresh Sync preview.
 
 ### Trunk and layer classification
 
@@ -3084,10 +3147,10 @@ Sync Stack never rewrites published remote history without explicit confirmation
 
 If Git encounters conflicts during the rebase cascade:
 
-1. The operation pauses and writes a recovery journal entry (`kind: 'sync'`) under `.git/git-stacks/journal/`, saving the active rebase state and backup refs for all replayed branches (`refs/git-stacks/backups/<id>/<branch>`).
-2. Conflicted files appear in the Changes view and conflict resolver.
-3. Once conflicts are resolved, use **Continue** to adopt the rebased commit and resume the cascade for the remaining branches.
-4. Alternatively, use **Abort** to restore all branches and their metadata to their exact pre-sync backup refs and return to the original clean checkout.
+1. The operation pauses in `git-stacks-stack.json` in the selected worktree's Git administrative directory, saving its stable recovery identity, active replay proof and backup refs under `refs/git-stacks/backups/<id>/<hex-encoded-branch>`.
+2. Conflicted files appear in the selected directory's Changes view and conflict resolver; other directories are not borrowed.
+3. Resolve and stage conflicts, then use **Continue** to resume the original owned replay. **Skip…** separately confirms dropping only the exact current paused commit; later commits and conflicts still follow the original journal.
+4. **Abort** restores recorded local tips and metadata only where their current identities remain proven. External changes block rollback; already published remote or provider effects are not undone. Recovery retains the original force consent and leases.
 
 ## Linked issues
 
@@ -3195,14 +3258,16 @@ it and the original tips stay recoverable.
   finished, so an Abort that arrives earlier finds it already restored at the tip the
   preview captured.
 - The remote half of a run - the pull request retargets and closes, and the native stack
-  unstack and re-registration - is part of the same journal, and Continue runs it again
-  after a resolved conflict as well as after a lost response. Every step reads what
-  GitHub actually holds, in full, before it writes: a step whose result is already there
+  unstack and re-registration - is part of the same journal. Continue resumes supported
+  remaining steps after a resolved conflict or confirmed readback of a lost response.
+  Every step reads what GitHub actually holds, in full, before it writes: a step whose result is already there
   is recognised and completed instead of repeated, including a push whose ref already
   moved, a retarget that landed, an unstack that dissolved the stack, and a stack
   creation that was registered before the response was lost. A step whose pull request
   head, base, or state, or whose native stack membership, differs from both the reviewed
   pre-state and the reviewed result stops the run instead of overwriting it.
+  A dispatched retarget, close or push still at its pre-state is unconfirmed, not
+  proof of rejection, and is refused rather than dispatched again.
 
 ## Review workspace
 

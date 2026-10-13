@@ -53,6 +53,13 @@ const desktop: DesktopAPI = {
   worktreeInventory: (request) => ipcRenderer.invoke('repositories:inventory', request),
   inspect: (context, operation, args, requestId) =>
     ipcRenderer.invoke('inspection:request', context, operation, args, requestId),
+  captureOperation: (context) => ipcRenderer.invoke('operation:capture', context),
+  executeOperation: (token, action) => ipcRenderer.invoke('operation:execute', token, action),
+  operationRecords: () => ipcRenderer.invoke('operation:records'),
+  worktreeLifecyclePreview: (request) =>
+    ipcRenderer.invoke('repository:worktree-lifecycle-preview', request),
+  nativeOperationPreview: (request) =>
+    ipcRenderer.invoke('repository:native-operation-preview', request),
   onWorktreeInventory: (listener) => subscribe('repositories:inventory-updated', listener),
   cancelInventory: (requestId) => ipcRenderer.invoke('repositories:inventory-cancel', requestId),
   adoptWorktrees: (ids, requestId) =>
@@ -82,6 +89,7 @@ const desktop: DesktopAPI = {
   commitDiff: (oid, requestId) => ipcRenderer.invoke('repository:commit-diff', oid, requestId),
   pushPreview: () => ipcRenderer.invoke('repository:push-preview'),
   stackPreview: (kind, branch) => ipcRenderer.invoke('repository:stack-preview', kind, branch),
+  reviewedMergePreview: (number) => ipcRenderer.invoke('repository:reviewed-merge-preview', number),
   surgeryPreview: (request) => ipcRenderer.invoke('repository:surgery-preview', request),
   submitStackProgress: () => ipcRenderer.invoke('repository:submit-stack-progress'),
   onSubmitStackProgress: (listener: (event: OperationProgress<PublishProgress>) => void) =>

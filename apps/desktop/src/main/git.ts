@@ -1,3 +1,6 @@
+import { executeNativeOperation } from './native-operation'
+import { executeWorktreeLifecycle } from './worktree-lifecycle'
+import { recordOperationResult } from './operation-authority'
 import type { InspectionWorktreeStatus } from '@git-stacks/shared/inspection'
 import { spawn } from 'node:child_process'
 
@@ -134,6 +137,7 @@ import {
   recoverStaleBranchLocks,
   runStackAction,
   validateStackAction,
+  skipStackOperation,
 } from './stacks'
 import { buildReconciliationReport } from './reconciliation'
 
@@ -207,6 +211,26 @@ function validateAction(value: unknown): GitAction {
   }
 
   switch (value.type) {
+    case 'unregisterWorktrees':
+      throw new Error(
+        'Registration changes require the captured main-process registration authority.',
+      )
+    case 'executeNativeOperation':
+      if (value.confirmed !== true)
+        throw new Error('Native membership change confirmation is required.')
+      return {
+        type: 'executeNativeOperation',
+        token: requireString(value.token, 'native preview token', 256),
+        confirmed: true,
+      }
+    case 'executeWorktreeLifecycle':
+      if (value.coordinationConfirmed !== true)
+        throw new Error('External-tool coordination confirmation is required.')
+      return {
+        type: 'executeWorktreeLifecycle',
+        token: requireString(value.token, 'lifecycle preview token', 256),
+        coordinationConfirmed: true,
+      }
     case 'switch':
       if (value.carry !== undefined && typeof value.carry !== 'boolean')
         throw new Error('carry must be a boolean')
@@ -5658,7 +5682,8 @@ async function ensureStackWriteAllowed(repoPath: string, action: GitAction): Pro
     action.type === 'resolveConflict' ||
     action.type === 'conflictMergeTool' ||
     action.type === 'stackContinue' ||
-    action.type === 'stackAbort'
+    action.type === 'stackAbort' ||
+    action.type === 'operationSkip'
   ) {
     return
   }
@@ -5993,6 +6018,22 @@ export async function runAction(
     }
     await ensureStackWriteAllowed(root, action)
     switch (action.type) {
+      case 'unregisterWorktrees':
+        throw new Error(
+          'Registration changes require the captured main-process registration authority.',
+        )
+      case 'executeNativeOperation':
+        return executeNativeOperation(root, action.token, action.confirmed)
+      case 'executeWorktreeLifecycle': {
+        const worktreeLifecycle = await executeWorktreeLifecycle(
+          root,
+          action.token,
+          action.coordinationConfirmed,
+          (progress) =>
+            recordOperationResult({ message: progress.message, worktreeLifecycle: progress }),
+        )
+        return { message: worktreeLifecycle.message, worktreeLifecycle }
+      }
       case 'stage':
       case 'unstage':
         return runStage(root, action.type, action.paths)
@@ -6059,7 +6100,9 @@ export async function runAction(
       case 'operationContinue':
         return runOperation(root, 'continue')
       case 'operationSkip':
-        return runOperation(root, 'skip')
+        return (await getStackProgress(root))
+          ? skipStackOperation(root)
+          : runOperation(root, 'skip')
       case 'operationAbort':
         return runOperation(root, 'abort')
       case 'discardFile':

@@ -419,7 +419,11 @@ export function OperationBanner({
               >
                 Continue
               </Button>
-              {!stack && ['rebase', 'cherryPick', 'revert'].includes(operation ?? '') ? (
+              {(
+                stack
+                  ? operation === 'rebase' && Boolean(stack.currentBranch)
+                  : ['rebase', 'cherryPick', 'revert'].includes(operation ?? '')
+              ) ? (
                 <Button
                   disabled={busy}
                   size="sm"

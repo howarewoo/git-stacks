@@ -17,6 +17,7 @@ export function inspectionAPI(
   api: DesktopAPI,
   context: InspectionContext,
   isCurrent?: () => boolean,
+  prepare?: (operation: InspectionOperation) => Promise<InspectionContext>,
 ): DesktopAPI {
   const scoped = { ...api }
   for (const [name, value] of Object.entries(scoped)) {
@@ -39,7 +40,7 @@ export function inspectionAPI(
         writable: true,
       })
   }
-  const requests = new Map<string, Set<string>>()
+  const requests = new Map<string, Map<string, InspectionContext>>()
   for (const operation of Object.keys(INSPECTION_CHANNELS) as InspectionOperation[]) {
     if (operation === 'cancel') continue
     Object.defineProperty(scoped, operation, {
@@ -48,6 +49,7 @@ export function inspectionAPI(
           throw new Error('The captured provider session changed; reopen this source explicitly.')
         if (!api.inspect)
           throw new Error('Selected-context inspection is unavailable in this runtime.')
+        const requestContext = prepare ? await prepare(operation) : context
         const id = `inspection-${crypto.randomUUID()}`
         const explicitId =
           operation === 'history' ||
@@ -72,11 +74,11 @@ export function inspectionAPI(
               : operation === 'conflictView'
                 ? `conflict:${args[0]}`
                 : operation.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)
-        const pending = requests.get(key) ?? new Set<string>()
-        pending.add(id)
+        const pending = requests.get(key) ?? new Map<string, InspectionContext>()
+        pending.set(id, requestContext)
         requests.set(key, pending)
         try {
-          const result = await api.inspect(context, operation, args, id)
+          const result = await api.inspect(requestContext, operation, args, id)
           if (isCurrent && !isCurrent())
             throw new Error('The captured provider session changed; this response was retired.')
           return result
@@ -90,7 +92,8 @@ export function inspectionAPI(
   }
   scoped.cancel = async (requestId) => {
     if (!api.inspect) return
-    for (const id of requests.get(requestId) ?? []) await api.inspect(context, 'cancel', [id])
+    for (const [id, requestContext] of requests.get(requestId) ?? [])
+      await api.inspect(requestContext, 'cancel', [id])
   }
   scoped.runAction = () =>
     Promise.reject(new Error('Inspection does not authorize a Git mutation.'))

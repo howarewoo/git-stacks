@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { OperationProgress } from '@git-stacks/shared/operation-scope'
+import type { OperationProgress, OperationCapture } from '@git-stacks/shared/operation-scope'
 import {
   mergeProgressAfterRead,
   operationProgressKeys,
@@ -52,6 +52,7 @@ import {
   BlockerList,
   MergeOutcomePanel,
   OperationContext,
+  CapturedOperationContext,
   OperationSteps,
   PhaseStatus,
   PublishProgressPanel,
@@ -80,7 +81,7 @@ export type WorkflowRequest =
   | { kind: 'rename' | 'parent' | 'upstream'; branch: Branch }
   | { kind: 'pull' | 'merge' | 'stash' | 'forcePush' }
   | { kind: 'commitAction'; commit: Commit; mode: 'cherryPick' | 'revert' }
-  | { kind: 'stack'; branch: string; operation: StackKind }
+  | { kind: 'stack'; branch: string; operation: StackKind; pullRequest?: number }
   | { kind: 'surgery'; request: SurgeryRequest }
   | { kind: 'pr'; number: number }
   | {
@@ -157,7 +158,9 @@ export function surgeryRequestFor(
 ): SurgeryRequest {
   return request.request.kind === 'insert'
     ? { ...request.request, name: name.trim() }
-    : request.request
+    : request.request.kind === 'move'
+      ? { ...request.request, target: name.trim() }
+      : request.request
 }
 
 type WorkflowData =
@@ -199,7 +202,13 @@ function initialWorkflowName(request: WorkflowRequest, snapshot: RepositorySnaps
     if (request.kind === 'upstream') return request.branch.upstreamRef ?? ''
     return request.branch.parent ?? snapshot.defaultBranch
   }
-  return request.kind === 'surgery' && request.request.kind === 'insert' ? request.request.name : ''
+  return request.kind === 'surgery'
+    ? request.request.kind === 'insert'
+      ? request.request.name
+      : request.request.kind === 'move'
+        ? request.request.target
+        : ''
+    : ''
 }
 
 function workflowComposition(request: WorkflowRequest): WorkflowComposition {
@@ -263,7 +272,16 @@ export type WorkflowStackAPI = Pick<
   | 'mergeStatus'
 > &
   Partial<
-    Pick<DesktopAPI, 'searchIssues' | 'pullRequestIssueLinks' | 'previewIssueLink' | 'pullRequest'>
+    Pick<
+      DesktopAPI,
+      | 'searchIssues'
+      | 'pullRequestIssueLinks'
+      | 'previewIssueLink'
+      | 'pullRequest'
+      | 'surgeryPreview'
+      | 'pushPreview'
+      | 'reviewedMergePreview'
+    >
   >
 
 interface PrLinkedIssuesSectionProps {
@@ -837,6 +855,7 @@ export function WorkflowDialog({
   defaults,
   providerManagement = false,
   providerSourceCurrent = true,
+  capturedAuthority,
 }: {
   request: WorkflowRequest
   snapshot: RepositorySnapshot
@@ -853,6 +872,7 @@ export function WorkflowDialog({
   defaults?: AppSettings | null
   providerManagement?: boolean
   providerSourceCurrent?: boolean
+  capturedAuthority?: OperationCapture | null
 }) {
   // TanStack Form owns every editable value in this dialog. The state declared below
   // it is domain state: reviewed previews, progress, recovery and dispatch identity.
@@ -1030,28 +1050,33 @@ export function WorkflowDialog({
     // Read from the store rather than a render snapshot: the insert preview is always
     // the one for the branch name actually written.
     const requestedName =
-      request.kind === 'surgery' && request.request.kind === 'insert'
+      request.kind === 'surgery' && request.request.kind !== 'remove'
         ? form.getFieldValue('name')
         : null
     setError(null)
     setIdentity(null)
     const load = async (): Promise<WorkflowData> => {
       if (request.kind === 'stack') {
+        if (request.operation === 'merge' && request.pullRequest !== undefined) {
+          if (!stackApi.reviewedMergePreview)
+            throw new Error('Reviewed provider downstack preview is unavailable.')
+          return { kind: 'stack', value: await stackApi.reviewedMergePreview(request.pullRequest) }
+        }
         return {
           kind: 'stack',
           value: await stackApi.stackPreview(request.operation, request.branch),
         }
       }
       if (request.kind === 'surgery') {
+        if (!stackApi.surgeryPreview) throw new Error('Captured surgery preview is unavailable.')
         return {
           kind: 'surgery',
-          value: await window.desktop.surgeryPreview(
-            surgeryRequestFor(request, requestedName ?? ''),
-          ),
+          value: await stackApi.surgeryPreview(surgeryRequestFor(request, requestedName ?? '')),
         }
       }
       if (request.kind === 'forcePush') {
-        return { kind: 'forcePush', value: await window.desktop.pushPreview() }
+        if (!stackApi.pushPreview) throw new Error('Captured push preview is unavailable.')
+        return { kind: 'forcePush', value: await stackApi.pushPreview() }
       }
       if (request.kind === 'pr') {
         if (!stackApi.pullRequest)
@@ -1196,7 +1221,7 @@ export function WorkflowDialog({
                             : request.kind === 'stack' && request.operation === 'publish'
                               ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
                               : request.kind === 'stack' && request.operation === 'sync'
-                                ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
+                                ? 'Review the explicitly fetched trunk, merged-layer handling, replay, retargeting and captured remote leases. Fetch is a separate Git operation; Sync never fetches while opening a preview. Conflicts pause for explicit Continue or Abort.'
                                 : 'GitHub merges the reviewed pull requests itself, bottom-to-top, and this dialog follows the result. Local branches are never retargeted or deleted for you; restack and publish the rest afterwards.'
 
   const readProgress = async () => {
@@ -1273,13 +1298,19 @@ export function WorkflowDialog({
   // The branch name a force consent must match, read from the same submitted values
   // the payload is built from.
   const confirmationTargetFor = (values: WorkflowFormValues): string | null =>
-    request.kind === 'forcePush'
-      ? (push?.branch ?? null)
-      : request.kind === 'stack' && values.allowForce
-        ? request.branch
-        : request.kind === 'surgery' && values.allowForce
-          ? (surgery?.forcePushes[0] ?? null)
-          : null
+    request.kind === 'confirm' && request.destructive
+      ? 'ref' in request.action
+        ? request.action.ref
+        : request.action.type === 'unregisterWorktrees'
+          ? 'REMOVE REGISTRATION'
+          : 'DELETE SELECTED'
+      : request.kind === 'forcePush'
+        ? (push?.branch ?? null)
+        : request.kind === 'stack' && values.allowForce
+          ? request.branch
+          : request.kind === 'surgery' && values.allowForce
+            ? (surgery?.forcePushes[0] ?? null)
+            : null
 
   /**
    * The exact action payload a set of form values describes, or `null` while the
@@ -1303,8 +1334,13 @@ export function WorkflowDialog({
       prDraft,
     } = values
     const confirmationTarget = confirmationTargetFor(values)
-    if (request.kind === 'confirm')
-      return { kind: 'confirm', action: request.action, label: request.label }
+    if (request.kind === 'confirm') {
+      const action =
+        request.action.type === 'deleteBranch' || request.action.type === 'deleteBranches'
+          ? { ...request.action, force: allowForce }
+          : request.action
+      return { kind: 'confirm', action, label: request.label }
+    }
     if (request.kind === 'stack') {
       if (!preview) return null
       return request.operation === 'publish'
@@ -1421,7 +1457,7 @@ export function WorkflowDialog({
       expectedOidMissing: request.kind === 'forcePush' && !push,
       requiresName:
         ['rename', 'parent', 'merge'].includes(request.kind) ||
-        (request.kind === 'surgery' && request.request.kind === 'insert'),
+        (request.kind === 'surgery' && request.request.kind !== 'remove'),
       name: values.name,
       requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
       mainline: values.mainline,
@@ -1586,6 +1622,17 @@ export function WorkflowDialog({
             <fieldset className="workflow-fields" disabled={locked || finished}>
               {closeNotice ? <WarningNote>{closeNotice}</WarningNote> : null}
               {contextFacts.length ? <OperationContext facts={contextFacts} /> : null}
+              {capturedAuthority ? (
+                <>
+                  <CapturedOperationContext capture={capturedAuthority} />
+                  <WarningNote>
+                    {capturedAuthority.coordination} Replay may switch only this explicitly chosen
+                    directory among the listed layers and restores its original checkout on
+                    completion; a conflict leaves recovery in this same directory. Other worktrees
+                    are never borrowed, stashed or reset.
+                  </WarningNote>
+                </>
+              ) : null}
               <PhaseStatus phase={phase} message={statusMessage} />
               {request.kind === 'rename' ? (
                 <form.Field name="name">
@@ -1786,11 +1833,19 @@ export function WorkflowDialog({
                 consent and the base changes the moment a fresh read fails, while Resume
                 stayed enabled. The preview-dependent parts stay gated; the saved ones do not.
               */}
-              {request.kind === 'surgery' && request.request.kind === 'insert' ? (
+              {request.kind === 'surgery' && request.request.kind !== 'remove' ? (
                 <>
                   <form.Field name="name">
                     {(field) => (
-                      <Field id="workflow-surgery-name" label="New branch name" required>
+                      <Field
+                        id="workflow-surgery-name"
+                        label={
+                          request.request.kind === 'move'
+                            ? 'New dependency parent branch'
+                            : 'New branch name'
+                        }
+                        required
+                      >
                         <Input
                           data-workflow-first-field=""
                           value={field.state.value}
@@ -1810,8 +1865,8 @@ export function WorkflowDialog({
                     )}
                   </form.Field>
                   <WarningNote>
-                    Reload the preview after naming the branch: the reviewed rewrites, pull request
-                    bases and pushes below are the ones this exact name costs.
+                    Reload the preview after naming the branch or target: the reviewed rewrites,
+                    pull request bases and pushes below belong to that exact choice.
                   </WarningNote>
                 </>
               ) : null}
@@ -2548,6 +2603,38 @@ export function WorkflowDialog({
                   ) : null}
                 </>
               ) : null}
+              {request.kind === 'confirm' && request.destructive ? (
+                <form.Field name="confirmation">
+                  {(field) => (
+                    <TypedConfirmation
+                      id="workflow-confirm-selected"
+                      value={field.state.value}
+                      target={confirmationTarget ?? ''}
+                      disabled={locked}
+                      onChange={(value) => {
+                        markEdited()
+                        field.handleChange(value)
+                      }}
+                    />
+                  )}
+                </form.Field>
+              ) : null}
+              {request.kind === 'confirm' &&
+              (request.action.type === 'deleteBranch' ||
+                request.action.type === 'deleteBranches') ? (
+                <form.Field name="allowForce">
+                  {(field) => (
+                    <Checkbox
+                      checked={field.state.value}
+                      onCheckedChange={(value) => {
+                        markEdited()
+                        field.handleChange(value === true)
+                      }}
+                      label="Explicitly allow deletion of unmerged local tips; protected default, current and any-worktree branches still cannot be deleted. No remote branch or directory is removed."
+                    />
+                  )}
+                </form.Field>
+              ) : null}
             </fieldset>
 
             {/* Outside the fieldset on purpose: a finished run locks every control that
@@ -2694,6 +2781,11 @@ export function WorkflowDialog({
             </WorkflowActions>
           </WorkflowFrame>
         </form>
+        {capturedAuthority && (busy || formSubmitting) ? (
+          <Button variant="secondary" onClick={onClose}>
+            Hide running operation — continue in persistent Operations status
+          </Button>
+        ) : null}
       </DialogContent>
     </Dialog>
   )

@@ -16,6 +16,7 @@ import type {
   ReconciliationRepairKind,
   ReconciliationState,
   RepositorySnapshot,
+  DesktopAPI,
 } from '@git-stacks/shared/types'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
@@ -404,6 +405,7 @@ export function ReconciliationPanel({
   runAction,
   actionError,
   onClearActionError,
+  desktop,
 }: {
   snapshot: RepositorySnapshot
   authority: string
@@ -411,6 +413,7 @@ export function ReconciliationPanel({
   runAction: RunAction
   actionError: string | null
   onClearActionError: () => void
+  desktop?: Pick<DesktopAPI, 'reconciliationPreview'>
 }) {
   const report = snapshot.reconciliation
   const [openKey, setOpenKey] = React.useState<string | null>(null)
@@ -421,10 +424,10 @@ export function ReconciliationPanel({
     queryKey: ['repository-reconciliation-preview', snapshot.path, authority, openKey, revision],
     enabled: Boolean(report && openKey),
     queryFn: async ({ signal }) => {
-      if (!window.desktop?.reconciliationPreview) {
+      if (!desktop?.reconciliationPreview) {
         throw new Error('This build cannot read reconciliation previews.')
       }
-      const result = await window.desktop.reconciliationPreview(openKey!)
+      const result = await desktop.reconciliationPreview(openKey!)
       signal.throwIfAborted()
       return result
     },

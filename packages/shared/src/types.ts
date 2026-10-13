@@ -1,6 +1,17 @@
+import type { NativeOperationRequest, NativeOperationPreview } from './native-operation'
+import type {
+  WorktreeLifecycleRequest,
+  WorktreeLifecyclePreview,
+  WorktreeLifecycleResult,
+} from './worktree-lifecycle'
 import type { SnapshotLimits } from './performance'
 import type { InventoryRequest, WorktreeInventory, InventoryId } from './worktree-inventory'
-import type { OperationProgress, OperationScope } from './operation-scope'
+import type {
+  OperationProgress,
+  OperationScope,
+  OperationCapture,
+  OperationRecord,
+} from './operation-scope'
 
 import type { GitHubHostStatus } from './host'
 import type { RepositoryCapabilities } from './capabilities'
@@ -920,6 +931,9 @@ export type SubmitStackAction =
   | { type: 'submitStackDismiss' }
 
 export interface StackProgress {
+  operationId: string
+  /** Null when the local-only replay has no remote force consent. */
+  allowForce: boolean | null
   kind: 'restack' | 'sync'
   originalBranch: string
   currentBranch: string | null
@@ -931,12 +945,12 @@ export interface StackProgress {
     pullRequests: {
       number: number
       action: 'retarget' | 'close'
-      status: 'pending' | 'completed'
+      status: 'pending' | 'dispatched' | 'completed'
     }[]
     nativeStack: {
       number: number
       action: 'unstack' | 'unstack-and-create'
-      unstackStatus: 'pending' | 'completed'
+      unstackStatus: 'pending' | 'dispatched' | 'completed'
       createStatus: 'pending' | 'completed' | 'skipped'
     } | null
   }
@@ -1000,6 +1014,9 @@ export type PullRequestAction = Extract<
 >
 
 export type GitAction =
+  | { type: 'executeWorktreeLifecycle'; token: string; coordinationConfirmed: boolean }
+  | { type: 'executeNativeOperation'; token: string; confirmed: boolean }
+  | { type: 'unregisterWorktrees'; worktreeIds: string[] }
   | { type: 'switch'; ref: string; carry?: boolean }
   | { type: 'createBranch'; name: string; parent: string }
   | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
@@ -1054,6 +1071,7 @@ export type MergeLayerStatus =
   | 'enqueued'
   | 'failed'
   | 'pending'
+  | 'unconfirmed'
   | 'not-requested'
   | 'not-merged'
 
@@ -1103,6 +1121,7 @@ export interface ActionResult {
   url?: string
   /** Present only for a merge: the per-pull-request outcome, including queue state. */
   merge?: MergeResult
+  worktreeLifecycle?: WorktreeLifecycleResult
 }
 
 /**
@@ -1306,6 +1325,12 @@ export interface DesktopAPI {
     args: InspectionArgs<K>,
     requestId?: string,
   ): Promise<InspectionResult<K>>
+  /** Explicit main-minted authority; neither selection nor ambient repository grants it. */
+  captureOperation?(context: InspectionContext): Promise<OperationCapture>
+  executeOperation?(token: string, action: GitAction): Promise<ActionResult>
+  operationRecords?(): Promise<OperationRecord[]>
+  worktreeLifecyclePreview?(request: WorktreeLifecycleRequest): Promise<WorktreeLifecyclePreview>
+  nativeOperationPreview?(request: NativeOperationRequest): Promise<NativeOperationPreview>
   /** Captured inspection facade only; production callers use inspect(context, 'worktreeStatus', []). */
   worktreeStatus?(): Promise<InspectionWorktreeStatus>
   /** Accessible repositories for the signed-in account; paginated and cancellable. */
@@ -1344,6 +1369,7 @@ export interface DesktopAPI {
   commitDiff(oid: string, requestId?: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
+  reviewedMergePreview?(number: number): Promise<StackPreview>
   /** The reviewed insert, move, or remove surgery for one stack. */
   surgeryPreview(request: SurgeryRequest): Promise<SurgeryPreview>
   /** Resumable Submit Stack progress left on disk, or null when nothing is pending. */

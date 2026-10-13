@@ -7,6 +7,7 @@ import type {
   PullRequestStackMembership,
 } from '@git-stacks/shared/types'
 import { getOriginUrl, isCancelled, parseRemote } from './git-core'
+import { recordOperationRemoteDispatch } from './operation-authority'
 import { isRecord } from '@git-stacks/shared/guards'
 import {
   hostTransport,
@@ -724,6 +725,7 @@ export async function createPullRequestStack(
   const transport = options.transport ?? hostTransport(options.host)
   try {
     await options.beforeCreate?.()
+    await recordOperationRemoteDispatch('intent')
     const response = await transport.rest<unknown>({
       method: 'POST',
       path: `repos/${owner}/${repo}/stacks`,
@@ -733,6 +735,15 @@ export async function createPullRequestStack(
     })
     return parseRestStack(response.data)
   } catch (error) {
+    if (
+      error instanceof GitHubBudgetExhaustedError ||
+      (error instanceof GitHubTransportError &&
+        typeof error.status === 'number' &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408)
+    )
+      await recordOperationRemoteDispatch('rejected')
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
         throw new NativeStackError(
@@ -791,6 +802,7 @@ export async function addPullRequestsToStack(
 
   const transport = options.transport ?? hostTransport(options.host)
   try {
+    await recordOperationRemoteDispatch('intent')
     const response = await transport.rest<unknown>({
       method: 'POST',
       path: `repos/${owner}/${repo}/stacks/${stackNumber}/add`,
@@ -800,6 +812,15 @@ export async function addPullRequestsToStack(
     })
     return parseRestStack(response.data)
   } catch (error) {
+    if (
+      error instanceof GitHubBudgetExhaustedError ||
+      (error instanceof GitHubTransportError &&
+        typeof error.status === 'number' &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408)
+    )
+      await recordOperationRemoteDispatch('rejected')
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
         throw new NativeStackError(
@@ -835,6 +856,7 @@ export async function unstackPullRequestStack(
   }
   const transport = options.transport ?? hostTransport(options.host)
   try {
+    await recordOperationRemoteDispatch('intent')
     const response = await transport.rest<unknown>({
       method: 'POST',
       path: `repos/${owner}/${repo}/stacks/${stackNumber}/unstack`,
@@ -852,6 +874,15 @@ export async function unstackPullRequestStack(
     }
     return { dissolved: false, stack: parseRestStack(response.data) }
   } catch (error) {
+    if (
+      error instanceof GitHubBudgetExhaustedError ||
+      (error instanceof GitHubTransportError &&
+        typeof error.status === 'number' &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408)
+    )
+      await recordOperationRemoteDispatch('rejected')
     if (error instanceof GitHubTransportError) {
       if (error.status === 404 || error.kind === 'not-found') {
         throw new NativeStackError(
@@ -1062,6 +1093,19 @@ export async function createNativeStackAction(
     defaultBranch,
     host,
   })
+  if (
+    stack.pullRequests.length !== pullRequests.length ||
+    stack.pullRequests.some(
+      (member, index) =>
+        member.number !== pullRequests[index] ||
+        !member.headSha ||
+        member.headSha !== knownPullRequests.find((pr) => pr.number === member.number)?.headOid,
+    )
+  )
+    throw new NativeStackError(
+      'preview-unavailable',
+      'The provider registration has an unknown or changed captured head/order. Its actual effects are retained; do not replay this request.',
+    )
   await retireLegacyStackComments(originFullName, pullRequests, { host })
   return {
     message: `Created native stack #${stack.number} on ${host.host} with ${stack.size} pull requests`,
@@ -1075,15 +1119,37 @@ export async function addPullRequestsToNativeStackAction(
   stackNumber: number,
   pullRequests: number[],
   knownPullRequests: PullRequest[],
+  expectedStack?: NativeStack,
 ): Promise<ActionResult> {
   const [owner, name] = originFullName.split('/')
   const host = await mutationHost(repoPath)
   const existing = await getPullRequestStack(owner, name, stackNumber, { host })
+  if (expectedStack && JSON.stringify(existing) !== JSON.stringify(expectedStack))
+    throw new NativeStackError(
+      'preview-unavailable',
+      'Native membership changed after approval; no append was sent.',
+    )
   const stack = await addPullRequestsToStack(owner, name, stackNumber, pullRequests, {
     existingStack: existing,
     knownPullRequests,
     host,
   })
+  const expectedNumbers = [...existing.pullRequests.map((member) => member.number), ...pullRequests]
+  if (
+    stack.pullRequests.length !== expectedNumbers.length ||
+    stack.pullRequests.some(
+      (member, index) =>
+        member.number !== expectedNumbers[index] ||
+        !member.headSha ||
+        member.headSha !==
+          (knownPullRequests.find((pr) => pr.number === member.number)?.headOid ??
+            existing.pullRequests.find((pr) => pr.number === member.number)?.headSha),
+    )
+  )
+    throw new NativeStackError(
+      'preview-unavailable',
+      'The provider append has an unknown or changed captured head/order. Its actual effects are retained; do not replay this request.',
+    )
   await retireLegacyStackComments(
     originFullName,
     stack.pullRequests.map((member) => member.number),
@@ -1099,10 +1165,16 @@ export async function unstackNativeStackAction(
   repoPath: string,
   originFullName: string,
   stackNumber: number,
+  expectedStack?: NativeStack,
 ): Promise<ActionResult> {
   const [owner, name] = originFullName.split('/')
   const host = await mutationHost(repoPath)
   const before = await getPullRequestStack(owner, name, stackNumber, { host })
+  if (expectedStack && JSON.stringify(before) !== JSON.stringify(expectedStack))
+    throw new NativeStackError(
+      'preview-unavailable',
+      'Native membership changed after approval; no unstack was sent.',
+    )
   const result = await unstackPullRequestStack(owner, name, stackNumber, { host })
   await retireLegacyStackComments(
     originFullName,

@@ -146,6 +146,8 @@ export const activeCherryPickSnapshot = withSnapshot({
 /** A restack that paused after finishing some branches. */
 export const pausedRestackProgress: StackProgress = {
   kind: 'restack',
+  operationId: 'fixture-paused-restack',
+  allowForce: null,
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',
   completed: ['feature/checkout'],
@@ -163,6 +165,8 @@ export const pausedRestackSnapshot = withSnapshot({
 /** A restack whose steps have all been applied. */
 export const completedRestackProgress: StackProgress = {
   kind: 'restack',
+  operationId: 'fixture-completed-restack',
+  allowForce: null,
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',
   completed: ['feature/checkout', 'feature/checkout-tests'],
@@ -177,6 +181,8 @@ export const completedRestackSnapshot = withSnapshot({
 /** A restack that has not applied a single step yet. */
 export const unstartedRestackProgress: StackProgress = {
   kind: 'restack',
+  operationId: 'fixture-unstarted-restack',
+  allowForce: null,
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout',
   completed: [],

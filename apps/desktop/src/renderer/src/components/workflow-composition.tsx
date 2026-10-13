@@ -13,6 +13,7 @@ import type {
   StackStep,
 } from '@git-stacks/shared/types'
 import { PHASE_PRESENTATION, type WorkflowComposition, type WorkflowPhase } from './workflow-policy'
+import type { OperationCapture } from '@git-stacks/shared/operation-scope'
 
 /**
  * The three reusable compositions named in the design brief — ordinary form,
@@ -114,6 +115,33 @@ export function OperationContext({
   )
 }
 
+export function CapturedOperationContext({ capture }: { capture: OperationCapture }) {
+  return (
+    <OperationContext
+      facts={[
+        { label: 'Common-local repository', value: capture.repositoryId, code: true },
+        { label: 'Execution directory', value: capture.worktreePath, code: true },
+        { label: 'Worktree authority', value: capture.worktreeId, code: true },
+        { label: 'Captured HEAD', value: capture.headOid ?? 'Unborn', code: true },
+        ...(capture.operationCommitOid
+          ? [{ label: 'Exact paused commit', value: capture.operationCommitOid, code: true }]
+          : []),
+        {
+          label: 'Provider remote',
+          value: capture.scope.remoteUrl ?? 'No configured remote',
+          code: true,
+        },
+        { label: 'Captured provider authority', value: capture.scope.authority, code: true },
+        {
+          label: 'HEAD/index/status/ref/dependency fingerprint',
+          value: capture.fingerprint,
+          code: true,
+        },
+      ]}
+    />
+  )
+}
+
 export function OperationFacts({
   facts,
   className,
@@ -134,7 +162,7 @@ export function OperationFacts({
           <dd
             className={cn(
               'm-0 min-w-0 break-words text-xs text-[var(--gs-semantic-text-primary)]',
-              fact.code && 'font-mono',
+              fact.code && 'font-mono break-all',
             )}
           >
             {fact.value}
@@ -411,6 +439,7 @@ const mergeLayerPresentation: Record<
   pending: { label: 'running', tone: 'info' },
   merged: { label: 'merged', tone: 'success' },
   enqueued: { label: 'enqueued', tone: 'info' },
+  unconfirmed: { label: 'outcome unconfirmed', tone: 'warning' },
   'not-requested': { label: 'not requested', tone: 'info' },
   'not-merged': { label: 'not merged', tone: 'warning' },
   failed: { label: 'failed', tone: 'danger' },

@@ -349,6 +349,7 @@ function graphPullRequest(
     headRefName: pr.head,
     headRefOid: currentHead(state, pr),
     baseRefName: pr.base,
+    baseRefOid: hostRefSha(`refs/heads/${pr.base}`),
     isDraft: pr.draft === true,
     state: pr.state,
     reviewDecision: pr.reviewDecision || null,
