@@ -397,6 +397,8 @@ export interface Branch {
   subject: string
   updatedAt: string
   parent: string | null
+  /** Main-resolved qualified endpoint used for the parent comparison; never the tracking upstream. */
+  parentRef?: string | null
   /** Parent commits absent from this branch; null when no parent comparison is available. */
   parentBehind: number | null
   pr: PullRequest | null
@@ -1242,6 +1244,14 @@ export interface GitHubCliStatus {
   message: string | null
 }
 
+import type {
+  InspectionContext,
+  InspectionOperation,
+  InspectionArgs,
+  InspectionResult,
+  InspectionWorktreeStatus,
+} from './inspection'
+
 export interface DesktopAPI {
   /**
    * What the configured GitHub host was observed to support. Every field is a
@@ -1258,6 +1268,14 @@ export interface DesktopAPI {
   cancelInventory?(requestId: string): Promise<void>
   /** Register selected discovered existing directories; never checks out or recreates them. */
   adoptWorktrees?(ids: InventoryId[], requestId: string): Promise<RecentRepository[]>
+  inspect?<K extends InspectionOperation>(
+    context: InspectionContext,
+    operation: K,
+    args: InspectionArgs<K>,
+    requestId?: string,
+  ): Promise<InspectionResult<K>>
+  /** Captured inspection facade only; production callers use inspect(context, 'worktreeStatus', []). */
+  worktreeStatus?(): Promise<InspectionWorktreeStatus>
   /** Accessible repositories for the signed-in account; paginated and cancellable. */
   searchRepositories?(
     request: RepositoryDiscoveryRequest,

@@ -1,5 +1,6 @@
 import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
-import { inventoryFixture } from './inventory'
+import { snapshotInventory } from './inventory'
+import type { InspectionResult } from '@git-stacks/shared/inspection'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import {
   parseGraphPreferences,
@@ -308,7 +309,14 @@ export function installFixtureControl(options: {
   let scenario = scenarioFor(options.scenario)
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
-  let servedInventory = scenario.inventory ?? inventoryFixture()
+  let servedInventory =
+    scenario.inventory ??
+    snapshotInventory(
+      Object.values(
+        scenario.snapshotsByPath ??
+          (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+      ),
+    )
   const inventoryListeners = new Set<(value: WorktreeInventory) => void>()
   let active: RepositorySnapshot | null = scenario.snapshot
   const cliStatuses = new Map<string, GitHubCliStatus>()
@@ -695,6 +703,53 @@ export function installFixtureControl(options: {
     return { ...before, ...after, reference, state, message }
   }
   const desktop: DesktopAPI = {
+    inspect: async (context, operation, args) => {
+      record('inspect', [context, operation, args])
+      const repo = servedInventory.repositories.find(
+        (item) => item.identity.id === context.repositoryId,
+      )
+      if (!repo) throw new Error('Selected fixture repository was removed')
+      const tree = context.worktreeId
+        ? repo.worktrees.find((item) => item.id === context.worktreeId)
+        : undefined
+      if (context.worktreeId && (!tree || tree.missing))
+        throw new Error('Selected fixture directory was removed')
+      const source = scenario.snapshotsByPath?.[repo.registeredPaths[0]] ?? scenario.snapshot
+      if (!source) throw new Error('Selected fixture snapshot is unavailable')
+      const captured = {
+        ...structuredClone(source),
+        path: tree?.path ?? repo.registeredPaths[0],
+        headOid: tree?.headOid ?? source.headOid,
+        pullRequests: repo.pullRequests.map((pr) => pr.facts),
+      }
+      if (operation === 'refresh') return captured as InspectionResult<typeof operation>
+      if (operation === 'worktreeStatus')
+        return {
+          path: captured.path,
+          currentBranch: captured.currentBranch,
+          headOid: captured.headOid,
+          files: captured.files,
+          filesTruncated: captured.limits.filesTruncated,
+          observedAt: new Date().toISOString(),
+        } as InspectionResult<typeof operation>
+      if (operation === 'repositoryOperationScope')
+        return {
+          repositoryPath: captured.path,
+          remoteUrl: captured.remoteUrl,
+          authority: cliAuthority('github.com', statusForHost('github.com')),
+        } as InspectionResult<typeof operation>
+      const previous = active
+      active = captured
+      try {
+        const method = desktop[operation] as (
+          ...args: unknown[]
+        ) => Promise<InspectionResult<typeof operation>>
+        if (!method) throw new Error('Selected fixture operation is unavailable')
+        return method(...args)
+      } finally {
+        active = previous
+      }
+    },
     graphPreferences: () => {
       record('graphPreferences', [])
       return admittedAnswer('graphPreferences', () => graphPreferenceResult(graphPreferenceScope()))
@@ -2201,7 +2256,14 @@ export function installFixtureControl(options: {
     setScenario(name) {
       scenario = scenarioFor(name)
       servedPrIndex = scenario.prIndex
-      servedInventory = scenario.inventory ?? inventoryFixture()
+      servedInventory =
+        scenario.inventory ??
+        snapshotInventory(
+          Object.values(
+            scenario.snapshotsByPath ??
+              (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+          ),
+        )
       seedGraphPreferences()
       // This double is installed once and outlives any number of scenario
       // changes. Only the answers change here: the mounted window keeps the

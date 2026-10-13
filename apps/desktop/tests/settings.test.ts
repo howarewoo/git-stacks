@@ -151,12 +151,12 @@ test('an absent field is not reported as corrupt, so a sparse file is not all no
 
 test('a stored shortcut chord that no action can dispatch falls back to the default', () => {
   const { settings } = validateSettings({
-    shortcuts: { 'view.branches': 'Home', 'view.stacks': 'home' },
+    shortcuts: { 'view.branches': 'Home', 'view.pullRequests': 'home' },
   })
   assert.equal(settings.shortcuts['view.branches'], 'Home')
   assert.equal(
-    settings.shortcuts['view.stacks'],
-    DEFAULT_SETTINGS.shortcuts['view.stacks'],
+    settings.shortcuts['view.pullRequests'],
+    DEFAULT_SETTINGS.shortcuts['view.pullRequests'],
     'two actions on one chord settles to a single owner',
   )
 })

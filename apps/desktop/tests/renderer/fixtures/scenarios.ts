@@ -89,6 +89,7 @@ function local(seed: BranchSeed): Branch {
     subject: `Update ${seed.name}`,
     updatedAt: UPDATED,
     parent: null,
+    parentRef: seed.parent ? `refs/heads/${seed.parent}` : null,
     parentBehind: 0,
     pr: null,
     oid: oid(`local:${seed.name}`),

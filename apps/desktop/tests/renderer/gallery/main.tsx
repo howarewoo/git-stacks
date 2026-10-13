@@ -8,7 +8,6 @@ import { TooltipProvider } from '../../../src/renderer/src/components/ui/tooltip
 import { DataSurfacesSpecimen } from '../../../src/renderer/src/design-system/DataSurfacesSpecimen'
 import { DialogSpecimen } from '../../../src/renderer/src/design-system/DialogSpecimen'
 import { FoundationsSpecimen } from '../../../src/renderer/src/design-system/FoundationsSpecimen'
-import { ShellSpecimen } from '../../../src/renderer/src/design-system/ShellSpecimen'
 import { installFixtureControl } from '../fixtures/control'
 import { InventoryConsumer } from './inventory-consumer'
 import { WorkbenchV5Gallery } from './workbench-v5'
@@ -112,7 +111,7 @@ function renderRoute(route: GalleryRouteId, remountKey: string) {
     case 'foundations':
       return <FoundationsSpecimen key={remountKey} />
     case 'shell':
-      return <ShellSpecimen key={remountKey} />
+      return <WorkbenchV5Gallery key={remountKey} />
     case 'data':
       return <DataSurfacesSpecimen key={remountKey} />
     case 'dialog':
