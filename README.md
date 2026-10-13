@@ -1790,9 +1790,9 @@ failure is an unmet runtime prerequisite, not permission to use `--no-sandbox`
 or `ELECTRON_DISABLE_SANDBOX` to report passing startup/interaction budgets.
 
 It writes `benchmarks/latest.json` and appends one line per run to
-`benchmarks/trend.jsonl` (capped at the last 200 runs). The `Performance budgets`
-workflow runs the full harness on main pushes and manual dispatches, and on PRs
-affecting desktop production code or shared dependencies. It uploads `benchmarks/`
+`benchmarks/trend.jsonl` (capped at the last 200 runs). The `budgets` job in the
+`Accessibility checks` workflow runs the full harness on main pushes and manual
+dispatches, and on PRs affecting desktop production code or shared dependencies. It uploads `benchmarks/`
 as an artifact and fails when any measurement exceeds its budget. See
 [Selective CI](#selective-ci) for the conservative selection policy.
 
@@ -1935,14 +1935,14 @@ These are the extreme cases the app states rather than hanging or crashing on.
 
 ## Selective CI
 
-The automatic accessibility and performance workflows always report the stable
+The `Accessibility checks` workflow uses one selection job for the stable
 `automated`, `design`, and `budgets` checks. Pull requests select affected workloads;
 every `main` push and `workflow_dispatch` runs the full existing nonvisual renderer,
 catalog, typecheck, keyboard/component unit, and performance workloads. Visual
 baselines remain a separate macOS-only local check.
 
 `scripts/ci/select-checks.mjs` is the single dependency-free Node 24/Git policy.
-Both workflows run its permanent regression suite before dependency installation,
+The workflow runs its permanent regression suite once before dependency installation,
 browser/display setup, or builds; `pnpm test` also runs those regressions.
 The PR comparison is `merge-base(event base SHA, event head SHA)..event head SHA`,
 not the merge checkout's parent diff. Selection fetches complete checkout history
@@ -1952,6 +1952,11 @@ the PR head used for selection. Missing history/commits, unknown paths, and comm
 workspace/build/test tooling conservatively select all relevant checks.
 NUL-delimited Git status parsing includes both rename/copy paths and deleted paths;
 a selected spec absent from the tested checkout expands to the full renderer.
+
+Node bootstrap explicitly disables `setup-node`'s automatic package-manager cache:
+the selector and skip-validation jobs need Node before pnpm is installed.
+Enabled workloads install the pinned pnpm afterward; no package-manager or
+dependency setup runs solely to validate an intentional skip.
 
 - Root documentation and `.agents/skills/` standalone skills skip expensive checks.
 - `apps/design/` selects catalog validation, tokens, build and tests plus the
