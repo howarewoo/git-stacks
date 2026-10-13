@@ -160,6 +160,10 @@ async function inspect(root: string, request: NativeOperationRequest) {
       state: pr.state,
       draft: pr.draft,
       stack: pr.stack,
+      checks: pr.checks,
+      reviewDecision: pr.reviewDecision,
+      mergeState: pr.mergeState,
+      canUpdate: pr.canUpdate,
     })),
   })
   return { preview, origin, signature }
@@ -188,6 +192,16 @@ export async function previewNativeOperation(
   const { preview, origin, signature } = await inspect(root, request)
   plans.set(preview.token, { root, origin, preview, signature, expires: Date.now() + 5 * 60_000 })
   return preview
+}
+
+/** Read-only approval validation; never consumes or reseeds the authored preview. */
+export async function validateNativeOperationPreview(root: string, token: string): Promise<void> {
+  const plan = plans.get(token)
+  if (!plan || plan.root !== root || plan.expires < Date.now())
+    throw new Error('The original native preview expired or is unavailable.')
+  const current = await inspect(root, plan.preview.request)
+  if (current.signature !== plan.signature || current.preview.blockers.length)
+    throw new Error('Original native heads, bases, membership, permission or capability changed.')
 }
 export async function executeNativeOperation(
   root: string,

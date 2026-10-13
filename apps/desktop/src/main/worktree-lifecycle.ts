@@ -7,15 +7,9 @@ import type {
   WorktreeLifecycleResult,
 } from '@git-stacks/shared/worktree-lifecycle'
 import { discoverWorktrees, inspectWorktree } from './worktree-inventory'
-import {
-  runGit,
-  getRefs,
-  getCurrentBranch,
-  getDefaultBranch,
-  validateBranchName,
-  isExitCode,
-} from './git-core'
-import { recordOperationPreview } from './operation-authority'
+import { runGit, tryGit, validateBranchName, isExitCode } from './git-core'
+import { recordOperationPreview, unresolvedOperationRecords } from './operation-authority'
+import { validateOperationEffect, operationEffectGuard } from './inspection-context'
 
 interface Plan {
   root: string
@@ -109,6 +103,8 @@ async function inspectPlan(
     coordination:
       'Coordinate external tools before execution. Their activity is unknown; app locks and administrative worktree locks are not an external-agent mutex.',
   }
+  const unresolved = await unresolvedOperationRecords(root)
+  const commonIdentity = await directoryIdentity(repository.identity.commonDirectory)
   const facts: unknown[] = [
     repository.identity,
     repository.refs,
@@ -155,15 +151,13 @@ async function inspectPlan(
       new Set(request.worktreeIds).size !== request.worktreeIds.length
     )
       throw new Error('Choose the exact nonempty worktree subset without duplicates.')
-    const defaultBranch = await getDefaultBranch(
-      root,
-      await getRefs(root),
-      await getCurrentBranch(root),
-    )
-    const base =
-      repository.refs.find(
-        (ref) => ref.kind === 'remote' && ref.name === `refs/remotes/origin/${defaultBranch}`,
-      ) ?? repository.refs.find((ref) => ref.name === `refs/heads/${defaultBranch}`)
+    // origin/HEAD is recorded repository authority; display fallbacks and
+    // init.defaultBranch are not proof that a tip landed in this repository.
+    const landingRef = (await tryGit(root, ['symbolic-ref', 'refs/remotes/origin/HEAD']))?.trim()
+    const base = landingRef?.startsWith('refs/remotes/origin/')
+      ? repository.refs.find((ref) => ref.kind === 'remote' && ref.name === landingRef)
+      : undefined
+    facts.push({ landingRef: landingRef ?? null, landingOid: base?.oid ?? null })
     for (const id of request.worktreeIds) {
       const found = repository.worktrees.find((tree) => tree.id === id)
       if (!found) throw new Error('A selected worktree disappeared; the batch is not trimmed.')
@@ -196,8 +190,48 @@ async function inspectPlan(
           'Ignored local contents are unpublished data; Git worktree remove would delete them even without force.',
         )
       facts.push(protectedContents)
+      const indexFlags = tree.missing
+        ? null
+        : await runGit(tree.path, ['--no-optional-locks', 'ls-files', '-v', '-z'])
+      facts.push(indexFlags)
+      for (const entry of indexFlags?.split('\0') ?? []) {
+        if (!entry) continue
+        if (/^[a-z] /.test(entry)) {
+          blockers.push(
+            'Assume-unchanged index entries cannot prove tracked contents safe for deletion.',
+          )
+          break
+        }
+        if (entry.startsWith('S ')) {
+          const materialized = await lstat(join(tree.path, entry.slice(2))).then(
+            () => true,
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return false
+              throw error
+            },
+          )
+          if (materialized) {
+            blockers.push('Materialized skip-worktree contents cannot be safely deleted.')
+            break
+          }
+        }
+      }
       if (tree.operation || (tree.gitDirectory && (await activeJournal(tree.gitDirectory))))
         blockers.push('Active or interrupted Git/app operation requires separate recovery.')
+      for (const record of unresolved) {
+        if (
+          record.capture.commonIdentity === commonIdentity &&
+          record.context.worktreeId === tree.id &&
+          record.worktreePath === tree.path &&
+          record.capture.gitDirectory === tree.gitDirectory &&
+          !tree.missing &&
+          record.capture.directoryIdentity === (await directoryIdentity(tree.path)) &&
+          record.capture.gitDirectoryIdentity === (await directoryIdentity(tree.gitDirectory!))
+        )
+          blockers.push(
+            `Unresolved ${record.action.type} operation ${record.id} retains this owner for independent recovery.`,
+          )
+      }
       const ref = repository.refs.find((ref) => ref.id === tree.refId)
       if (!base || !tree.headOid || !(await ancestor(root, tree.headOid, base.oid)))
         blockers.push('This captured tip is not proven merged into the default branch.')
@@ -291,6 +325,18 @@ export async function previewWorktreeLifecycle(
   return preview
 }
 
+/** Read-only validation of the immutable original directory plan. */
+export async function validateWorktreeLifecyclePreview(root: string, token: string): Promise<void> {
+  const plan = plans.get(token)
+  if (!plan || plan.root !== root || plan.expires < Date.now())
+    throw new Error('The original lifecycle preview expired or is unavailable.')
+  const current = await inspectPlan(root, plan.request)
+  if (current.signature !== plan.signature || current.preview.blockers.length)
+    throw new Error(
+      'Original directory contents, landing proof, refs, parent or recovery ownership changed.',
+    )
+}
+
 export async function executeWorktreeLifecycle(
   root: string,
   token: string,
@@ -329,18 +375,39 @@ export async function executeWorktreeLifecycle(
     effect.detail =
       'Git creation is being dispatched; inspect actual directory and branch after interruption, never replay automatically.'
     await onProgress?.(result)
+    let gitCompleted = false
     try {
       // Existing branch names are passed only after qualification. New branches use the captured base OID.
       // Git accepts an existing empty directory; claim an absent destination
+      const beforeClaim = await inspectPlan(root, plan.request)
+      if (beforeClaim.signature !== plan.signature || beforeClaim.preview.blockers.length)
+        throw new Error('Creation target or parent authority changed; no directory was claimed.')
       // ourselves rather than treating a raced-in external directory as ours.
+      await validateOperationEffect()
       await mkdir(target.path)
       const claimed = await directoryIdentity(target.path)
-      await runGit(
-        root,
-        plan.request.newBranch
-          ? ['worktree', 'add', '-b', plan.request.newBranch, '--', target.path, target.oid!]
-          : ['worktree', 'add', '--', target.path, target.ref!.slice('refs/heads/'.length)],
+      await operationEffectGuard.run(
+        async () => {
+          if ((await directoryIdentity(target.path)) !== claimed)
+            throw new Error('The claimed creation directory was replaced before Git dispatch.')
+          if (plan.request.kind === 'create' && !plan.request.newBranch) {
+            const live = await discoverWorktrees(root)
+            const ref = live.refs.find((ref) => ref.name === target.ref)
+            if (ref?.oid !== target.oid || live.worktrees.some((tree) => tree.refId === ref.id))
+              throw new Error(
+                'The existing branch tip or checkout ownership changed before creation.',
+              )
+          }
+        },
+        () =>
+          runGit(
+            root,
+            plan.request.kind === 'create' && plan.request.newBranch
+              ? ['worktree', 'add', '-b', plan.request.newBranch, '--', target.path, target.oid!]
+              : ['worktree', 'add', '--', target.path, target.ref!.slice('refs/heads/'.length)],
+          ),
       )
+      gitCompleted = true
       const observed = await discoverWorktrees(root)
       if ((await directoryIdentity(target.path)) !== claimed)
         throw new Error(
@@ -357,16 +424,21 @@ export async function executeWorktreeLifecycle(
       effect.state = 'completed'
       effect.detail = 'Git creation confirmed; directory can now be adopted separately.'
     } catch (error) {
-      effect.state = 'failed'
+      effect.state =
+        gitCompleted || (error instanceof Error && 'gitDispatched' in error && error.gitDispatched)
+          ? 'unconfirmed'
+          : 'failed'
       effect.detail = `${error instanceof Error ? error.message : String(error)} Partial directory or branch creation may remain; no rollback or registration is claimed.`
     } finally {
       await onProgress?.(result)
     }
   } else {
+    const removal = plan.request
     for (const [index, target] of plan.preview.targets.entries()) {
       const effect = result.targets[index]
-      if (result.targets.some((item) => item.state === 'failed')) {
-        effect.detail = 'Stopped after the first failure; no rollback is claimed.'
+      if (result.targets.some((item) => item.state === 'failed' || item.state === 'unconfirmed')) {
+        effect.detail =
+          'Stopped after the first failure or uncertain dispatch; inspect partial effects without replay.'
         continue
       }
       try {
@@ -387,17 +459,51 @@ export async function executeWorktreeLifecycle(
         effect.detail =
           'Git removal is being dispatched; inspect the exact directory after interruption before any new request.'
         await onProgress?.(result)
-        await runGit(root, ['worktree', 'remove', '--', target.path])
+        const final = await inspectPlan(root, {
+          ...plan.request,
+          worktreeIds: [target.worktreeId!],
+        })
+        if (
+          final.preview.blockers.length ||
+          final.identities.get(target.worktreeId!) !== plan.identities.get(target.worktreeId!) ||
+          final.preview.targets[0].oid !== target.oid ||
+          final.preview.targets[0].path !== target.path ||
+          final.preview.targets[0].ref !== target.ref
+        )
+          throw new Error(
+            'Removal authority changed after recording intent; no removal was dispatched.',
+          )
+        await operationEffectGuard.run(
+          async () => {
+            const dispatch = await inspectPlan(root, {
+              ...removal,
+              worktreeIds: [target.worktreeId!],
+            })
+            if (
+              dispatch.preview.blockers.length ||
+              dispatch.identities.get(target.worktreeId!) !==
+                plan.identities.get(target.worktreeId!) ||
+              dispatch.preview.targets[0].oid !== target.oid ||
+              dispatch.preview.targets[0].ref !== target.ref ||
+              dispatch.preview.targets[0].path !== target.path
+            )
+              throw new Error('The exact removal target changed at dispatch; nothing was removed.')
+          },
+          () => runGit(root, ['worktree', 'remove', '--', target.path]),
+        )
         effect.state = 'completed'
         effect.detail = 'Directory removed by Git; branch and PR retained.'
       } catch (error) {
-        effect.state = 'failed'
+        effect.state =
+          error instanceof Error && 'gitDispatched' in error && error.gitDispatched
+            ? 'unconfirmed'
+            : 'failed'
         effect.detail = error instanceof Error ? error.message : String(error)
       } finally {
         await onProgress?.(result)
       }
     }
   }
-  result.message = `${result.targets.filter((target) => target.state === 'completed').length} completed; ${result.targets.filter((target) => target.state === 'failed').length} failed; ${result.targets.filter((target) => target.state === 'not-run').length} not run. Branches and pull requests are retained.`
+  result.message = `${result.targets.filter((target) => target.state === 'completed').length} completed; ${result.targets.filter((target) => target.state === 'unconfirmed').length} unconfirmed; ${result.targets.filter((target) => target.state === 'failed').length} failed; ${result.targets.filter((target) => target.state === 'not-run').length} not run. Branches and pull requests are retained.`
   return result
 }

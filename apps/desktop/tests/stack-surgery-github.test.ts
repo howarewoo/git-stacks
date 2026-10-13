@@ -1035,21 +1035,28 @@ test('a registration whose read-back 404s keeps its intent instead of posting ag
   await withPublishedStack(async (harness) => {
     await publishedFourLayerStack(harness)
     git(harness, ['switch', 'two'])
-    const state = await harness.readState()
-    // The create lands, and the read-back that has to prove it answers 404.
-    state.lostResponses = [
-      {
-        method: 'GET',
-        pathIncludes: '/stacks/1',
-        pathEndsWith: '/stacks/1',
-        // The read-back of the registration is the third read of that stack: the
-        // preview, the unstack verification, and the proof of the create.
-        after: 2,
-        status: 404,
-        message: 'Not Found',
-      },
-    ]
-    await harness.writeState(state)
+    const inner = createGitHubApiDouble()
+    let createdNumber: number | null = null
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: async (input, init) => {
+          const url = String(input)
+          if (
+            createdNumber !== null &&
+            url.endsWith(`/stacks/${createdNumber}`) &&
+            (init?.method ?? 'GET') === 'GET'
+          )
+            return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 })
+          const response = await inner(input, init)
+          if (url.endsWith('/stacks') && init?.method === 'POST' && response.ok) {
+            const created = (await response.clone().json()) as { number: number }
+            createdNumber = created.number
+          }
+          return response
+        },
+      }),
+    )
 
     const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
     assert.deepEqual(plan.blockers, [])

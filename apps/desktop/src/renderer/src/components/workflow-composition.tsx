@@ -210,21 +210,47 @@ export function OperationSteps({
             </strong>
             <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
               into {step.parent} · {step.commits} commit{step.commits === 1 ? '' : 's'} ·{' '}
-              <code className="font-mono">{step.oid.slice(0, 10)}</code>
+              <code className="break-all font-mono">{step.oid}</code>
             </span>
+            <OperationFacts
+              facts={[
+                {
+                  label: 'Replay base OID',
+                  value: step.baseOid ?? 'Unknown; not inferred',
+                  code: true,
+                },
+              ]}
+            />
             {step.note ? (
               <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">{step.note}</p>
             ) : null}
           </div>
           {step.pr ? (
-            <span className="col-span-2 col-start-2 flex flex-wrap items-center gap-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
+            <div className="col-span-2 col-start-2 flex flex-wrap items-center gap-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
               <Badge variant={step.pr.state === 'OPEN' ? 'secondary' : 'outline'}>
                 {step.pr.draft ? 'draft' : step.pr.state.toLowerCase()}
               </Badge>
               <span>
                 #{step.pr.number} · {step.pr.head} → {step.pr.base}
               </span>
-            </span>
+              <OperationFacts
+                facts={[
+                  {
+                    label: 'Provider head OID',
+                    value: step.pr.headOid ?? 'Unknown; not inferred',
+                    code: true,
+                  },
+                  {
+                    label: 'Provider base OID',
+                    value: step.pr.baseOid ?? 'Unknown; not inferred',
+                    code: true,
+                  },
+                  { label: 'Checks', value: step.pr.checks },
+                  { label: 'Review decision', value: step.pr.reviewDecision ?? 'Unknown' },
+                  { label: 'Merge state', value: step.pr.mergeState ?? 'Unknown' },
+                ]}
+              />
+            </div>
           ) : null}
         </li>
       ))}

@@ -10,6 +10,7 @@ const globalServices: Record<string, true> = {
   onGitHubCliStatus: true,
   onSubmitStackProgress: true,
   onMergeProgress: true,
+  operationSafety: true,
 }
 
 /** Existing review consumers receive captured methods, never the active checkout's API. */

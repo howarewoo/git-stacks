@@ -11,12 +11,18 @@ import {
   runRecordedOperation,
   recordOperationResult,
   validateRecordedRecovery,
+  validateCapturedDirectory,
 } from '../src/main/operation-authority'
 import { previewWorktreeLifecycle, executeWorktreeLifecycle } from '../src/main/worktree-lifecycle'
 import { discoverWorktrees } from '../src/main/worktree-inventory'
 import { RepositoryScheduler } from '../src/main/repository-scheduler'
 import { getSnapshot, runAction } from '../src/main/git'
 import { previewStack, getStackProgress } from '../src/main/stacks'
+import { operationEffectGuard } from '../src/main/inspection-context'
+import { runGit } from '../src/main/git-core'
+import { readMergeObservations } from '../src/main/merge-async'
+import { writeJournal } from '../src/main/review-journal'
+import { randomUUID } from 'node:crypto'
 
 function git(root: string, ...args: string[]): string {
   return execFileSync('git', ['-C', root, ...args], {
@@ -463,6 +469,186 @@ test('owned Skip drops only the conflicted commit, keeps the later commit and re
     assert.deepEqual(retained.preview, original.preview)
     const skipped = records.find((record) => record.action.type === 'operationSkip')!
     assert.equal(skipped.recovery?.id, paused.operationId)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('cleanup refuses an unproven non-main landing instead of borrowing either execution checkout as its default', async () => {
+  const { root, repo } = await fixture()
+  try {
+    const selected = await linked(repo, join(root, 'feature'), 'feature')
+    git(repo, 'branch', '-m', 'main', 'trunk')
+    git(repo, 'symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
+    git(repo, 'update-ref', '-d', 'refs/remotes/origin/main')
+    git(repo, 'push', '-u', 'origin', 'trunk')
+    const inventory = await discoverWorktrees(repo)
+    const request = {
+      kind: 'remove' as const,
+      repositoryId: inventory.identity.id,
+      worktreeIds: [selected.id],
+    }
+    for (const execution of [repo, selected.path]) {
+      const preview = await previewWorktreeLifecycle(execution, request)
+      assert.ok(preview.blockers.some((reason) => reason.includes('not proven merged')))
+      await assert.rejects(executeWorktreeLifecycle(execution, preview.token, true))
+    }
+    assert.equal(await readFile(join(selected.path, 'tracked.txt'), 'utf8'), 'base\n')
+    assert.equal(git(repo, 'symbolic-ref', 'HEAD'), 'refs/heads/trunk')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('cleanup preserves assume-unchanged and materialized skip-worktree bytes and never rewrites their index flags', async () => {
+  const { root, repo } = await fixture()
+  try {
+    const selected = await linked(repo, join(root, 'hidden'), 'hidden')
+    const inventory = await discoverWorktrees(repo)
+    const request = {
+      kind: 'remove' as const,
+      repositoryId: inventory.identity.id,
+      worktreeIds: [selected.id],
+    }
+    for (const flag of ['assume-unchanged', 'skip-worktree']) {
+      git(selected.path, 'update-index', `--${flag}`, 'tracked.txt')
+      await writeFile(join(selected.path, 'tracked.txt'), `private ${flag}\n`)
+      const indexBefore = await readFile(join(selected.gitDirectory!, 'index'))
+      const preview = await previewWorktreeLifecycle(repo, request)
+      assert.ok(
+        preview.blockers.some((reason) =>
+          reason.includes(
+            flag === 'assume-unchanged' ? 'Assume-unchanged' : 'Materialized skip-worktree',
+          ),
+        ),
+      )
+      await assert.rejects(executeWorktreeLifecycle(repo, preview.token, true))
+      assert.deepEqual(await readFile(join(selected.gitDirectory!, 'index')), indexBefore)
+      assert.equal(await readFile(join(selected.path, 'tracked.txt'), 'utf8'), `private ${flag}\n`)
+      git(selected.path, 'update-index', `--no-${flag}`, 'tracked.txt')
+      await writeFile(join(selected.path, 'tracked.txt'), 'base\n')
+    }
+    const preview = await previewWorktreeLifecycle(repo, request)
+    assert.deepEqual(preview.blockers, [])
+    git(selected.path, 'update-index', '--assume-unchanged', 'tracked.txt')
+    await writeFile(join(selected.path, 'tracked.txt'), 'late private contents\n')
+    await assert.rejects(executeWorktreeLifecycle(repo, preview.token, true))
+    assert.equal(
+      await readFile(join(selected.path, 'tracked.txt'), 'utf8'),
+      'late private contents\n',
+    )
+    assert.equal(git(repo, 'stash', 'list'), '')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('cleanup retains an incarnation-qualified unresolved owner and allows only confirmed terminal history', async () => {
+  const { root, repo, scope } = await fixture()
+  try {
+    const selected = await linked(repo, join(root, 'owner'), 'owner')
+    const inventory = await discoverWorktrees(repo)
+    const capture = await captureOperation(
+      selected.path,
+      { repositoryId: inventory.identity.id, worktreeId: selected.id },
+      { ...scope, repositoryPath: selected.path },
+    )
+    const id = randomUUID()
+    const record = {
+      id,
+      repositoryId: capture.repositoryId,
+      context: capture.context,
+      scope: capture.scope,
+      capture,
+      worktreePath: selected.path,
+      action: {
+        type: 'executeNativeOperation',
+        token: 'original-resource-preview',
+        confirmed: true,
+      },
+      state: 'unconfirmed',
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      message: 'Original native dispatch retained',
+      result: null,
+      remoteDispatch: 'intent',
+    }
+    const journal = join(capture.commonDirectory, 'git-stacks-operations', `${id}.json`)
+    await writeJournal(journal, 'records', [record])
+    const request = {
+      kind: 'remove' as const,
+      repositoryId: inventory.identity.id,
+      worktreeIds: [selected.id],
+    }
+    const blocked = await previewWorktreeLifecycle(repo, request)
+    assert.ok(blocked.blockers.some((reason) => reason.includes(id)))
+    await assert.rejects(executeWorktreeLifecycle(repo, blocked.token, true))
+    await writeJournal(journal, 'records', [{ ...record, state: 'completed' }])
+    const terminal = await previewWorktreeLifecycle(repo, request)
+    assert.deepEqual(terminal.blockers, [])
+    await writeJournal(journal, 'records', [{ ...record, capture: {} }])
+    await assert.rejects(previewWorktreeLifecycle(repo, request))
+    await writeJournal(journal, 'records', [{ ...record, state: 'completed' }])
+    await writeFile(journal, '{unreadable original intent')
+    await assert.rejects(executeWorktreeLifecycle(repo, terminal.token, true))
+    assert.equal(await readFile(join(selected.path, 'tracked.txt'), 'utf8'), 'base\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the final Git effect fence refuses a replaced selected directory after held preflight without writing either incarnation', async () => {
+  const { root, repo, scope } = await fixture()
+  try {
+    const tree = await linked(repo, join(root, 'selected'), 'selected')
+    const inventory = await discoverWorktrees(repo)
+    const capture = await captureOperation(
+      tree.path,
+      { repositoryId: inventory.identity.id, worktreeId: tree.id },
+      { ...scope, repositoryPath: tree.path },
+    )
+    const reached = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const effect = operationEffectGuard.run(
+      async () => {
+        reached.resolve()
+        await release.promise
+        await validateCapturedDirectory(capture)
+      },
+      () =>
+        runGit(tree.path, [
+          '-c',
+          'advice.detachedHead=false',
+          'config',
+          'gitStacks.unapproved',
+          'written',
+        ]),
+    )
+    await reached.promise
+    const moved = join(root, 'retained')
+    await rename(tree.path, moved)
+    await cp(moved, tree.path, { recursive: true })
+    release.resolve()
+    await assert.rejects(effect, /replaced/)
+    assert.equal(git(repo, 'config', '--list').includes('gitstacks.unapproved='), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('strict merge-history reads distinguish absence from malformed remembered requests without retiring them', async () => {
+  const { root, repo } = await fixture()
+  try {
+    assert.equal((await readMergeObservations(repo, { strict: true })).size, 0)
+    const journal = join(repo, '.git', 'git-stacks-merge-queue.json')
+    for (const contents of [
+      '{truncated',
+      JSON.stringify({ '41': { pullRequest: 41, headOid: 'a'.repeat(40) } }),
+    ]) {
+      await writeFile(journal, contents)
+      await assert.rejects(readMergeObservations(repo, { strict: true }))
+      assert.equal(await readFile(journal, 'utf8'), contents)
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
   }

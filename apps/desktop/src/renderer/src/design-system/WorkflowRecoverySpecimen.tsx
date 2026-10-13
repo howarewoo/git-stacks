@@ -19,6 +19,10 @@ const JOURNEY_LAYERS: PublishProgress['layers'] = [
   {
     branch: 'feature/checkout',
     base: 'main',
+    oid: 'a'.repeat(40),
+    baseOid: 'b'.repeat(40),
+    remoteOid: null,
+    push: 'create',
     create: true,
     pullRequest: 101,
     title: 'Checkout validation',
@@ -31,6 +35,10 @@ const JOURNEY_LAYERS: PublishProgress['layers'] = [
   {
     branch: 'feature/checkout-orders',
     base: 'feature/checkout',
+    oid: 'c'.repeat(40),
+    baseOid: 'a'.repeat(40),
+    remoteOid: 'd'.repeat(40),
+    push: 'force',
     create: false,
     pullRequest: 102,
     title: 'Orders',

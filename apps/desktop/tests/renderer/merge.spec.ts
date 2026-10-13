@@ -300,6 +300,10 @@ test.describe('Persistent remote recovery in the actual App', () => {
             {
               branch: 'feature/checkout-tests',
               base: 'main',
+              oid: 'a'.repeat(40),
+              baseOid: 'b'.repeat(40),
+              remoteOid: 'c'.repeat(40),
+              push: 'force',
               create: false,
               pullRequest: 41,
               title: 'Captured title',

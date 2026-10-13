@@ -46,6 +46,13 @@ const {
   validateNativeStackChain,
   validatePublishedStackRegistration,
 } = await import('../src/main/native-stacks')
+const { createNativeStackAction, unstackNativeStackAction } = await import(
+  '../src/main/native-stacks'
+)
+const { captureOperation, runRecordedOperation, readOperationRecords } = await import(
+  '../src/main/operation-authority'
+)
+const { discoverWorktrees } = await import('../src/main/worktree-inventory')
 const { getSubmitStackProgress, previewStack, runStackAction } = await import('../src/main/stacks')
 
 function git(harness: GitHubHarness, args: string[]): string {
@@ -3094,5 +3101,109 @@ test('a preview made before a host served stacks is refused before anything is p
       'the submission opened nothing new',
     )
     assert.deepEqual(after.stacks, [], 'and registered no stack')
+  })
+})
+
+test('standalone native create retains an unconfirmed durable intent when independent postwrite resource read fails', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const inventory = await discoverWorktrees(harness.repo)
+    const owner = inventory.worktrees.find((tree) => tree.path === harness.repo)!
+    const capture = await captureOperation(
+      harness.repo,
+      { repositoryId: inventory.identity.id, worktreeId: owner.id },
+      {
+        repositoryPath: harness.repo,
+        remoteUrl: 'https://github.com/acme/widgets.git',
+        authority: 'fixture-provider',
+      },
+    )
+    const prs = (
+      await getGitHubData(harness.repo, git(harness, ['config', '--get', 'remote.origin.url']))
+    ).pullRequests
+    const inner = createGitHubApiDouble()
+    let wrote = false
+    let retiredComments = 0
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: async (input, init) => {
+          const url = String(input)
+          if (wrote && /\/stacks\/\d+$/.test(url) && (init?.method ?? 'GET') === 'GET')
+            return new Response(
+              JSON.stringify({ message: 'Independent membership read unavailable' }),
+              { status: 503 },
+            )
+          if (url.includes('/comments/') && init?.method === 'DELETE') retiredComments += 1
+          const response = await inner(input, init)
+          if (url.endsWith('/stacks') && init?.method === 'POST') wrote = true
+          return response
+        },
+      }),
+    )
+    await assert.rejects(
+      runRecordedOperation(
+        capture,
+        { type: 'executeNativeOperation', token: 'original-native-create', confirmed: true },
+        () => createNativeStackAction(harness.repo, 'acme/widgets', [101, 102], prs, 'main'),
+      ),
+      /membership read unavailable/,
+    )
+    assert.deepEqual(
+      (await harness.readState()).stacks?.[0]?.pull_requests.map((member) => member.number),
+      [101, 102],
+    )
+    assert.equal((await readOperationRecords(harness.repo))[0].state, 'unconfirmed')
+    assert.equal(retiredComments, 0)
+  })
+})
+
+test('standalone unstack rejects a valid unchanged open membership response and retains original recovery without legacy retirement', async () => {
+  await withHarness(async (harness) => {
+    await setupThreeBranches(harness)
+    const stack = await createPullRequestStack('acme', 'widgets', [101, 102], HOST_ONLY)
+    const inventory = await discoverWorktrees(harness.repo)
+    const owner = inventory.worktrees.find((tree) => tree.path === harness.repo)!
+    const capture = await captureOperation(
+      harness.repo,
+      { repositoryId: inventory.identity.id, worktreeId: owner.id },
+      {
+        repositoryPath: harness.repo,
+        remoteUrl: 'https://github.com/acme/widgets.git',
+        authority: 'fixture-provider',
+      },
+    )
+    const inner = createGitHubApiDouble()
+    let retiredComments = 0
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: async (input, init) => {
+          const url = String(input)
+          if (url.endsWith('/unstack') && init?.method === 'POST')
+            return inner(url.slice(0, -'/unstack'.length), {
+              ...init,
+              method: 'GET',
+              body: undefined,
+            })
+          if (url.includes('/comments/') && init?.method === 'DELETE') retiredComments += 1
+          return inner(input, init)
+        },
+      }),
+    )
+    await assert.rejects(
+      runRecordedOperation(
+        capture,
+        { type: 'executeNativeOperation', token: 'original-native-unstack', confirmed: true },
+        () => unstackNativeStackAction(harness.repo, 'acme/widgets', stack.number, stack),
+      ),
+      /not independently confirmed/,
+    )
+    assert.equal(
+      (await getPullRequestStack('acme', 'widgets', stack.number, HOST_ONLY)).pullRequests.length,
+      2,
+    )
+    assert.equal((await readOperationRecords(harness.repo))[0].state, 'unconfirmed')
+    assert.equal(retiredComments, 0)
   })
 })

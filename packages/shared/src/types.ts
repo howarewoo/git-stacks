@@ -669,6 +669,7 @@ export interface StackStep {
   branch: string
   parent: string
   oid: string
+  baseOid: string | null
   commits: number
   title: string
   pr: PullRequest | null
@@ -861,6 +862,11 @@ export interface PublishStep {
 export interface PublishLayer {
   branch: string
   base: string
+  /** Immutable, full captured Git authority for this publication layer. */
+  oid: string
+  baseOid: string
+  remoteOid: string | null
+  push: SyncPushKind
   title: string
   body: string
   draft: boolean
@@ -887,6 +893,14 @@ export interface PublishPreview {
   steps: PublishStep[]
   stackNumber: number | null
   stackAction: PublishStackAction
+  originalMembership: {
+    number: number
+    head: string
+    headOid: string | null
+    base: string
+    state: PullRequest['state']
+  }[]
+  resultingOrder: string[]
   /** Layers whose base must change on an existing pull request to be submitted. */
   baseChanges: string[]
   capturedAt: string
@@ -1327,6 +1341,14 @@ export interface DesktopAPI {
   ): Promise<InspectionResult<K>>
   /** Explicit main-minted authority; neither selection nor ambient repository grants it. */
   captureOperation?(context: InspectionContext): Promise<OperationCapture>
+  /** Read-only validation of an existing approval; no new token or draft is created. */
+  operationSafety?(
+    token: string,
+    preview?: {
+      kind: 'stack' | 'native' | 'lifecycle'
+      token: string
+    },
+  ): Promise<{ current: boolean; reason: string | null }>
   executeOperation?(token: string, action: GitAction): Promise<ActionResult>
   operationRecords?(): Promise<OperationRecord[]>
   worktreeLifecyclePreview?(request: WorktreeLifecycleRequest): Promise<WorktreeLifecyclePreview>

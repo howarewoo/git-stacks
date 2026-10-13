@@ -1,7 +1,7 @@
-import { previewNativeOperation } from './native-operation'
-import { previewReviewedMerge } from './stacks'
+import { previewNativeOperation, validateNativeOperationPreview } from './native-operation'
+import { previewReviewedMerge, validateStackPreview } from './stacks'
 import { assertStackActionTarget, isStackAction } from './stacks'
-import { previewWorktreeLifecycle } from './worktree-lifecycle'
+import { previewWorktreeLifecycle, validateWorktreeLifecyclePreview } from './worktree-lifecycle'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   captureOperation,
@@ -1737,6 +1737,53 @@ function installHandlers() {
       })
     })
   })
+  ipcMain.handle('operation:safety', async (_event, tokenValue: unknown, previewValue: unknown) => {
+    const token = requireString(tokenValue, 'original operation approval', 256)
+    const captured = operationCaptures.get(token)
+    if (!captured || Date.now() - Date.parse(captured.capturedAt) > 5 * 60_000)
+      return {
+        current: false,
+        reason: 'The original approval expired, was retired or was dispatched.',
+      }
+    try {
+      return await inGitRuntime(() =>
+        scheduler.read(captured.repositoryId, async () => {
+          const registered = inventory
+            .current()
+            .repositories.find((repo) => repo.identity.id === captured.repositoryId)
+          if (
+            !registered?.registeredPaths.some((path) =>
+              recents.some((recent) => recent.path === path),
+            )
+          )
+            throw new Error('The original repository registration was retired.')
+          await revalidateOperation(captured, await repositoryOperationScope(captured.worktreePath))
+          if (previewValue !== undefined) {
+            if (!isRecord(previewValue)) throw new Error('The original typed preview is required.')
+            const previewToken = requireString(previewValue.token, 'original preview', 256)
+            if (previewValue.kind === 'stack')
+              await validateStackPreview(captured.worktreePath, previewToken)
+            else if (previewValue.kind === 'native')
+              await validateNativeOperationPreview(captured.worktreePath, previewToken)
+            else if (previewValue.kind === 'lifecycle')
+              await validateWorktreeLifecyclePreview(captured.worktreePath, previewToken)
+            else throw new Error('Unknown original preview kind.')
+          }
+          if (
+            !sameOperationScope(
+              captured.scope,
+              await repositoryOperationScope(captured.worktreePath),
+            )
+          )
+            throw new Error('Original provider authority changed during safety inspection.')
+          await validateCapturedDirectory(captured)
+          return { current: true, reason: null }
+        }),
+      )
+    } catch (error) {
+      return { current: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  })
   ipcMain.handle('operation:execute', async (_event, tokenValue: unknown, action: GitAction) => {
     if (
       !isRecord(action) ||
@@ -1847,6 +1894,7 @@ function installHandlers() {
           const privateCredential = capturedHost
             ? await hostCredentialAuthority(capturedHost.host)
             : null
+          let effectAdmitted = false
           const validate = async () => {
             const fresh = await discoverWorktrees(captured.worktreePath)
             if (
@@ -1873,6 +1921,16 @@ function installHandlers() {
               throw new Error(
                 'Original local or provider authority changed during the operation; no further step is authorized.',
               )
+            if (!effectAdmitted) await revalidateOperation(captured, scope)
+            // HEAD/index may legitimately evolve under the engine's own captured
+            // checkpoints; physical ownership and provider authority never may.
+            await validateCapturedDirectory(captured)
+            if (
+              capturedGeneration !== hostGeneration ||
+              (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host))
+            )
+              throw new Error('Provider authority changed at the effect boundary.')
+            effectAdmitted = true
           }
           const settings = (await readSettingsFile(settingsFile())).settings
           return progressOwner.run(scope, () =>
@@ -1885,6 +1943,7 @@ function installHandlers() {
                   origin,
                   originUrl: scope.remoteUrl,
                   validate,
+                  validateEffect: validate,
                 },
                 async () => {
                   if (action.type !== 'unregisterWorktrees')
@@ -1908,7 +1967,9 @@ function installHandlers() {
                   })
                   const write = registrationWrite.then(async () => {
                     const next = recents.filter((recent) => !paths.includes(recent.path))
+                    await validate()
                     await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), { mode: 0o600 })
+                    await validate()
                     await rename(`${settingsPath()}.tmp`, settingsPath())
                     setRecents(next)
                   })

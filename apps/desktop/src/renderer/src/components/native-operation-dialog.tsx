@@ -21,10 +21,12 @@ import type {
 import { inspectionAPI } from '../lib/inspection-api'
 import { sameOperationScope } from '@git-stacks/shared/operation-scope'
 import { CapturedOperationContext } from './workflow-composition'
+import { useOperationSafety } from '../lib/operation-safety'
 
 export function NativeOperationDialog({
   api,
   repository,
+  sourceVersion,
   initialNumber,
   onClose,
   onChanged,
@@ -32,6 +34,7 @@ export function NativeOperationDialog({
   api: DesktopAPI
   repository: RepositoryInventory
   initialNumber?: number
+  sourceVersion: number
   onClose: () => void
   onChanged: () => Promise<void>
 }) {
@@ -56,6 +59,29 @@ export function NativeOperationDialog({
   const [typed, setTyped] = React.useState('')
   const [error, setError] = React.useState('')
   const [result, setResult] = React.useState<string | null>(null)
+  const [approvalVersion, setApprovalVersion] = React.useState<number | null>(null)
+  const cancelRef = React.useRef<HTMLButtonElement>(null)
+  const safety = useOperationSafety(
+    api,
+    authority?.token,
+    preview ? { kind: 'native', token: preview.token } : undefined,
+    busy,
+    JSON.stringify([
+      sourceVersion,
+      repository.refs,
+      repository.worktrees.map((tree) => [
+        tree.id,
+        tree.path,
+        tree.headOid,
+        tree.refId,
+        tree.indexSignature,
+        tree.status,
+        tree.locked,
+        tree.missing,
+      ]),
+    ]),
+  )
+  const sourceCurrent = approvalVersion === sourceVersion
   const retire = () => {
     capture.current = null
     setAuthority(null)
@@ -90,6 +116,7 @@ export function NativeOperationDialog({
       const value = await scoped.nativeOperationPreview(request)
       capture.current = approved
       setAuthority(approved)
+      setApprovalVersion(sourceVersion)
       setPreview(value)
     } catch (cause) {
       setError(String(cause))
@@ -104,6 +131,8 @@ export function NativeOperationDialog({
       !capture.current ||
       !preview ||
       preview.blockers.length ||
+      !safety.current ||
+      !sourceCurrent ||
       !consent ||
       (kind === 'unstack' && typed !== 'UNSTACK')
     )
@@ -145,7 +174,7 @@ export function NativeOperationDialog({
         if (!open && !busy) onClose()
       }}
     >
-      <DialogContent className="workflow-dialog">
+      <DialogContent className="workflow-dialog" initialFocus={() => cancelRef.current ?? false}>
         <DialogHeader>
           <DialogTitle>Native stack management</DialogTitle>
           <DialogDescription>
@@ -256,6 +285,12 @@ export function NativeOperationDialog({
         ) : (
           <>
             {authority ? <CapturedOperationContext capture={authority} /> : null}
+            {!safety.current || !sourceCurrent ? (
+              <p role="alert">
+                {!sourceCurrent ? 'The original provider session changed.' : safety.reason} The
+                original preview and input remain retained; prepare a fresh preview explicitly.
+              </p>
+            ) : null}
             <p>
               Provider native resource: <code>{preview.fullName}</code>
             </p>
@@ -316,6 +351,8 @@ export function NativeOperationDialog({
                 Boolean(result) ||
                 !capture.current ||
                 !consent ||
+                !safety.current ||
+                !sourceCurrent ||
                 preview.blockers.length > 0 ||
                 (kind === 'unstack' && typed !== 'UNSTACK')
               }
@@ -330,7 +367,7 @@ export function NativeOperationDialog({
         )}
         {error ? <p role="alert">{error}</p> : null}
         {result ? <p role="status">{result}</p> : null}
-        <Button variant="secondary" onClick={onClose}>
+        <Button ref={cancelRef} variant="secondary" onClick={onClose}>
           {busy
             ? preview
               ? 'Hide running operation'

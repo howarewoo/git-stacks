@@ -2,6 +2,7 @@ import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { OperationProgress, OperationCapture } from '@git-stacks/shared/operation-scope'
+import { useOperationSafety } from '../lib/operation-safety'
 import {
   mergeProgressAfterRead,
   operationProgressKeys,
@@ -266,6 +267,7 @@ export function previewIdentity(data: WorkflowData): string | null {
 export type WorkflowStackAPI = Pick<
   DesktopAPI,
   | 'stackPreview'
+  | 'operationSafety'
   | 'submitStackProgress'
   | 'onSubmitStackProgress'
   | 'onMergeProgress'
@@ -854,6 +856,7 @@ export function WorkflowDialog({
   stackApi = window.desktop,
   defaults,
   providerManagement = false,
+  safetyRevision = '',
   providerSourceCurrent = true,
   capturedAuthority,
 }: {
@@ -871,6 +874,7 @@ export function WorkflowDialog({
   /** Stored defaults, used to seed the pull strategy and merge method. */
   defaults?: AppSettings | null
   providerManagement?: boolean
+  safetyRevision?: string
   providerSourceCurrent?: boolean
   capturedAuthority?: OperationCapture | null
 }) {
@@ -976,6 +980,13 @@ export function WorkflowDialog({
   const preview = previewQuery.data?.kind === 'stack' ? previewQuery.data.value : null
   const surgery = previewQuery.data?.kind === 'surgery' ? previewQuery.data.value : null
   const push = previewQuery.data?.kind === 'forcePush' ? previewQuery.data.value : null
+  const safety = useOperationSafety(
+    stackApi,
+    capturedAuthority?.token,
+    preview || surgery ? { kind: 'stack', token: (preview ?? surgery)!.token } : undefined,
+    busy,
+    safetyRevision,
+  )
   const pr = previewQuery.data?.kind === 'pr' ? previewQuery.data.value : null
   const externalMutation = useMutation({
     mutationFn: (url: string) => window.desktop.openExternal(url),
@@ -1439,45 +1450,55 @@ export function WorkflowDialog({
    * bypassed control cannot dispatch what the reviewed preview forbids.
    */
   const guardFor = (values: WorkflowFormValues): WorkflowBlocker | null =>
-    workflowBlocker({
-      kind: request.kind,
-      busy,
-      loading,
-      loaded,
-      finished,
-      capturedPath: captured.current.path,
-      currentPath: snapshot.path,
-      previewToken: identity,
-      rejectedTokens: rejectedIdentities,
-      previewBlockers:
-        request.kind === 'surgery' ? (surgery?.blockers ?? []) : (preview?.blockers ?? []),
-      confirmationTarget: confirmationTargetFor(values),
-      confirmation: values.confirmation,
-      allowForce: values.allowForce,
-      expectedOidMissing: request.kind === 'forcePush' && !push,
-      requiresName:
-        ['rename', 'parent', 'merge'].includes(request.kind) ||
-        (request.kind === 'surgery' && request.request.kind !== 'remove'),
-      name: values.name,
-      requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
-      mainline: values.mainline,
-      requiresMergeMethod:
-        request.kind === 'stack' &&
-        request.operation === 'merge' &&
-        values.mergeAction === 'direct_merge',
-      mergeMethod: values.mergeMethod,
-      requiresLeaseApproval:
-        (preview?.sync?.forcePushes.length ?? 0) > 0 || (surgery?.forcePushes.length ?? 0) > 0,
-      untitledBranches:
-        request.kind === 'stack' && request.operation === 'publish' && publishOffer
-          ? publishOffer.layers
-              .filter((layer) => layer.create && !values.layerChoices[layer.branch]?.title.trim())
-              .map((layer) => layer.branch)
-          : [],
-      pullRequestMissing: request.kind === 'pr' && !pr,
-      pullRequestMerged: request.kind === 'pr' && pr?.state === 'MERGED',
-      pullRequestTitle: values.prTitle,
-    })
+    capturedAuthority && !finished && (!safety.current || !providerSourceCurrent)
+      ? {
+          code: 'preview-stale',
+          message: !providerSourceCurrent
+            ? 'The original provider session changed; authored input remains retained.'
+            : (safety.reason ??
+              'Original approval safety facts changed; inspect a fresh preview explicitly.'),
+        }
+      : workflowBlocker({
+          kind: request.kind,
+          busy,
+          loading,
+          loaded,
+          finished,
+          capturedPath: captured.current.path,
+          currentPath: snapshot.path,
+          previewToken: identity,
+          rejectedTokens: rejectedIdentities,
+          previewBlockers:
+            request.kind === 'surgery' ? (surgery?.blockers ?? []) : (preview?.blockers ?? []),
+          confirmationTarget: confirmationTargetFor(values),
+          confirmation: values.confirmation,
+          allowForce: values.allowForce,
+          expectedOidMissing: request.kind === 'forcePush' && !push,
+          requiresName:
+            ['rename', 'parent', 'merge'].includes(request.kind) ||
+            (request.kind === 'surgery' && request.request.kind !== 'remove'),
+          name: values.name,
+          requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
+          mainline: values.mainline,
+          requiresMergeMethod:
+            request.kind === 'stack' &&
+            request.operation === 'merge' &&
+            values.mergeAction === 'direct_merge',
+          mergeMethod: values.mergeMethod,
+          requiresLeaseApproval:
+            (preview?.sync?.forcePushes.length ?? 0) > 0 || (surgery?.forcePushes.length ?? 0) > 0,
+          untitledBranches:
+            request.kind === 'stack' && request.operation === 'publish' && publishOffer
+              ? publishOffer.layers
+                  .filter(
+                    (layer) => layer.create && !values.layerChoices[layer.branch]?.title.trim(),
+                  )
+                  .map((layer) => layer.branch)
+              : [],
+          pullRequestMissing: request.kind === 'pr' && !pr,
+          pullRequestMerged: request.kind === 'pr' && pr?.state === 'MERGED',
+          pullRequestTitle: values.prTitle,
+        })
   const blocker = guardFor(values)
   const failed = Boolean(
     error ||
@@ -1542,10 +1563,10 @@ export function WorkflowDialog({
           },
           {
             label: 'Expected remote tip',
-            value: push.remoteOid?.slice(0, 12) ?? 'New branch',
+            value: push.remoteOid ?? 'Absent; create-only',
             code: true,
           },
-          { label: 'Local tip', value: push.localOid.slice(0, 12), code: true },
+          { label: 'Local tip', value: push.localOid, code: true },
         ]
       : request.kind === 'merge' && captured.current.branch
         ? [
@@ -1905,12 +1926,12 @@ export function WorkflowDialog({
                           facts={[
                             {
                               label: 'Lease',
-                              value: `origin/${layer.branch} at ${layer.remoteOid?.slice(0, 12) ?? 'absent'}`,
+                              value: `origin/${layer.branch} at ${layer.remoteOid ?? 'absent'}`,
                               code: true,
                             },
                             {
                               label: 'New tip',
-                              value: layer.oid?.slice(0, 12) ?? 'Not written yet',
+                              value: layer.oid ?? 'Not written yet',
                               code: true,
                             },
                           ]}
@@ -2049,12 +2070,12 @@ export function WorkflowDialog({
                         facts={[
                           {
                             label: 'Local trunk tip',
-                            value: syncOffer.trunk.localOid?.slice(0, 12) ?? 'Unavailable',
+                            value: syncOffer.trunk.localOid ?? 'Unavailable',
                             code: true,
                           },
                           {
                             label: 'Fetched trunk tip',
-                            value: syncOffer.trunk.remoteOid?.slice(0, 12) ?? 'Unavailable',
+                            value: syncOffer.trunk.remoteOid ?? 'Unavailable',
                             code: true,
                           },
                           {
@@ -2083,19 +2104,22 @@ export function WorkflowDialog({
                             </span>
                           </div>
                           <p className="workflow-note">{layer.note}</p>
-                          {layer.push === 'force' ? (
-                            <OperationFacts
-                              facts={[
-                                {
-                                  label: 'Lease',
-                                  value: `origin/${layer.branch} at ${
-                                    layer.remoteOid?.slice(0, 12) ?? 'absent'
-                                  }`,
-                                  code: true,
-                                },
-                              ]}
-                            />
-                          ) : null}
+                          <OperationFacts
+                            facts={[
+                              { label: 'Captured layer OID', value: layer.oid, code: true },
+                              { label: 'Replay base OID', value: layer.baseOid, code: true },
+                              {
+                                label: 'Expected remote lease',
+                                value: layer.remoteOid ?? 'Absent; create-only',
+                                code: true,
+                              },
+                              { label: 'Push effect', value: layer.push },
+                              {
+                                label: 'Replay effect',
+                                value: layer.rebase ? 'Rebase this layer' : 'No rebase',
+                              },
+                            ]}
+                          />
                           {layer.blockers.length > 0 ? (
                             <BlockerList items={layer.blockers} />
                           ) : null}
@@ -2147,6 +2171,51 @@ export function WorkflowDialog({
                   ) : null}
                   {request.operation === 'publish' && (publishOffer || recovering) ? (
                     <>
+                      {publishOffer ? (
+                        <OperationFacts
+                          facts={[
+                            {
+                              label: 'Native registration effect',
+                              value: publishOffer.stackAction,
+                            },
+                            {
+                              label: 'Original native resource',
+                              value: publishOffer.stackNumber
+                                ? `#${publishOffer.stackNumber}`
+                                : 'No existing resource',
+                            },
+                            {
+                              label: 'Original membership',
+                              value:
+                                publishOffer.originalMembership
+                                  .map((member) => `#${member.number}`)
+                                  .join(' → ') || 'None',
+                            },
+                            {
+                              label: 'Resulting native order',
+                              value:
+                                publishOffer.resultingOrder.join(' → ') ||
+                                'No native membership write',
+                            },
+                          ]}
+                        />
+                      ) : null}
+                      {publishOffer?.originalMembership.map((member) => (
+                        <OperationContext
+                          key={member.number}
+                          title={`Original member #${member.number}`}
+                          facts={[
+                            { label: 'Provider head', value: member.head },
+                            {
+                              label: 'Provider head OID',
+                              value: member.headOid ?? 'Unknown; not inferred',
+                              code: true,
+                            },
+                            { label: 'Provider base', value: member.base },
+                            { label: 'Provider state', value: member.state },
+                          ]}
+                        />
+                      ))}
                       <PublishProgressPanel progress={progress} />
                       {progressQuery.data?.source === 'journal-read' && progress ? (
                         <p className="workflow-note">
@@ -2243,6 +2312,22 @@ export function WorkflowDialog({
                                 key={`layer-${id}`}
                                 label={`${layer.branch} → ${layer.base}`}
                               >
+                                <OperationFacts
+                                  facts={[
+                                    { label: 'Captured local OID', value: layer.oid, code: true },
+                                    {
+                                      label: 'Captured base OID',
+                                      value: layer.baseOid,
+                                      code: true,
+                                    },
+                                    {
+                                      label: 'Expected remote lease',
+                                      value: layer.remoteOid ?? 'Absent; create-only',
+                                      code: true,
+                                    },
+                                    { label: 'Push effect', value: layer.push },
+                                  ]}
+                                />
                                 <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">
                                   {layer.create
                                     ? 'A new pull request is opened with the title, description and readiness chosen below.'
@@ -2319,38 +2404,65 @@ export function WorkflowDialog({
                     </>
                   ) : null}
                   {request.operation === 'merge' ? (
-                    <form.Field name="mergeAction">
-                      {(field) => (
-                        <Field
-                          id="workflow-merge-action"
-                          label="How GitHub lands it"
-                          description={
-                            values.mergeAction === 'merge_queue'
-                              ? 'The merge queue runs the repository\u2019s required checks and either merges the group or ejects it. The merge method below is not sent.'
-                              : 'GitHub merges the reviewed pull requests itself, in the background, while this dialog follows the result.'
-                          }
-                        >
-                          <Select
-                            data-workflow-first-field=""
-                            disabled={locked || finished}
-                            value={field.state.value}
-                            onValueChange={(value) => {
-                              markEdited()
-                              field.handleChange(value as MergeAction)
-                            }}
-                            options={(preview?.merge?.actions ?? []).map((action) => ({
-                              value: action,
-                              label:
-                                action === 'merge_queue'
-                                  ? 'Add to the merge queue'
-                                  : action === 'direct_merge'
-                                    ? 'Merge directly, without the queue'
-                                    : 'Let the repository decide (queue when one is configured)',
-                            }))}
-                          />
-                        </Field>
-                      )}
-                    </form.Field>
+                    <>
+                      <OperationFacts
+                        facts={[
+                          {
+                            label: 'Request grouping',
+                            value: preview?.merge?.native
+                              ? 'One native request includes the disclosed members'
+                              : 'Independent requests, base first',
+                          },
+                          {
+                            label: 'Included in selected request',
+                            value:
+                              preview?.merge?.layers
+                                .filter((layer) => layer.includedInRequest)
+                                .map((layer) => `#${layer.pullRequest}`)
+                                .join(' → ') || 'None',
+                          },
+                          {
+                            label: 'Full reviewed downstack',
+                            value:
+                              preview?.merge?.layers
+                                .map((layer) => `#${layer.pullRequest}`)
+                                .join(' → ') || 'Unavailable',
+                          },
+                        ]}
+                      />
+                      <form.Field name="mergeAction">
+                        {(field) => (
+                          <Field
+                            id="workflow-merge-action"
+                            label="How GitHub lands it"
+                            description={
+                              values.mergeAction === 'merge_queue'
+                                ? 'The merge queue runs the repository\u2019s required checks and either merges the group or ejects it. The merge method below is not sent.'
+                                : 'GitHub merges the reviewed pull requests itself, in the background, while this dialog follows the result.'
+                            }
+                          >
+                            <Select
+                              data-workflow-first-field=""
+                              disabled={locked || finished}
+                              value={field.state.value}
+                              onValueChange={(value) => {
+                                markEdited()
+                                field.handleChange(value as MergeAction)
+                              }}
+                              options={(preview?.merge?.actions ?? []).map((action) => ({
+                                value: action,
+                                label:
+                                  action === 'merge_queue'
+                                    ? 'Add to the merge queue'
+                                    : action === 'direct_merge'
+                                      ? 'Merge directly, without the queue'
+                                      : 'Let the repository decide (queue when one is configured)',
+                              }))}
+                            />
+                          </Field>
+                        )}
+                      </form.Field>
+                    </>
                   ) : null}
                   {request.operation === 'merge' && values.mergeAction === 'direct_merge' ? (
                     <form.Field name="mergeMethod">

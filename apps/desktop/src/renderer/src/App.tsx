@@ -187,6 +187,7 @@ function App() {
   } | null>(null)
   const [createPrRef, setCreatePrRef] = React.useState('')
   const operationScope = React.useRef<OperationScope | null>(null)
+  const operationCaptureGeneration = React.useRef<number | null>(null)
   const operationContext = React.useRef<InspectionContext | null>(null)
   const operationBusy =
     preparingOperation ||
@@ -366,6 +367,7 @@ function App() {
           'The original preview was retired; its approval cannot replace a newer target.',
         )
       operationCapture.current = value
+      operationCaptureGeneration.current = providerGeneration.current
       setApprovedCapture(value)
     })
   }, [
@@ -822,6 +824,7 @@ function App() {
       throw new Error('The captured provider changed while preparing this workflow.')
     operationCapture.current = capture
     setApprovedCapture(capture)
+    operationCaptureGeneration.current = generation
     operationScope.current = capture.scope
     operationContext.current = { ...target }
     setOperationSnapshot(value)
@@ -903,13 +906,20 @@ function App() {
     }
     if (action === 'refresh-metadata') {
       if (!desktop || !captured.repositoryId) return
-      void inspectionAPI(desktop, { repositoryId: captured.repositoryId })
+      const generation = providerGeneration.current
+      const current = () => providerGeneration.current === generation
+      void inspectionAPI(desktop, { repositoryId: captured.repositoryId }, current)
         .refresh()
         .then(async (value) => {
-          setDetails((previous) => ({ ...previous, [captured.repositoryId]: value }))
-          await inventory.refetch()
+          if (!current()) return
+          setDetails((previous) =>
+            current() ? { ...previous, [captured.repositoryId]: value } : previous,
+          )
+          if (current()) await inventory.refetch()
         })
-        .catch((value) => setError(String(value)))
+        .catch((value) => {
+          if (current()) setError(String(value))
+        })
       return
     }
     if (action === 'reconcile') {
@@ -2171,8 +2181,17 @@ function App() {
                       ['publish', 'Preview selected Publish / Submit'],
                       ['merge', 'Preview reviewed downstack merge'],
                       ['reconcile', 'Inspect source discrepancies and repairs'],
+                      ['delete-local', 'Preview protected local branch deletion'],
+                      ['delete-remote', 'Preview leased remote branch deletion'],
                     ] as const
                   )
+                    .filter(([action]) =>
+                      action === 'delete-local'
+                        ? selected.refKind === 'local'
+                        : action === 'delete-remote'
+                          ? selected.refKind === 'remote'
+                          : true,
+                    )
                     .filter(([, label]) => label.toLowerCase().includes(globalQuery.toLowerCase()))
                     .map(([action, label]) => (
                       <CommandItem
@@ -2352,11 +2371,12 @@ function App() {
             onClick={async () => {
               const branch = createPrTarget?.branches.find((branch) => branch.id === createPrRef)
               if (!branch || !createPrTarget) return
-              const opened = await prepareWorkflow(
-                { kind: 'stack', branch: branch.name, operation: 'publish' },
-                { repositoryId: createPrTarget.repositoryId, refId: branch.id },
-              )
-              if (opened) setCreatePrTarget(null)
+              setCreatePrTarget(null)
+              setExecutionChoice({
+                action: 'publish',
+                context: { repositoryId: createPrTarget.repositoryId, branchId: branch.id },
+              })
+              setExecutionChoiceId('')
             }}
           >
             Preview publication
@@ -2636,6 +2656,7 @@ function App() {
       ) ? (
         <NativeOperationDialog
           api={desktop}
+          sourceVersion={providerEpoch}
           repository={
             inventory.data.repositories.find(
               (repo) => repo.identity.id === nativeManagement.repositoryId,
@@ -2664,6 +2685,7 @@ function App() {
             </DialogDescription>
           </DialogHeader>
           <Select
+            aria-label="Explicit execution directory"
             value={executionChoiceId}
             onValueChange={setExecutionChoiceId}
             options={[
@@ -2694,6 +2716,7 @@ function App() {
       desktop &&
       inventory.data?.repositories.find((repo) => repo.identity.id === lifecycle.repositoryId) ? (
         <WorktreeLifecycleDialog
+          sourceVersion={providerEpoch}
           api={desktop}
           repository={
             inventory.data.repositories.find((repo) => repo.identity.id === lifecycle.repositoryId)!
@@ -2722,10 +2745,29 @@ function App() {
           )}
           busy={operationBusy}
           stackApi={providerWorkflow?.api ?? operationApi}
+          safetyRevision={JSON.stringify([
+            providerEpoch,
+            inventory.data?.repositories.find(
+              (repo) => repo.identity.id === approvedCapture?.repositoryId,
+            )?.refs,
+            inventory.data?.repositories
+              .find((repo) => repo.identity.id === approvedCapture?.repositoryId)
+              ?.worktrees.map((tree) => [
+                tree.id,
+                tree.path,
+                tree.headOid,
+                tree.refId,
+                tree.indexSignature,
+                tree.status,
+                tree.locked,
+                tree.missing,
+              ]),
+          ])}
           capturedAuthority={approvedCapture}
           providerManagement={Boolean(providerWorkflow)}
           providerSourceCurrent={
-            !providerWorkflow || providerWorkflow.generation === providerGeneration.current
+            (!providerWorkflow || providerWorkflow.generation === providerGeneration.current) &&
+            (!approvedCapture || operationCaptureGeneration.current === providerGeneration.current)
           }
           actionError={error}
           onClearActionError={() => setError(null)}

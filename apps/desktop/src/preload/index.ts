@@ -54,6 +54,7 @@ const desktop: DesktopAPI = {
   inspect: (context, operation, args, requestId) =>
     ipcRenderer.invoke('inspection:request', context, operation, args, requestId),
   captureOperation: (context) => ipcRenderer.invoke('operation:capture', context),
+  operationSafety: (token, preview) => ipcRenderer.invoke('operation:safety', token, preview),
   executeOperation: (token, action) => ipcRenderer.invoke('operation:execute', token, action),
   operationRecords: () => ipcRenderer.invoke('operation:records'),
   worktreeLifecyclePreview: (request) =>

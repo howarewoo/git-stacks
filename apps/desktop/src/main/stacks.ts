@@ -4,6 +4,7 @@ import {
   recordOperationResult,
   recordOperationPreview,
   recordOperationRecovery,
+  unresolvedOperationRecords,
 } from './operation-authority'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
@@ -2354,6 +2355,7 @@ async function capturePlan(
       branch: entry.branch,
       parent: entry.parent,
       oid: entry.oldTip,
+      baseOid: entry.parentOid,
       commits: await commitCount(root, entry.boundary, entry.oldTip),
       title: entry.pr?.title ?? entry.branch,
       pr: entry.pr,
@@ -2477,6 +2479,17 @@ async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
     layers.push({
       branch: entry.branch,
       base: entry.parent,
+      oid: entry.oldTip,
+      baseOid: entry.parentOid,
+      remoteOid: entry.remoteOid,
+      push:
+        entry.remoteOid === entry.oldTip
+          ? 'none'
+          : entry.remoteOid === null
+            ? 'create'
+            : (await isAncestor(plan.repoPath, entry.remoteOid, entry.oldTip))
+              ? 'fast-forward'
+              : 'force',
       title,
       body: `${title}\n\nGit Stacks branch: ${entry.branch}\nBase: ${entry.parent}`,
       draft: true,
@@ -2510,6 +2523,27 @@ async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
     steps: publishSteps(layers, stackAction, stackNumber),
     stackNumber,
     stackAction,
+    originalMembership:
+      plan.capturedStacks
+        .find((stack) => stack.number === stackNumber)
+        ?.members.map((member) => ({
+          number: member.number,
+          head: member.head,
+          headOid: member.headSha ?? null,
+          base: member.base,
+          state: member.state,
+        })) ?? [],
+    resultingOrder:
+      stackAction === 'none'
+        ? []
+        : [
+            ...new Set([
+              ...(plan.capturedStacks
+                .find((stack) => stack.number === stackNumber)
+                ?.members.map((member) => member.head) ?? []),
+              ...layers.map((layer) => layer.branch),
+            ]),
+          ],
     baseChanges,
     capturedAt: new Date().toISOString(),
   }
@@ -3130,6 +3164,66 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
     ) {
       throw new Error(`Stack preview is stale: native stack #${captured.number} changed on GitHub`)
     }
+  }
+}
+
+/** Inspection of a retained approval, not a new preview or authority token. */
+export async function validateStackPreview(root: string, token: string): Promise<void> {
+  const plan = plans.get(token) ?? surgeryPlans.get(token)?.stackPlan
+  if (!plan || plan.repoPath !== root || plan.expiresAt <= Date.now())
+    throw new Error('The original stack preview expired or is unavailable.')
+  await revalidatePlan(root, plan)
+  if (plan.entries.some((entry) => entry.pr)) {
+    const live = await getGitHubData(root, plan.originUrl)
+    if (!live.available) throw new Error(live.message)
+    for (const entry of plan.entries) {
+      if (!entry.pr) continue
+      const current = live.pullRequests.find((pr) => pr.number === entry.pr!.number)
+      const facts = (pr: PullRequest) =>
+        JSON.stringify([
+          pr.number,
+          pr.headOid,
+          pr.base,
+          pr.baseOid,
+          pr.state,
+          pr.draft,
+          pr.checks,
+          pr.reviewDecision,
+          pr.mergeState,
+          pr.canUpdate,
+        ])
+      if (!current || facts(current) !== facts(entry.pr))
+        throw new Error(`Original provider safety facts for #${entry.pr.number} changed.`)
+    }
+  }
+  if (plan.kind === 'merge' && plan.merge && plan.originFullName) {
+    const data = await getGitHubData(root, plan.originUrl)
+    if (!data.available) throw new Error(data.message)
+    revalidateMergeMembership(plan.merge, data)
+    const selected = plan.merge.layers.at(-1)!
+    const queue = await readQueueCapability(root, plan.originFullName, selected.pullRequest)
+    if (
+      !queue ||
+      queue.enabled === null ||
+      queue.headOid !== selected.headOid ||
+      queue.base !== selected.base ||
+      (queue.enabled === true) !== plan.merge.actions.includes('merge_queue')
+    )
+      throw new Error('Original reviewed merge-queue policy changed or is unreadable.')
+    for (const layer of plan.merge.layers) {
+      const pr = data.pullRequests.find((pr) => pr.number === layer.pullRequest)
+      if (!pr || pr.state !== 'OPEN' || pr.headOid !== layer.headOid || pr.base !== layer.base)
+        throw new Error('Original reviewed merge head, state or base changed.')
+      const policy = await captureMergeCheckPolicy(root, pr.number, layer.headOid, layer.base)
+      if (
+        policy.signature !== plan.mergeRequirements?.[String(pr.number)] ||
+        policy.blockers.length
+      )
+        throw new Error('Original reviewed checks or merge permission changed.')
+    }
+    const methods = await repositoryMergeMethods(plan.originFullName, await repositoryHost(root))
+    if (JSON.stringify(methods) !== JSON.stringify(plan.mergeMethods))
+      throw new Error('Original repository merge permission or methods changed.')
   }
 }
 
@@ -6803,9 +6897,28 @@ async function mergeStack(
     }
   }
   revalidateMergeMembership(merge, data)
-  const priorRequests = await readMergeObservations(repoPath)
+  const priorRequests = await readMergeObservations(repoPath, { strict: true })
+  const unresolved = await unresolvedOperationRecords(repoPath)
   for (const layer of merge.layers) {
     const prior = priorRequests.get(layer.pullRequest)
+    if (
+      unresolved.some(
+        (record) =>
+          (!record.preview ||
+            !('merge' in record.preview) ||
+            record.preview.merge?.layers.some(
+              (entry) => entry.pullRequest === layer.pullRequest && entry.headOid === layer.headOid,
+            )) &&
+          record.result?.merge?.layers.some(
+            (entry) =>
+              entry.pullRequest === layer.pullRequest &&
+              ['pending', 'enqueued', 'unconfirmed'].includes(entry.status),
+          ),
+      )
+    )
+      throw new Error(
+        `Pull request #${layer.pullRequest} retains a durable unresolved merge intent; inspect the original request without replay.`,
+      )
     if (
       prior &&
       prior.headOid === layer.headOid &&
@@ -7726,9 +7839,28 @@ export async function previewReviewedMerge(
   )
     blockers.push('Live merge-queue policy for the reviewed head/base is unknown.')
   const requirements: Record<string, string> = {}
-  const priorRequests = await readMergeObservations(root)
+  const priorRequests = await readMergeObservations(root, { strict: true })
+  const unresolved = await unresolvedOperationRecords(root)
   for (const pr of downstack) {
     blockers.push(...mergeLayerBlockers(pr, pr.base, pr.headOid ?? ''))
+    if (
+      unresolved.some(
+        (record) =>
+          (!record.preview ||
+            !('merge' in record.preview) ||
+            record.preview.merge?.layers.some(
+              (entry) => entry.pullRequest === pr.number && entry.headOid === pr.headOid,
+            )) &&
+          record.result?.merge?.layers.some(
+            (entry) =>
+              entry.pullRequest === pr.number &&
+              ['pending', 'enqueued', 'unconfirmed'].includes(entry.status),
+          ),
+      )
+    )
+      blockers.push(
+        `#${pr.number} retains a durable unresolved merge intent; inspect the original request without replay.`,
+      )
     const prior = priorRequests.get(pr.number)
     if (
       prior &&
@@ -7826,6 +7958,7 @@ export async function previewReviewedMerge(
       branch: entry.branch,
       parent: entry.parent,
       oid: entry.oldTip,
+      baseOid: entry.parentOid || null,
       commits: counts[entry.pr!.number],
       title: entry.pr!.title,
       pr: entry.pr,

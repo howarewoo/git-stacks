@@ -21,11 +21,13 @@ import type {
 import { inspectionAPI } from '../lib/inspection-api'
 import { sameOperationScope } from '@git-stacks/shared/operation-scope'
 import { CapturedOperationContext } from './workflow-composition'
+import { useOperationSafety } from '../lib/operation-safety'
 
 /** Exact selected IDs; never infer eligibility from the visible page or clean badges. */
 export function WorktreeLifecycleDialog({
   api,
   repository,
+  sourceVersion,
   mode,
   sourceRefId,
   worktreeIds,
@@ -33,6 +35,7 @@ export function WorktreeLifecycleDialog({
   onChanged,
 }: {
   api: DesktopAPI
+  sourceVersion: number
   repository: RepositoryInventory
   mode: 'create' | 'remove'
   sourceRefId?: string
@@ -51,6 +54,29 @@ export function WorktreeLifecycleDialog({
   const [result, setResult] = React.useState<WorktreeLifecycleResult | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [busy, setBusy] = React.useState(false)
+  const [approvalVersion, setApprovalVersion] = React.useState<number | null>(null)
+  const cancelRef = React.useRef<HTMLButtonElement>(null)
+  const safety = useOperationSafety(
+    api,
+    authority?.token,
+    preview ? { kind: 'lifecycle', token: preview.token } : undefined,
+    busy,
+    JSON.stringify([
+      sourceVersion,
+      repository.refs,
+      repository.worktrees.map((tree) => [
+        tree.id,
+        tree.path,
+        tree.headOid,
+        tree.refId,
+        tree.indexSignature,
+        tree.status,
+        tree.locked,
+        tree.missing,
+      ]),
+    ]),
+  )
+  const sourceCurrent = approvalVersion === sourceVersion
   const capture = React.useRef<OperationCapture | null>(null)
   const lock = React.useRef(false)
   const mounted = React.useRef(true)
@@ -97,6 +123,7 @@ export function WorktreeLifecycleDialog({
       )
       capture.current = approval
       setAuthority(approval)
+      setApprovalVersion(sourceVersion)
       setPreview(value)
     } catch (error) {
       setError(String(error))
@@ -110,6 +137,8 @@ export function WorktreeLifecycleDialog({
       lock.current ||
       !preview ||
       !capture.current ||
+      !safety.current ||
+      !sourceCurrent ||
       !coordinated ||
       preview.blockers.length ||
       (mode === 'remove' && confirmation !== 'REMOVE')
@@ -152,7 +181,7 @@ export function WorktreeLifecycleDialog({
         if (!open && !busy) onClose()
       }}
     >
-      <DialogContent className="workflow-dialog">
+      <DialogContent className="workflow-dialog" initialFocus={() => cancelRef.current ?? false}>
         <DialogHeader>
           <DialogTitle>
             {mode === 'create' ? 'Create worktree' : 'Remove selected worktree directories'}
@@ -243,6 +272,12 @@ export function WorktreeLifecycleDialog({
           {preview ? (
             <>
               {authority ? <CapturedOperationContext capture={authority} /> : null}
+              {!safety.current || !sourceCurrent ? (
+                <p role="alert">
+                  {!sourceCurrent ? 'The original provider session changed.' : safety.reason} The
+                  original preview and input remain retained; prepare a fresh preview explicitly.
+                </p>
+              ) : null}
               <ol className="stack-preview-list">
                 {preview.targets.map((target) => (
                   <li key={target.path}>
@@ -288,6 +323,8 @@ export function WorktreeLifecycleDialog({
                     disabled={
                       busy ||
                       !capture.current ||
+                      !safety.current ||
+                      !sourceCurrent ||
                       !coordinated ||
                       Boolean(preview.blockers.length) ||
                       (mode === 'remove' && confirmation !== 'REMOVE')
@@ -295,6 +332,9 @@ export function WorktreeLifecycleDialog({
                     onClick={() => void execute()}
                   >
                     {mode === 'create' ? 'Create reviewed worktree' : 'Remove reviewed directories'}
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={retire}>
+                    Inspect and prepare a fresh preview
                   </Button>
                 </>
               ) : null}
@@ -313,7 +353,7 @@ export function WorktreeLifecycleDialog({
             </div>
           ) : null}
           {error ? <p role="alert">{error}</p> : null}
-          <Button variant="secondary" onClick={onClose}>
+          <Button ref={cancelRef} variant="secondary" onClick={onClose}>
             {busy
               ? preview
                 ? 'Hide running operation'

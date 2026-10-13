@@ -1088,11 +1088,12 @@ export async function createNativeStackAction(
 ): Promise<ActionResult> {
   const [owner, name] = originFullName.split('/')
   const host = await mutationHost(repoPath)
-  const stack = await createPullRequestStack(owner, name, pullRequests, {
+  const dispatched = await createPullRequestStack(owner, name, pullRequests, {
     knownPullRequests,
     defaultBranch,
     host,
   })
+  const stack = await getPullRequestStack(owner, name, dispatched.number, { host })
   if (
     stack.pullRequests.length !== pullRequests.length ||
     stack.pullRequests.some(
@@ -1129,11 +1130,12 @@ export async function addPullRequestsToNativeStackAction(
       'preview-unavailable',
       'Native membership changed after approval; no append was sent.',
     )
-  const stack = await addPullRequestsToStack(owner, name, stackNumber, pullRequests, {
+  await addPullRequestsToStack(owner, name, stackNumber, pullRequests, {
     existingStack: existing,
     knownPullRequests,
     host,
   })
+  const stack = await getPullRequestStack(owner, name, stackNumber, { host })
   const expectedNumbers = [...existing.pullRequests.map((member) => member.number), ...pullRequests]
   if (
     stack.pullRequests.length !== expectedNumbers.length ||
@@ -1175,13 +1177,34 @@ export async function unstackNativeStackAction(
       'preview-unavailable',
       'Native membership changed after approval; no unstack was sent.',
     )
-  const result = await unstackPullRequestStack(owner, name, stackNumber, { host })
+  await unstackPullRequestStack(owner, name, stackNumber, { host })
+  let observed: NativeStack | null
+  try {
+    observed = await getPullRequestStack(owner, name, stackNumber, { host })
+  } catch (error) {
+    if (!(error instanceof NativeStackError) || error.httpStatus !== 404) throw error
+    // A resource 404 alone can hide permissions. A successful complete collection
+    // read must also prove the original resource absent before claiming dissolution.
+    const remaining = await listPullRequestStacks(owner, name, { host })
+    if (remaining.some((stack) => stack.number === stackNumber)) throw error
+    observed = null
+  }
+  const unmerged = new Set(
+    before.pullRequests
+      .filter((member) => member.state !== 'MERGED')
+      .map((member) => member.number),
+  )
+  if (observed?.pullRequests.some((member) => unmerged.has(member.number)))
+    throw new NativeStackError(
+      'preview-unavailable',
+      'Unstack membership was not independently confirmed; retain the intent and inspect without replay.',
+    )
   await retireLegacyStackComments(
     originFullName,
     before.pullRequests.map((member) => member.number),
     { host },
   )
-  if (result.dissolved) {
+  if (!observed) {
     return { message: `Dissolved native stack #${stackNumber} on ${host.host}` }
   }
   return { message: `Unstacked pull requests from native stack #${stackNumber} on ${host.host}` }

@@ -1,6 +1,7 @@
 import { executeNativeOperation } from './native-operation'
 import { executeWorktreeLifecycle } from './worktree-lifecycle'
 import { recordOperationResult } from './operation-authority'
+import { validateOperationEffect } from './inspection-context'
 import type { InspectionWorktreeStatus } from '@git-stacks/shared/inspection'
 import { spawn } from 'node:child_process'
 
@@ -3381,6 +3382,7 @@ async function replaceCheckedFile(
 
   try {
     await assertParents()
+    await validateOperationEffect()
     await fs.mkdir(stagingDirectory, { mode: 0o700 })
     const stagingInfo = await fs.lstat(stagingDirectory)
     if (stagingInfo.isSymbolicLink() || !stagingInfo.isDirectory()) {
@@ -3393,11 +3395,13 @@ async function replaceCheckedFile(
       const sourceInfo = await fs.stat(sourcePath)
       if (!sourceInfo.isFile()) throw new Error('The replacement path is not a regular file')
       await assertLocations()
+      await validateOperationEffect()
       await fs.copyFile(sourcePath, replacementPath!, fsConstants.COPYFILE_EXCL)
       await assertLocations()
       await fs.chmod(replacementPath!, sourceInfo.mode & 0o777)
     } else if (content !== undefined) {
       await assertLocations()
+      await validateOperationEffect()
       await fs.writeFile(replacementPath!, content, {
         encoding: 'utf8',
         mode: expected.stat ? expected.stat.mode & 0o777 : 0o666,
@@ -3445,6 +3449,7 @@ async function replaceCheckedFile(
     if (originalIdentity) {
       await assertLocations()
       try {
+        await validateOperationEffect()
         await fs.rename(targetPath, backupPath)
         movedOriginal = true
       } catch (error) {
@@ -3477,6 +3482,7 @@ async function replaceCheckedFile(
         throw new Error('A concurrent file appeared during the action')
       }
       try {
+        await validateOperationEffect()
         await fs.link(replacementPath, targetPath)
       } catch (error) {
         if (movedOriginal && (error as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -3500,6 +3506,7 @@ async function replaceCheckedFile(
         throw new Error('The quarantined original changed during the action')
       }
       await assertLocations()
+      await validateOperationEffect()
       await fs.unlink(backupPath)
       movedOriginal = false
     }
@@ -4188,6 +4195,7 @@ async function stageCheckedConflict(
     await lock.sync()
     await lock.close()
     lock = null
+    await validateOperationEffect()
     await fs.rename(lockPath, indexPath)
     ownsLock = false
   } finally {
@@ -4524,6 +4532,7 @@ export async function runStageHunk(
     if (indexMode !== null) await fs.chmod(tempIndexPath, indexMode)
     await lockHandle.close()
     lockHandle = null
+    await validateOperationEffect()
     await fs.rename(tempIndexPath, realIndexPath)
   } finally {
     if (lockHandle) {

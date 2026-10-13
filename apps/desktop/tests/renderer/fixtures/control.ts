@@ -316,6 +316,7 @@ export function installFixtureControl(options: {
   /** Saved filters, as the main process keeps them: whole-list writes, identities preserved. */
   let inboxFilters: PullRequestInboxSavedFilter[] = []
   const operationApprovals = new Map<string, InspectionContext>()
+  const operationSafetyFacts = new Map<string, string>()
 
   const scenarioFor = (name: string): FixtureScenario =>
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
@@ -728,6 +729,17 @@ export function installFixtureControl(options: {
       const scope = await desktop.inspect!(context, 'repositoryOperationScope', [])
       const token = crypto.randomUUID()
       operationApprovals.set(token, structuredClone(context))
+      const source = await desktop.inspect!(context, 'refresh', [])
+      operationSafetyFacts.set(
+        token,
+        JSON.stringify([
+          repo,
+          scope,
+          source.pullRequests,
+          source.nativeStacks,
+          source.capabilities,
+        ]),
+      )
       return {
         token,
         context: structuredClone(context),
@@ -748,11 +760,38 @@ export function installFixtureControl(options: {
         coordination: 'Fixture app locks do not lock external tools.',
       }
     },
+    operationSafety: async (token, preview) => {
+      record('operationSafety', [token, preview])
+      const context = operationApprovals.get(token)
+      if (!context)
+        return { current: false, reason: 'Fixture original approval expired or was spent.' }
+      const repo = servedInventory.repositories.find(
+        (repo) => repo.identity.id === context.repositoryId,
+      )
+      const scope = await desktop.inspect!(context, 'repositoryOperationScope', [])
+      const source = await desktop.inspect!(context, 'refresh', [])
+      const actual = JSON.stringify([
+        repo,
+        scope,
+        source.pullRequests,
+        source.nativeStacks,
+        source.capabilities,
+      ])
+      return answer('operationSafety', () =>
+        actual === operationSafetyFacts.get(token)
+          ? { current: true, reason: null }
+          : {
+              current: false,
+              reason: 'Fixture original owner, ref, provider or permission facts changed.',
+            },
+      )
+    },
     executeOperation: async (token, action) => {
       record('executeOperation', [token, action])
       const context = operationApprovals.get(token)
       if (!context) throw new Error('Fixture approval was already spent.')
       operationApprovals.delete(token)
+      operationSafetyFacts.delete(token)
       const previous = active
       const source = await desktop.inspect!(context, 'refresh', [])
       active = source
@@ -824,7 +863,8 @@ export function installFixtureControl(options: {
         if (!selected || args[0] !== selected.number)
           throw new Error('The request does not address the captured pull request.')
       }
-      if (operation === 'refresh') return captured as InspectionResult<typeof operation>
+      if (operation === 'refresh')
+        return answer('refresh', () => captured as InspectionResult<typeof operation>)
       if (operation === 'worktreeStatus')
         return {
           path: captured.path,

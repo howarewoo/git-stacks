@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
-import { writeFile } from 'node:fs/promises'
+import { writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createGitHubHarness } from './fixtures/github-harness'
@@ -16,6 +16,11 @@ const { getMergeStatus, previewStack } = await import('../src/main/stacks')
 const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 const { GITHUB_API_URL_ENV } = await import('../src/main/github-transport')
+const { previewReviewedMerge } = await import('../src/main/stacks')
+const { captureOperation, runRecordedOperation, readOperationRecords } = await import(
+  '../src/main/operation-authority'
+)
+const { discoverWorktrees } = await import('../src/main/worktree-inventory')
 
 /**
  * The asynchronous merge flow, end to end through the production read path: a real
@@ -286,5 +291,60 @@ test('a later refresh that cannot read the pull request keeps what a read confir
     await harness.writeState(again)
     const recovered = await getMergeStatus(harness.repo)
     assert.equal(recovered?.layers[0]?.status, 'merged')
+  })
+})
+
+test('retained merge intent plus unreadable secondary history cannot authorize a second provider request', {
+  concurrency: false,
+}, async () => {
+  await withLiveGitHub(async (harness) => {
+    const ready = await publishedStack(harness)
+    ready.asyncMergeStaysPending = true
+    await harness.writeState(ready)
+    const preview = await mergePreviewFor(harness, 'parent')
+    const inventory = await discoverWorktrees(harness.repo)
+    const owner = inventory.worktrees.find((tree) => tree.path === harness.repo)!
+    const capture = await captureOperation(
+      harness.repo,
+      { repositoryId: inventory.identity.id, worktreeId: owner.id },
+      {
+        repositoryPath: harness.repo,
+        remoteUrl: 'https://github.com/acme/widgets.git',
+        authority: 'fixture-provider',
+      },
+    )
+    await runRecordedOperation(
+      capture,
+      {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: false,
+        mergeMethod: 'squash',
+        mergeAction: 'direct_merge',
+      },
+      () => dispatchMerge(harness, preview.token),
+    )
+    assert.equal((await readOperationRecords(harness.repo))[0].state, 'unconfirmed')
+    const number = prFor(ready, 'parent').number
+    const journal = join(harness.repo, '.git', 'git-stacks-merge-queue.json')
+    const original = await readFile(journal, 'utf8')
+    const requestsBefore = (await harness.readState()).requests?.filter((request) =>
+      request.argv.includes('PUT'),
+    ).length
+    await writeFile(journal, '{truncated accepted history')
+    await assert.rejects(previewReviewedMerge(harness.repo, number))
+    assert.equal(await readFile(journal, 'utf8'), '{truncated accepted history')
+    await writeFile(journal, original)
+    const retained = await previewReviewedMerge(harness.repo, number)
+    assert.ok(
+      retained.blockers.some(
+        (reason) => reason.includes('unresolved merge intent') || reason.includes('pending'),
+      ),
+    )
+    assert.equal(
+      (await harness.readState()).requests?.filter((request) => request.argv.includes('PUT'))
+        .length,
+      requestsBefore,
+    )
   })
 })

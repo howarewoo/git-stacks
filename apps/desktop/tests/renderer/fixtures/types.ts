@@ -41,6 +41,7 @@ import type { NotificationInbox } from '@git-stacks/shared/notifications'
 export type FixtureCall =
   | 'inspect'
   | 'captureOperation'
+  | 'operationSafety'
   | 'executeOperation'
   | 'operationRecords'
   | 'worktreeLifecyclePreview'

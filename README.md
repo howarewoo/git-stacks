@@ -2202,6 +2202,16 @@ worktree lifecycle use the real existing main engines and typed preload boundary
 Hidden/unloaded dependency members participate base-first; incomplete full-scope
 facts refuse the operation instead of shrinking it to visible rows. Branch hints,
 tracking, published PR bases and provider-owned native membership remain distinct.
+Every Git/ref/config effect is fenced again after its awaited preflight, with original
+physical/provider authority retained as the engine's own HEAD/index checkpoints evolve.
+`operationSafety(token, preview)` is read-only: it validates the existing original
+approval and retained stack/native/lifecycle plan, never mints a replacement or consumes
+the token. Open forms inspect this original owner on live inventory/provider changes,
+focus and a five-second cadence; drift latches the approval retired while authored
+titles, bodies and selected targets remain unchanged. A fresh preview is explicit.
+Publication review discloses full local/base/remote-lease OIDs, push effects and original
+native membership/resulting order. Reviewed merge discloses its full base-first
+downstack and the membership included in the selected request.
 Local replay switches only the explicitly disclosed execution directory and refuses
 to overwrite ignored contents. A branch without a directory requires an explicit
 eligible existing execution choice; there is no implicit primary activation,
@@ -2219,6 +2229,9 @@ retargets, closes, merges and native requests are not blindly replayed. Readback
 adopt only source-confirmed effects; an unchanged pre-state does not prove a
 dispatched write failed. Hiding a running operation does not abort it; independent
 inspection and its durable status remain available.
+Strict merge authorization distinguishes missing secondary history from malformed or
+unreadable history and also consults retained original durable merge intents. A bad
+history is neither empty nor repaired by inspection and cannot authorize another write.
 
 Worktree creation qualifies an absent normalized destination and an explicit local
 branch or new branch from a captured base. It never switches an existing checkout
@@ -2226,6 +2239,13 @@ or falsely adopts a failed/partial creation. Cleanup preflights the exact whole
 subset and excludes primary/bare, locked, detached/unborn, missing/uncertain,
 dirty/untracked/**ignored**, active/interrupted, unmerged and unpublished contexts.
 Ignored files are unpublished local data: Git itself deletes them without force.
+Cleanup requires an observed source-qualified `origin/HEAD` landing ref and OID;
+display-name fallbacks and `init.defaultBranch` do not prove a tip landed. Assume-unchanged
+entries and materialized skip-worktree contents are excluded without changing index
+flags; genuinely absent sparse entries remain distinguishable. Incarnation-qualified
+unresolved operation owners are retained for recovery, with unreadable history refusing
+the whole batch. A postdispatch child interruption remains unconfirmed, retains known
+partial effects and stops the remaining targets; it is not reported as a no-effect failure.
 Every directory is revalidated before removal; completed/failed/not-run/uncertain
 partial effects are retained, never called a rollback. Removing a worktree retains
 its branch and PR; registration-only removal and protected local/remote branch
@@ -2240,11 +2260,18 @@ unconfirmed outcomes remain distinct. It never implicitly restacks, fetches,
 checks out, deletes or cleans up local contexts. Native create/extend/unstack
 separately captures complete membership and canonical heads/bases; unknown prior
 native dispatches cannot be turned into repeat writes by preparing another token.
+Native create/extend independently read the written resource and prove exact order/head
+membership before completion or legacy-navigation retirement. Unstack independently
+proves captured unmerged members absent; dissolution requires an independently successful
+complete collection read as well as resource absence. Unknown readback retains the intent.
+Create PR always requires an exact-ref explicit execution chooser before capturing
+publication authority. Local and remote deletion have separate qualified palette entries,
+in addition to their separate destructive confirmations and backend protections.
 
 Focused disposable regression coverage:
 
 ```sh
-pnpm --filter git-stacks exec tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/operation-authority.test.ts tests/sync-stack.test.ts tests/merge-runtime.test.ts tests/stack-surgery-github.test.ts tests/native-stacks.test.ts
+pnpm --filter git-stacks exec tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/operation-authority.test.ts tests/worktree-lifecycle-dispatch.test.ts tests/sync-stack.test.ts tests/merge-runtime.test.ts tests/stack-surgery-github.test.ts tests/native-stacks.test.ts
 ```
 
 Gallery action history proves renderer intent, not Git, IPC or live provider

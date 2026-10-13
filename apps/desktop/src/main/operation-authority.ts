@@ -291,15 +291,17 @@ export async function runRecordedOperation(
     record.state =
       record.recovery?.kind === 'stack' && stack?.operationId === record.recovery.id
         ? 'paused'
-        : result.worktreeLifecycle?.targets.some((target) => target.state === 'failed')
-          ? 'failed'
-          : result.merge?.layers.some((layer) =>
-                ['pending', 'enqueued', 'unconfirmed'].includes(layer.status),
-              )
-            ? 'unconfirmed'
-            : result.merge?.layers.some((layer) => layer.status === 'failed')
-              ? 'failed'
-              : 'completed'
+        : result.worktreeLifecycle?.targets.some((target) => target.state === 'unconfirmed')
+          ? 'unconfirmed'
+          : result.worktreeLifecycle?.targets.some((target) => target.state === 'failed')
+            ? 'failed'
+            : result.merge?.layers.some((layer) =>
+                  ['pending', 'enqueued', 'unconfirmed'].includes(layer.status),
+                )
+              ? 'unconfirmed'
+              : result.merge?.layers.some((layer) => layer.status === 'failed')
+                ? 'failed'
+                : 'completed'
     record.message = result.message
     return result
   } catch (error) {
@@ -321,6 +323,14 @@ export async function runRecordedOperation(
       activeRecords.delete(record.id)
     }
   }
+}
+
+/** Safety reads exclude only the request currently owning this durable record. */
+export async function unresolvedOperationRecords(root: string): Promise<OperationRecord[]> {
+  const own = operationRecord.getStore()?.record.id
+  return (await readOperationRecords(root)).filter(
+    (record) => record.id !== own && ['active', 'paused', 'unconfirmed'].includes(record.state),
+  )
 }
 
 /** No replay, repair, journal retirement or account substitution on a status read. */
@@ -360,6 +370,29 @@ export async function readOperationRecords(root: string): Promise<OperationRecor
           typeof entry.startedAt !== 'string' ||
           typeof entry.message !== 'string' ||
           !['active', 'paused', 'failed', 'unconfirmed', 'completed'].includes(String(entry.state))
+        )
+          return null
+        const capture = entry.capture
+        if (
+          [
+            'token',
+            'repositoryId',
+            'worktreeId',
+            'worktreePath',
+            'directoryIdentity',
+            'commonDirectory',
+            'commonIdentity',
+            'gitDirectory',
+            'gitDirectoryIdentity',
+            'fingerprint',
+            'capturedAt',
+          ].some((key) => typeof capture[key] !== 'string' || !capture[key]) ||
+          capture.repositoryId !== entry.repositoryId ||
+          capture.worktreePath !== entry.worktreePath ||
+          capture.worktreeId !== entry.context.worktreeId ||
+          !isRecord(capture.context) ||
+          !isRecord(capture.scope) ||
+          !Array.isArray(capture.refs)
         )
           return null
         return entry as unknown as OperationRecord
