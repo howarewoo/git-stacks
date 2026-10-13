@@ -276,6 +276,7 @@ interface PrLinkedIssuesSectionProps {
   runAction: (action: GitAction, label: string) => Promise<boolean>
   stackApi: WorkflowStackAPI
   defaultBranch: string
+  canEditBody: boolean
   onMutationBusy: (busy: boolean) => void
   onBodyMutation: (preview: IssueLinkPreview) => void
 }
@@ -292,6 +293,7 @@ function PrLinkedIssuesSection({
   defaultBranch,
   onMutationBusy,
   onBodyMutation,
+  canEditBody,
 }: PrLinkedIssuesSectionProps) {
   const queryClient = useQueryClient()
   const instance = React.useId()
@@ -357,7 +359,7 @@ function PrLinkedIssuesSection({
   const [writing, setActionBusy] = React.useState(false)
   const actionBusy = writing || linkQuery.isFetching || unlinkQuery.isFetching
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
-  const closingAvailable = pr.base === defaultBranch
+  const closingAvailable = canEditBody && Boolean(defaultBranch) && pr.base === defaultBranch
 
   const loadLinks = React.useCallback(async () => {
     try {
@@ -589,8 +591,11 @@ function PrLinkedIssuesSection({
       ) : null}
       {!closingAvailable ? (
         <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">
-          Closing keywords only close issues on pull requests targeting {defaultBranch}. This pull
-          request targets {pr.base}; use a related link instead.
+          {!canEditBody
+            ? 'Provider body-edit permission has not been established; local related links remain separate.'
+            : !defaultBranch
+              ? 'The provider default branch is unknown; closing links are unavailable.'
+              : `Closing keywords only close issues when this PR targets ${defaultBranch}, not ${pr.base}. Use a related link instead.`}
         </p>
       ) : null}
 
@@ -606,7 +611,7 @@ function PrLinkedIssuesSection({
                   {link.state.toLowerCase()}
                 </Badge>
                 <Badge variant={link.relation === 'closing' ? 'accent' : 'outline'}>
-                  {link.relation === 'closing' ? 'closes on merge' : 'related'}
+                  {link.relation === 'closing' ? 'closing keyword' : 'local related link'}
                 </Badge>
                 <span className="font-medium truncate" title={link.title}>
                   #{link.number} {link.title}
@@ -615,7 +620,7 @@ function PrLinkedIssuesSection({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={disabled || actionBusy}
+                disabled={disabled || actionBusy || (link.relation === 'closing' && !canEditBody)}
                 aria-label={`Remove link to issue #${link.number} from this pull request`}
                 tooltip={`Remove ${link.relation === 'closing' ? 'closing keyword from PR description' : 'local related link'}`}
                 onClick={() => void handleUnlink(link)}
@@ -830,6 +835,8 @@ export function WorkflowDialog({
   onRequest,
   stackApi = window.desktop,
   defaults,
+  providerManagement = false,
+  providerSourceCurrent = true,
 }: {
   request: WorkflowRequest
   snapshot: RepositorySnapshot
@@ -844,6 +851,8 @@ export function WorkflowDialog({
   stackApi?: WorkflowStackAPI
   /** Stored defaults, used to seed the pull strategy and merge method. */
   defaults?: AppSettings | null
+  providerManagement?: boolean
+  providerSourceCurrent?: boolean
 }) {
   // TanStack Form owns every editable value in this dialog. The state declared below
   // it is domain state: reviewed previews, progress, recovery and dispatch identity.
@@ -964,6 +973,8 @@ export function WorkflowDialog({
   const [edited, setEdited] = React.useState(false)
   const [closeNotice, setCloseNotice] = React.useState<string | null>(null)
   const hasEditedRef = React.useRef(false)
+  const expectedPrBody = React.useRef<string | undefined>(undefined)
+  const [, refreshBodyBaseline] = React.useReducer((value: number) => value + 1, 0)
   const captured = React.useRef({
     path: snapshot.path,
     head: snapshot.headOid,
@@ -982,8 +993,17 @@ export function WorkflowDialog({
   // review cannot be edited underneath the action it just started.
   const locked = dispatchLocked || formSubmitting
   const composition = workflowComposition(request)
+  const providerPrBlock = !providerSourceCurrent
+    ? 'The captured provider session changed. Your input remains owned by the original form; reopen its source explicitly.'
+    : snapshot.stackOperation
+      ? 'Finish or abort the captured stack operation before changing PR metadata.'
+      : pr?.canUpdate === true
+        ? null
+        : 'The provider has not established permission to edit this PR.'
   const shapeReason =
-    actionBlockReason(snapshot.capabilities, requestActionType(request)) ??
+    (providerManagement && request.kind === 'pr'
+      ? providerPrBlock
+      : actionBlockReason(snapshot.capabilities, requestActionType(request))) ??
     (request.kind === 'confirm' &&
     (request.action.type === 'stashPop' || request.action.type === 'stashDrop')
       ? stashRemovalBlockReason(snapshot.capabilities)
@@ -1034,7 +1054,9 @@ export function WorkflowDialog({
         return { kind: 'forcePush', value: await window.desktop.pushPreview() }
       }
       if (request.kind === 'pr') {
-        return { kind: 'pr', value: await window.desktop.pullRequest(request.number) }
+        if (!stackApi.pullRequest)
+          throw new Error('Captured pull request management is unavailable.')
+        return { kind: 'pr', value: await stackApi.pullRequest(request.number) }
       }
       return { kind: 'local' }
     }
@@ -1063,6 +1085,8 @@ export function WorkflowDialog({
           if (requestedName !== null && requestedName !== form.getFieldValue('name'))
             queryClient.setQueryData(previewKey, { kind: 'local' })
         } else if (data.kind === 'pr') {
+          if (expectedPrBody.current === undefined || !hasEditedRef.current)
+            expectedPrBody.current = data.value.body
           if (!hasEditedRef.current) {
             form.setFieldValue('prTitle', data.value.title)
             form.setFieldValue('body', data.value.body)
@@ -1166,7 +1190,7 @@ export function WorkflowDialog({
                       : request.kind === 'commitAction'
                         ? `${request.commit.subject} · ${request.commit.oid.slice(0, 10)} → ${captured.current.branch ?? 'current branch'}`
                         : request.kind === 'pr'
-                          ? 'Manage this pull request, or open GitHub for the full review discussion.'
+                          ? 'Manage this captured pull request without changing a checkout.'
                           : request.kind === 'stack' && request.operation === 'restack'
                             ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
                             : request.kind === 'stack' && request.operation === 'publish'
@@ -1208,7 +1232,7 @@ export function WorkflowDialog({
       dispatchLocked ||
       captured.current.path !== snapshot.path ||
       shapeReason ||
-      actionBlockReason(snapshot.capabilities, action.type)
+      (providerManagement ? providerPrBlock : actionBlockReason(snapshot.capabilities, action.type))
     )
       return
     const merging =
@@ -1216,7 +1240,12 @@ export function WorkflowDialog({
     const attemptRun = dispatch(async () => {
       if (merging) setMergeRunning(true)
       try {
-        const success = await runAction(action, label)
+        const success = await runAction(
+          action.type === 'updatePr' && pr
+            ? { ...action, expectedBody: expectedPrBody.current ?? pr.body }
+            : action,
+          label,
+        )
         if (!success) {
           // A stopped submission is resumable, so read what it managed to finish
           // before deciding the reviewed preview may or may not run again.
@@ -2321,10 +2350,34 @@ export function WorkflowDialog({
                     </Button>
                   </div>
                   <p className="workflow-note">
+                    <code>{pr.url}</code>
+                  </p>
+                  <p className="workflow-note">
                     Checks: {pr.checks} · Reviews:{' '}
                     {pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() || 'No decision'} · Merge
                     state: {pr.mergeState?.replaceAll('_', ' ').toLowerCase() || 'Unknown'}
                   </p>
+                  {expectedPrBody.current !== undefined && expectedPrBody.current !== pr.body ? (
+                    <div className="workflow-section">
+                      <WarningNote>
+                        The published body changed while you were composing. Your input is retained;
+                        compare and merge the latest body before acknowledging this version.
+                      </WarningNote>
+                      <Field id="workflow-latest-pr-body" label="Latest published body">
+                        <Textarea id="workflow-latest-pr-body" readOnly value={pr.body} />
+                      </Field>
+                      <Button
+                        disabled={locked || !providerSourceCurrent}
+                        variant="secondary"
+                        onClick={() => {
+                          expectedPrBody.current = pr.body
+                          refreshBodyBaseline()
+                        }}
+                      >
+                        I have compared this published body
+                      </Button>
+                    </div>
+                  ) : null}
                   <form.Field name="prTitle">
                     {(field) => (
                       <Field id="workflow-pr-title" label="Title" required>
@@ -2377,6 +2430,7 @@ export function WorkflowDialog({
                     authority={authority}
                     onPrUpdate={(updated) => {
                       queryClient.setQueryData(previewKey, { kind: 'pr', value: updated })
+                      expectedPrBody.current = updated.body
                       form.setFieldValue('body', updated.body)
                     }}
                     onBodyMutation={(mutation) => {
@@ -2385,39 +2439,28 @@ export function WorkflowDialog({
                           ? { ...current, value: { ...current.value, body: mutation.newBody } }
                           : current,
                       )
+                      expectedPrBody.current = mutation.newBody
                       form.setFieldValue('body', mutation.newBody)
                     }}
                     onMutationBusy={setIssueMutationBusy}
-                    defaultBranch={snapshot.defaultBranch}
-                    disabled={busy || pr.state === 'MERGED'}
+                    defaultBranch={
+                      providerManagement
+                        ? (pr.repositoryDefaultBranch ?? '')
+                        : snapshot.defaultBranch
+                    }
+                    canEditBody={
+                      !providerManagement || (providerSourceCurrent && pr.canUpdate === true)
+                    }
+                    disabled={
+                      busy ||
+                      pr.state === 'MERGED' ||
+                      (providerManagement &&
+                        (!providerSourceCurrent || Boolean(snapshot.stackOperation)))
+                    }
                     hasFormEdits={edited}
                     runAction={runAction}
                     stackApi={stackApi}
                   />
-                  {pr.state === 'OPEN' &&
-                  localBranches.some(
-                    (branch) => branch.name === pr.head && branch.pr?.number === pr.number,
-                  ) ? (
-                    <Button
-                      tooltip={
-                        actionBlockReason(snapshot.capabilities, 'executeStack') ??
-                        'Check the PR’s current head, reviews, checks, and allowed merge methods before merging.'
-                      }
-                      disabled={Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))}
-                      onClick={() =>
-                        onRequest({ kind: 'stack', operation: 'merge', branch: pr.head })
-                      }
-                    >
-                      Preview merge
-                    </Button>
-                  ) : null}
-                  {pr.state === 'OPEN' &&
-                  !localBranches.some((branch) => branch.pr?.number === pr.number) ? (
-                    <p className="workflow-note">
-                      Check out the PR’s branch to manage it as a local stack. Fork PRs remain
-                      available on GitHub.
-                    </p>
-                  ) : null}
                   {pr.state !== 'MERGED' ? (
                     <div className="pr-lifecycle">
                       {confirmPrState ? (
@@ -2439,16 +2482,20 @@ export function WorkflowDialog({
                               variant="danger"
                               size="sm"
                               disabled={Boolean(
-                                actionBlockReason(
-                                  snapshot.capabilities,
-                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                                ),
+                                providerManagement
+                                  ? providerPrBlock
+                                  : actionBlockReason(
+                                      snapshot.capabilities,
+                                      pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                    ),
                               )}
                               tooltip={
-                                actionBlockReason(
-                                  snapshot.capabilities,
-                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                                ) ??
+                                (providerManagement
+                                  ? providerPrBlock
+                                  : actionBlockReason(
+                                      snapshot.capabilities,
+                                      pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                    )) ??
                                 (pr.state === 'OPEN'
                                   ? 'Close this PR without merging or deleting its branch. Unsaved edits are not applied.'
                                   : 'Reopen this PR on GitHub. Unsaved edits are not applied.')
@@ -2474,17 +2521,21 @@ export function WorkflowDialog({
                           size="sm"
                           variant="ghost"
                           disabled={Boolean(
-                            actionBlockReason(
-                              snapshot.capabilities,
-                              pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                            ),
+                            providerManagement
+                              ? providerPrBlock
+                              : actionBlockReason(
+                                  snapshot.capabilities,
+                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                ),
                           )}
                           onClick={() => setConfirmPrState(true)}
                           tooltip={
-                            actionBlockReason(
-                              snapshot.capabilities,
-                              pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                            ) ??
+                            (providerManagement
+                              ? providerPrBlock
+                              : actionBlockReason(
+                                  snapshot.capabilities,
+                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                )) ??
                             (pr.state === 'OPEN'
                               ? 'Review closing this PR without merging. Its branch and commits will remain.'
                               : 'Review reopening this closed PR on GitHub.')

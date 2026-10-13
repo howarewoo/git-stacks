@@ -473,7 +473,7 @@ export function validateStackAction(value: unknown): StackAction {
       if (!hasOnlyKeys(value, ['type'])) stackActionError(`Invalid ${value.type} action`)
       return { type: value.type }
     case 'updatePr':
-      if (!hasOnlyKeys(value, ['type', 'number', 'title', 'body', 'draft'])) {
+      if (!hasOnlyKeys(value, ['type', 'number', 'title', 'body', 'draft', 'expectedBody'])) {
         stackActionError('Invalid updatePr action')
       }
       if (
@@ -491,12 +491,20 @@ export function validateStackAction(value: unknown): StackAction {
       ) {
         stackActionError('pull request body must be a string without NUL bytes')
       }
+      if (
+        value.expectedBody !== undefined &&
+        (typeof value.expectedBody !== 'string' ||
+          value.expectedBody.length > MAX_MESSAGE_LENGTH ||
+          value.expectedBody.includes('\0'))
+      )
+        stackActionError('Expected pull request body must be a string without NUL bytes')
       return {
         type: 'updatePr',
         number: value.number,
         title: requireString(value.title, 'pull request title'),
         body: value.body,
         draft: value.draft,
+        ...(typeof value.expectedBody === 'string' ? { expectedBody: value.expectedBody } : {}),
       }
     case 'closePr':
     case 'reopenPr':
@@ -7112,10 +7120,17 @@ async function updatePullRequest(
   title: string,
   body: string,
   draft: boolean,
+  expectedBody?: string,
 ): Promise<ActionResult> {
   const origin = await currentOrigin(repoPath)
   const current = await getPullRequest(repoPath, number)
+  if (current.canUpdate !== true)
+    throw new Error('The provider did not establish permission to edit this pull request.')
   if (current.state === 'MERGED') throw new Error(`Pull request #${number} is already merged`)
+  if (expectedBody !== undefined && current.body !== expectedBody)
+    throw new Error(
+      'The pull request body changed. Reload its current body before saving; authored input was not sent.',
+    )
   await patchPullRequest(origin.fullName, number, { title, body }, origin.host)
   if (current.draft !== draft) {
     await changePullRequestDraft(origin.fullName, number, draft, origin.host)
@@ -7134,6 +7149,10 @@ async function changePullRequestState(
 ): Promise<ActionResult> {
   const origin = await currentOrigin(repoPath)
   const current = await getPullRequest(repoPath, number)
+  if (current.canUpdate !== true)
+    throw new Error(
+      'The provider did not establish permission to change this pull request lifecycle.',
+    )
   if (state === 'open' && current.state === 'MERGED')
     throw new Error(`Pull request #${number} cannot be reopened after merge`)
   await patchPullRequest(origin.fullName, number, { state }, origin.host)
@@ -7290,7 +7309,14 @@ export async function runStackAction(
     case 'executeSurgery':
       return runSurgery(root, action.token, action.allowForce, action.closePullRequests)
     case 'updatePr':
-      return updatePullRequest(root, action.number, action.title, action.body, action.draft)
+      return updatePullRequest(
+        root,
+        action.number,
+        action.title,
+        action.body,
+        action.draft,
+        action.expectedBody,
+      )
     case 'closePr':
       return changePullRequestState(root, action.number, 'closed')
     case 'reopenPr':

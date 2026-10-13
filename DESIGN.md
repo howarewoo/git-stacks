@@ -224,6 +224,27 @@ The reference is `git-stacks-workbench-v5.html` at retained commit `40ade209a285
 - Edges are 1.5px essential-boundary strokes at subdued emphasis; selected ancestry uses Repository Blue at 1.8px. Nodes are content-filled outlined circles; selected node is blue with an info-surface halo. Selection uses the selection surface, independently of checkout/lifecycle. Hover uses inset/hover tones. Ancestor context uses inset fill and an explicit Context label.
 - Filter, fold and page projections retain real ancestors and stable track positions; never reconnect to a different parent or hide disagreements. Context and protected trunk cannot enter bulk selection. Select page includes only visible matching eligible rows, never hidden or unloaded data. Fold controls state exact descendant count and preserve the parent's scroll anchor when children expand above it.
 
+### Collaboration and secondary desktop surfaces
+
+- Pull requests uses a qualified list and full Review, never duplicate lanes. Keep
+  lifecycle, draft, checks, review, native membership and published revision
+  independent; missing source data remains named unknown. Host/repository and
+  fork/head/base identity remain visible in review and management context.
+- Attention is global even with no pinned repository selected. Group reasons,
+  count a provider PR once, and retain clone-local safety problems separately.
+  Unknown/incomplete source and observation time remain visible, not decorative
+  success badges or zero counts. Activity shows observed transitions, never an
+  initial snapshot presented as historical events or external-agent liveness.
+- Return routes restore the originating repository, view, filters, folds and
+  scroll. Open forms retain their original source; authored review, reply and PR
+  body text is not relocated or discarded by navigation or source refresh.
+- Settings, local entry, clone and optional Notifications remain compact shared
+  focus-managed secondary surfaces, with bounded scrolling, reachable actions,
+  errors, cancellation and nested focus return. Local entry and primary provider
+  session status are separate from optional Notifications consent/credentials.
+- Display density and reduced motion follow authoritative appearance settings,
+  not per-repository navigation memory. Density changes spacing, not typography.
+
 ### Responsive layout and density
 
 - At widths ≤1350px sidebar/inspector become 204/348px; ≤1199px they become 188/324px with 8px canvas/gutters and 16px pane insets. At ≥1680px use 236/408px and retain flexible main width.

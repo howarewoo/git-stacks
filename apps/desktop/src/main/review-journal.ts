@@ -35,17 +35,31 @@ export async function repositoryJournalPath(
  * can reconstruct, and a corrupt or foreign file must not stop a person
  * reviewing. Entries that do not parse are dropped one by one, so one record in
  * an unexpected shape cannot hide the rest.
+ * Callers retaining authored text or deriving confirmed-review baselines use
+ * strict mode: an unreadable journal is unknown, not a replaceable empty set.
  */
 export async function readJournal<T>(
   file: string,
   field: 'records' | 'writes',
   parse: (value: unknown) => T | null,
+  options: { strict?: boolean } = {},
 ): Promise<T[]> {
   try {
     const parsed: unknown = JSON.parse(await fs.readFile(file, 'utf8'))
-    if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed[field])) return []
-    return parsed[field].map((entry) => parse(entry)).filter((entry): entry is T => entry !== null)
-  } catch {
+    if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed[field])) {
+      if (options.strict) throw new Error('The review journal format cannot be read safely.')
+      return []
+    }
+    const result: T[] = []
+    for (const entry of parsed[field]) {
+      const value = parse(entry)
+      if (value === null) {
+        if (options.strict) throw new Error('The review journal contains an unreadable record.')
+      } else result.push(value)
+    }
+    return result
+  } catch (error) {
+    if (options.strict && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     return []
   }
 }

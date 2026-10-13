@@ -88,7 +88,12 @@ export function textFile(
 }
 
 /** One pull request's files: a text patch, a whitespace-only pair, and every no-text state. */
-export function reviewFileSet(number: number, headOid: string, baseRef = 'main'): ReviewFileSet {
+export function reviewFileSet(
+  number: number,
+  headOid: string,
+  baseRef = 'main',
+  baseOid = 'b'.repeat(40),
+): ReviewFileSet {
   const files: ReviewFile[] = [
     textFile('src/main/review.ts', '@@ -1,6 +1,6 @@ export function readPullRequest()', [
       [' export function readPullRequest() {', 1, 1],
@@ -158,7 +163,7 @@ export function reviewFileSet(number: number, headOid: string, baseRef = 'main')
   ]
   return {
     number,
-    comparison: { headOid, baseOid: 'b'.repeat(40), baseRef },
+    comparison: { headOid, baseOid, baseRef },
     files,
     additions: files.reduce((sum, file) => sum + file.additions, 0),
     deletions: files.reduce((sum, file) => sum + file.deletions, 0),
@@ -266,9 +271,9 @@ export function reviewThreadSet(
   number: number,
   headOid: string,
   baseRef: string | null,
-  options: { resolved?: boolean; outdated?: boolean } = {},
+  options: { resolved?: boolean; outdated?: boolean; baseOid?: string } = {},
 ): ReviewThreadSet {
-  const comparison = { headOid, baseOid: 'b'.repeat(40), baseRef }
+  const comparison = { headOid, baseOid: options.baseOid ?? 'b'.repeat(40), baseRef }
   return {
     number,
     comparison,

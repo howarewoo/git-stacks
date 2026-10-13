@@ -151,6 +151,8 @@ function parseGraphQlPullRequest(
     draft: value.isDraft === true,
     checks: pullRequestChecks(checkEntries),
     ...(typeof value.headRefOid === 'string' ? { headOid: value.headRefOid } : {}),
+    ...(typeof value.baseRefOid === 'string' ? { baseOid: value.baseRefOid } : {}),
+    ...(typeof value.viewerCanUpdate === 'boolean' ? { canUpdate: value.viewerCanUpdate } : {}),
     ...(headRepository ? { headRepository } : {}),
     ...(typeof value.reviewDecision === 'string' ? { reviewDecision: value.reviewDecision } : {}),
     ...(typeof value.mergeStateStatus === 'string' ? { mergeState: value.mergeStateStatus } : {}),
@@ -521,11 +523,14 @@ export async function getPullRequestIndexPage(
   cursor: string | null,
   conservative: boolean,
   signal?: AbortSignal,
+  state: PullRequest['state'] | 'ALL' = 'OPEN',
+  full = false,
 ): Promise<{
   pullRequests: PullRequest[]
   next: string | null
   viewer: string | null
   conservative: boolean
+  nativeMessage?: string
 }> {
   const remote = parseRemote(originUrl)
   const host = remoteHostContext(remote)
@@ -534,9 +539,13 @@ export async function getPullRequestIndexPage(
   const query = (basic: boolean) => `query($owner: String!, $name: String!, $cursor: String) {
     viewer { login }
     repository(owner: $owner, name: $name) {
-      pullRequests(first: 50, after: $cursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
-        nodes { number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner }
-          ${basic ? '' : 'author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }'} }
+      pullRequests(first: 50, after: $cursor, states: ${state === 'ALL' ? '[OPEN, CLOSED, MERGED]' : state}, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        nodes { ${
+          full
+            ? pullRequestFields(basic)
+            : `number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner }
+          ${basic ? '' : 'author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }'}`
+        } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -568,18 +577,21 @@ export async function getPullRequestIndexPage(
     throw new Error('GitHub returned an invalid pull request cursor')
   }
   const pullRequests = connection.nodes.map(
-    (node) => parseGraphQlPullRequest(node, true)?.pullRequest,
+    (node) => parseGraphQlPullRequest(node, basic || !full)?.pullRequest,
   )
-  if (pullRequests.some((pr) => !pr || pr.state !== 'OPEN')) {
-    throw new Error('GitHub returned an invalid open pull request')
+  if (pullRequests.some((pr) => !pr || (state !== 'ALL' && pr.state !== state))) {
+    throw new Error('GitHub returned an invalid pull request for the requested lifecycle')
   }
   const viewer =
     isRecord(page.viewer) && typeof page.viewer.login === 'string' ? page.viewer.login : null
+  const facts = pullRequests as PullRequest[]
+  const native = full ? await loadRepositoryNativeStacks(originUrl, facts, signal, transport) : null
   return {
-    pullRequests: pullRequests as PullRequest[],
+    pullRequests: facts,
     next: next as string | null,
     viewer,
     conservative: basic,
+    ...(native ? { nativeMessage: native.message } : {}),
   }
 }
 
@@ -634,11 +646,12 @@ function isSchemaRefusal(error: unknown): boolean {
  * request with its merge and check state honestly unknown.
  */
 function pullRequestFields(conservative: boolean, withBody = false): string {
-  const base = `number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner } mergeCommit { oid }${withBody ? ' body' : ''}`
+  const base = `number title url headRefName headRefOid baseRefName baseRefOid isDraft state headRepository { nameWithOwner } mergeCommit { oid }${withBody ? ' body' : ''}`
   return conservative
     ? base
     : `${base}
         author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }
+        viewerCanUpdate
         reviewDecision mergeStateStatus
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
 }
@@ -667,6 +680,7 @@ export async function getPullRequest(
   const transport = hostTransport(host)
   const query = (conservative: boolean) => `query($owner: String!, $name: String!, $number: Int!) {
     repository(owner: $owner, name: $name) {
+      defaultBranchRef { name }
       pullRequest(number: $number) {
         ${pullRequestFields(conservative, true)}
       }
@@ -730,7 +744,13 @@ export async function getPullRequest(
       // A host without the stacks resource keeps stack null; membership is never
       // invented from a host that did not report it.
     }
-    return { ...parsed.pullRequest, body: node.body }
+    const defaultBranch =
+      isRecord(repository) &&
+      isRecord(repository.defaultBranchRef) &&
+      typeof repository.defaultBranchRef.name === 'string'
+        ? repository.defaultBranchRef.name
+        : null
+    return { ...parsed.pullRequest, body: node.body, repositoryDefaultBranch: defaultBranch }
   } catch (error) {
     if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
     observeGraphqlFailure(host, error)

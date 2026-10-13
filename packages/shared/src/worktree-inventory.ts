@@ -31,6 +31,8 @@ export interface InventoryRef {
   behind: number | null
   worktreeIds: InventoryId[]
   pullRequestIds: InventoryId[]
+  /** Main's bounded dependency analysis; null/absent is not proof that no restack is needed. */
+  needsRestack?: boolean | null
 }
 export interface WorktreeCounts {
   staged: number
@@ -74,6 +76,7 @@ export interface RepositoryInventory {
   remotes?: { name: string; identity: RemoteRepositoryIdentity | null }[]
   discovery: InventoryRead
   refsRead: InventoryRead
+  dependenciesRead?: InventoryRead
   refs: InventoryRef[]
   worktrees: InventoryWorktree[]
   pullRequests: InventoryPullRequest[]

@@ -569,6 +569,8 @@ export async function previewIssueLink(
 
   if (relation === 'closing') {
     const livePr = await getPullRequest(repoPath, prNumber, signal)
+    if (livePr.canUpdate !== true)
+      throw new Error('The provider did not establish permission to edit closing references.')
     if (action === 'link') {
       if (
         !remote ||
@@ -647,6 +649,8 @@ export async function runLinkIssueAction(
 
   // Revalidate body immediately before writing!
   const livePr = await getPullRequest(repoPath, action.prNumber)
+  if (livePr.canUpdate !== true)
+    throw new Error('The provider did not establish permission to edit closing references.')
   if (livePr.base !== (await repositoryDefaultBranch(remote.fullName, host))) {
     throw new Error(
       'Closing keywords only close issues when the pull request targets the repository default branch.',
@@ -715,6 +719,8 @@ export async function runUnlinkIssueAction(
 
   // Revalidate body immediately before writing!
   const livePr = await getPullRequest(repoPath, action.prNumber)
+  if (livePr.canUpdate !== true)
+    throw new Error('The provider did not establish permission to edit closing references.')
   if (action.expectedBody !== undefined && livePr.body !== action.expectedBody) {
     throw new Error(
       `External body modification detected: the pull request description on GitHub was modified after this action was previewed. Reload the pull request before modifying issue links.`,

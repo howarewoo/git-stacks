@@ -89,6 +89,63 @@ export function sameReviewDraft(left: ReviewDraft, right: ReviewDraft): boolean 
  * force-push does. A record therefore carries the whole comparison, and a
  * record written at one is never re-sent against another.
  */
+/** Authored non-inline text shares the existing account/comparison-owned journal. */
+export interface ReviewComposerDraft {
+  summary: string
+  event: ReviewEvent
+  replies: Array<{ threadId: string; body: string }>
+}
+
+export function parseReviewComposerDraft(value: unknown): ReviewComposerDraft | null {
+  if (typeof value !== 'object' || value === null) return null
+  const input = value as Record<string, unknown>
+  if (
+    typeof input.summary !== 'string' ||
+    input.summary.length > 65536 ||
+    !REVIEW_EVENTS.includes(input.event as ReviewEvent) ||
+    !Array.isArray(input.replies) ||
+    input.replies.length > 200
+  )
+    return null
+  const replies: ReviewComposerDraft['replies'] = []
+  const ids = new Set<string>()
+  for (const row of input.replies) {
+    if (
+      typeof row !== 'object' ||
+      row === null ||
+      typeof row.threadId !== 'string' ||
+      !row.threadId ||
+      row.threadId.length > 512 ||
+      ids.has(row.threadId) ||
+      typeof row.body !== 'string' ||
+      row.body.length > 65536
+    )
+      return null
+    ids.add(row.threadId)
+    replies.push({ threadId: row.threadId, body: row.body })
+  }
+  return { summary: input.summary, event: input.event as ReviewEvent, replies }
+}
+
+export function sameReviewComposerDraft(
+  a: ReviewComposerDraft | undefined,
+  b: ReviewComposerDraft | undefined,
+): boolean {
+  if (a === b) return true
+  if (
+    !a ||
+    !b ||
+    a.summary !== b.summary ||
+    a.event !== b.event ||
+    a.replies.length !== b.replies.length
+  )
+    return false
+  return a.replies.every(
+    (reply, index) =>
+      reply.threadId === b.replies[index].threadId && reply.body === b.replies[index].body,
+  )
+}
+
 export interface ReviewDraftRecord {
   number: number
   /**
@@ -107,6 +164,7 @@ export interface ReviewDraftRecord {
   /** The comparison the drafts' line numbers were read at. */
   comparison: ReviewComparison
   drafts: ReviewDraft[]
+  composer?: ReviewComposerDraft
   updatedAt: string
 }
 
@@ -510,6 +568,7 @@ export function withReviewDraft(
     viewer: record?.viewer ?? '',
     comparison,
     drafts: drafts.length > REVIEW_DRAFTS_MAX ? drafts.slice(0, REVIEW_DRAFTS_MAX) : drafts,
+    ...(record?.composer ? { composer: record.composer } : {}),
     updatedAt: now,
   }
 }

@@ -1,3 +1,4 @@
+import type { ReviewComposerDraft } from '@git-stacks/shared/review-threads'
 import * as React from 'react'
 import { useForm, useSelector, type ReactFormExtendedApi } from '@tanstack/react-form'
 import { useMutation } from '@tanstack/react-query'
@@ -123,9 +124,6 @@ function isUncertainOutcome(cause: unknown): boolean {
  */
 type ReviewSubmitValues = { event: ReviewEvent; summary: string }
 
-/** A fresh review: a plain comment with no words of its own yet. */
-const REVIEW_SUBMIT_DEFAULTS: ReviewSubmitValues = { event: 'COMMENT', summary: '' }
-
 /** The submit form as it reaches the bar that renders its fields. */
 type ReviewSubmitForm = ReactFormExtendedApi<
   ReviewSubmitValues,
@@ -155,6 +153,8 @@ export interface ReviewConversationProps {
   onSelect: (selection: ReviewSelection) => void
   onClearSelection: () => void
   onDraftChange: (drafts: ReviewDraft[]) => void
+  onComposerChange: (composer: ReviewComposerDraft) => void
+  canCompose: boolean
   onReload: () => void
   frozenReason?: string | null
 }
@@ -173,6 +173,8 @@ export function ReviewConversation({
   onClearSelection,
   onDraftChange,
   onReload,
+  onComposerChange,
+  canCompose,
   frozenReason = null,
 }: ReviewConversationProps) {
   const [error, setError] = React.useState<string | null>(null)
@@ -222,12 +224,26 @@ export function ReviewConversation({
   // this component's own state as well as the backend's: while it is set, the
   // button stays dead even though the drafts and the error are still here.
   const [uncertain, setUncertain] = React.useState(false)
+  const composerEdited = React.useRef(false)
+  const composer = getDrafts()?.composer
+  const persistComposer = () => {
+    composerEdited.current = true
+    onComposerChange({
+      summary: form.getFieldValue('summary'),
+      event: form.getFieldValue('event'),
+      replies: getDrafts()?.composer?.replies ?? [],
+    })
+  }
 
   const form: ReviewSubmitForm = useForm({
-    defaultValues: REVIEW_SUBMIT_DEFAULTS,
+    defaultValues: { summary: composer?.summary ?? '', event: composer?.event ?? 'COMMENT' },
     onSubmit: async ({ value, formApi }): Promise<void> => {
       const pending = (getDrafts()?.drafts ?? []).filter((draft) => draft.body.trim() !== '')
-      if (!desktop?.reviewSubmit || pending.length === 0) return
+      if (
+        !desktop?.reviewSubmit ||
+        (pending.length === 0 && value.event === 'COMMENT' && value.summary.trim() === '')
+      )
+        return
       if (blockedByStale || uncertain || Boolean(frozenReason) || submitLock.current) return
       if (!files) {
         setError('The diff has to be loaded before a review can be sent.')
@@ -272,6 +288,11 @@ export function ReviewConversation({
       }
     },
   })
+  React.useEffect(() => {
+    if (composerEdited.current) return
+    form.setFieldValue('summary', composer?.summary ?? '')
+    form.setFieldValue('event', composer?.event ?? 'COMMENT')
+  }, [composer, form])
   const sending = submitMutation.isPending
 
   // Draft identities are minted where a draft is composed, not derived from
@@ -348,6 +369,8 @@ export function ReviewConversation({
 
       <SubmitBar
         form={form}
+        onComposerEdit={persistComposer}
+        canCompose={canCompose}
         permissions={permissions}
         intendedCount={intended.length}
         staleCount={stale.length}
@@ -373,6 +396,9 @@ export function ReviewConversation({
         error={readError}
         onReload={onReload}
         onSelect={onSelect}
+        composer={composer}
+        onComposerChange={onComposerChange}
+        canCompose={canCompose}
       />
     </section>
   )
@@ -524,12 +550,16 @@ function SubmitBar({
   intendedCount,
   staleCount,
   uncertain,
+  onComposerEdit,
+  canCompose,
 }: {
   form: ReviewSubmitForm
   permissions: ReviewPermissions | null
   intendedCount: number
   staleCount: number
   uncertain: boolean
+  onComposerEdit: () => void
+  canCompose: boolean
 }) {
   const busy = useSelector(form.store, (state) => state.isSubmitting)
   const summaryReasonId = React.useId()
@@ -569,7 +599,9 @@ function SubmitBar({
               // going dead.
               const disabled =
                 busy ||
-                intendedCount === 0 ||
+                (intendedCount === 0 &&
+                  event.state.value === 'COMMENT' &&
+                  summary.state.value.trim() === '') ||
                 blocked !== null ||
                 summaryProblem !== null ||
                 staleCount > 0 ||
@@ -581,8 +613,10 @@ function SubmitBar({
                   : (summaryProblem ??
                     (staleCount > 0
                       ? `${staleCount} pending comment${staleCount === 1 ? '' : 's'} no longer names a line in this diff, so the whole review is held. Reopen it or remove ${staleCount === 1 ? 'it' : 'them'} first.`
-                      : intendedCount === 0
-                        ? 'Write at least one pending comment first.'
+                      : intendedCount === 0 &&
+                          event.state.value === 'COMMENT' &&
+                          summary.state.value.trim() === ''
+                        ? 'Write a review summary or pending comment first.'
                         : `Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one ${
                             REVIEW_EVENT_LABELS[event.state.value]
                           } review.`)))
@@ -594,10 +628,13 @@ function SubmitBar({
                       aria-label="Review summary"
                       aria-describedby={summaryReasonId}
                       aria-invalid={summaryProblem !== null}
-                      disabled={busy}
+                      disabled={busy || !canCompose}
                       name={summary.name}
                       onBlur={summary.handleBlur}
-                      onChange={(changeEvent) => summary.handleChange(changeEvent.target.value)}
+                      onChange={(changeEvent) => {
+                        summary.handleChange(changeEvent.target.value)
+                        onComposerEdit()
+                      }}
                       placeholder="Optional for a comment; required when requesting changes."
                       rows={2}
                       value={summary.state.value}
@@ -610,6 +647,7 @@ function SubmitBar({
                       // The group is string-typed, so the cast is narrowed back
                       // to the three decisions the radio rows actually offer.
                       event.handleChange(next as ReviewEvent)
+                      onComposerEdit()
                     }}
                     value={event.state.value}
                   >
@@ -621,7 +659,7 @@ function SubmitBar({
                             'review-submit-event',
                             candidateReason && 'review-submit-event-blocked',
                           )}
-                          disabled={busy}
+                          disabled={busy || !canCompose}
                           key={candidate}
                           title={candidateReason ?? REVIEW_EVENT_LABELS[candidate]}
                           value={candidate}
@@ -662,6 +700,9 @@ function ThreadList({
   error,
   onReload,
   onSelect,
+  composer,
+  onComposerChange,
+  canCompose,
 }: {
   desktop: DesktopAPI | undefined
   number: number
@@ -670,6 +711,9 @@ function ThreadList({
   error: string | null
   onReload: () => void
   onSelect: (selection: ReviewSelection) => void
+  composer: ReviewComposerDraft | undefined
+  onComposerChange: (composer: ReviewComposerDraft) => void
+  canCompose: boolean
 }) {
   const threads = read?.threads.threads ?? []
   const window_ = useListWindow(threads, LIST_PAGE_SIZE)
@@ -852,7 +896,15 @@ function ThreadList({
                       }
                       size="sm"
                       variant="ghost"
-                      onClick={() => setReplyFor(replyFor === thread.id ? null : thread.id)}
+                      onClick={() => {
+                        if (replyFor !== thread.id)
+                          replyForm.setFieldValue(
+                            'body',
+                            composer?.replies.find((reply) => reply.threadId === thread.id)?.body ??
+                              '',
+                          )
+                        setReplyFor(replyFor === thread.id ? null : thread.id)
+                      }}
                     >
                       Reply
                     </Button>
@@ -872,10 +924,27 @@ function ThreadList({
                         <>
                           <Textarea
                             aria-label={`Reply to ${reviewThreadLabel(thread)}`}
-                            disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                            disabled={
+                              !canCompose ||
+                              busy === thread.id ||
+                              (replying && replyFor === thread.id)
+                            }
                             name={body.name}
                             onBlur={body.handleBlur}
-                            onChange={(changeEvent) => body.handleChange(changeEvent.target.value)}
+                            onChange={(changeEvent) => {
+                              const text = changeEvent.target.value
+                              body.handleChange(text)
+                              onComposerChange({
+                                summary: composer?.summary ?? '',
+                                event: composer?.event ?? 'COMMENT',
+                                replies: [
+                                  ...(composer?.replies ?? []).filter(
+                                    (reply) => reply.threadId !== thread.id,
+                                  ),
+                                  ...(text ? [{ threadId: thread.id, body: text }] : []),
+                                ],
+                              })
+                            }}
                             placeholder="Reply to this thread"
                             rows={3}
                             value={body.state.value}
@@ -883,6 +952,7 @@ function ThreadList({
                           <Button
                             disabled={
                               !read.owner.viewer ||
+                              !canCompose ||
                               replying ||
                               body.state.value.trim() === '' ||
                               uncertain.has(thread.id)

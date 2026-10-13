@@ -1,3 +1,5 @@
+import type { ReviewEvent } from '@git-stacks/shared/review-threads'
+import { parseReviewComposerDraft } from '@git-stacks/shared/review-threads'
 import path from 'node:path'
 
 import type { ReviewComparison, ReviewLineRef, ReviewSide } from '@git-stacks/shared/review'
@@ -224,6 +226,10 @@ function parseRecord(value: unknown): ReviewDraftRecord | null {
   // would otherwise be offered to whichever account happens to be signed in.
   if (typeof value.repo !== 'string' || value.repo === '') return null
   if (typeof value.viewer !== 'string' || value.viewer === '') return null
+  const composer =
+    value.composer === undefined ? undefined : parseReviewComposerDraft(value.composer)
+  if (composer === null)
+    throw new Error('Saved review composer text is invalid; the journal was not replaced.')
   const drafts = value.drafts
     .map(parseDraft)
     .filter((draft): draft is ReviewDraft => draft !== null)
@@ -237,6 +243,7 @@ function parseRecord(value: unknown): ReviewDraftRecord | null {
     // and the reviewer's words are left in the file for them to find.
     comparison: parseComparison(value.comparison),
     drafts,
+    ...(composer ? { composer } : {}),
     // Nothing here counts drafts. An identity is minted where a draft is
     // composed, so there is no counter to rewind, refuse, or keep — and a
     // record written before ids were generated, or one carrying a counter this
@@ -251,7 +258,7 @@ function sameOwner(record: ReviewDraftRecord, repo: string, viewer: string): boo
 }
 
 function readDrafts(file: string): Promise<ReviewDraftRecord[]> {
-  return readJournal(file, 'records', parseRecord)
+  return readJournal(file, 'records', parseRecord, { strict: true })
 }
 
 /**
@@ -543,6 +550,65 @@ export async function removeDeliveredReviewDrafts(
     },
     signal,
   )
+}
+
+/** A confirmed receipt retires matching text only, never another window's newer edit. */
+export async function retireDeliveredComposerText(
+  repoPath: string,
+  repo: string,
+  viewer: string,
+  number: number,
+  delivered:
+    | { summary: string; event: ReviewEvent; comparison: ReviewComparison }
+    | { threadId: string; body: string },
+  authorize: () => Promise<void>,
+): Promise<void> {
+  const file = await repositoryJournalPath(repoPath, DRAFTS_JOURNAL)
+  await withJournalLock(file, async () => {
+    const records = await readDrafts(file)
+    let changed = false
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index]
+      const composer = record.composer
+      if (record.number !== number || !sameOwner(record, repo, viewer) || !composer) continue
+      if ('summary' in delivered) {
+        if (
+          !sameReviewComparison(record.comparison, delivered.comparison) ||
+          composer.summary !== delivered.summary ||
+          composer.event !== delivered.event
+        )
+          continue
+        if (!composer.summary && composer.event === 'COMMENT') continue
+        records[index] = {
+          ...record,
+          composer: { ...composer, summary: '', event: 'COMMENT' },
+          updatedAt: nextDraftVersion(record),
+        }
+      } else {
+        if (
+          !composer.replies.some(
+            (reply) => reply.threadId === delivered.threadId && reply.body === delivered.body,
+          )
+        )
+          continue
+        records[index] = {
+          ...record,
+          composer: {
+            ...composer,
+            replies: composer.replies.filter(
+              (reply) => reply.threadId !== delivered.threadId || reply.body !== delivered.body,
+            ),
+          },
+          updatedAt: nextDraftVersion(record),
+        }
+      }
+      changed = true
+    }
+    if (changed) {
+      await authorize()
+      await writeDrafts(file, records)
+    }
+  })
 }
 
 /**

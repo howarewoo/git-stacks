@@ -47,6 +47,7 @@ import {
   writeReviewDrafts,
   retireSettledWrites,
   removeDeliveredReviewDrafts,
+  retireDeliveredComposerText,
 } from '../src/main/review-drafts'
 import {
   newReviewDraftId,
@@ -7287,4 +7288,184 @@ test('a settled write is still forgotten when its payload no longer carries it',
     [],
     'an unanswered payload is what retires the evidence, and only that',
   )
+})
+
+test('overall review and thread text survive reopening and retire only exact confirmed versions', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const authorize = authorizedTestJournal(workspace.repo)
+  const input: ReviewDraftRecord = {
+    ...JOURNAL_OWNER,
+    number: 7,
+    comparison: comparison(),
+    drafts: [],
+    composer: {
+      summary: 'Original overall review',
+      event: 'REQUEST_CHANGES',
+      replies: [{ threadId: 'thread-one', body: 'Original reply' }],
+    },
+    updatedAt: '2026-10-13T10:00:00Z',
+  }
+  const first = await writeReviewDrafts(workspace.repo, input, null, authorize)
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer,
+    input.composer,
+  )
+  assert.equal(await readReviewDrafts(workspace.repo, input.repo, 'another-account', 7), null)
+  const newer = await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...first,
+      composer: {
+        ...first.composer!,
+        summary: 'Newer overall review',
+        replies: [{ threadId: 'thread-one', body: 'Newer reply' }],
+      },
+    },
+    first.updatedAt,
+    authorize,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    { summary: input.composer!.summary, event: 'REQUEST_CHANGES', comparison: input.comparison },
+    authorize,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    { threadId: 'thread-one', body: 'Original reply' },
+    authorize,
+  )
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer,
+    newer.composer,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    {
+      summary: newer.composer!.summary,
+      event: 'REQUEST_CHANGES',
+      comparison: { ...input.comparison, baseOid: 'c'.repeat(40) },
+    },
+    authorize,
+  )
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer,
+    newer.composer,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    { summary: newer.composer!.summary, event: 'REQUEST_CHANGES', comparison: input.comparison },
+    authorize,
+  )
+  const afterReview = await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7)
+  assert.equal(afterReview?.composer?.summary, '')
+  assert.deepEqual(afterReview?.composer?.replies, newer.composer!.replies)
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    { threadId: 'thread-one', body: 'Newer reply' },
+    authorize,
+  )
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer?.replies,
+    [],
+  )
+  await assert.rejects(
+    writeReviewDrafts(workspace.repo, newer, newer.updatedAt, authorize),
+    /Saved drafts changed/,
+  )
+})
+
+test('invalid saved composer text is reported without replacing the private journal', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts-qualified.json')
+  const malformed = JSON.stringify({
+    version: 1,
+    records: [
+      {
+        ...JOURNAL_OWNER,
+        number: 7,
+        comparison: comparison(),
+        drafts: [],
+        composer: {
+          summary: 'Owned text',
+          event: 'COMMENT',
+          replies: [
+            { threadId: 'one', body: 'one' },
+            { threadId: 'one', body: 'other' },
+          ],
+        },
+        updatedAt: '2026-10-13T10:00:00Z',
+      },
+    ],
+  })
+  await writeFile(journal, malformed)
+  await assert.rejects(
+    readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7),
+  )
+  assert.equal(await readFile(journal, 'utf8'), malformed)
+})
+
+test('a summary-only review is actually submitted and its confirmed composer text retires', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport, writes } = threadDouble()
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+  const body = 'Overall review without an invented inline anchor'
+  await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...JOURNAL_OWNER,
+      number: 7,
+      comparison: comparison(),
+      drafts: [],
+      composer: { summary: body, event: 'COMMENT', replies: [] },
+      updatedAt: '2026-10-13T10:00:00Z',
+    },
+    null,
+    authorizedTestJournal(workspace.repo),
+  )
+  const result = await submitReview(workspace.repo, 7, {
+    ...JOURNAL_OWNER,
+    event: 'COMMENT',
+    body,
+    comparison: comparison(),
+    drafts: [],
+  })
+  assert.ok(result.id)
+  assert.equal(writes.filter((write) => write.path.endsWith('/pulls/7/reviews')).length, 1)
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.composer
+      ?.summary,
+    '',
+  )
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts-qualified.json')
+  const before = await readFile(journal, 'utf8')
+  await assert.rejects(
+    submitReview(workspace.repo, 7, {
+      ...JOURNAL_OWNER,
+      event: 'COMMENT',
+      body: '',
+      comparison: comparison(),
+      drafts: [],
+    }),
+  )
+  assert.equal(writes.filter((write) => write.path.endsWith('/pulls/7/reviews')).length, 1)
+  assert.equal(await readFile(journal, 'utf8'), before)
 })

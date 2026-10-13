@@ -100,6 +100,36 @@ export async function readReviewSnapshotLog(
   const records = await readSnapshotJournal(repoPath, signal)
   return records.find((log) => matches(log, repo, viewer, number)) ?? null
 }
+/** One bounded journal read for Attention; account/provider filtering precedes publication. */
+export async function readReviewedHeads(
+  repoPath: string,
+  repo: string,
+  viewer: string,
+  signal?: AbortSignal,
+): Promise<Map<number, { headOid: string; reviewedAt: string }>> {
+  const records = await readJournal(
+    await repositoryJournalPath(repoPath, SNAPSHOT_JOURNAL, signal),
+    'records',
+    parseLog,
+    { strict: true },
+  )
+  signal?.throwIfAborted()
+  const heads = new Map<number, { headOid: string; reviewedAt: string }>()
+  for (const log of records) {
+    if (log.repo !== repo || log.viewer.toLowerCase() !== viewer.toLowerCase()) continue
+    let reviewed: ReviewSnapshot | null = null
+    for (const snapshot of log.snapshots)
+      if (
+        snapshot.reviewed &&
+        snapshot.reviewedAt &&
+        (!reviewed?.reviewedAt || snapshot.reviewedAt > reviewed.reviewedAt)
+      )
+        reviewed = snapshot
+    if (reviewed?.reviewedAt)
+      heads.set(log.number, { headOid: reviewed.headOid, reviewedAt: reviewed.reviewedAt })
+  }
+  return heads
+}
 
 /**
  * Records an observed head for this pull request under the active account.

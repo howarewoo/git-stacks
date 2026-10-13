@@ -267,10 +267,15 @@ export interface PullRequest {
   draft: boolean
   checks: 'passing' | 'failing' | 'pending' | 'none'
   headOid?: string
+  /** Provider-observed base revision; a missing OID cannot establish base stability. */
+  baseOid?: string
   mergeOid?: string
   headRepository?: string
-  reviewDecision?: string
+  reviewDecision?: string | null
   mergeState?: string
+  /** Actual provider edit permission; absence is not permission. */
+  canUpdate?: boolean
+  repositoryDefaultBranch?: string | null
   stack?: PullRequestStackMembership | null
   /** Source-backed collaboration facts; absent means the source did not establish them. */
   author?: string | null
@@ -955,7 +960,14 @@ export type StackAction =
       /** Consent to close the pull request of a submitted layer the surgery removes. */
       closePullRequests: boolean
     }
-  | { type: 'updatePr'; number: number; title: string; body: string; draft: boolean }
+  | {
+      type: 'updatePr'
+      number: number
+      title: string
+      body: string
+      draft: boolean
+      expectedBody?: string
+    }
   | { type: 'closePr' | 'reopenPr'; number: number }
   | { type: 'createNativeStack'; pullRequests: number[] }
   | { type: 'addPullRequestsToNativeStack'; stackNumber: number; pullRequests: number[] }
@@ -980,6 +992,12 @@ export type StackAction =
       relation: IssueLinkRelation
       expectedBody?: string
     }
+
+/** Provider-only management of a captured PR; never a local Git or stack mutation. */
+export type PullRequestAction = Extract<
+  StackAction,
+  { type: 'updatePr' | 'closePr' | 'reopenPr' | 'linkIssue' | 'unlinkIssue' }
+>
 
 export type GitAction =
   | { type: 'switch'; ref: string; carry?: boolean }
@@ -1252,6 +1270,13 @@ import type {
   InspectionWorktreeStatus,
 } from './inspection'
 
+export interface PullRequestPage {
+  pullRequests: PullRequest[]
+  next: string | null
+  observedAt: string
+  nativeMessage?: string
+}
+
 export interface DesktopAPI {
   /**
    * What the configured GitHub host was observed to support. Every field is a
@@ -1336,6 +1361,14 @@ export interface DesktopAPI {
   mergeStatus?: () => Promise<OperationProgress<MergeStatus>>
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
+  pullRequestPage?(
+    state: PullRequest['state'] | 'ALL',
+    cursor: string | null,
+  ): Promise<PullRequestPage>
+  pullRequestAction?(
+    action: PullRequestAction,
+    expectedScope: OperationScope,
+  ): Promise<ActionResult>
   /** The review workspace headline: one pull request plus the stack layers around it. */
   reviewHeadline?(number: number, requestId?: string): Promise<ReviewHeadline>
   /** Every file of one pull request, read from GitHub rather than the working tree. */

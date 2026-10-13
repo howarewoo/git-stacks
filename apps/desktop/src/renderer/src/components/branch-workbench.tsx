@@ -64,6 +64,8 @@ export interface BranchWorkbenchProps {
   snapshot: BranchWorkbenchSnapshot
   repositoryId: string
   density?: 'compact' | 'standard'
+  onDensityChange?: (density: 'compact' | 'standard') => void
+  densityDisabled?: boolean
   selectedBranchId: string | null
   capabilities: WorkbenchCapabilities
   onRepositoryChange: (id: string) => void
@@ -229,6 +231,8 @@ export function BranchWorkbench({
   snapshot,
   repositoryId,
   density = 'compact',
+  onDensityChange,
+  densityDisabled,
   selectedBranchId,
   capabilities,
   onRepositoryChange,
@@ -274,7 +278,8 @@ export function BranchWorkbench({
   const [scope, setScope] = useState(viewState.scope)
   const [refScope, setRefScope] = useState(viewState.refScope)
   const [page, setPage] = useState(viewState.page)
-  const [displayDensity, setDisplayDensity] = useState(viewState.density ?? density)
+  const [localDensity, setDisplayDensity] = useState(density)
+  const displayDensity = onDensityChange ? density : localDensity
   const [folded, setFolded] = useState<Set<string>>(new Set(viewState.folded))
   const [checked, setChecked] = useState<Set<string>>(new Set())
   const [focusedBranchId, setFocusedBranchId] = useState<string | null>(selectedBranchId)
@@ -330,7 +335,6 @@ export function BranchWorkbench({
       page,
       unfilteredScroll: unfiltered.current.scroll,
       unfilteredPage: unfiltered.current.page,
-      density: displayDensity,
       ...overrides,
     })
   }
@@ -1174,8 +1178,11 @@ export function BranchWorkbench({
                     aria-label="Display density"
                     controlSize="compact"
                     value={displayDensity}
+                    disabled={densityDisabled}
                     onValueChange={(value) =>
-                      setDisplayDensity(value as WorkbenchViewState['density'])
+                      onDensityChange
+                        ? onDensityChange(value as 'compact' | 'standard')
+                        : setDisplayDensity(value as 'compact' | 'standard')
                     }
                     options={[
                       { value: 'compact', label: 'Compact display' },

@@ -7,6 +7,9 @@ export interface RepositoryViewMemory {
   pullRequestId: string | null
   pullRequestPage: number
   pullRequestScroll: number
+  pullRequestQuery: string
+  pullRequestLifecycle: string
+  pullRequestCursor: string | null
   reviewOrigin: {
     repositoryId: string
     surface: WorkbenchSurface
@@ -56,6 +59,16 @@ export function readWorkbenchMemory(): Record<string, RepositoryViewMemory> {
           value.pullRequestScroll >= 0
             ? value.pullRequestScroll
             : 0,
+        pullRequestQuery: typeof value.pullRequestQuery === 'string' ? value.pullRequestQuery : '',
+        pullRequestLifecycle:
+          typeof value.pullRequestLifecycle === 'string' &&
+          ['all', 'open', 'draft', 'closed', 'merged'].includes(value.pullRequestLifecycle)
+            ? value.pullRequestLifecycle
+            : 'all',
+        pullRequestCursor:
+          typeof value.pullRequestCursor === 'string' && value.pullRequestCursor.length <= 2048
+            ? value.pullRequestCursor
+            : null,
         reviewOrigin:
           value.reviewOrigin &&
           typeof value.reviewOrigin.repositoryId === 'string' &&
@@ -86,12 +99,27 @@ export function readWorkbenchMemory(): Record<string, RepositoryViewMemory> {
             : null,
         view: {
           ...initialWorkbenchView,
-          ...view,
+          query: view.query,
+          filter: view.filter,
+          scope: view.scope,
+          folded: view.folded,
+          scroll: view.scroll,
+          unfilteredScroll:
+            typeof view.unfilteredScroll === 'number' &&
+            Number.isFinite(view.unfilteredScroll) &&
+            view.unfilteredScroll >= 0
+              ? view.unfilteredScroll
+              : undefined,
+          unfilteredPage:
+            typeof view.unfilteredPage === 'number' &&
+            Number.isInteger(view.unfilteredPage) &&
+            view.unfilteredPage >= 0
+              ? view.unfilteredPage
+              : undefined,
           page: Number.isInteger(view.page) && view.page >= 0 ? view.page : 0,
           tab: ['overview', 'changes', 'checks', 'discussion'].includes(view.tab)
             ? view.tab
             : 'overview',
-          density: view.density === 'standard' ? 'standard' : 'compact',
           worktreeId: typeof view.worktreeId === 'string' ? view.worktreeId : null,
           refScope: view.refScope === 'local' || view.refScope === 'remote' ? view.refScope : 'all',
         },
@@ -116,6 +144,9 @@ export const emptyRepositoryMemory: RepositoryViewMemory = {
   pullRequestId: null,
   pullRequestPage: 0,
   pullRequestScroll: 0,
+  pullRequestQuery: '',
+  pullRequestLifecycle: 'all',
+  pullRequestCursor: null,
   reviewOrigin: null,
   view: initialWorkbenchView,
 }

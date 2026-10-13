@@ -34,6 +34,7 @@ import {
   recordUncertainWrite,
   reserveUncertainWrite,
   removeDeliveredReviewDrafts,
+  retireDeliveredComposerText,
   assertReviewDraftOwner,
   retireSettledWrites,
 } from './review-drafts'
@@ -978,7 +979,8 @@ export async function submitReview(
   // and before the request is journalled or sent, not after.
 
   const sendable = submission.drafts.filter((draft) => draft.body.trim() !== '')
-  if (sendable.length === 0) throw new Error('Write at least one comment before submitting.')
+  if (sendable.length === 0 && submission.event === 'COMMENT' && submission.body.trim() === '')
+    throw new Error('Write a review summary or pending comment before submitting.')
   if (submission.event === 'REQUEST_CHANGES' && submission.body.trim() === '') {
     throw new Error('Requesting changes needs a summary saying what must change.')
   }
@@ -1094,7 +1096,7 @@ export async function submitReview(
   // Everything in this payload is already on GitHub, so the outcome GitHub
   // recorded for the review that carried them is what is reported.
   // Settled evidence stays until a later payload acknowledges retirement.
-  if (undelivered.length === 0) {
+  if (undelivered.length === 0 && (sendable.length > 0 || guard.settled.length > 0)) {
     const settledReview = guard.settled[0]
     if (files.comparison.headOid) {
       await markReviewSnapshotReviewed(
@@ -1114,6 +1116,14 @@ export async function submitReview(
       delivered,
       sendable,
       submission.comparison,
+      authorizeCapturedAttempt,
+    )
+    await retireDeliveredComposerText(
+      repoPath,
+      repo,
+      permissions.viewer,
+      number,
+      { summary: submission.body, event: submission.event, comparison: submission.comparison },
       authorizeCapturedAttempt,
     )
     return {
@@ -1292,6 +1302,14 @@ export async function submitReview(
     delivered,
     sendable,
     submission.comparison,
+    authorizeCapturedAttempt,
+  )
+  await retireDeliveredComposerText(
+    repoPath,
+    repo,
+    permissions.viewer,
+    number,
+    { summary: submission.body, event: submission.event, comparison: submission.comparison },
     authorizeCapturedAttempt,
   )
   return result
@@ -1788,6 +1806,14 @@ export async function replyToThread(
     // and the record retired: sending again would be a second copy of the same
     // reply, which is the duplicate this guard prevents.
     if (landed) {
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        { threadId, body },
+        authorizeCapturedAttempt,
+      )
       await clearUncertainWrite(
         repoPath,
         repo,
@@ -1906,6 +1932,14 @@ export async function replyToThread(
       body,
     )
     if (landed) {
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        { threadId, body },
+        authorizeCapturedAttempt,
+      )
       await clearUncertainWrite(
         repoPath,
         repo,
@@ -1924,6 +1958,18 @@ export async function replyToThread(
     ? data.addPullRequestReviewThreadReply
     : null
   const comment = payload && isRecord(payload.comment) ? payload.comment : null
+  if (!comment || typeof comment.id !== 'string' || !comment.id)
+    throw new ReviewOutcomeUnknownError(
+      'The provider did not confirm the reply identity; authored text and its dispatched-attempt guard were retained.',
+    )
+  await retireDeliveredComposerText(
+    repoPath,
+    repo,
+    permissions.viewer,
+    number,
+    { threadId, body },
+    authorizeCapturedAttempt,
+  )
   await clearUncertainWrite(
     repoPath,
     repo,
@@ -1933,9 +1979,9 @@ export async function replyToThread(
     authorizeCapturedAttempt,
   )
   return {
-    id: comment && typeof comment.id === 'string' ? comment.id : '',
+    id: comment.id,
     state: 'created',
-    url: comment && typeof comment.url === 'string' ? comment.url : null,
+    url: typeof comment.url === 'string' ? comment.url : null,
   }
 }
 

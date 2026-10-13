@@ -737,6 +737,28 @@ export function SettingsDialog({
                   />
                 </Field>
                 <Field
+                  id="settings-density"
+                  label="Workbench density"
+                  description="Applies to the workbench in every repository."
+                  error={problemFor('appearance.density')}
+                >
+                  <SegmentedControl
+                    label="Workbench density"
+                    value={settings.appearance.density ?? 'compact'}
+                    disabled={busy || locked('appearance.density')}
+                    options={[
+                      { value: 'compact', label: 'Compact' },
+                      { value: 'standard', label: 'Standard' },
+                    ]}
+                    onValueChange={(value) =>
+                      void save(
+                        { appearance: { density: value } },
+                        `Workbench density set to ${value}.`,
+                      )
+                    }
+                  />
+                </Field>
+                <Field
                   id="settings-reduce-motion"
                   label={<span className="sr-only">Reduce motion</span>}
                   description="Removes non-essential transitions, whether or not this computer's system asks for it."
