@@ -10,57 +10,112 @@ permissions:
   contents: read
 
 jobs:
-  automated:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+  selection:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      plan: ${{ steps.select.outputs.plan }}
+      automated: ${{ steps.select.outputs.automated }}
+      catalog: ${{ steps.select.outputs.catalog }}
     steps:
       - uses: actions/checkout@v6
-      - name: Install virtual display dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb xauth
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - name: Selector regression tests (no dependencies)
+        run: node --test scripts/ci/select-checks.test.mjs
+      - name: Fetch explicit PR comparison commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # A missing baseline is handled conservatively by the selector.
+        run: git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA" || true
+      - name: Select affected checks
+        id: select
+        run: node scripts/ci/select-checks.mjs
+  automated:
+    needs: selection
+    if: always()
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      SELECTION_RESULT: ${{ needs.selection.result }}
+      CHECK_PLAN: ${{ needs.selection.outputs.plan }}
+      CHECK_ENABLED: ${{ needs.selection.outputs.automated }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Validate selection and explain intentional skips
+        run: node scripts/ci/run-checks.mjs gate automated
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        if: needs.selection.outputs.automated == 'true'
+      - name: Install dependencies
+        if: needs.selection.outputs.automated == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Affected workspace typechecks
+        if: needs.selection.outputs.automated == 'true'
+        run: node scripts/ci/run-checks.mjs typecheck
+      - name: Shared keyboard and state-label contracts
+        if: needs.selection.outputs.automated == 'true'
+        run: node scripts/ci/run-checks.mjs unit
+      - name: Install virtual display dependencies
+        if: fromJSON(needs.selection.outputs.plan).desktop != 'skip'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends xvfb xauth
       - name: Install Playwright Chromium
+        if: fromJSON(needs.selection.outputs.plan).desktop != 'skip'
         run: pnpm --filter git-stacks exec playwright install --with-deps chromium
-      - name: Unit checks for the shared keyboard and state-label contracts
-        run: pnpm --filter git-stacks exec tsx --test tests/tree-navigation.test.ts tests/components.test.ts
-      - name: Typecheck
-        run: pnpm run typecheck
-      - name: axe audits, contrast, keyboard routes, and 200% zoom
-        # The a11y suite runs against the real renderer fixtures served by Vite.
-        # Pixel baselines are darwin-only and stay a local gate (pnpm run test:visual).
-        run: xvfb-run -a pnpm run test:ui
+      - name: Selected nonvisual renderer checks
+        if: fromJSON(needs.selection.outputs.plan).desktop != 'skip'
+        # Root Turbo invocation retains build:gallery; macOS pixel baselines stay local.
+        run: xvfb-run -a node scripts/ci/run-checks.mjs desktop
       - name: Upload the Playwright report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: accessibility-report
-          path: apps/desktop/playwright-report/
+          path: |
+            apps/desktop/playwright-report/
+            apps/desktop/test-results/
           if-no-files-found: warn
   design:
+    needs: selection
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      SELECTION_RESULT: ${{ needs.selection.result }}
+      CHECK_PLAN: ${{ needs.selection.outputs.plan }}
+      CHECK_ENABLED: ${{ needs.selection.outputs.catalog }}
     steps:
       - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter design exec playwright install --with-deps chromium
-      - run: pnpm --filter design check:manifest
-      - run: pnpm --filter @git-stacks/ui tokens:check
-      - run: pnpm --filter design build
-      - run: pnpm --filter design test:catalog
+      - name: Validate selection and explain intentional skips
+        run: node scripts/ci/run-checks.mjs gate design
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        if: needs.selection.outputs.catalog == 'true'
+      - name: Install dependencies
+        if: needs.selection.outputs.catalog == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        if: needs.selection.outputs.catalog == 'true'
+        run: pnpm --filter design exec playwright install --with-deps chromium
+      - name: Catalog validation, build, and tests
+        if: needs.selection.outputs.catalog == 'true'
+        run: node scripts/ci/run-checks.mjs catalog
       - name: Upload catalog failures
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: design-catalog-failures
-          path: apps/design/test-results/
+          path: |
+            apps/design/test-results/
+            apps/design/playwright-report/
