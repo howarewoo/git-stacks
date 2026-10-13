@@ -23,11 +23,15 @@ export function IconographySpecimen() {
       <div>
         <h3>Navigation and actions</h3>
         <p>
-          16px glyphs accompany compact labels; 20px glyphs suit standard controls. The glyph is not
-          the target: icon-only controls retain 44px targets.
+          16px glyphs accompany 36px compact controls; 20px glyphs suit 44px standard controls. The
+          glyph is not the target: icon-only controls retain 44px targets.
         </p>
         <div className="design-specimen-row">
-          <Button variant="secondary" onClick={() => setFeedback('Branch example opened locally.')}>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setFeedback('Branch example opened locally.')}
+          >
             <GitBranch size={16} aria-hidden="true" /> Browse branches
           </Button>
           <Button
@@ -52,12 +56,15 @@ export function IconographySpecimen() {
           </IconButton>
           <Button
             variant="secondary"
+            size="sm"
             onClick={() => setFeedback('External-link example activated locally; no page opened.')}
           >
             <ExternalLink size={16} aria-hidden="true" /> Open example documentation
           </Button>
         </div>
-        <p role="status">{feedback} These examples never call Git or a network operation.</p>
+        <p className="iconography-feedback" role="status">
+          {feedback} These examples never call Git or a network operation.
+        </p>
       </div>
       <div>
         <h3>Git objects</h3>
@@ -82,18 +89,22 @@ export function IconographySpecimen() {
       </div>
       <div>
         <h3>Status has visible meaning</h3>
-        <ul className="iconography-list">
+        <ul className="iconography-list iconography-status-list">
           <li className="iconography-success">
-            <CircleCheck size={16} aria-hidden="true" /> Success: checks passed
+            <CircleCheck size={16} aria-hidden="true" />
+            <span>Success: checks passed</span>
           </li>
           <li className="iconography-warning">
-            <TriangleAlert size={16} aria-hidden="true" /> Warning: restack required
+            <TriangleAlert size={16} aria-hidden="true" />
+            <span>Warning: restack required</span>
           </li>
           <li className="iconography-neutral">
-            <CircleOff size={16} aria-hidden="true" /> Unavailable: remote facts could not be read
+            <CircleOff size={16} aria-hidden="true" />
+            <span>Unavailable: remote facts could not be read</span>
           </li>
           <li className="iconography-neutral">
-            <CircleHelp size={16} aria-hidden="true" /> Unknown: check result not reported
+            <CircleHelp size={16} aria-hidden="true" />
+            <span>Unknown: check result not reported</span>
           </li>
         </ul>
         <p>

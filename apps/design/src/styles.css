@@ -351,13 +351,24 @@ body {
   gap: var(--gs-semantic-space-6);
 }
 
+.iconography-specimen > div {
+  min-width: 0;
+}
+
 .iconography-specimen h3 {
+  font-size: var(--gs-semantic-type-label-size);
+  line-height: var(--gs-semantic-type-label-line);
   font-weight: 600;
 }
 
 .iconography-specimen p {
   max-width: 72ch;
   margin-top: var(--gs-semantic-space-2);
+  color: var(--gs-semantic-text-secondary);
+}
+
+.iconography-specimen .iconography-feedback {
+  color: var(--gs-semantic-text-primary);
 }
 
 .iconography-specimen .design-specimen-row,
@@ -375,6 +386,12 @@ body {
   display: flex;
   align-items: center;
   gap: var(--gs-semantic-space-2);
+}
+
+.iconography-status-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 40ch), 1fr));
+  max-width: 88ch;
 }
 
 .iconography-specimen svg {

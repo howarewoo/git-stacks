@@ -2323,7 +2323,7 @@ imports rather than an Icon wrapper, registry or shared re-export:
 import { GitBranch, RefreshCw } from 'lucide-react'
 import { Button, IconButton } from '@git-stacks/ui'
 
-<Button variant="secondary" onClick={browseBranches}>
+<Button variant="secondary" size="sm" onClick={browseBranches}>
   <GitBranch size={16} aria-hidden="true" /> Browse branches
 </Button>
 <IconButton label="Refresh repository" variant="ghost" onClick={refreshRepository}>
@@ -2335,8 +2335,10 @@ Keep ambiguous actions visibly labelled. Follow [Iconography](DESIGN.md#iconogra
 for semantic colors, inline status sizes and accessibility. The catalog actions
 only update local feedback: verify Foundations navigation, search for Lucide,
 the Iconography command result and `/#iconography`, then Tab/Enter/Space through
-the examples. Inspect 16px/20px glyphs, 44px icon targets and explicit status text
-in light/dark, 390px narrow browsing and 640×450 reflow. Run `pnpm run typecheck`,
+the examples. Inspect 16px glyphs in 36px compact buttons, 20px glyphs in 44px
+standard buttons, and 44px icon-only targets. Check that the labelled status grid
+reflows with its available width and retains each icon beside its text in light/dark,
+390px narrow browsing and 640×450 reflow. Run `pnpm run typecheck`,
 `pnpm --filter design check:manifest`, `pnpm --filter design build` and
 `pnpm --filter design test:catalog`; the manifest checks Lucide's genuine
 documentation only for this owned foundation while retaining shadcn provenance
