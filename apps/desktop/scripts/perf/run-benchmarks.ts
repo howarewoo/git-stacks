@@ -135,7 +135,7 @@ async function main() {
 
     mkdirSync(out, { recursive: true })
     const report = {
-      version: 2 as const,
+      version: 3 as const,
       node: process.version,
       platform: `${process.platform}-${process.arch}`,
       generatedAt: new Date().toISOString(),

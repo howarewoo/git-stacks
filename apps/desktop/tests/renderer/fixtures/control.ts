@@ -1,5 +1,6 @@
 import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
-import { inventoryFixture } from './inventory'
+import { inventoryFixture, snapshotInventory } from './inventory'
+import type { InspectionResult } from '@git-stacks/shared/inspection'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import {
   parseGraphPreferences,
@@ -274,6 +275,7 @@ interface WaitingCall {
  */
 export function installFixtureControl(options: {
   scenario: string
+  inventoryConsumer?: () => boolean
   onScenarioChange: (name: string) => void
   reviewCache: FixtureControl['reviewCache']
 }): FixtureControl {
@@ -308,7 +310,24 @@ export function installFixtureControl(options: {
   let scenario = scenarioFor(options.scenario)
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
-  let servedInventory = scenario.inventory ?? inventoryFixture()
+  let inventoryConsumer = options.inventoryConsumer?.() ?? false
+  let retainedConsumerInventory: WorktreeInventory | null = null
+  let servedInventory =
+    scenario.inventory ??
+    (inventoryConsumer
+      ? inventoryFixture()
+      : snapshotInventory(
+          Object.values(
+            scenario.snapshotsByPath ??
+              (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+          ),
+        ))
+  let snapshotSources = new Map(
+    Object.entries(
+      scenario.snapshotsByPath ??
+        (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+    ),
+  )
   const inventoryListeners = new Set<(value: WorktreeInventory) => void>()
   let active: RepositorySnapshot | null = scenario.snapshot
   const cliStatuses = new Map<string, GitHubCliStatus>()
@@ -695,6 +714,60 @@ export function installFixtureControl(options: {
     return { ...before, ...after, reference, state, message }
   }
   const desktop: DesktopAPI = {
+    inspect: async (context, operation, args) => {
+      record('inspect', [context, operation, args])
+      const repo = servedInventory.repositories.find(
+        (item) => item.identity.id === context.repositoryId,
+      )
+      if (!repo) throw new Error('Selected fixture repository was removed')
+      const tree = context.worktreeId
+        ? repo.worktrees.find((item) => item.id === context.worktreeId)
+        : undefined
+      if (context.worktreeId && (!tree || tree.missing))
+        throw new Error('Selected fixture directory was removed')
+      const source = snapshotSources.get(repo.registeredPaths[0]) ?? scenario.snapshot
+      if (!source) throw new Error('Selected fixture snapshot is unavailable')
+      const captured = {
+        ...structuredClone(source),
+        path: tree?.path ?? repo.registeredPaths[0],
+        headOid: tree?.headOid ?? source.headOid,
+        pullRequests: repo.pullRequests.map((pr) => pr.facts),
+      }
+      if (operation === 'refresh') {
+        record('refresh', [])
+        return admittedAnswer('refresh', () => captured) as Promise<
+          InspectionResult<typeof operation>
+        >
+      }
+      if (operation === 'worktreeStatus') {
+        record('worktreeStatus', [])
+        return admittedAnswer('worktreeStatus', () => ({
+          path: captured.path,
+          currentBranch: captured.currentBranch,
+          headOid: captured.headOid,
+          files: captured.files,
+          filesTruncated: captured.limits.filesTruncated,
+          observedAt: new Date().toISOString(),
+        })) as Promise<InspectionResult<typeof operation>>
+      }
+      if (operation === 'repositoryOperationScope')
+        return {
+          repositoryPath: captured.path,
+          remoteUrl: captured.remoteUrl,
+          authority: cliAuthority('github.com', statusForHost('github.com')),
+        } as InspectionResult<typeof operation>
+      const previous = active
+      active = captured
+      try {
+        const method = desktop[operation] as (
+          ...args: unknown[]
+        ) => Promise<InspectionResult<typeof operation>>
+        if (!method) throw new Error('Selected fixture operation is unavailable')
+        return method(...args)
+      } finally {
+        active = previous
+      }
+    },
     graphPreferences: () => {
       record('graphPreferences', [])
       return admittedAnswer('graphPreferences', () => graphPreferenceResult(graphPreferenceScope()))
@@ -725,6 +798,16 @@ export function installFixtureControl(options: {
     },
     worktreeInventory: (request) => {
       record('worktreeInventory', [request])
+      const consumer = options.inventoryConsumer?.() ?? false
+      if (!scenario.inventory && consumer !== inventoryConsumer) {
+        const generation = servedInventory.generation + 1
+        if (inventoryConsumer) retainedConsumerInventory = servedInventory
+        servedInventory = consumer
+          ? (retainedConsumerInventory ?? inventoryFixture())
+          : snapshotInventory([...snapshotSources.values()].map(answeredForServedCredential))
+        servedInventory = { ...servedInventory, generation }
+        inventoryConsumer = consumer
+      }
       const admitted = structuredClone(servedInventory)
       return answer('worktreeInventory', () => admitted)
     },
@@ -775,7 +858,10 @@ export function installFixtureControl(options: {
     },
     openRepository: (path) => {
       record('openRepository', path === undefined ? [] : [path])
-      const requested = path === undefined ? undefined : scenario.snapshotsByPath?.[path]
+      const requested =
+        path === undefined
+          ? active
+          : (snapshotSources.get(path) ?? scenario.snapshotsByPath?.[path])
       const opened = requested ?? scenario.snapshot
       if (!opened) throw new Error('No repository is open in this fixture.')
       // What this read answers is settled when it is admitted, under the
@@ -1206,8 +1292,8 @@ export function installFixtureControl(options: {
     },
     pullRequest: (number) => {
       record('pullRequest', [number])
+      const found = active?.pullRequests.find((pr) => pr.number === number)
       return answer('pullRequest', () => {
-        const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         return {
           ...found,
@@ -2201,7 +2287,24 @@ export function installFixtureControl(options: {
     setScenario(name) {
       scenario = scenarioFor(name)
       servedPrIndex = scenario.prIndex
-      servedInventory = scenario.inventory ?? inventoryFixture()
+      inventoryConsumer = options.inventoryConsumer?.() ?? false
+      retainedConsumerInventory = null
+      servedInventory =
+        scenario.inventory ??
+        (inventoryConsumer
+          ? inventoryFixture()
+          : snapshotInventory(
+              Object.values(
+                scenario.snapshotsByPath ??
+                  (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+              ),
+            ))
+      snapshotSources = new Map(
+        Object.entries(
+          scenario.snapshotsByPath ??
+            (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+        ),
+      )
       seedGraphPreferences()
       // This double is installed once and outlives any number of scenario
       // changes. Only the answers change here: the mounted window keeps the
@@ -2249,7 +2352,15 @@ export function installFixtureControl(options: {
       // session becomes the new one, so a read asked for afterwards answers as
       // the replacement rather than as the session it replaced, and the window
       // is told about it without having asked.
+      const previous = statusForHost(status.host)
       cliStatuses.set(status.host, status)
+      if (!scenario.inventory && !inventoryConsumer && previous?.identity !== status.identity) {
+        servedInventory = {
+          ...snapshotInventory([...snapshotSources.values()].map(answeredForServedCredential)),
+          generation: servedInventory.generation + 1,
+        }
+        for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+      }
       for (const listener of cliStatusListeners) listener(status)
     },
     hold(call) {
@@ -2331,6 +2442,15 @@ export function installFixtureControl(options: {
           .toLowerCase() ?? null
       const owner = statusForHost(host)
       if (owner) publishedSnapshotOwners.set(value, owner)
+      if (!scenario.inventory) {
+        if (snapshotSources.size === 1 && active?.path !== value.path) snapshotSources.clear()
+        snapshotSources.set(value.path, value)
+        servedInventory = {
+          ...snapshotInventory([...snapshotSources.values()]),
+          generation: servedInventory.generation + 1,
+        }
+        for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+      }
       active = value
       push('repository:background-snapshot', value)
     },

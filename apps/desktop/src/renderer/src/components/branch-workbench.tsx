@@ -45,6 +45,10 @@ import {
   MessageSquare,
 } from 'lucide-react'
 import {
+  initialWorkbenchView,
+  laneDescendantCounts,
+  relatedLaneIds,
+  type WorkbenchViewState,
   projectBranchLanes,
   type BranchWorkbenchSnapshot,
   type LaneEntry,
@@ -54,6 +58,7 @@ import {
   type WorkbenchFact,
 } from './branch-workbench-model'
 import './branch-workbench.css'
+import { LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 
 export interface BranchWorkbenchProps {
   snapshot: BranchWorkbenchSnapshot
@@ -65,7 +70,15 @@ export interface BranchWorkbenchProps {
   onSelectionChange: (id: string) => void
   onAction: (action: WorkbenchAction, context: WorkbenchActionContext) => void
   /** Real detail/review consumers can supply read-only tab contents without a second route. */
-  detailPanels?: Partial<Record<'changes' | 'checks' | 'discussion', React.ReactNode>>
+  detailPanels?: Partial<Record<'overview' | 'changes' | 'checks' | 'discussion', React.ReactNode>>
+  viewState?: WorkbenchViewState
+  onViewStateChange?: (state: WorkbenchViewState) => void
+  onWorktreeChange?: (id: string | null) => void
+  resolveCopyPath?: (context: WorkbenchActionContext) => Promise<string>
+  surface?: 'branches' | 'pull-requests' | 'attention' | 'activity' | 'review'
+  mainPanel?: React.ReactNode
+  topUtilities?: React.ReactNode
+  sidebarUtilities?: React.ReactNode
 }
 
 const filters = ['All branches', 'Needs you', 'Unpublished', 'Ready to merge'] as const
@@ -140,9 +153,11 @@ function Fact({ fact }: { fact: WorkbenchFact }) {
 
 function RelationshipLines({
   entries,
+  related,
   selectedId,
 }: {
   entries: LaneEntry[]
+  related: ReadonlySet<string>
   selectedId: string | null
 }) {
   const svg = useRef<SVGSVGElement>(null)
@@ -172,22 +187,6 @@ function RelationshipLines({
     measure()
     return () => observer.disconnect()
   }, [entries])
-  const related = new Set<string>()
-  let current = entries.find((entry) => entry.branch.id === selectedId)
-  while (current && !related.has(current.branch.id)) {
-    related.add(current.branch.id)
-    current = entries.find((entry) => entry.branch.id === current?.parentId)
-  }
-  for (const entry of entries) {
-    let parent = entries.find((candidate) => candidate.branch.id === entry.parentId)
-    while (parent) {
-      if (parent.branch.id === selectedId) {
-        related.add(entry.branch.id)
-        break
-      }
-      parent = entries.find((candidate) => candidate.branch.id === parent?.parentId)
-    }
-  }
   return (
     <svg ref={svg} className="bw-lines" aria-hidden="true">
       {entries.map((entry) => {
@@ -236,34 +235,67 @@ export function BranchWorkbench({
   onSelectionChange,
   onAction,
   detailPanels,
+  viewState: suppliedViewState,
+  onViewStateChange,
+  onWorktreeChange,
+  resolveCopyPath,
+  surface = 'branches',
+  mainPanel,
+  topUtilities,
+  sidebarUtilities,
 }: BranchWorkbenchProps) {
+  const viewState = suppliedViewState ?? initialWorkbenchView
+  const controlledInspector = suppliedViewState !== undefined && onViewStateChange !== undefined
   const repository = snapshot.repositories.find((repo) => repo.id === repositoryId)
   const branches = useMemo(
     () => snapshot.branches.filter((branch) => branch.repositoryId === repositoryId),
     [snapshot.branches, repositoryId],
   )
-  const topology = useMemo(() => projectBranchLanes(branches), [branches])
-  const descendants = useMemo(() => {
-    const counts: Record<string, number> = {}
-    const byId = new Map(topology.map((entry) => [entry.branch.id, entry]))
-    for (const entry of topology) {
-      let parent = entry.parentId ? byId.get(entry.parentId) : undefined
-      while (parent) {
-        counts[parent.branch.id] = (counts[parent.branch.id] ?? 0) + 1
-        parent = parent.parentId ? byId.get(parent.parentId) : undefined
-      }
-    }
-    return counts
+  const layout = useMemo(() => {
+    const start = performance.now()
+    const entries = projectBranchLanes(branches)
+    return { entries, elapsed: performance.now() - start }
+  }, [branches])
+  const topology = layout.entries
+  const related = useMemo(
+    () => relatedLaneIds(topology, selectedBranchId),
+    [topology, selectedBranchId],
+  )
+  const descendants = useMemo(() => laneDescendantCounts(topology), [topology])
+  const byId = useMemo(() => new Map(topology.map((entry) => [entry.branch.id, entry])), [topology])
+  const childCounts = useMemo(() => {
+    const result = new Map<string, number>()
+    for (const entry of topology)
+      if (entry.parentId) result.set(entry.parentId, (result.get(entry.parentId) ?? 0) + 1)
+    return result
   }, [topology])
-  const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<string>(filters[0])
-  const [scope, setScope] = useState('all')
-  const [folded, setFolded] = useState<Set<string>>(new Set())
+  const [query, setQuery] = useState(viewState.query)
+  const [filter, setFilter] = useState<string>(viewState.filter)
+  const [scope, setScope] = useState(viewState.scope)
+  const [refScope, setRefScope] = useState(viewState.refScope)
+  const [page, setPage] = useState(viewState.page)
+  const [displayDensity, setDisplayDensity] = useState(viewState.density ?? density)
+  const [folded, setFolded] = useState<Set<string>>(new Set(viewState.folded))
   const [checked, setChecked] = useState<Set<string>>(new Set())
   const [focusedBranchId, setFocusedBranchId] = useState<string | null>(selectedBranchId)
-  const [tab, setTab] = useState('overview')
+  const pendingRowFocus = useRef<string | null>(null)
+  const [localTab, setLocalTab] = useState(viewState.tab)
+  const tab = controlledInspector ? viewState.tab : localTab
+  const [relationshipPage, setRelationshipPage] = useState(0)
+  const [worktreePage, setWorktreePage] = useState(0)
+  const [repositoryPage, setRepositoryPage] = useState(() =>
+    Math.max(
+      0,
+      Math.floor(
+        snapshot.repositories.findIndex((repo) => repo.id === repositoryId) / LIST_PAGE_SIZE,
+      ),
+    ),
+  )
+  const repositoryPages = Math.max(1, Math.ceil(snapshot.repositories.length / LIST_PAGE_SIZE))
+  const currentRepositoryPage = Math.min(repositoryPage, repositoryPages - 1)
   const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1040)
-  const [worktreeId, setWorktreeId] = useState<string | null>(null)
+  const [localWorktreeId, setLocalWorktreeId] = useState<string | null>(viewState.worktreeId)
+  const worktreeId = controlledInspector ? viewState.worktreeId : localWorktreeId
   const [copyResult, setCopyResult] = useState('')
   const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 1039px)').matches)
   useEffect(() => {
@@ -273,6 +305,65 @@ export function BranchWorkbench({
     return () => media.removeEventListener('change', update)
   }, [])
   const scroll = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = viewState.scroll
+  }, [surface, repositoryId])
+  const filtering = Boolean(query) || filter !== filters[0] || scope !== 'all' || refScope !== 'all'
+  const unfiltered = useRef({
+    scroll: viewState.unfilteredScroll ?? viewState.scroll,
+    page: viewState.unfilteredPage ?? page,
+  })
+  const restoringFilter = useRef(false)
+  const persistView = (
+    scrollTop = scroll.current?.scrollTop ?? viewState.scroll,
+    overrides: Partial<WorkbenchViewState> = {},
+  ) => {
+    if (!filtering && !restoringFilter.current) unfiltered.current = { scroll: scrollTop, page }
+    onViewStateChange?.({
+      query,
+      filter,
+      scope,
+      refScope,
+      folded: [...folded],
+      tab,
+      worktreeId,
+      scroll: scrollTop,
+      page,
+      unfilteredScroll: unfiltered.current.scroll,
+      unfilteredPage: unfiltered.current.page,
+      density: displayDensity,
+      ...overrides,
+    })
+  }
+  const setTab = (value: WorkbenchViewState['tab']) => {
+    if (controlledInspector) persistView(undefined, { tab: value })
+    else setLocalTab(value)
+  }
+  const setWorktreeId = (value: string | null) => {
+    if (controlledInspector) persistView(undefined, { worktreeId: value })
+    else setLocalWorktreeId(value)
+  }
+  useEffect(() => {
+    persistView()
+  }, [query, filter, scope, refScope, folded, tab, worktreeId, page, displayDensity])
+  const filterIdentity = `${query}\0${filter}\0${scope}\0${refScope}`
+  const previousFilter = useRef({ identity: filterIdentity, active: filtering })
+  useLayoutEffect(() => {
+    if (previousFilter.current.identity !== filterIdentity) {
+      setChecked(new Set())
+      if (previousFilter.current.active && !filtering) {
+        restoringFilter.current = true
+        setPage(unfiltered.current.page)
+      } else if (filtering) setPage(0)
+    }
+    previousFilter.current = { identity: filterIdentity, active: filtering }
+  }, [filterIdentity])
+  useLayoutEffect(() => {
+    if (restoringFilter.current && page === unfiltered.current.page && scroll.current) {
+      scroll.current.scrollTop = unfiltered.current.scroll
+      restoringFilter.current = false
+    }
+  }, [page, filterIdentity])
   const foldAnchor = useRef<{ id: string; top: number } | null>(null)
   useLayoutEffect(() => {
     const anchor = foldAnchor.current
@@ -281,74 +372,126 @@ export function BranchWorkbench({
     const row = document.getElementById(`branch-${anchor.id}`)
     if (row) scroll.current.scrollTop += row.getBoundingClientRect().top - anchor.top
   }, [folded])
-  const memory = useRef<
-    Record<
-      string,
-      { query: string; filter: string; scope: string; folded: Set<string>; scroll: number }
-    >
-  >({})
-  const oldRepository = useRef(repositoryId)
-  useEffect(() => {
-    if (oldRepository.current === repositoryId) return
-    const saved = memory.current[repositoryId]
-    setQuery(saved?.query ?? '')
-    setFilter(saved?.filter ?? filters[0])
-    setScope(saved?.scope ?? 'all')
-    setFolded(saved?.folded ?? new Set())
-    setChecked(new Set())
-    setTab('overview')
-    if (scroll.current) scroll.current.scrollTop = saved?.scroll ?? 0
-    setCopyResult('')
-    setWorktreeId(null)
-    oldRepository.current = repositoryId
-  }, [repositoryId])
   const selected = branches.find((branch) => branch.id === selectedBranchId)
   const selectedLane = topology.find((entry) => entry.branch.id === selectedBranchId)
   const worktree =
-    selected?.worktrees.find((tree) => tree.id === worktreeId) ?? selected?.worktrees[0]
+    selected?.worktrees.find((tree) => tree.id === worktreeId) ??
+    (worktreeId === null && selected?.worktreesKnown === true && selected.worktrees.length === 1
+      ? selected.worktrees[0]
+      : undefined)
+  const worktreePages = Math.max(1, Math.ceil((selected?.worktrees.length ?? 0) / LIST_PAGE_SIZE))
+  const currentWorktreePage = Math.min(worktreePage, worktreePages - 1)
+  const worktreeChoices =
+    selected?.worktrees.slice(
+      currentWorktreePage * LIST_PAGE_SIZE,
+      (currentWorktreePage + 1) * LIST_PAGE_SIZE,
+    ) ?? []
+  if (worktree && !worktreeChoices.some((tree) => tree.id === worktree.id))
+    worktreeChoices.unshift(worktree)
   const context: WorkbenchActionContext = {
     repositoryId,
     branchId: selected?.id,
     worktreeId: worktree?.id,
     pullRequestId: selected?.pullRequest?.id,
   }
-  const filtering = Boolean(query) || filter !== filters[0] || scope !== 'all'
-  const matching = topology.filter(({ branch, parentId }) => {
+  const editorReason = !worktree
+    ? selected && selected.worktrees.length > 1
+      ? 'Choose a working directory first'
+      : 'No associated working directory'
+    : (capabilities['open-directory']?.reason ??
+      (!capabilities['open-directory'] ? 'Editor handoff is unavailable' : undefined))
+  const hidden = new Set<string>()
+  if (!filtering) {
+    for (let index = topology.length - 1; index >= 0; index--) {
+      const entry = topology[index]
+      if (entry.parentId && (folded.has(entry.parentId) || hidden.has(entry.parentId)))
+        hidden.add(entry.branch.id)
+    }
+  }
+  const matching = topology.filter(({ branch }) => {
+    if (hidden.has(branch.id)) return false
+    if (refScope === 'local' && branch.refKind !== 'local') return false
+    if (refScope === 'remote' && branch.refKind !== 'remote') return false
     if (scope === 'with' && !branch.worktrees.length) return false
-    if (scope === 'without' && branch.worktrees.length) return false
+    if (scope === 'without' && (branch.worktreesKnown !== true || branch.worktrees.length))
+      return false
     if (filter === 'Needs you' && !branch.attention) return false
     if (filter === 'Unpublished' && !(branch.unpushed && branch.unpushed > 0)) return false
     if (filter === 'Ready to merge' && branch.readyToMerge !== true) return false
     if (
       query &&
-      !`${branch.ref} ${branch.title} ${branch.pullRequest?.number ?? ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
+      !`${branch.ref} ${branch.title} ${branch.pullRequest ? `#${branch.pullRequest.number}` : ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
         .toLowerCase()
         .includes(query.toLowerCase())
     )
       return false
-    let parent = topology.find((entry) => entry.branch.id === parentId)
-    while (!filtering && parent) {
-      if (folded.has(parent.branch.id)) return false
-      parent = topology.find((entry) => entry.branch.id === parent?.parentId)
-    }
     return true
   })
   const matchIds = new Set(matching.map(({ branch }) => branch.id))
   const included = new Set(matchIds)
   for (const entry of matching) {
-    let parent = topology.find((candidate) => candidate.branch.id === entry.parentId)
+    let parent = entry.parentId ? byId.get(entry.parentId) : undefined
     while (parent && !included.has(parent.branch.id)) {
       included.add(parent.branch.id)
-      parent = topology.find((candidate) => candidate.branch.id === parent?.parentId)
+      parent = parent.parentId ? byId.get(parent.parentId) : undefined
     }
   }
-  const entries = topology.filter((entry) => included.has(entry.branch.id))
+  let selectedContext = selectedBranchId ? byId.get(selectedBranchId) : undefined
+  while (selectedContext && !included.has(selectedContext.branch.id)) {
+    included.add(selectedContext.branch.id)
+    selectedContext = selectedContext.parentId ? byId.get(selectedContext.parentId) : undefined
+  }
+  const allEntries = topology.filter((entry) => included.has(entry.branch.id))
+  const pageCount = Math.max(1, Math.ceil(allEntries.length / LIST_PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount - 1)
+  const entries = allEntries.slice(currentPage * LIST_PAGE_SIZE, (currentPage + 1) * LIST_PAGE_SIZE)
+  useLayoutEffect(() => {
+    if (!pendingRowFocus.current) return
+    document.getElementById(`branch-${pendingRowFocus.current}`)?.focus()
+    pendingRowFocus.current = null
+  }, [currentPage, focusedBranchId])
+  const pageIds = new Set(entries.map((entry) => entry.branch.id))
+  const omittedEdges = entries.filter(
+    (entry) => entry.parentId && !pageIds.has(entry.parentId),
+  ).length
+  const mountedChildren = new Map<string, number>()
+  for (const entry of entries)
+    if (entry.parentId)
+      mountedChildren.set(entry.parentId, (mountedChildren.get(entry.parentId) ?? 0) + 1)
+  const selectedChildren = topology.filter((entry) => entry.parentId === selectedBranchId)
+  const oldSelection = useRef(selectedBranchId)
+  useEffect(() => {
+    if (oldSelection.current === selectedBranchId) return
+    oldSelection.current = selectedBranchId
+    const index = allEntries.findIndex((entry) => entry.branch.id === selectedBranchId)
+    if (index >= 0) setPage(Math.floor(index / LIST_PAGE_SIZE))
+    setChecked(new Set())
+    setRelationshipPage(0)
+    setWorktreePage(0)
+    if (!narrow) setInspectorOpen(Boolean(selectedBranchId))
+  }, [selectedBranchId, allEntries])
   const focusId = entries.some((entry) => entry.branch.id === focusedBranchId)
     ? focusedBranchId
     : entries.some((entry) => entry.branch.id === selectedBranchId)
       ? selectedBranchId
       : entries[0]?.branch.id
-  const selectable = matching.filter(({ branch }) => !branch.trunk).map(({ branch }) => branch.id)
+  const selectable = entries
+    .filter(
+      ({ branch }) =>
+        matchIds.has(branch.id) &&
+        !branch.trunk &&
+        branch.bulkEligible === true &&
+        branch.conflicted === false &&
+        !branch.parentIssue,
+    )
+    .map(({ branch }) => branch.id)
+  const eligibility = selectable.join('\0')
+  useEffect(() => {
+    setChecked((previous) => {
+      const next = new Set([...previous].filter((id) => selectable.includes(id)))
+      return next.size === previous.size ? previous : next
+    })
+  }, [eligibility])
   let countAttention: number | null = 0
   let countReady: number | null = 0
   for (const repo of snapshot.repositories) {
@@ -360,6 +503,10 @@ export function BranchWorkbench({
       countReady === null || repo.readyToMergeCount === null
         ? null
         : countReady + repo.readyToMergeCount
+  }
+  if (snapshot.globalCounts) {
+    countAttention = snapshot.globalCounts.attention
+    countReady = snapshot.globalCounts.readyToMerge
   }
   const action = (
     kind: WorkbenchAction,
@@ -384,19 +531,15 @@ export function BranchWorkbench({
   function inspect(id: string) {
     setFocusedBranchId(id)
     onSelectionChange(id)
-    setWorktreeId(null)
+    if (!controlledInspector) {
+      setLocalWorktreeId(null)
+      setLocalTab('overview')
+    }
     setCopyResult('')
-    setTab('overview')
     setInspectorOpen(true)
   }
   function switchRepository(id: string) {
-    memory.current[repositoryId] = {
-      query,
-      filter,
-      scope,
-      folded,
-      scroll: scroll.current?.scrollTop ?? 0,
-    }
+    persistView()
     onRepositoryChange(id)
   }
   function toggleFold(id: string) {
@@ -412,22 +555,30 @@ export function BranchWorkbench({
   }
   async function copyPath() {
     if (!worktree) return
+    let path = worktree.path
     try {
-      await navigator.clipboard.writeText(worktree.path)
-      setCopyResult('Path copied.')
+      if (resolveCopyPath) path = await resolveCopyPath(context)
+    } catch (error) {
+      setCopyResult(error instanceof Error ? error.message : String(error))
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(path)
+      setCopyResult(`Path copied: ${path}`)
     } catch {
-      setCopyResult(`Clipboard unavailable. Copy the full path: ${worktree.path}`)
+      setCopyResult(`Clipboard unavailable. Copy the validated full path: ${path}`)
     }
   }
   const inspector =
-    selected && inspectorOpen ? (
+    selected && inspectorOpen && surface === 'branches' ? (
       <Tabs
         value={tab}
-        onValueChange={(value) => setTab(String(value))}
+        onValueChange={(value) => setTab(value as WorkbenchViewState['tab'])}
         style={{ display: 'contents' }}
       >
         <WorkbenchPane
           className="bw-inspector"
+          role="complementary"
           aria-label="Selected branch details"
           header={
             <>
@@ -493,14 +644,10 @@ export function BranchWorkbench({
           footer={
             <div className="bw-inspector-actions">
               {action(
-                selected.pullRequest ? 'review' : selected.trunk ? 'history' : 'publish',
+                selected.pullRequest ? 'review' : 'history',
                 <>
                   <Eye />
-                  {selected.pullRequest
-                    ? 'Review pull request'
-                    : selected.trunk
-                      ? 'Inspect branch history'
-                      : 'Publish pull request…'}
+                  {selected.pullRequest ? 'Review pull request' : 'Inspect branch history'}
                   <ArrowUpRight />
                 </>,
                 context,
@@ -518,13 +665,33 @@ export function BranchWorkbench({
                   <Copy />
                   Copy worktree path
                 </Button>
-                <BranchActions context={context} capabilities={capabilities} onAction={onAction} />
+                <span className="bw-directory-actions">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger
+                      render={
+                        <IconButton label="Selected working directory actions" variant="ghost">
+                          <MoreHorizontal />
+                        </IconButton>
+                      }
+                    />
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        disabled={Boolean(editorReason)}
+                        onClick={() => onAction('open-directory', context)}
+                      >
+                        Open working directory
+                        {editorReason ? <small className="ml-2">{editorReason}</small> : null}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </span>
               </div>
               <small>
                 {worktree
                   ? 'Review here. Develop in your editor.'
                   : 'Review without creating a worktree'}
               </small>
+              {copyResult ? <p role="status">{copyResult}</p> : null}
             </div>
           }
           bodyClassName="bw-inspector-scroll"
@@ -573,22 +740,61 @@ export function BranchWorkbench({
                       </IconButton>
                     ) : null}
                   </div>
-                  {selected.worktrees.length > 1 ? (
+                  {worktreeId && !worktree ? (
+                    <p role="status">
+                      The selected directory is no longer associated with this qualified branch.
+                      Choose another directory explicitly.
+                    </p>
+                  ) : null}
+                  {selected.worktrees.length > 0 &&
+                  (selected.worktrees.length > 1 ||
+                    selected.worktreesKnown !== true ||
+                    (worktreeId && !worktree)) ? (
                     <Select
-                      aria-label="Worktree to inspect"
                       value={worktree?.id ?? ''}
-                      onValueChange={(value) => setWorktreeId(String(value))}
-                      options={selected.worktrees.map((tree) => ({
-                        value: tree.id,
-                        label: tree.path,
-                      }))}
+                      aria-label="Worktree to inspect"
+                      onValueChange={(value) => {
+                        setWorktreeId(String(value))
+                        onWorktreeChange?.(String(value))
+                      }}
+                      options={[
+                        { value: '', label: 'Choose the local directory', disabled: true },
+                        ...worktreeChoices.map((tree) => ({
+                          value: tree.id,
+                          label: tree.path,
+                        })),
+                      ]}
                     />
+                  ) : null}
+                  {worktreePages > 1 ? (
+                    <div className="bw-between">
+                      <Button
+                        size="xs"
+                        disabled={!currentWorktreePage}
+                        onClick={() => setWorktreePage(currentWorktreePage - 1)}
+                      >
+                        Previous directories
+                      </Button>
+                      <span>
+                        Directory choices {currentWorktreePage + 1} / {worktreePages}
+                      </span>
+                      <Button
+                        size="xs"
+                        disabled={currentWorktreePage + 1 >= worktreePages}
+                        onClick={() => setWorktreePage(currentWorktreePage + 1)}
+                      >
+                        Next directories
+                      </Button>
+                    </div>
                   ) : null}
                   <div className="bw-directory">
                     <div className="bw-between">
                       <span>
                         <Folder />
-                        {worktree?.name ?? 'Not checked out'}
+                        {worktree?.name ??
+                          (selected.worktreesKnown === false
+                            ? 'Directory association unknown'
+                            : 'Not checked out')}
                       </span>
                       <Badge variant="secondary">{worktree?.status.label ?? 'No worktree'}</Badge>
                     </div>
@@ -596,7 +802,6 @@ export function BranchWorkbench({
                       {worktree?.displayPath ?? worktree?.path ?? 'Inspect without checkout'}
                     </code>
                   </div>
-                  {copyResult ? <p role="status">{copyResult}</p> : null}
                   <div className="bw-facts">
                     <div>
                       <strong>{selected.commits ?? 'Unknown'}</strong>
@@ -612,19 +817,11 @@ export function BranchWorkbench({
                     </div>
                   </div>
                 </section>
+                {detailPanels?.overview}
                 {selected.pullRequest ? (
                   <section className="bw-section">
                     <div className="bw-between">
                       <h3>Pull request status</h3>
-                      {action(
-                        'merge',
-                        <>
-                          Preview merge
-                          <ArrowUpRight />
-                        </>,
-                        context,
-                        'ghost',
-                      )}
                     </div>
                     <div className="bw-readiness">
                       <span>
@@ -655,18 +852,28 @@ export function BranchWorkbench({
                     <Button
                       size="xs"
                       variant="ghost"
-                      onClick={() =>
+                      onClick={() => {
+                        const index = allEntries.findIndex(
+                          (entry) => entry.branch.id === selected.id,
+                        )
+                        if (index >= 0) {
+                          setPage(Math.floor(index / LIST_PAGE_SIZE))
+                          setChecked(new Set())
+                        }
                         document
                           .getElementById(`branch-${selected.id}`)
                           ?.scrollIntoView({ block: 'nearest' })
-                      }
+                      }}
                     >
                       Locate in lanes
                       <ArrowUpRight />
                     </Button>
                   </div>
-                  {topology
-                    .filter((entry) => entry.parentId === selected.id)
+                  {selectedChildren
+                    .slice(
+                      relationshipPage * LIST_PAGE_SIZE,
+                      (relationshipPage + 1) * LIST_PAGE_SIZE,
+                    )
                     .map(({ branch }) => (
                       <Button
                         key={branch.id}
@@ -685,6 +892,27 @@ export function BranchWorkbench({
                         </small>
                       </Button>
                     ))}
+                  {selectedChildren.length > LIST_PAGE_SIZE ? (
+                    <div className="bw-between">
+                      <Button
+                        size="xs"
+                        disabled={!relationshipPage}
+                        onClick={() => setRelationshipPage(relationshipPage - 1)}
+                      >
+                        Previous descendants
+                      </Button>
+                      <span>{selectedChildren.length} actual immediate children</span>
+                      <Button
+                        size="xs"
+                        disabled={
+                          (relationshipPage + 1) * LIST_PAGE_SIZE >= selectedChildren.length
+                        }
+                        onClick={() => setRelationshipPage(relationshipPage + 1)}
+                      >
+                        Next descendants
+                      </Button>
+                    </div>
+                  ) : null}
                   <Button
                     variant="unstyled"
                     className="bw-relationship bw-selected"
@@ -723,7 +951,11 @@ export function BranchWorkbench({
       </Tabs>
     ) : null
   return (
-    <div className="bw-app" data-density={density}>
+    <div
+      className="bw-app"
+      data-density={displayDensity}
+      data-lane-projection-layout-ms={layout.elapsed}
+    >
       <header className="bw-topbar">
         <div className="bw-brand">
           <span>
@@ -741,6 +973,7 @@ export function BranchWorkbench({
           'ghost',
         )}
         <div className="bw-top-right">
+          {topUtilities}
           {action(
             'settings',
             <>
@@ -781,10 +1014,15 @@ export function BranchWorkbench({
             <div className="bw-nav-heading">
               Repository<span>{repository?.mark}</span>
             </div>
-            <div className="bw-nav bw-selected" aria-current="page">
+            <Button
+              variant="unstyled"
+              className={`bw-nav ${surface === 'branches' ? 'bw-selected' : ''}`}
+              aria-current={surface === 'branches' ? 'page' : undefined}
+              onClick={() => onAction('branches', { repositoryId })}
+            >
               <GitBranch />
               Branches<span>{repository?.branchCount ?? 'Unknown'}</span>
-            </div>
+            </Button>
             {action(
               'pull-requests',
               <>
@@ -796,25 +1034,54 @@ export function BranchWorkbench({
               'ghost',
             )}
             <div className="bw-nav-heading">Pinned repositories</div>
-            {snapshot.repositories.map((repo) => (
-              <Button
-                key={repo.id}
-                variant="unstyled"
-                className={`bw-repo ${repo.id === repositoryId ? 'bw-repo-active' : ''}`}
-                aria-pressed={repo.id === repositoryId}
-                aria-label={`${repo.owner}/${repo.name}`}
-                onClick={() => switchRepository(repo.id)}
-              >
-                <span className="bw-repo-mark">{repo.mark}</span>
+            {snapshot.repositories
+              .slice(
+                currentRepositoryPage * LIST_PAGE_SIZE,
+                (currentRepositoryPage + 1) * LIST_PAGE_SIZE,
+              )
+              .map((repo) => (
+                <Button
+                  key={repo.id}
+                  variant="unstyled"
+                  className={`bw-repo ${repo.id === repositoryId ? 'bw-repo-active' : ''}`}
+                  aria-pressed={repo.id === repositoryId}
+                  aria-label={`${repo.owner}/${repo.name}${repo.path ? ` · ${repo.path}` : ''}`}
+                  title={repo.path}
+                  onClick={() => switchRepository(repo.id)}
+                >
+                  <span className="bw-repo-mark">{repo.mark}</span>
+                  <span>
+                    <strong>{repo.name}</strong>
+                    <small>{repo.worktreeCount ?? 'Unknown'} worktrees</small>
+                  </span>
+                  {repo.attentionCount !== 0 ? (
+                    <span className="bw-warning bw-count">
+                      {repo.attentionCount ?? 'Unknown'} ·
+                    </span>
+                  ) : null}
+                </Button>
+              ))}
+            {repositoryPages > 1 ? (
+              <div>
+                <Button
+                  size="xs"
+                  disabled={!currentRepositoryPage}
+                  onClick={() => setRepositoryPage(currentRepositoryPage - 1)}
+                >
+                  Previous repositories
+                </Button>
                 <span>
-                  <strong>{repo.name}</strong>
-                  <small>{repo.worktreeCount ?? 'Unknown'} worktrees</small>
+                  {currentRepositoryPage + 1} / {repositoryPages}
                 </span>
-                {repo.attentionCount !== 0 ? (
-                  <span className="bw-warning bw-count">{repo.attentionCount ?? 'Unknown'} ·</span>
-                ) : null}
-              </Button>
-            ))}
+                <Button
+                  size="xs"
+                  disabled={currentRepositoryPage + 1 >= repositoryPages}
+                  onClick={() => setRepositoryPage(currentRepositoryPage + 1)}
+                >
+                  Next repositories
+                </Button>
+              </div>
+            ) : null}
           </nav>
           <div className="bw-sidebar-bottom">
             <div className="bw-shipping">
@@ -825,377 +1092,490 @@ export function BranchWorkbench({
               </div>
             </div>
             <small>Git / GitHub workbench</small>
+            {sidebarUtilities}
           </div>
         </aside>
-        <WorkbenchPane
-          className="bw-main"
-          aria-label="Branch workbench"
-          header={
-            <>
-              <div className="bw-panel-head">
-                <div className="bw-breadcrumb">
-                  <Folder />
-                  {repository?.owner} / {repository?.name}
-                </div>
-                <div className="bw-between">
-                  <h1>Branches &amp; worktrees</h1>
-                  <div className="bw-actions">
-                    {action(
-                      'discover',
-                      <>
-                        <Search />
-                        Discover worktrees
-                      </>,
-                      { repositoryId },
-                      'default',
-                    )}
+        {mainPanel}
+        {(!mainPanel || surface === 'branches') && (
+          <WorkbenchPane
+            className="bw-main"
+            role="main"
+            aria-label="Branch workbench"
+            header={
+              <>
+                <div className="bw-panel-head">
+                  <div className="bw-breadcrumb">
+                    <Folder />
+                    {repository?.owner} / {repository?.name}
                   </div>
+                  <div className="bw-between">
+                    <h1>Branches &amp; worktrees</h1>
+                    <div className="bw-actions">
+                      {action(
+                        'discover',
+                        <>
+                          <Search />
+                          Discover worktrees
+                        </>,
+                        { repositoryId },
+                        'default',
+                      )}
+                    </div>
+                  </div>
+                  <p>One row per branch. Worktree context and dependencies, together.</p>
                 </div>
-                <p>One row per branch. Worktree context and dependencies, together.</p>
-              </div>
-              <SegmentedControl
-                label="Branch status filter"
-                className="bw-filters"
-                value={filter}
-                onValueChange={(value) => {
-                  setFilter(value)
-                  setChecked(new Set())
-                }}
-                options={filters.map((label) => ({
-                  value: label,
-                  label: (
-                    <>
-                      {label}
-                      <span>
-                        {(label === 'All branches'
-                          ? repository?.branchCount
-                          : label === 'Needs you'
-                            ? repository?.attentionCount
-                            : label === 'Unpublished'
-                              ? repository?.unpublishedCount
-                              : repository?.readyToMergeCount) ?? 'Unknown'}
-                      </span>
-                    </>
-                  ),
-                }))}
-              />
-              <div className="bw-toolbar">
-                <div className="bw-search">
-                  <Search />
-                  <Input
-                    aria-label="Filter branches by branch, PR, or path"
-                    placeholder="Filter by branch, PR, or path…"
-                    value={query}
-                    onChange={(event) => {
-                      setQuery(event.target.value)
-                      setChecked(new Set())
-                    }}
-                  />
-                </div>
-                <Select
-                  aria-label="Worktree availability"
-                  controlSize="compact"
-                  value={scope}
+                <SegmentedControl
+                  label="Branch status filter"
+                  className="bw-filters"
+                  value={filter}
                   onValueChange={(value) => {
-                    setScope(String(value))
+                    setFilter(value)
                     setChecked(new Set())
                   }}
-                  options={[
-                    { value: 'all', label: 'Any worktree' },
-                    { value: 'with', label: 'Has worktree' },
-                    { value: 'without', label: 'No worktree' },
-                  ]}
+                  options={filters.map((label) => ({
+                    value: label,
+                    label: (
+                      <>
+                        {label}
+                        <span>
+                          {(label === 'All branches'
+                            ? repository?.branchCount
+                            : label === 'Needs you'
+                              ? repository?.attentionCount
+                              : label === 'Unpublished'
+                                ? repository?.unpublishedCount
+                                : repository?.readyBranchCount === undefined
+                                  ? repository?.readyToMergeCount
+                                  : repository.readyBranchCount) ?? 'Unknown'}
+                        </span>
+                      </>
+                    ),
+                  }))}
                 />
-                {action(
-                  'settings',
-                  <>
-                    <Settings2 />
-                    Display
-                  </>,
-                  { repositoryId },
-                  'ghost',
-                )}
-                {filtering ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setQuery('')
-                      setScope('all')
-                      setFilter(filters[0])
+                <div className="bw-toolbar">
+                  <div className="bw-search">
+                    <Search />
+                    <Input
+                      aria-label="Filter branches by branch, PR, or path"
+                      placeholder="Filter by branch, PR, or path…"
+                      value={query}
+                      onChange={(event) => {
+                        setQuery(event.target.value)
+                        setChecked(new Set())
+                      }}
+                    />
+                  </div>
+                  <Select
+                    aria-label="Worktree availability"
+                    controlSize="compact"
+                    value={scope}
+                    onValueChange={(value) => {
+                      setScope(String(value))
                       setChecked(new Set())
                     }}
-                  >
-                    Clear filters
-                  </Button>
+                    options={[
+                      { value: 'all', label: 'Any worktree' },
+                      { value: 'with', label: 'Has worktree' },
+                      { value: 'without', label: 'No worktree' },
+                    ]}
+                  />
+                  <Select
+                    aria-label="Display density"
+                    controlSize="compact"
+                    value={displayDensity}
+                    onValueChange={(value) =>
+                      setDisplayDensity(value as WorkbenchViewState['density'])
+                    }
+                    options={[
+                      { value: 'compact', label: 'Compact display' },
+                      { value: 'standard', label: 'Standard display' },
+                    ]}
+                  />
+                  <Select
+                    aria-label="Ref source"
+                    controlSize="compact"
+                    value={refScope}
+                    onValueChange={(value) => setRefScope(value as WorkbenchViewState['refScope'])}
+                    options={[
+                      { value: 'all', label: 'Local and remote' },
+                      { value: 'local', label: 'Local refs' },
+                      { value: 'remote', label: 'Remote refs' },
+                    ]}
+                  />
+                  {filtering ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setQuery('')
+                        setScope('all')
+                        setFilter(filters[0])
+                        setRefScope('all')
+                        setChecked(new Set())
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  ) : null}
+                  {!inspectorOpen ? (
+                    <Button size="sm" variant="ghost" onClick={() => setInspectorOpen(true)}>
+                      Inspector
+                    </Button>
+                  ) : null}
+                </div>
+                {snapshot.notice ? (
+                  <p role="status" className="bw-data-notice">
+                    {snapshot.notice}
+                  </p>
                 ) : null}
-                {!inspectorOpen ? (
-                  <Button size="sm" variant="ghost" onClick={() => setInspectorOpen(true)}>
-                    Inspector
-                  </Button>
+                {checked.size ? (
+                  <div className="bw-bulk" role="status">
+                    {checked.size} selected on this page only · filters, folds and pages clear
+                    selection
+                    <Button size="xs" variant="ghost" onClick={() => setChecked(new Set())}>
+                      Clear selection
+                    </Button>
+                  </div>
                 ) : null}
+              </>
+            }
+            footer={
+              <div className="bw-panel-bottom">
+                <span>
+                  {matching.length} matches · {allEntries.length - matching.length} context ·{' '}
+                  {allEntries.length - entries.length} unmounted
+                </span>
+                <span>Selection changes inspection, never checkout</span>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={currentPage === 0}
+                  onClick={() => {
+                    setPage(currentPage - 1)
+                    setChecked(new Set())
+                  }}
+                >
+                  Previous page
+                </Button>
+                <span>
+                  Page {currentPage + 1} / {pageCount}
+                </span>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={currentPage + 1 >= pageCount}
+                  onClick={() => {
+                    setPage(currentPage + 1)
+                    setChecked(new Set())
+                  }}
+                >
+                  Next page
+                </Button>
               </div>
-              {snapshot.notice ? (
-                <p role="status" className="bw-data-notice">
-                  {snapshot.notice}
+            }
+          >
+            <div
+              ref={scroll}
+              className="bw-main-scroll"
+              onScroll={(event) => persistView(event.currentTarget.scrollTop)}
+            >
+              {selectedBranchId && !branches.some((branch) => branch.id === selectedBranchId) ? (
+                <p role="status">
+                  The selected qualified object is unavailable in the current observed scope. Choose
+                  another object explicitly; no similarly named object is substituted.
                 </p>
               ) : null}
-              {checked.size ? (
-                <div className="bw-bulk" role="status">
-                  {checked.size} selected · no operation dispatched
-                  <Button size="xs" variant="ghost" onClick={() => setChecked(new Set())}>
-                    Clear selection
-                  </Button>
-                </div>
+              {omittedEdges ? (
+                <p role="status">
+                  {omittedEdges} parent connections continue on another page; no complete edge is
+                  drawn.
+                </p>
               ) : null}
-            </>
-          }
-          footer={
-            <div className="bw-panel-bottom">
-              <span>
-                {matching.length} branches
-                {entries.length > matching.length
-                  ? ` + ${entries.length - matching.length} context`
-                  : ''}
-              </span>
-              <span>Selection changes inspection, never checkout</span>
-            </div>
-          }
-        >
-          <div ref={scroll} className="bw-main-scroll">
-            <div className="bw-lane-guide">
-              <GitBranch />
-              <span>Branches ↑ · base ↓</span>
-              <span>Relationships, not a commit timeline</span>
-            </div>
-            <div
-              className="bw-lane-group"
-              style={
-                {
-                  '--bw-max-lane': Math.max(2, ...topology.map((entry) => entry.lane)),
-                } as CSSProperties
-              }
-            >
-              <div className="bw-grid bw-labels">
-                <Checkbox
-                  aria-label="Select visible matching branches; excludes trunk and context"
-                  checked={selectable.length > 0 && selectable.every((id) => checked.has(id))}
-                  indeterminate={
-                    selectable.some((id) => checked.has(id)) &&
-                    !selectable.every((id) => checked.has(id))
-                  }
-                  disabled={!selectable.length}
-                  onCheckedChange={(value) => setChecked(value ? new Set(selectable) : new Set())}
-                />
-                <span>Lanes</span>
-                <span>Branch / pull request</span>
-                <span className="bw-worktree-column">Working directory</span>
-                <span>PR status</span>
-                <span />
+              <div className="bw-lane-guide">
+                <GitBranch />
+                <span>Branches ↑ · base ↓</span>
+                <span>Relationships, not a commit timeline</span>
               </div>
-              <div className="bw-lane-body">
-                <RelationshipLines entries={entries} selectedId={selectedBranchId} />
-                {entries.map((entry) => {
-                  const branch = entry.branch
-                  const tree = branch.worktrees[0]
-                  const isContext = !matchIds.has(branch.id)
-                  const children = topology.filter((candidate) => candidate.parentId === branch.id)
-                  return (
-                    <div
-                      key={branch.id}
-                      id={`branch-${branch.id}`}
-                      data-branch-id={branch.id}
-                      data-lane={entry.lane}
-                      className={`bw-grid bw-lane-row ${branch.trunk ? 'bw-trunk' : ''} ${selectedBranchId === branch.id ? 'bw-selected' : ''} ${isContext ? 'bw-context' : ''}`}
-                      role="group"
-                      aria-label={`${branch.ref}. ${entry.parentId ? `Parent: ${branches.find((parent) => parent.id === entry.parentId)?.ref}.` : (entry.issue ?? 'No recorded parent.')} ${isContext ? 'Ancestor context.' : ''} ${tree?.status.label ?? 'No worktree'}. ${branch.pullRequest?.review.label ?? (branch.pullRequest === null ? 'No pull request' : 'PR association unknown')}. ${branch.pullRequest?.checks.label ?? ''}`}
-                      onKeyDown={(event) => {
-                        if (event.defaultPrevented) return
-                        const identityControl =
-                          event.target instanceof HTMLElement &&
-                          event.target.closest('.bw-branch-name, .bw-subtitle')
-                        if (event.target !== event.currentTarget && !identityControl) return
-                        const index = entries.indexOf(entry)
-                        const next =
-                          event.key === 'ArrowDown'
-                            ? Math.min(index + 1, entries.length - 1)
-                            : event.key === 'ArrowUp'
-                              ? Math.max(index - 1, 0)
-                              : event.key === 'Home'
-                                ? 0
-                                : event.key === 'End'
-                                  ? entries.length - 1
-                                  : null
-                        if (next !== null) {
-                          event.preventDefault()
-                          setFocusedBranchId(entries[next].branch.id)
-                          document.getElementById(`branch-${entries[next].branch.id}`)?.focus()
-                        } else if (
-                          event.target === event.currentTarget &&
-                          (event.key === 'Enter' || event.key === ' ')
-                        ) {
-                          event.preventDefault()
-                          inspect(branch.id)
-                        }
-                      }}
-                      onFocus={() => setFocusedBranchId(branch.id)}
-                      tabIndex={focusId === branch.id ? 0 : -1}
-                    >
-                      <Checkbox
-                        aria-label={`Select branch for bulk action: ${branch.ref}`}
-                        disabled={branch.trunk || isContext}
-                        checked={checked.has(branch.id)}
-                        onCheckedChange={(value) =>
-                          setChecked((previous) => {
-                            const next = new Set(previous)
-                            if (value) next.add(branch.id)
-                            else next.delete(branch.id)
-                            return next
-                          })
-                        }
-                      />
-                      <span className="bw-track" />
-                      <div className="bw-identity">
-                        <div className="bw-between">
-                          <Button
-                            variant="unstyled"
-                            className="bw-branch-name"
-                            aria-pressed={selectedBranchId === branch.id}
-                            title={branch.ref}
-                            onClick={() => inspect(branch.id)}
-                          >
-                            {branch.ref}
-                          </Button>
-                          {branch.trunk ? (
-                            <span className="bw-tag">Trunk</span>
-                          ) : isContext ? (
-                            <span className="bw-tag">Context</span>
-                          ) : children.length && !filtering ? (
+              <div
+                className="bw-lane-group"
+                style={
+                  {
+                    '--bw-max-lane': Math.max(2, ...topology.map((entry) => entry.lane)),
+                  } as CSSProperties
+                }
+              >
+                <div className="bw-grid bw-labels">
+                  <Checkbox
+                    aria-label="Select visible matching branches; excludes trunk and context"
+                    checked={selectable.length > 0 && selectable.every((id) => checked.has(id))}
+                    indeterminate={
+                      selectable.some((id) => checked.has(id)) &&
+                      !selectable.every((id) => checked.has(id))
+                    }
+                    disabled={!selectable.length}
+                    onCheckedChange={(value) => setChecked(value ? new Set(selectable) : new Set())}
+                  />
+                  <span>Lanes</span>
+                  <span>Branch / pull request</span>
+                  <span className="bw-worktree-column">Working directory</span>
+                  <span>PR status</span>
+                  <span />
+                </div>
+                <div className="bw-lane-body">
+                  <RelationshipLines
+                    entries={entries}
+                    related={related}
+                    selectedId={selectedBranchId}
+                  />
+                  {entries.map((entry) => {
+                    const branch = entry.branch
+                    const tree = branch.worktrees[0]
+                    const isContext = !matchIds.has(branch.id)
+                    const children = childCounts.get(branch.id) ?? 0
+                    return (
+                      <div
+                        key={branch.id}
+                        id={`branch-${branch.id}`}
+                        data-branch-id={branch.id}
+                        data-lane={entry.lane}
+                        className={`bw-grid bw-lane-row ${branch.trunk ? 'bw-trunk' : ''} ${selectedBranchId === branch.id ? 'bw-selected' : ''} ${isContext ? 'bw-context' : ''}`}
+                        role="group"
+                        aria-label={`${branch.ref}. ${entry.parentId ? `Parent: ${byId.get(entry.parentId)?.branch.ref}.` : (entry.issue ?? 'No recorded parent.')} ${isContext ? 'Context: does not match current filter.' : ''} ${tree?.status.label ?? 'No worktree'}. ${branch.pullRequest?.review.label ?? (branch.pullRequest === null ? 'No pull request' : 'PR association unknown')}. ${branch.pullRequest?.checks.label ?? ''}`}
+                        onKeyDown={(event) => {
+                          if (
+                            event.defaultPrevented ||
+                            event.altKey ||
+                            event.ctrlKey ||
+                            event.metaKey ||
+                            event.shiftKey ||
+                            event.nativeEvent.isComposing
+                          )
+                            return
+                          const identityControl =
+                            event.target instanceof HTMLElement &&
+                            event.target.closest('.bw-branch-name, .bw-subtitle')
+                          if (event.target !== event.currentTarget && !identityControl) return
+                          if (event.key === 'Home' || event.key === 'End') {
+                            event.preventDefault()
+                            const index = event.key === 'Home' ? 0 : allEntries.length - 1
+                            const id = allEntries[index].branch.id
+                            setFocusedBranchId(id)
+                            if (Math.floor(index / LIST_PAGE_SIZE) !== currentPage) {
+                              pendingRowFocus.current = id
+                              setPage(Math.floor(index / LIST_PAGE_SIZE))
+                            } else document.getElementById(`branch-${id}`)?.focus()
+                            return
+                          }
+                          const index = entries.indexOf(entry)
+                          const next =
+                            event.key === 'ArrowDown'
+                              ? Math.min(index + 1, entries.length - 1)
+                              : event.key === 'ArrowUp'
+                                ? Math.max(index - 1, 0)
+                                : null
+                          if (next !== null) {
+                            event.preventDefault()
+                            setFocusedBranchId(entries[next].branch.id)
+                            document.getElementById(`branch-${entries[next].branch.id}`)?.focus()
+                          } else if (
+                            event.target === event.currentTarget &&
+                            (event.key === 'Enter' || event.key === ' ')
+                          ) {
+                            event.preventDefault()
+                            inspect(branch.id)
+                          }
+                        }}
+                        onFocus={() => setFocusedBranchId(branch.id)}
+                        tabIndex={focusId === branch.id ? 0 : -1}
+                      >
+                        <Checkbox
+                          aria-label={`Select branch for bulk action: ${branch.ref}`}
+                          disabled={!selectable.includes(branch.id)}
+                          checked={checked.has(branch.id)}
+                          onCheckedChange={(value) =>
+                            setChecked((previous) => {
+                              const next = new Set(previous)
+                              if (value) next.add(branch.id)
+                              else next.delete(branch.id)
+                              return next
+                            })
+                          }
+                        />
+                        <span className="bw-track" />
+                        <div className="bw-identity">
+                          <div className="bw-between">
                             <Button
                               variant="unstyled"
-                              className="bw-fold"
-                              aria-expanded={!folded.has(branch.id)}
-                              aria-label={`${folded.has(branch.id) ? 'Expand' : 'Collapse'} descendants of ${branch.ref}`}
-                              onClick={() => toggleFold(branch.id)}
+                              className="bw-branch-name"
+                              aria-pressed={selectedBranchId === branch.id}
+                              title={branch.ref}
+                              onClick={() => inspect(branch.id)}
                             >
-                              <ArrowUp />
-                              {descendants[branch.id] ?? 0}
+                              {branch.ref}
+                            </Button>
+                            {branch.trunk ? (
+                              <span className="bw-tag">Trunk</span>
+                            ) : isContext ? (
+                              <span className="bw-tag">Context</span>
+                            ) : children && !filtering ? (
+                              <Button
+                                variant="unstyled"
+                                className="bw-fold"
+                                aria-expanded={!folded.has(branch.id)}
+                                aria-label={`${folded.has(branch.id) ? 'Expand' : 'Collapse'} descendants of ${branch.ref}`}
+                                onClick={() => toggleFold(branch.id)}
+                              >
+                                <ArrowUp />
+                                {descendants.get(branch.id) ?? 0}
+                              </Button>
+                            ) : null}
+                          </div>
+                          {entry.parentId && !pageIds.has(entry.parentId) ? (
+                            <Button
+                              size="xs"
+                              variant="ghost"
+                              onClick={() => inspect(entry.parentId!)}
+                            >
+                              Parent continues outside this page
                             </Button>
                           ) : null}
-                        </div>
-                        <Button
-                          variant="unstyled"
-                          className="bw-subtitle"
-                          onClick={() => inspect(branch.id)}
-                        >
-                          {branch.pullRequest ? (
-                            <span
-                              className={`bw-pr bw-${branch.pullRequest.lifecycle.tone ?? 'neutral'}`}
-                            >
-                              <GitPullRequest />#{branch.pullRequest.number}
-                              <span>·</span>
-                            </span>
-                          ) : null}
-                          {branch.needsRestack ? (
-                            <span className="bw-warning">Restack ·</span>
-                          ) : null}
-                          {branch.conflicted ? (
-                            <span className="bw-warning">Conflict ·</span>
-                          ) : null}
-                          <span>{branch.trunk ? 'Default branch' : branch.title}</span>
-                        </Button>
-                        <div className="bw-inline-directory">
-                          <Folder />
-                          {tree?.name ?? 'No worktree'} ·{' '}
-                          {tree?.status.label ?? 'Inspect without checkout'}
-                          {branch.unpushed ? (
-                            <span className="bw-info">↑ {branch.unpushed}</span>
-                          ) : null}
-                        </div>
-                        {entry.issue || branch.parentIssue ? (
-                          <small className="bw-warning">
-                            {entry.issue ?? branch.parentIssue} · no edge shown
-                          </small>
-                        ) : null}
-                      </div>
-                      <div className="bw-worktree-column bw-local">
-                        <span>
-                          <Folder />
-                          {tree?.name ?? 'No worktree'}
-                        </span>
-                        <div>
-                          <span className={tree?.status.tone === 'warning' ? 'bw-warning' : ''}>
-                            {tree?.status.label ?? 'Inspect without checkout'}
-                          </span>
-                          {tree || branch.unpushed !== 0 ? (
-                            <span className={branch.unpushed ? 'bw-info' : ''}>
-                              {branch.trunk
-                                ? ''
-                                : branch.unpushed === null
-                                  ? 'Unpushed unknown'
-                                  : branch.unpushed
-                                    ? `↑ ${branch.unpushed} unpushed`
-                                    : branch.local.label}
-                            </span>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="bw-pr-status">
-                        {branch.pullRequest ? (
-                          <>
-                            <Fact
-                              fact={
-                                branch.pullRequest.state === 'merged'
-                                  ? branch.pullRequest.lifecycle
-                                  : branch.pullRequest.review
-                              }
-                            />
-                            <Fact fact={branch.pullRequest.checks} />
-                          </>
-                        ) : (
-                          <>
-                            <span>
-                              <GitBranch />
-                              {branch.trunk
-                                ? 'Default branch'
-                                : branch.pullRequest === null
-                                  ? 'No pull request'
-                                  : 'PR association unknown'}
-                            </span>
+                          {(childCounts.get(branch.id) ?? 0) >
+                          (mountedChildren.get(branch.id) ?? 0) ? (
                             <small>
-                              {branch.trunk
-                                ? ''
-                                : branch.unpushed
-                                  ? 'Unpublished commits'
-                                  : branch.local.label}
+                              {(childCounts.get(branch.id) ?? 0) -
+                                (mountedChildren.get(branch.id) ?? 0)}{' '}
+                              child connections continue outside this page
                             </small>
-                          </>
-                        )}
+                          ) : null}
+                          <Button
+                            variant="unstyled"
+                            className="bw-subtitle"
+                            onClick={() => inspect(branch.id)}
+                          >
+                            {branch.pullRequest ? (
+                              <span
+                                className={`bw-pr bw-${branch.pullRequest.lifecycle.tone ?? 'neutral'}`}
+                              >
+                                <GitPullRequest />#{branch.pullRequest.number}
+                                <span>·</span>
+                              </span>
+                            ) : null}
+                            {branch.needsRestack ? (
+                              <span className="bw-warning">Restack ·</span>
+                            ) : null}
+                            {branch.conflicted ? (
+                              <span className="bw-warning">Conflict ·</span>
+                            ) : null}
+                            <span>{branch.trunk ? 'Default branch' : branch.title}</span>
+                          </Button>
+                          <div className="bw-inline-directory">
+                            <Folder />
+                            {branch.worktrees.length > 1
+                              ? `${branch.worktrees.length} associated directories`
+                              : (tree?.name ??
+                                (branch.worktreesKnown === false
+                                  ? 'Directories unknown'
+                                  : 'No worktree'))}{' '}
+                            ·{' '}
+                            {branch.worktrees.length > 1
+                              ? 'Choose exact directory in inspector'
+                              : (tree?.status.label ?? 'Inspect without checkout')}
+                            {branch.unpushed ? (
+                              <span className="bw-info">↑ {branch.unpushed}</span>
+                            ) : null}
+                          </div>
+                          {entry.issue || branch.parentIssue ? (
+                            <small className="bw-warning">
+                              {entry.issue ?? branch.parentIssue} · no edge shown
+                            </small>
+                          ) : null}
+                        </div>
+                        <div className="bw-worktree-column bw-local">
+                          <span>
+                            <Folder />
+                            {branch.worktrees.length > 1
+                              ? `${branch.worktrees.length} directories`
+                              : (tree?.name ??
+                                (branch.worktreesKnown === false
+                                  ? 'Directories unknown'
+                                  : 'No worktree'))}
+                          </span>
+                          <div>
+                            <span className={tree?.status.tone === 'warning' ? 'bw-warning' : ''}>
+                              {branch.worktrees.length > 1
+                                ? 'Choose exact directory'
+                                : (tree?.status.label ?? 'Inspect without checkout')}
+                            </span>
+                            {tree || branch.unpushed !== 0 ? (
+                              <span className={branch.unpushed ? 'bw-info' : ''}>
+                                {branch.trunk
+                                  ? ''
+                                  : branch.unpushed === null
+                                    ? 'Unpushed unknown'
+                                    : branch.unpushed
+                                      ? `↑ ${branch.unpushed} unpushed`
+                                      : branch.local.label}
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="bw-pr-status">
+                          {branch.pullRequest ? (
+                            <>
+                              <Fact
+                                fact={
+                                  branch.pullRequest.state === 'merged'
+                                    ? branch.pullRequest.lifecycle
+                                    : branch.pullRequest.review
+                                }
+                              />
+                              <Fact fact={branch.pullRequest.checks} />
+                            </>
+                          ) : (
+                            <>
+                              <span>
+                                <GitBranch />
+                                {branch.trunk
+                                  ? 'Default branch'
+                                  : branch.pullRequest === null
+                                    ? 'No pull request'
+                                    : 'PR association unknown'}
+                              </span>
+                              <small>
+                                {branch.trunk
+                                  ? ''
+                                  : branch.unpushed
+                                    ? 'Unpublished commits'
+                                    : branch.local.label}
+                              </small>
+                            </>
+                          )}
+                        </div>
+                        <BranchActions
+                          context={{
+                            repositoryId,
+                            branchId: branch.id,
+                            worktreeId: branch.worktrees.length === 1 ? tree?.id : undefined,
+                            pullRequestId: branch.pullRequest?.id,
+                          }}
+                          capabilities={capabilities}
+                          onAction={onAction}
+                        />
                       </div>
-                      <BranchActions
-                        context={{
-                          repositoryId,
-                          branchId: branch.id,
-                          worktreeId: branch.worktrees.length === 1 ? tree?.id : undefined,
-                          pullRequestId: branch.pullRequest?.id,
-                        }}
-                        capabilities={capabilities}
-                        onAction={onAction}
-                      />
-                    </div>
-                  )
-                })}
+                    )
+                  })}
+                </div>
               </div>
+              {!entries.length ? (
+                <div className="bw-empty">
+                  <Search />
+                  <h2>No matching branches</h2>
+                  <p>Try another branch, PR, path, or worktree filter.</p>
+                </div>
+              ) : null}
             </div>
-            {!entries.length ? (
-              <div className="bw-empty">
-                <Search />
-                <h3>No matching branches</h3>
-                <p>Try another branch, PR, path, or worktree filter.</p>
-              </div>
-            ) : null}
-          </div>
-        </WorkbenchPane>
+          </WorkbenchPane>
+        )}
         {narrow ? (
           <Sheet open={Boolean(inspector)} onOpenChange={setInspectorOpen}>
             <SheetContent

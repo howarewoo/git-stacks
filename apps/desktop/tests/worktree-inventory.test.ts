@@ -119,7 +119,6 @@ test('a failed registered root automatically recovers when its directory returns
     await rm(root, { recursive: true, force: true })
   }
 })
-
 test('NUL discovery preserves unusual paths and incomplete records never become directories', () => {
   const path = '/fixture/space Ω\nline '
   const result = parseWorktreeList(

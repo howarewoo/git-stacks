@@ -1,3 +1,4 @@
+import type { InspectionWorktreeStatus } from '@git-stacks/shared/inspection'
 import { spawn } from 'node:child_process'
 
 import * as path from 'node:path'
@@ -3975,9 +3976,10 @@ export async function getConflictView(
   repoPath: string,
   requestedPath: string,
   toolOverride?: string | null,
+  readOnly = false,
 ): Promise<ConflictFile> {
   const root = await resolveRepository(repoPath)
-  await recoverFileActionJournals(root)
+  if (!readOnly) await recoverFileActionJournals(root)
   const entry = changedEntry(await getStatus(root), requirePathInput(requestedPath, 'path'))
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
@@ -4846,6 +4848,60 @@ export function confirmedGitHubPayload(
   }
   return cached
 }
+async function classifyInspectionFiles(root: string, files: ChangedFile[]) {
+  if (!files.length) return
+  const classification = [
+    getIndexEntries(
+      root,
+      files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
+    ),
+    getHeadGitlinks(
+      root,
+      files.map((file) => file.path),
+    ),
+  ] as const
+  const [indexEntries, headGitlinks] = await Promise.all(classification).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(classification)
+      throw error
+    },
+  )
+  for (const file of files) {
+    const entry = indexEntries.get(file.path)
+    if (entry?.submodule || headGitlinks.has(file.path)) file.submodule = true
+    if (entry?.sparseExcluded) file.sparseExcluded = true
+  }
+}
+
+/** Selected-directory status never assembles a branch graph or starts journal recovery. */
+export async function getWorktreeInspectionStatus(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<InspectionWorktreeStatus> {
+  const root = await resolveRepository(repoPath, signal)
+  const reads = [
+    listStatus(root, signal),
+    getCurrentBranch(root, signal),
+    currentHeadOid(root, signal),
+  ] as const
+  const [status, currentBranch, headOid] = await Promise.all(reads).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(reads)
+      throw error
+    },
+  )
+  await classifyInspectionFiles(root, status.files)
+  signal?.throwIfAborted()
+  return {
+    path: root,
+    currentBranch,
+    headOid,
+    files: status.files,
+    filesTruncated: status.truncated,
+    observedAt: new Date().toISOString(),
+  }
+}
+
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,
@@ -4857,6 +4913,7 @@ export async function getSnapshot(
   // nothing and found its confirmed answer had been retired, so it consults no
   // confirmed payload at all and is assembled from the local work alone.
   localOnly = false,
+  readOnly = false,
 ): Promise<RepositorySnapshot> {
   // Claimed on entry, not at the GitHub read: local Git work differs per read,
   // so arrival at the request is not the order the reads began in.
@@ -4867,9 +4924,11 @@ export async function getSnapshot(
   const generation = confirmedPayloadGeneration
 
   const root = await resolveRepository(repoPath, signal)
-  await recoverStashDropForRepository(root)
-  await recoverFileActionJournals(root)
-  await recoverStaleBranchLocks(root)
+  if (!readOnly) {
+    await recoverStashDropForRepository(root)
+    await recoverFileActionJournals(root)
+    await recoverStaleBranchLocks(root)
+  }
   const capabilities = await getRepositoryCapabilities(root)
   // A bare repository has no index to compare against a worktree.
   const noWorkingTree = { files: [] as ChangedFile[], truncated: false }
@@ -4929,27 +4988,7 @@ export async function getSnapshot(
   // The index and the HEAD tree are independent reads, so they run together
   // rather than one after the other. A rejected read must not leave its sibling
   // running, so every read is awaited before the rejection escapes.
-  const classification = [
-    getIndexEntries(
-      root,
-      files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
-    ),
-    getHeadGitlinks(
-      root,
-      files.map((file) => file.path),
-    ),
-  ] as const
-  const [indexEntries, headGitlinks] = await Promise.all(classification).catch(
-    async (error: unknown) => {
-      await Promise.allSettled(classification)
-      throw error
-    },
-  )
-  for (const file of files) {
-    const entry = indexEntries.get(file.path)
-    if (entry?.submodule || headGitlinks.has(file.path)) file.submodule = true
-    if (entry?.sparseExcluded) file.sparseExcluded = true
-  }
+  await classifyInspectionFiles(root, files)
 
   const localRefs = refs.filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
   const remoteRefs = refs.filter((ref) => ref.refname.startsWith('refs/remotes/') && !ref.symref)
@@ -5267,6 +5306,7 @@ export async function getSnapshot(
     return true
   })
   for (const branch of branches) {
+    branch.parentRef = parentOf(branch)?.refname ?? null
     if (branch.parent && !parentOf(branch)) branch.needsRestack = Boolean(branch.parentTip)
   }
   const behind = takeBudget(comparable)
@@ -5396,7 +5436,7 @@ export async function getSnapshot(
     // assembled once, with the replaced account's answers never consulted. A
     // commit that succeeded is not undone by an account changing while it was
     // measured, and the retry reads it for itself exactly once.
-    return getSnapshot(repoPath, signal, branchBudget, 'reuse', true)
+    return getSnapshot(repoPath, signal, branchBudget, 'reuse', true, readOnly)
   }
   return snapshot
 }

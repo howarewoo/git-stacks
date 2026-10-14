@@ -35,7 +35,7 @@ export type StandardViewportName = keyof typeof STANDARD_VIEWPORTS
  */
 export function getViewFilterInput(page: Page): Locator {
   return page.getByRole('textbox', {
-    name: 'Filter current view branches, files, and pull requests',
+    name: 'Filter branches by branch, PR, or path',
   })
 }
 
@@ -114,17 +114,18 @@ export async function openGallery(page: Page, options: OpenGalleryOptions = {}):
   await page.goto(targetUrl)
   await expect(page.locator('#root')).toBeVisible({ timeout: 15_000 })
 
-  // The fixture gallery performs the same first click a person makes, so every
-  // scenario that has a repository starts connected. A scenario without one has
-  // no repository toolbar to wait for, and is ready as soon as it is rendered.
+  // Readiness follows the restored surface, including Review in a shared context.
+  // Empty and loading scenarios are ready as soon as their shell is rendered.
   if (
     route === 'app' &&
     !SCENARIOS_WITHOUT_A_REPOSITORY.has(scenario) &&
     scenario !== 'shell-loading'
   ) {
-    await expect(page.getByRole('toolbar', { name: 'Repository actions' })).toBeVisible({
-      timeout: 15_000,
-    })
+    await expect(
+      page.getByRole('heading', { level: 1 }).filter({
+        hasText: /^(Branches & worktrees|Pull requests|Needs attention|Activity|Review)$/,
+      }),
+    ).toBeVisible({ timeout: 15_000 })
   }
   await settle(page)
 }

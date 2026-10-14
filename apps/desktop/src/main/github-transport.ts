@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { canonicalHostName } from '@git-stacks/shared/host'
 import { commandCode, commandDetail, MAX_BUFFER } from './git-core'
 import { isRecord } from '@git-stacks/shared/guards'
+import { validateInspectionDispatch } from './inspection-context'
 import {
   conditionalCacheKey,
   conditionalHeaders,
@@ -1094,6 +1095,7 @@ export class DirectGitHubTransport implements GitHubTransport {
             : { kind: 'cancelled', detail: 'the request was cancelled' },
         )
       }
+      await validateInspectionDispatch()
       const response = await request$(url, {
         method,
         headers: access.headers,
@@ -1588,6 +1590,7 @@ export class GhGitHubTransport implements GitHubTransport {
         })
       let output: string
       try {
+        await validateInspectionDispatch()
         output = await run(args, { signal: controller.signal, timeoutMs, input })
       } catch (error) {
         if (timedOut)

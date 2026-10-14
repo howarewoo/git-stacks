@@ -142,6 +142,8 @@ export function PullRequestInboxView({
   onSaveFilters,
   onDismissError,
   searchInputRef,
+  initialFilter = PULL_REQUEST_INBOX_DEFAULT_FILTER,
+  onFilterChange,
 }: {
   report: PullRequestInboxReport | null
   loading: boolean
@@ -172,13 +174,14 @@ export function PullRequestInboxView({
    * the one that filters these rows.
    */
   searchInputRef: React.RefObject<HTMLInputElement | null>
+  initialFilter?: PullRequestInboxFilter
+  onFilterChange?: (filter: PullRequestInboxFilter) => void
 }) {
   // A whole-list write must not be started before the stored list has been
   // read: the name field, Enter, Save and Remove all share this one wait.
   const filtersSettling = savingFilters || !filtersReady
-  const [filter, setFilter] = React.useState<PullRequestInboxFilter>(
-    PULL_REQUEST_INBOX_DEFAULT_FILTER,
-  )
+  const [filter, setFilter] = React.useState<PullRequestInboxFilter>(initialFilter)
+  React.useEffect(() => onFilterChange?.(filter), [filter, onFilterChange])
   const saveFilterForm = useForm({
     defaultValues: { name: '' },
     validators: {

@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { MAX_COMMAND_BYTES, MAX_STATUS_BYTES } from '@git-stacks/shared/performance'
 import type { ChangedFile, GitOperation, Stash } from '@git-stacks/shared/types'
 import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
+import { assertInspectionOrigin } from './inspection-context'
 
 export const execFile = promisify(execFileCallback)
 export const MAX_BUFFER = MAX_COMMAND_BYTES
@@ -646,9 +647,11 @@ export async function getOriginUrl(repoPath: string, signal?: AbortSignal): Prom
     const value = stripTrailingNewline(
       await runGit(repoPath, ['remote', 'get-url', 'origin'], undefined, signal),
     )
+    assertInspectionOrigin(value || null, true)
     return value || null
   } catch (error) {
     if (isExitCode(error, 2) || isExitCode(error, 128)) {
+      assertInspectionOrigin(null, true)
       return null
     }
     throw error
@@ -733,9 +736,11 @@ export async function getConfigValue(
     const value = stripTrailingNewline(
       await runGit(repoPath, ['config', '--get', key], undefined, signal),
     )
+    if (key === 'remote.origin.url') assertInspectionOrigin(value || null)
     return value || null
   } catch (error) {
     if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
+      if (key === 'remote.origin.url') assertInspectionOrigin(null)
       return null
     }
     throw error

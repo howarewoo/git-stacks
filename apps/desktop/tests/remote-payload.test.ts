@@ -128,7 +128,6 @@ test('tracked detail failure degrades snapshots and retains only qualified backg
     await rm(root, { recursive: true, force: true })
   }
 })
-
 test('independent clones share qualified provider reads without sharing local status', {
   timeout: 30_000,
 }, async () => {

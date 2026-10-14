@@ -1,3 +1,4 @@
+import type { RepositorySnapshot } from '@git-stacks/shared/types'
 import type { WorktreeInventory, InventoryRead } from '@git-stacks/shared/worktree-inventory'
 import { openPullRequest } from '../../fixtures/workflow-scenarios'
 
@@ -151,5 +152,88 @@ export function inventoryFixture(
                 })),
           },
         ],
+  }
+}
+
+/** Scenario-to-inventory transport fixture: each local clone retains its own identity. */
+export function snapshotInventory(snapshots: readonly RepositorySnapshot[]): WorktreeInventory {
+  return {
+    generation: 1,
+    state: 'complete',
+    failures: [],
+    repositories: snapshots.map((snapshot) => {
+      const id = JSON.stringify(['fixture-local', snapshot.path])
+      const worktreeId = JSON.stringify([id, 'worktree', snapshot.path])
+      const remoteId = JSON.stringify(['fixture-remote', snapshot.remoteUrl])
+      const fullName =
+        snapshot.remoteUrl?.replace(/.*github\.com[:/]/, '').replace(/\.git$/, '') ??
+        'fixture/local'
+      const refId = (ref: string) => JSON.stringify([id, 'ref', ref])
+      const prId = (number: number) => JSON.stringify([remoteId, 'pr', String(number)])
+      return {
+        identity: { id, commonDirectory: `${snapshot.path}/.git` },
+        registeredPaths: [snapshot.path],
+        remote: snapshot.remoteUrl ? { id: remoteId, host: 'github.com', fullName } : null,
+        discovery: complete,
+        refsRead: complete,
+        remoteFreshness: snapshot.remote ?? null,
+        refs: snapshot.branches.map((branch) => ({
+          id: refId(branch.ref),
+          repositoryId: id,
+          name: branch.ref,
+          kind: branch.remote ? ('remote' as const) : ('local' as const),
+          oid: branch.oid ?? 'a'.repeat(40),
+          upstream: branch.upstreamRef ? refId(branch.upstreamRef) : null,
+          ahead: branch.ahead,
+          behind: branch.behind,
+          worktreeIds: branch.name === snapshot.currentBranch ? [worktreeId] : [],
+          pullRequestIds: branch.pr ? [prId(branch.pr.number)] : [],
+        })),
+        worktrees: [
+          {
+            id: worktreeId,
+            repositoryId: id,
+            path: snapshot.path,
+            gitDirectory: `${snapshot.path}/.git`,
+            kind: 'primary' as const,
+            headOid: snapshot.headOid,
+            refId: snapshot.currentBranch ? refId(`refs/heads/${snapshot.currentBranch}`) : null,
+            detached: !snapshot.currentBranch,
+            missing: false,
+            prunable: null,
+            locked: null,
+            status: snapshot.files.some((file) => file.conflicted)
+              ? ('conflicted' as const)
+              : snapshot.files.length
+                ? ('dirty' as const)
+                : ('clean' as const),
+            counts: {
+              staged: snapshot.files.filter((file) => file.index !== ' ' && file.index !== '?')
+                .length,
+              unstaged: snapshot.files.filter(
+                (file) => file.worktree !== ' ' && file.worktree !== '?',
+              ).length,
+              untracked: snapshot.files.filter((file) => file.index === '?').length,
+              renamed: snapshot.files.filter((file) => file.originalPath).length,
+              conflicted: snapshot.files.filter((file) => file.conflicted).length,
+            },
+            operation: snapshot.operation,
+            indexSignature: JSON.stringify(snapshot.files),
+            read: complete,
+          },
+        ],
+        pullRequests: snapshot.pullRequests.map((pr) => ({
+          id: prId(pr.number),
+          remoteId,
+          number: pr.number,
+          headRef: pr.head,
+          headOid: pr.headOid ?? null,
+          refIds: snapshot.branches
+            .filter((branch) => branch.pr?.number === pr.number)
+            .map((branch) => refId(branch.ref)),
+          facts: pr,
+        })),
+      }
+    }),
   }
 }

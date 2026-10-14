@@ -11,11 +11,7 @@ test('hydrated settings survive section changes and untouched tool blur does not
       git: { editor: 'zed', mergeTool: 'meld' },
     })
   })
-  await page.keyboard.press('Meta+k')
-  const palette = page.getByRole('dialog', { name: 'Command palette' })
-  if (!(await palette.isVisible())) await page.keyboard.press('Control+k')
-  await expect(palette).toBeVisible()
-  await palette.getByRole('option', { name: /^Settings/ }).click()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
 
   const dialog = page.getByRole('dialog', { name: 'Settings', exact: true })
   await expect(dialog).toBeVisible()

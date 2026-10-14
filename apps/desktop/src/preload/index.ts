@@ -51,6 +51,8 @@ const desktop: DesktopAPI = {
   openRepository: (path) => ipcRenderer.invoke('repositories:open', path),
   addRepository: (path) => ipcRenderer.invoke('repositories:add', path),
   worktreeInventory: (request) => ipcRenderer.invoke('repositories:inventory', request),
+  inspect: (context, operation, args, requestId) =>
+    ipcRenderer.invoke('inspection:request', context, operation, args, requestId),
   onWorktreeInventory: (listener) => subscribe('repositories:inventory-updated', listener),
   cancelInventory: (requestId) => ipcRenderer.invoke('repositories:inventory-cancel', requestId),
   adoptWorktrees: (ids, requestId) =>

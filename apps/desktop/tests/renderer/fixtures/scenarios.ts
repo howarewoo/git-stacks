@@ -89,6 +89,7 @@ function local(seed: BranchSeed): Branch {
     subject: `Update ${seed.name}`,
     updatedAt: UPDATED,
     parent: null,
+    parentRef: seed.parent ? `refs/heads/${seed.parent}` : null,
     parentBehind: 0,
     pr: null,
     oid: oid(`local:${seed.name}`),
@@ -570,13 +571,15 @@ const shiftedStashes: Stash[] = [
 ]
 
 /** The one open, mergeable pull request, reused by the merge read-back scenario. */
+const lifecycleOpenPr = { ...pullRequestFixtures[0], head: 'feature/lifecycle-open' }
+
 const lifecycleOpenBranch = local({
   name: 'feature/lifecycle-open',
   current: true,
   parent: 'main',
   parentTip: oid('local:main'),
   ahead: 1,
-  pr: pullRequestFixtures[0],
+  pr: lifecycleOpenPr,
   subject: 'Open pull request branch',
 })
 
@@ -1900,7 +1903,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       branches: lifecycleBranches,
       currentBranch: 'feature/lifecycle-open',
       pullRequests: [
-        pullRequestFixtures[0],
+        lifecycleOpenPr,
         pullRequestFixtures[1],
         pullRequestFixtures[2],
         pullRequestFixtures[3],
@@ -2012,7 +2015,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: repository({
       branches: [mainBranch, lifecycleOpenBranch],
       currentBranch: 'feature/lifecycle-open',
-      pullRequests: [pullRequestFixtures[0]],
+      pullRequests: [lifecycleOpenPr],
     }),
     recentRepositories,
     mergeStatus: failedMergeStatus,

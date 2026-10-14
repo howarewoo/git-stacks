@@ -1764,14 +1764,14 @@ benchmark version; older measurements with different definitions are not
 carried into the current trend.
 
 The `startup` measurement runs the built Electron app against the 3,000-ref
-fixture. It starts before process launch and ends after the automation activates
-the pre-seeded recent repository with Enter and its first 200 branch rows complete
-two animation frames. Keyboard activation avoids stale coordinates when the
-asynchronous Git environment report shifts the onboarding layout. The
-`interaction` measurement starts at an actual input event
-in the “Filter current view branches, files, and pull requests” field, not the
-command palette, and ends after the filtered branch result completes two
-animation frames. The separate `diff-render-ssr` measurement is server-side
+fixture. It starts before process launch and ends after the Workbench inventory
+reports all 3,001 local branches and its first 200 lane rows complete two animation
+frames. The seeded repository opens directly; no onboarding activation is needed.
+The `interaction` measurement starts at an actual input event in the
+“Filter branches by branch, PR, or path” field and ends after the single matching
+branch result completes two animation frames. Benchmark version 3 uses this
+Workbench measurement contract, rather than the retired onboarding/list shell.
+The separate `diff-render-ssr` measurement is server-side
 rendering cost for a 1,000-line diff preview; it is not an input-to-paint budget.
 CI installs `xvfb` and `xauth` on GitHub's standard `ubuntu-24.04-arm` hosted
 runner, builds the app, materializes the pinned Electron distribution with
@@ -2025,6 +2025,25 @@ retries, drop assertions or disable the sandbox to conceal stalls.
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
 
+The application fixtures exercise the current workbench shell: Branches & worktrees,
+Pull requests, Needs attention, and Activity. Full Review starts from a qualified PR;
+committed history and Notifications open in dialogs. Renderer helpers wait for the
+restored surface's heading, not the retired repository toolbar. Legacy graph-camera
+and removed mutation-control assertions are not contracts for this shell.
+
+Review return preserves the originating filter, selection, scroll and keyboard focus.
+Readonly navigation keeps the qualified Review mounted, preserving its pane and
+verified draft baseline; a retired provider owner cannot retain private metadata.
+Branch filters accept displayed PR numbers with or without the `#` prefix.
+Explicitly captured operations keep their scoped publication and merge journal
+subscriptions alive when recovery is closed or another inspection surface is active.
+Saved-filter full-list writes wait while their store read is pending, even when
+a previous list is cached.
+Held CLI reads cannot replace newer provider status. Notifications keep their
+independent credential ownership, fence late host-scoped answers, and complete
+enable → credential save → inbox read before dismissing authorization. Captured
+operation progress is checked against its provider authority, not an inspection key.
+
 ### v5 workbench foundation and matched visual evidence
 
 The current visual/product contract is [#243](https://github.com/howarewoo/git-stacks/issues/243)
@@ -2113,149 +2132,98 @@ These fixture captures prove renderer composition, not native Git success,
 OS window behavior, VoiceOver, actual browser zoom, signed updates, or final
 integrated graph parity. Existing packaged smoke and manual gates remain required.
 
-### Historical graph workbench fixtures and checks
+### Production Workbench context and inspection
 
-The production Stacks destination imports `GraphWorkbench`, using the shared
-`projectPrGraph` and graph discovery model. Gallery scenarios `graph-250`,
-`graph-1000`, and `graph-5000` use seed `graph-220-v1`, fixed timestamps, and
-exactly 50 PR author identities. They include a 100-deep mixed-author path,
-an 80-wide fork attached to PR40, nested forks attached to PR120, a shared
-ancestor PR20, 24 local PR refs, a local-only branch, a remote-tracking-only
-ref, and PRs without any local checkout. These are PR authors, not app teams.
+The production `App` mounts the shared v5 `BranchWorkbench` composition. The
+sidebar owns pinned repositories, global search, cross-repository Attention and
+Activity, and repository Branches/Pull requests. Review uses the existing wide
+`ReviewView`, including original durable drafts. Settings, onboarding, optional
+Notifications and explicit operation/recovery dialogs remain secondary consumers.
+Stacks, standalone Changes/History/Stashes and the old graph destination are no
+longer production routes. Historical reference bytes and backend graph readers
+remain retained; graph scenario names now also supply large Workbench inventories.
 
-Use `/?scenario=graph-1000#/app`, open the fixture repository, and select Stacks.
-`graph-partial` and `graph-error` retain the first 100 PRs with explicit
-incomplete page state; `graph-unsupported` degrades unavailable checks/review
-facts; `graph-stale` retains unreconfirmed source facts; `graph-index-unavailable`
-leaves local discovery available without claiming remote completeness.
-Fixture controls `pushPrIndex(index)` and `changeGraphPr(number, 'head' | 'base' |
-'status')` exercise progressive pages and external changes through the typed
-production subscription. Hold/fail/answer controls also cover selected-only
-`prIndexDetail` reads. Fixture transport is absent from the shipped renderer.
-`graph-preferences` and `graph-preferences-held` exercise positive save/restore/reset
-with a nonempty saved view and delayed initial answer. Typed preference calls use
-the same hold/release/answer/fail controls; tests cover pending edits and retired
-host/repository/account answers without browser storage.
+`projectWorkbenchInventory` joins genuine main-owned qualified repository/ref/
+worktree/PR identities. Local clones remain separate even when their remotes match.
+Main resolves `Branch.parentRef`; renderer display names and tracking upstreams
+never establish parentage. Published head/base and native stack membership are
+independent facts. Unavailable, partial and stale observations remain explicitly
+unknown, not passing checks, a clean directory or a fabricated zero.
 
-Renderer navigation checks target the graph outline, not the retired local stack
-rail: arrows and Home/End traverse its virtual window. Select a PR or associated
-ref, then use **Review #N** in the inspector to open readonly Review.
-Open **Submitted native order and reconciliation** before inspecting submitted
-membership or reviewing repairs. Submitted links retain known PR titles, fall
-back to head refs when titles are unavailable, and wrap within the disclosure.
+`projectBranchLanes` is deterministic iterative postorder: children above actual
+parents, shared ancestors once, invalid/cyclic/foreign endpoints without edges.
+The authoritative model is separate from the fixed `LIST_PAGE_SIZE` mounted page.
+Continuation controls locate relationships on other pages. Filters retain required
+labelled ancestors; clearing restores intentional folds and unfiltered position.
+Bulk selection includes only eligible matching local branch IDs on the current
+page, never trunk, context rows or unmounted matches; it resets as view scope changes.
 
-The selected local-ref inspector exposes Restack, Sync, Publish, merge previews,
-and insert/move/remove layer previews through the existing reviewed workflow
-dialog. Selection does not change checkout: checkout requires an explicit action,
-while new PR creation and local working-change actions use the current checkout.
-Moving a
-layer down selects its predecessor's parent, not its unchanged current parent;
-removing a middle layer lets the backend preview enumerate replayed descendants.
-Graph filters never define mutation scope. Remote-only refs offer explicit
-tracking and remote deletion; protected local deletion remains visible with its
-disabled reason.
-Native unstack removes unmerged members; merged members may keep the container
-alive, so its confirmation does not promise complete dissolution.
+`workbench-context.ts` stores versioned view-only per-repository memory: exact
+selection, surface, inspector tab/directory, filters, folds, density, page and scroll.
+It is not a settings store, remote cache or authored-draft/operation journal.
+Account retirement cancels captured reads and retires PR targets without deleting
+original authored text. Attention/Review return restores the originating surface.
+Global search is independent of local lane filters and includes full path/ref-kind
+context, debounce, bounded pages, keyboard selection and explicit read errors.
+Branch-only selection resets the directory and tab atomically; worktree selection
+retains only the exact chosen directory. Pending Attention→Review navigation is
+generation-fenced and retired by a newer explicit destination. The single shortcut
+dispatcher observes the existing confirmed settings query, including live remaps.
 
-These graph controls consume `@git-stacks/ui` directly. Selected facts use the
-shared `Surface`; the remote-only explanation uses `InlineAlert`. Restack is
-the primary stack action, with secondary Sync, Publish and merge entries.
-Destructive entries use the danger role without bypassing their existing
-reviewed confirmation.
+`DesktopAPI.inspect(context, operation, args, requestId)` is the typed captured-read
+boundary. Main validates sender and the fixed operation table, resolves registered
+repository authority, freshly discovers and verifies worktree administrative/path
+identity, and validates qualified ref/PR associations before dispatch and again
+before publishing a completed result. The captured common/worktree identity, ref/
+HEAD and raw/resolved origin must remain unchanged; cancellation is checked at
+completion. Provider origin getters reject another origin, and provider/editor
+dispatches revalidate after preceding awaits. Remote inventory adoption occurs only
+after that completion fence. Cancellation retires only that captured boundary
+request, not a running mutation. The renderer `inspectionAPI` facade never falls
+back to the active root or exposes Git actions.
+`worktreeStatus` is available only on this captured facade: a bounded local status
+read with no remote/graph/stash/history collection or recovery replay.
+Snapshot and captured conflict inspections skip automatic journal/lock recovery.
+Captured historical comparison never fetches missing Git objects: it uses local
+objects, a validated provider endpoint comparison, or an explicit unavailable
+result. Existing explicit operational recovery and object-fetch behavior is retained.
 
-Indexed search, saved-view names and dependent-path search use shared Field/Input
-controls. Collapse uses the shared Checkbox; repository presets use exactly one
-shared SegmentedControl choice, with roving arrow-key focus and explicit activation.
-These controls retain the same bounded criteria, preference ownership, path pages,
-camera and qualified selection. Refresh and preference writes keep their action
-names while the shared Button reports busy state; only the actual pending action
-in the current preference scope shows its loading marker. Retired writes cannot
-disable a replacement account's controls. Utility actions remain secondary or ghost.
+Overview, Changes, Checks and Discussion belong to the exact selected context.
+Multiple associated directories require an explicit choice. Changes shows staged
+HEAD→index and unstaged index→directory independently, including dual edits,
+untracked/rename/conflict stages and binary/LFS/submodule/sparse/truncation facts.
+Files, histories and diff lines use shared canonical page/byte budgets. No local
+editing, staging, commit, discard, stash or hidden mutation menu lives in the
+inspector. A PR without a directory opens published committed Review, not a local
+working diff. Copy uses the exact chosen path; the selected-context footer menu
+offers only configured editor handoff, including multi-worktree selection and
+useful no-choice/missing refusal. Main revalidates before launch; missing directories
+are not substituted. Overview shows readable directory/revision/observation facts,
+not opaque authority IDs or index fingerprints; full local OID is explicitly disclosed.
 
-The persistent operation surface stays outside destination content. Publication
-steps and observed merge outcomes retain their captured targets across Graph,
-Changes, Review and History; recovery opens the existing reviewed workflow without
-retrying a mutation. Closing a preview, navigating, retrying, dismissing saved
-publication and Git Abort are separate actions. Local Abort never promises to undo
-already published branches, PR changes or native membership effects. Stack recovery
-names Sync from its journal kind and surgery from its already-journalled effects.
-An unstack-only surgery does not register replacement membership; later Submit
-Stack is required where the preview says so. Unavailable queue capability does not
-offer a queue choice.
-Progress events and initial reads carry their admitted repository, origin URL and
-public CLI authority. The producer captures action scope before dispatch; late
-events and null clears cannot be relabelled by the window's eventual repository
-or account. The shell and recovery dialog observe one scoped journal Query;
-overtaken reads are cancelled and a failed refresh keeps the last confirmed facts.
-A merge with confirmed landed targets and later refusals remains partially completed,
-not “Not applied”; failed readback preserves both confirmed merges and refusal details.
-The required action-versus-journal-read source distinguishes transport ownership
-from historical creator provenance: existing journal bytes do not record the
-original public authority, so saved recovery says it is unrecorded. Displayed
-scope grants no mutation consent; saved targets/approvals and live backend
-revalidation still govern explicit Resume, Dismiss and Abort.
+Explicit existing operational workflows use a separately captured `OperationScope`
+and snapshot. They revalidate root, origin and public provider authority before
+dispatch; browsing neither retargets nor cancels them. Original preview/confirmation,
+force-with-lease, journals and main permission checks still govern writes. Downstream
+operational work should extend these captured contracts, not the inspection facade.
 
-**Edit stack layers** uses the shared keyboard-operable `Collapsible` and
-`Button` composition for parent, insert, move and remove entries. Opening it
-remains presentation-only, and its actions keep the existing preview,
-confirmation and operation locks. The default branch retains its parent entry;
-insert, move and remove remain restricted to nondefault branches. The standalone
-catalog is not shipped in the desktop bundle.
-
-Index, selected-detail, and preference reads belong to the existing TanStack Query
-client. Keys include checkout origin and CLI authority, plus observed qualified
-index identity. A push cancels a late read and updates scoped query data; authored
-criteria, camera and selection remain local. A known identity boundary retires old
-selection and both controlled search fields. Matching PR numbers cannot bridge
-different repositories. Refresh index explicitly rereads metadata, not Git fetch;
-ordinary `prIndex()` keeps its useful cached-load semantics.
-
-Preference replies include the main-observed checkout path, host, qualified repository
-and account, never credentials or opaque authority. The renderer checks that public
-provenance against its captured namespace. Save/reset additionally send the same
-namespace as a precondition: main independently derives its scope, rejects a stale
-caller before file IO, and never uses caller context to choose a storage file.
-Initial index adoption with a known typed CLI account does not duplicate preference
-reads; credential rotation still retires the existing authority-keyed queries.
-
-After source changes, run Node24/pnpm `pnpm run typecheck`, the selected root
-tests `apps/desktop/tests/graph-workbench.test.ts`, `apps/desktop/tests/graph-preferences.test.ts`,
-`apps/desktop/tests/graph-fixtures.test.ts`, `apps/desktop/tests/pr-graph.test.ts`, and
-`apps/desktop/tests/pr-index.test.ts`, then the renderer `graph-workbench.spec.ts` suite.
-The focused commands are:
+Useful focused checks:
 
 ```sh
-pnpm --filter git-stacks exec tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/graph-workbench.test.ts tests/graph-preferences.test.ts tests/graph-fixtures.test.ts tests/pr-graph.test.ts tests/pr-index.test.ts
-GALLERY_PORT=5241 pnpm run test:ui tests/renderer/graph-workbench.spec.ts --workers=1
+pnpm run typecheck
+pnpm --filter git-stacks exec tsx --test tests/workbench-model.test.ts
+pnpm --filter git-stacks exec tsx --test --test-name-pattern="read-only conflict inspection|object-only fetch" --import ./tests/setup/owned-cli-boundary.cjs tests/conflict-resolver.test.ts tests/review-snapshots.test.ts
+pnpm --filter git-stacks gallery --host 127.0.0.1 --port 4317
 ```
 
-Inspect light/dark at 1000×700, 1440×940, and 1920×1080 and a 720×470
-zoom-equivalent viewport. The renderer suite proves production dispatch and
-bounded presentation, not native Git success, VoiceOver, OS zoom, or final
-Electron timing/heap acceptance.
-
-Graph budgets live alongside unchanged existing budgets in
-`packages/shared/src/performance.ts`: at most 64 mounted outline rows, 32 detailed graph
-nodes, a 20-endpoint path page, and four selected detail bodies retained in
-main. The final production Electron gate measures at least 20 warm samples:
-input-to-paint p95 ≤250ms and projection plus layout ≤100ms, excluding network.
-Post-GC graph-owned heap growth must be ≤32MiB from 250 to 5000 PRs and ≤8MiB
-after 30 navigation/refresh cycles. Screenshot or SSR duration is not a
-substitute. Keep final timing/heap evidence separate from fixture invariants.
-The production component exposes the current render's local projection/reduction
-and reduced-layout computation as `data-graph-projection-layout-ms`. It retains no
-sample history. Electron input-to-paint and post-GC heap must still be measured by
-the final gate; a cached render's zero compute value is not a timing pass.
-Dispose task-owned browsers, fixture servers, profiles, and disposable
-repositories after verification; never operate on personal repos or credentials.
-
-Graph view persistence uses main-owned version-1 scoped files under the app's
-`graph-preferences` user-data directory. Save/restore/reset operates on the
-main-observed host/repository/account only. Invalid, unreadable, oversized, or
-future-version data is reported as recovered and retained until explicit
-save/reset; unknown authority is unavailable rather than an invented account.
-Preferences contain only bounded name, preset, search, author, status, and
-collapse criteria. Selection and camera are not persisted.
+The gallery's default `#/app` mounts actual production source with the test-only
+desktop double. `files-staged` includes both staged and unstaged content;
+`graph-5000` supplies large published inventories. Fixture observations prove
+renderer intent and bounded presentation, never native Git/provider success.
+Native/manual/assistive-technology and final Electron timing/heap certification
+for #243 remain user-deferred until all overhaul issues are implemented. Keep that
+acceptance separate from compilation/model/browser evidence; do not bless macOS
+visual baselines from another platform or change sandbox privileges.
 
 ### Fresh checkout
 
