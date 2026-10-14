@@ -419,7 +419,7 @@ export function BranchWorkbench({
     if (filter === 'Ready to merge' && branch.readyToMerge !== true) return false
     if (
       query &&
-      !`${branch.ref} ${branch.title} ${branch.pullRequest?.number ?? ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
+      !`${branch.ref} ${branch.title} ${branch.pullRequest ? `#${branch.pullRequest.number}` : ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
         .toLowerCase()
         .includes(query.toLowerCase())
     )
@@ -462,7 +462,7 @@ export function BranchWorkbench({
     setChecked(new Set())
     setRelationshipPage(0)
     setWorktreePage(0)
-    setInspectorOpen(Boolean(selectedBranchId))
+    if (!narrow) setInspectorOpen(Boolean(selectedBranchId))
   }, [selectedBranchId, allEntries])
   const focusId = entries.some((entry) => entry.branch.id === focusedBranchId)
     ? focusedBranchId
@@ -1089,7 +1089,8 @@ export function BranchWorkbench({
             {sidebarUtilities}
           </div>
         </aside>
-        {mainPanel ?? (
+        {mainPanel}
+        {(!mainPanel || surface === 'branches') && (
           <WorkbenchPane
             className="bw-main"
             role="main"

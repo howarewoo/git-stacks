@@ -32,11 +32,16 @@ for (const destination of ['pullRequests', 'branches'] as const) {
     await openGallery(page, { scenario: 'review-stacked' })
     await switchDestination(page, destination)
     if (destination === 'pullRequests') {
-      const link = page.locator('.wb-secondary-list').getByRole('button').filter({ hasText: '#42 ·' })
+      const link = page
+        .locator('.wb-secondary-list')
+        .getByRole('button')
+        .filter({ hasText: '#42 ·' })
       await link.focus()
       await link.press('Enter')
     } else {
-      await page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' }).fill('cancellation')
+      await page
+        .getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
+        .fill('cancellation')
       await page.locator('.bw-subtitle').filter({ hasText: /#42\b/ }).first().click()
       const reviewLink = page.getByRole('button', { name: 'Review pull request', exact: true })
       await reviewLink.focus()
@@ -49,10 +54,16 @@ for (const destination of ['pullRequests', 'branches'] as const) {
     await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
     if (destination === 'pullRequests') {
       await expect(page.getByRole('heading', { name: 'Pull requests', exact: true })).toBeVisible()
-      await expect(page.locator('.wb-secondary-list').getByRole('button').filter({ hasText: '#42 ·' })).toBeFocused()
+      await expect(
+        page.locator('.wb-secondary-list').getByRole('button').filter({ hasText: '#42 ·' }),
+      ).toBeFocused()
     } else {
-      await expect(page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })).toHaveValue('cancellation')
-      await expect(page.getByRole('button', { name: 'Review pull request', exact: true })).toBeVisible()
+      await expect(
+        page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' }),
+      ).toHaveValue('cancellation')
+      await expect(
+        page.getByRole('button', { name: 'Review pull request', exact: true }),
+      ).toBeVisible()
       await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
     }
     const calls = await getDoubleCalls(page)
@@ -233,7 +244,9 @@ test('qualified Review return retains branch filters, selected identity and scro
   await filter.fill('#40')
   await page.locator('.bw-subtitle').filter({ hasText: /#40\b/ }).first().click()
   await filter.fill('Change')
-  await list.evaluate((element) => { element.scrollTop = 900 })
+  await list.evaluate((element) => {
+    element.scrollTop = 900
+  })
   await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   const beforeScroll = await list.evaluate((element) => element.scrollTop)
   await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
@@ -275,12 +288,18 @@ test('return retains selected branch context when a background title leaves the 
       pr.number === 40 ? { ...pr, title: 'Retitled while Review was open' } : pr,
     ),
   }
-  await page.evaluate((inventory) => window.fixture.pushInventory(inventory), snapshotInventory([changed]))
+  await page.evaluate(
+    (inventory) => window.fixture.pushInventory(inventory),
+    snapshotInventory([changed]),
+  )
   await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
   await expect(filter).toHaveValue('Change 40')
   await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toHaveText('graph/change-40')
   await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
-  await expect(page.locator('.bw-lane-row.bw-selected')).toHaveAttribute('aria-label', /Context: does not match current filter/)
+  await expect(page.locator('.bw-lane-row.bw-selected')).toHaveAttribute(
+    'aria-label',
+    /Context: does not match current filter/,
+  )
   await expect(page.getByRole('button', { name: 'Review pull request', exact: true })).toBeVisible()
   expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'runAction')).toEqual([])
 })
@@ -396,7 +415,7 @@ test('a late account rejection preserves only the latest qualified unsent edits 
   await releaseDoubleCalls(page, 'reviewSetDrafts')
   await expect(page.getByText('Local review edits are not saved', { exact: true })).toBeVisible()
   expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toBeNull()
-  await expect(page.locator('.review-view')).not.toContainText(
+  await expect(page.locator('.bw-main:visible')).not.toContainText(
     'Latest unsent original-account text.',
   )
   await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
@@ -567,12 +586,13 @@ for (const availability of ['failed-headline', 'no-selected-pr'] as const) {
         window.fixture.failNext('reviewHeadline', 'The live PR is unavailable.'),
       )
     } else {
+      await switchDestination(page, 'review')
       await page.evaluate((snapshot) => window.fixture.pushSnapshot(snapshot), {
         ...scenarios['review-stacked'].snapshot!,
         pullRequests: [],
       })
     }
-    await switchDestination(page, 'review')
+    if (availability === 'failed-headline') await switchDestination(page, 'review')
     if (availability === 'failed-headline') {
       await expect(page.locator('.review-view')).toContainText('The live PR is unavailable.')
     } else {
@@ -918,7 +938,9 @@ for (const entrypoint of ['inspector', 'discussion'] as const) {
       await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
     } else {
       await page.getByRole('tab', { name: 'Discussion', exact: true }).click()
-      await page.getByRole('button', { name: 'Open full review and original durable drafts', exact: true }).click()
+      await page
+        .getByRole('button', { name: 'Open full review and original durable drafts', exact: true })
+        .click()
     }
     await expect(page.locator('.review-headline')).toContainText(
       '#42 Give the review workspace its own cancellation ids',
@@ -929,7 +951,9 @@ for (const entrypoint of ['inspector', 'discussion'] as const) {
     )
     await expect(page.getByRole('dialog')).toHaveCount(0)
     await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
-    await expect(page.getByRole('heading', { name: 'Branches & worktrees', exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+    ).toBeVisible()
     await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
     expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
   })
@@ -940,10 +964,20 @@ test('changing repository retires the previous repository qualified Review selec
 }) => {
   await openGallery(page, { scenario: 'pr-inbox-queue' })
   await switchDestination(page, 'attention')
-  await page.locator('.pr-inbox-item').filter({ hasText: 'Add a GitHub-derived PR Inbox' }).getByRole('button').click()
+  await page
+    .locator('.pr-inbox-item')
+    .filter({ hasText: 'Add a GitHub-derived PR Inbox' })
+    .getByRole('button')
+    .click()
   await expect(page.locator('.review-headline')).toContainText('#81 Add a GitHub-derived PR Inbox')
-  await page.getByRole('button', { name: /design-system-specimens.*\/Users\/ada\/Code\/design-system-specimens/ }).click()
-  await expect(page.getByRole('heading', { name: 'Branches & worktrees', exact: true })).toBeVisible()
+  await page
+    .getByRole('button', {
+      name: /design-system-specimens.*\/Users\/ada\/Code\/design-system-specimens/,
+    })
+    .click()
+  await expect(
+    page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+  ).toBeVisible()
   await expect(page.locator('.review-view')).toHaveCount(0)
   expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
 })
@@ -1144,7 +1178,6 @@ test('nullable partial enrichment retains independent native lifecycle and draft
   await expect(closedDraft).toContainText('Review unknown')
   await expect(closedDraft).toContainText('partial')
 })
-
 
 test('remapped Review file and native-layer commands respect boundaries, editors, and readonly navigation', async ({
   page,

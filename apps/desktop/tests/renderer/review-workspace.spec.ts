@@ -100,10 +100,20 @@ test('viewed and unviewed records survive same-head return but not a moved head 
     pullRequests: snapshot.pullRequests.map((pr) => ({
       ...pr,
       url: `https://github.com/other/widgets/pull/${pr.number}`,
+      headRepository: 'other/widgets',
     })),
   })
   await settle(page)
   expect(await page.evaluate(() => window.desktop.reviewViewed!(42))).toBeNull()
+  // A replacement repository has a different qualified PR identity. Re-enter
+  // through its current association rather than retaining the previous owner.
+  await switchDestination(page, 'branches')
+  await page
+    .getByRole('complementary', { name: 'Workspace navigation' })
+    .getByRole('button', { name: `other/widgets · ${snapshot.path}-other`, exact: true })
+    .click()
+  await page.getByRole('button', { name: snapshot.currentBranch!, exact: true }).click()
+  await switchDestination(page, 'review')
   await expect(page.locator('.review-headline')).toContainText('#42')
   await expect(page.getByRole('button', { name: 'Mark file as viewed', exact: true })).toBeVisible()
   await expect(row).not.toHaveAttribute('aria-label', /, viewed$/)
@@ -182,7 +192,7 @@ for (const size of [
   }
 }
 
-test('a refreshed head/base retains reading and composition while comparison safety remains immediate', async ({
+test('a queued repository preparation retains reading and composition while comparison safety remains immediate', async ({
   page,
 }) => {
   await openLongReview(page, { width: 1000, height: 700 })
@@ -198,11 +208,22 @@ test('a refreshed head/base retains reading and composition while comparison saf
   await editor.fill('Keep this sentence while the displayed comparison becomes stale.')
   await page.getByRole('textbox', { name: 'Review summary' }).fill('Keep the decision summary too.')
   await page.getByRole('button', { name: 'Code', exact: true }).click()
+  await page
+    .locator('.review-actions summary')
+    .filter({ hasText: /^PR actions$/ })
+    .click()
   const region = page.locator('.review-unified')
   await region.evaluate((element) => {
     element.scrollTop = 200
   })
   const scroll = await region.evaluate((element) => element.scrollTop)
+  // Preparing a qualified operation adopts its directory asynchronously.
+  // Inspection remains usable while that captured repository open is pending.
+  await holdDoubleCall(page, 'openRepository')
+  await page.getByRole('button', { name: 'Manage pull request', exact: true }).click()
+  await expect
+    .poll(() => page.evaluate(() => window.fixture.pending.includes('openRepository')))
+    .toBe(true)
   await answerNextDoubleCall(page, 'reviewFiles', {
     ...reviewFileSet(42, 'new-head-observed-while-busy'),
     files: [
@@ -229,7 +250,9 @@ test('a refreshed head/base retains reading and composition while comparison saf
   ).toHaveCount(0)
   expect(await region.evaluate((element) => element.scrollTop)).toBe(scroll)
   await page.getByRole('button', { name: 'Conversation', exact: true }).click()
-  await expect(editor).toHaveValue('Keep this sentence while the displayed comparison becomes stale.')
+  await expect(editor).toHaveValue(
+    'Keep this sentence while the displayed comparison becomes stale.',
+  )
   await expect(page.getByRole('textbox', { name: 'Review summary' })).toHaveValue(
     'Keep the decision summary too.',
   )
@@ -237,6 +260,8 @@ test('a refreshed head/base retains reading and composition while comparison saf
     page.locator('.review-submit').getByRole('button', { name: /Submit/ }),
   ).toBeDisabled()
   expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSubmit')).toEqual([])
+  await page.evaluate(() => window.fixture.unhold('openRepository'))
+  await releaseDoubleCalls(page, 'openRepository')
 })
 
 test('a refreshed comparison never launders a saved comment onto the new head', async ({

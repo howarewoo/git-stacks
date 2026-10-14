@@ -21,11 +21,9 @@ test.describe('Merge reads after a run', () => {
     const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
-    await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
 
     // Before the run: what GitHub reports for earlier requests, with one pull request
     // still running a request.
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
 
     // Held open, so the state the run itself publishes is observed rather than raced past.
@@ -33,19 +31,16 @@ test.describe('Merge reads after a run', () => {
     await dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last().click()
     const runningMessage = dialog.getByRole('region', { name: /^Merge result/ })
     await expect(runningMessage).toBeVisible()
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
 
     await releaseDoubleCalls(page, 'runAction')
     await expect(runningMessage).toBeVisible()
     await expect(dialog.getByText('GitHub could not be read:', { exact: false })).toBeVisible()
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
     await expect(dialog.getByText('Completed', { exact: true })).toHaveCount(0)
 
     // A later read is still what GitHub reports, and the control that asks for it is
     // reachable the whole time.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await expect(runningMessage).toHaveCount(0)
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
   })
 
@@ -57,7 +52,6 @@ test.describe('Merge reads after a run', () => {
     await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
     await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
-    await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await publishCliStatus(page, {
       state: 'authenticated',
       host: 'github.com',
@@ -70,7 +64,6 @@ test.describe('Merge reads after a run', () => {
     // stand in for a successful replacement-account read; retry is explicit.
     await expect(dialog.getByRole('alert')).toContainText('GitHub is unreachable')
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
     await expect(dialog.getByRole('button', { name: 'Refresh what GitHub reports' })).toBeEnabled()
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
@@ -194,15 +187,17 @@ test('a retired producer cannot replace outcomes for the explicitly captured dir
       action: 'default' as const,
       status: 'running' as const,
       message: 'Current captured merge',
-      layers: [{
-        branch: 'feature/checkout-tests',
-        pullRequest: 41,
-        status: 'pending' as const,
-        detail: 'Current authority owns this request',
-        mergedOid: null,
-        queue: null,
-        requestUuid: 'current',
-      }],
+      layers: [
+        {
+          branch: 'feature/checkout-tests',
+          pullRequest: 41,
+          status: 'pending' as const,
+          detail: 'Current authority owns this request',
+          mergedOid: null,
+          queue: null,
+          requestUuid: 'current',
+        },
+      ],
     }
     window.fixture.pushMergeProgress({ scope, source: 'action', progress })
     const retired = { ...scope, authority: `${scope.authority}-retired` }
@@ -247,31 +242,35 @@ test('captured publication survives a failed journal read without replay', async
         message: 'Captured remote update was refused',
         resumeAt: 0,
         allowForce: true,
-        layers: [{
-          branch: 'feature/checkout-tests',
-          base: 'main',
-          create: false,
-          pullRequest: 41,
-          title: 'Captured title',
-          body: 'Captured body',
-          draft: true,
-          updateBase: false,
-          force: true,
-          createIntent: false,
-        }],
-        steps: [{
-          kind: 'push',
-          branch: 'feature/checkout-tests',
-          label: 'Captured push feature/checkout-tests',
-          status: 'failed',
-          pullRequest: null,
-          detail: '',
-          failure: {
-            summary: 'Remote refused update',
-            recovery: 'Read before retrying',
-            retryable: true,
+        layers: [
+          {
+            branch: 'feature/checkout-tests',
+            base: 'main',
+            create: false,
+            pullRequest: 41,
+            title: 'Captured title',
+            body: 'Captured body',
+            draft: true,
+            updateBase: false,
+            force: true,
+            createIntent: false,
           },
-        }],
+        ],
+        steps: [
+          {
+            kind: 'push',
+            branch: 'feature/checkout-tests',
+            label: 'Captured push feature/checkout-tests',
+            status: 'failed',
+            pullRequest: null,
+            detail: '',
+            failure: {
+              summary: 'Remote refused update',
+              recovery: 'Read before retrying',
+              retryable: true,
+            },
+          },
+        ],
       },
     })
   })

@@ -18,8 +18,9 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await page.keyboard.press('ControlOrMeta+k')
     const search = page.getByRole('dialog', { name: 'Global search' })
     await expect(search).toBeVisible()
-    await expect(search.getByRole('textbox')).toBeFocused()
+    await expect(search.getByRole('combobox', { name: 'Global search' })).toBeFocused()
     await assertModalDialogFocusTrap(page, search, 'Global search')
+    await search.getByRole('combobox', { name: 'Global search' }).focus()
     await page.keyboard.press('Escape')
     await expect(search).not.toBeVisible()
   })
@@ -36,7 +37,9 @@ test.describe('Keyboard routes and accessibility navigation', () => {
       const button = navigation.getByRole('button', { name: buttonName })
       await button.focus()
       await page.keyboard.press('Enter')
-      await expect(page.getByRole('heading', { level: 1, name: heading, exact: true })).toBeVisible()
+      await expect(
+        page.getByRole('heading', { level: 1, name: heading, exact: true }),
+      ).toBeVisible()
     }
     expect(await getDispatchedActions(page)).toEqual([])
   })
@@ -50,11 +53,17 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(unpublished).toHaveAttribute('aria-pressed', 'true')
   })
 
-  test('mounted branch groups have one roving row stop and arrow, Home, End movement', async ({ page }) => {
+  test('mounted branch groups have one roving row stop and arrow, Home, End movement', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'shell-connected' })
     const rows = page.locator('.bw-lane-row')
     expect(await rows.count()).toBeGreaterThan(2)
-    expect(await rows.evaluateAll((elements) => elements.filter((element) => element.tabIndex === 0).length)).toBe(1)
+    expect(
+      await rows.evaluateAll(
+        (elements) => elements.filter((element) => element.tabIndex === 0).length,
+      ),
+    ).toBe(1)
     await rows.first().focus()
     await page.keyboard.press('ArrowDown')
     await expect(rows.nth(1)).toBeFocused()
@@ -66,17 +75,27 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(rows.first()).toBeFocused()
   })
 
-  test('Enter selects a qualified branch for inspection without checking it out', async ({ page }) => {
+  test('Enter selects a qualified branch for inspection without checking it out', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'shell-connected' })
-    const row = page.locator('.bw-lane-row').filter({ has: page.getByRole('button', { name: 'feature/checkout-tests', exact: true }) })
+    const row = page
+      .locator('.bw-lane-row')
+      .filter({ has: page.getByRole('button', { name: 'feature/checkout-tests', exact: true }) })
     await row.focus()
     await page.keyboard.press('Enter')
-    await expect(row.getByRole('button', { name: 'feature/checkout-tests', exact: true })).toHaveAttribute('aria-pressed', 'true')
-    await expect(page.getByRole('complementary', { name: 'Selected branch details' })).toContainText('feature/checkout-tests')
+    await expect(
+      row.getByRole('button', { name: 'feature/checkout-tests', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    await expect(
+      page.getByRole('complementary', { name: 'Selected branch details' }),
+    ).toContainText('feature/checkout-tests')
     expect(await getDispatchedActions(page)).toEqual([])
   })
 
-  test('paged branch groups move within the mounted page and remain reachable after paging back', async ({ page }) => {
+  test('paged branch groups move within the mounted page and remain reachable after paging back', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'branches-deep-chain' })
     const rows = page.locator('.bw-lane-row')
     const initial = await rows.first().getAttribute('data-branch-id')
@@ -90,21 +109,31 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(rows.last()).toBeFocused()
     await page.keyboard.press('Home')
     await expect(rows.first()).toBeFocused()
-    expect(await rows.evaluateAll((elements) => elements.filter((element) => element.tabIndex === 0).length)).toBe(1)
+    expect(
+      await rows.evaluateAll(
+        (elements) => elements.filter((element) => element.tabIndex === 0).length,
+      ),
+    ).toBe(1)
     await page.getByRole('button', { name: 'Previous page', exact: true }).click()
     await expect(rows.first()).toHaveAttribute('data-branch-id', initial!)
     await rows.first().focus()
     await expect(rows.first()).toBeFocused()
   })
 
-  test('branch groups leave modified stack-navigation chords to the global dispatcher', async ({ page }) => {
+  test('branch groups leave modified stack-navigation chords to the global dispatcher', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'shell-connected' })
     await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
-    const main = page.locator('.bw-lane-row').filter({ has: page.getByRole('button', { name: 'main', exact: true }) })
+    const main = page
+      .locator('.bw-lane-row')
+      .filter({ has: page.getByRole('button', { name: 'main', exact: true }) })
     await main.focus()
-    await page.keyboard.press('Alt+ArrowDown')
+    await page.keyboard.press('Alt+ArrowUp')
     await expect(main).toBeFocused()
-    await expect(page.getByRole('button', { name: 'feature/checkout-tests', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await expect(
+      page.getByRole('button', { name: 'feature/checkout-tests', exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true')
     expect(await getDispatchedActions(page)).toEqual([])
   })
 
@@ -122,9 +151,14 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     expect(await getDispatchedActions(page)).toEqual([])
   })
 
-  test('branch action menu opens from the keyboard, moves focus and restores its trigger', async ({ page }) => {
+  test('branch action menu opens from the keyboard, moves focus and restores its trigger', async ({
+    page,
+  }) => {
     await openGallery(page, { scenario: 'shell-connected' })
-    const trigger = page.getByRole('button', { name: 'More branch and worktree actions', exact: true }).first()
+    await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
+    const trigger = page
+      .locator('.bw-lane-row.bw-selected')
+      .getByRole('button', { name: 'More branch and worktree actions', exact: true })
     await trigger.focus()
     await page.keyboard.press('Enter')
     const menu = page.getByRole('menu')
@@ -269,7 +303,6 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     )
   })
 
-
   test('the search field keeps every typed keystroke, including shortcut characters', async ({
     page,
   }) => {
@@ -282,7 +315,9 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await expect(search).toHaveValue('7/k')
 
     // None of them was captured: no view changed and no palette opened.
-    await expect(page.getByRole('heading', { level: 1, name: 'Branches & worktrees' })).toBeVisible()
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Branches & worktrees' }),
+    ).toBeVisible()
     await expect(page.getByRole('dialog', { name: 'Global search' })).toHaveCount(0)
   })
 })

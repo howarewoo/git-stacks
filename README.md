@@ -1938,10 +1938,17 @@ These fixtures exercise Git Stacks, not the Journey prototype. Production React 
 The application fixtures exercise the current workbench shell: Branches & worktrees,
 Pull requests, Needs attention, and Activity. Full Review starts from a qualified PR;
 committed history and Notifications open in dialogs. Renderer helpers wait for the
-workbench heading, not the retired repository toolbar. Legacy graph-camera and
-removed mutation-control assertions are not contracts for this shell.
+restored surface's heading, not the retired repository toolbar. Legacy graph-camera
+and removed mutation-control assertions are not contracts for this shell.
 
 Review return preserves the originating filter, selection, scroll and keyboard focus.
+Readonly navigation keeps the qualified Review mounted, preserving its pane and
+verified draft baseline; a retired provider owner cannot retain private metadata.
+Branch filters accept displayed PR numbers with or without the `#` prefix.
+Explicitly captured operations keep their scoped publication and merge journal
+subscriptions alive when recovery is closed or another inspection surface is active.
+Saved-filter full-list writes wait while their store read is pending, even when
+a previous list is cached.
 Held CLI reads cannot replace newer provider status. Notifications keep their
 independent credential ownership, fence late host-scoped answers, and complete
 enable → credential save → inbox read before dismissing authorization. Captured

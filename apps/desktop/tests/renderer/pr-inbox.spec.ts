@@ -162,13 +162,11 @@ test.describe('PR Inbox queue', () => {
   }) => {
     await expect(rows(page)).toHaveCount(2)
     await rows(page).nth(1).getByRole('button').click()
+    // Inspection selects the registered authority without operationally opening a directory.
     const opened = (await getDoubleCalls(page)).filter((entry) => entry.call === 'openRepository')
-    expect(opened.map((entry) => entry.args[0])).toContain(
-      '/Users/ada/Code/design-system-specimens',
-    )
-    // The foreign repository's own facts, read after it was adopted: its pull
-    // request #77 is selected in it rather than looked up in the workspace that
-    // happened to be showing.
+    expect(opened).toHaveLength(0)
+    // The foreign repository's own pull request is selected rather than resolved
+    // against the repository that happened to be showing.
     await expect(
       page.getByText('#77 Charge every native-stack page to the refresh budget').first(),
     ).toBeVisible()
@@ -176,8 +174,9 @@ test.describe('PR Inbox queue', () => {
     await expect(page.getByText('No pull request selected')).toHaveCount(0)
     // The origin the workspace reports is the repository the row named, so the
     // remote this window would use is that one and not a look-alike.
-    await expect(page.getByRole('button', { name: /^howarewoo\/design-system-specimens ·/u }))
-      .toHaveAttribute('aria-pressed', 'true')
+    await expect(
+      page.getByRole('button', { name: /^howarewoo\/design-system-specimens ·/u }),
+    ).toHaveAttribute('aria-pressed', 'true')
   })
 
   test('the search chord reaches the queue, with a repository open and without one', async ({
@@ -627,8 +626,9 @@ test.describe('PR Inbox to Review, in one window', () => {
     // The workspace on screen is that repository's, with its own canonical
     // origin: nothing here resolved the row against the repository that was
     // already open.
-    await expect(page.getByRole('button', { name: /^howarewoo\/design-system-specimens ·/u }))
-      .toHaveAttribute('aria-pressed', 'true')
+    await expect(
+      page.getByRole('button', { name: /^howarewoo\/design-system-specimens ·/u }),
+    ).toHaveAttribute('aria-pressed', 'true')
 
     const reads = (await getDoubleCalls(page)).filter(
       (entry) => entry.call === 'reviewFiles' || entry.call === 'reviewCommits',
@@ -775,7 +775,6 @@ test.describe('PR Inbox transitions', () => {
     ).toBeVisible()
     await expect(page.getByRole('status')).toContainText('read without knowing whose queue this is')
   })
-
 })
 
 test.describe('PR Inbox identity', () => {
@@ -1019,9 +1018,10 @@ test.describe('structured Inbox saved views', () => {
       page.getByText('#81 Keep repository identity stable', { exact: false }).first(),
     ).toBeVisible()
     const calls = await getDoubleCalls(page)
-    expect(
-      calls.filter((entry) => entry.call === 'openRepository').map((entry) => entry.args[0]),
-    ).toContain('/Users/ada/Code/design-system-specimens')
+    expect(calls.filter((entry) => entry.call === 'openRepository')).toHaveLength(0)
+    await expect(
+      page.getByRole('button', { name: /^howarewoo\/design-system-specimens ·/u }),
+    ).toHaveAttribute('aria-pressed', 'true')
     expect(calls.filter((entry) => entry.call === 'runAction')).toHaveLength(0)
   })
 

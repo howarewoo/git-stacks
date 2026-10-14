@@ -114,16 +114,18 @@ export async function openGallery(page: Page, options: OpenGalleryOptions = {}):
   await page.goto(targetUrl)
   await expect(page.locator('#root')).toBeVisible({ timeout: 15_000 })
 
-  // Wait for the workbench, not the toolbar removed by the shell cutover.
+  // Readiness follows the restored surface, including Review in a shared context.
   // Empty and loading scenarios are ready as soon as their shell is rendered.
   if (
     route === 'app' &&
     !SCENARIOS_WITHOUT_A_REPOSITORY.has(scenario) &&
     scenario !== 'shell-loading'
   ) {
-    await expect(page.getByRole('heading', { level: 1, name: 'Branches & worktrees' })).toBeVisible({
-      timeout: 15_000,
-    })
+    await expect(
+      page.getByRole('heading', { level: 1 }).filter({
+        hasText: /^(Branches & worktrees|Pull requests|Needs attention|Activity|Review)$/,
+      }),
+    ).toBeVisible({ timeout: 15_000 })
   }
   await settle(page)
 }

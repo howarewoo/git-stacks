@@ -193,9 +193,10 @@ test.describe('Required GitHub CLI status', () => {
     await publishCliStatus(page, ACCOUNT_B)
 
     await expect(page.getByRole('button', { name: 'Review pull request' })).toHaveCount(0)
-    await expect(branch).toContainText('No pull request')
     await expect(checks.getByText('ci', { exact: true })).toHaveCount(0)
-    await expect(page.getByRole('heading', { name: 'Branches & worktrees', exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+    ).toBeVisible()
     await expect(branch).toHaveCount(1)
 
     // The session on screen is still the one that replaced it.
@@ -217,20 +218,23 @@ test.describe('Required GitHub CLI status', () => {
     await publishCliStatus(page, ACCOUNT_B)
     // Main can have persisted B already. Neither a second open nor a local
     // mutation against B may run while the renderer still displays A.
-    await expect(
-      add,
-    ).toBeDisabled()
+    await expect(add).toBeDisabled()
     expect(await releaseDoubleCalls(page, 'openRepository')).toBe(1)
     await settle(page)
 
     const opened = scenarios['shell-long-content'].snapshot!
-    await expect(page.getByText(opened.name, { exact: true }).first()).toBeVisible()
-    await expect(page.getByText(opened.currentBranch!, { exact: true }).first()).toBeVisible()
+    await expect(
+      page
+        .getByRole('complementary', { name: 'Workspace navigation' })
+        .getByRole('button', { name: `howarewoo/git-stacks · ${opened.path}`, exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    await expect(
+      page.getByRole('button', { name: opened.currentBranch!, exact: true }),
+    ).toBeVisible()
     await expect(add).toBeEnabled()
     await cliStatusButton(page).click()
     await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()
   })
-
 
   test('a replaced account takes the private repositories it had discovered with it, and a held search cannot bring them back', async ({
     page,

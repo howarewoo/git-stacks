@@ -34,10 +34,17 @@ test.describe('Safety and mutation dispatch invariants', () => {
     await dialog.getByRole('button', { name: 'Restack stack', exact: true }).click()
     await settle(page)
     await expect(dialog).toBeVisible()
-    await expect(page.getByRole('alert').filter({ hasText: 'Captured restack was refused' })).toBeVisible()
-    await expect(dialog.getByRole('button', { name: 'Restack stack', exact: true })).toBeEnabled()
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Captured restack was refused' }),
+    ).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Restack stack', exact: true })).toBeDisabled()
     expect(await getDispatchedActions(page)).toEqual([
-      { type: 'executeStack', token: restackPreview.token, allowForce: false, mergeMethod: 'squash' },
+      {
+        type: 'executeStack',
+        token: restackPreview.token,
+        allowForce: false,
+        mergeMethod: 'squash',
+      },
     ])
   })
 
@@ -54,7 +61,12 @@ test.describe('Safety and mutation dispatch invariants', () => {
     await releaseDoubleCalls(page, 'runAction')
     await settle(page)
     expect(await getDispatchedActions(page)).toEqual([
-      { type: 'executeStack', token: restackPreview.token, allowForce: false, mergeMethod: 'squash' },
+      {
+        type: 'executeStack',
+        token: restackPreview.token,
+        allowForce: false,
+        mergeMethod: 'squash',
+      },
     ])
   })
 
@@ -113,9 +125,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
         ).toHaveLength(1)
       })
     }
-
   })
-
 
   test.describe('Selection is not checkout or staging', () => {
     test('clicking branch row changes inspector selection without dispatching switch or checkout', async ({
@@ -126,7 +136,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await selectBranchInList(page, 'main')
 
       const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
-      await expect(inspector.getByText('refs/heads/main', { exact: true })).toBeVisible()
+      await expect(inspector.locator('.bw-ref')).toHaveText('main')
 
       // Dispatched actions must be completely empty: selection is read-only
       const actions = await getDispatchedActions(page)
@@ -139,7 +149,11 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await openGallery(page, { scenario: 'pull-requests-lifecycle' })
       await switchDestination(page, 'pullRequests')
 
-      await page.getByRole('button', { name: /#42 Migrate changes/ }).click()
+      await page
+        .locator('.wb-secondary-list')
+        .getByRole('button')
+        .filter({ hasText: '#42 ·' })
+        .click()
       await expect(page.locator('.review-headline')).toContainText('#42 Migrate changes')
       await expect(page.getByRole('dialog')).toHaveCount(0)
 
@@ -165,5 +179,4 @@ test.describe('Safety and mutation dispatch invariants', () => {
       expect(actions).toEqual([])
     })
   })
-
 })
