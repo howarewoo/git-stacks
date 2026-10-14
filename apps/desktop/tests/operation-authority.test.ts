@@ -12,6 +12,7 @@ import {
   recordOperationResult,
   validateRecordedRecovery,
   createOperationEffectValidator,
+  createOperationProviderValidator,
   unresolvedOperationRecords,
 } from '../src/main/operation-authority'
 import { previewWorktreeLifecycle, executeWorktreeLifecycle } from '../src/main/worktree-lifecycle'
@@ -774,6 +775,66 @@ test('the combined final provider-await fence refuses a rewired Git administrati
     assert.deepEqual(await readFile(join(repo, '.git', 'index')), originalIndex)
     // Restore only this intentionally corrupted disposable fixture file.
     await writeFile(pointer, originalPointer)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('production provider callback refuses same-physical origin retirement during the final credential await before a real Git effect', async () => {
+  const { root, repo, scope } = await fixture()
+  try {
+    const tree = await linked(repo, join(root, 'selected'), 'selected')
+    const inventory = await discoverWorktrees(repo)
+    const selectedScope = { ...scope, repositoryPath: tree.path }
+    const capture = await captureOperation(
+      tree.path,
+      { repositoryId: inventory.identity.id, worktreeId: tree.id },
+      selectedScope,
+    )
+    const reached = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let holdCredential = false
+    const validate = createOperationEffectValidator(
+      capture,
+      selectedScope,
+      createOperationProviderValidator(tree.path, async (origin) => {
+        assert.equal(origin, scope.remoteUrl)
+        if (holdCredential) {
+          reached.resolve()
+          await release.promise
+        }
+        // The private credential remains the original; only effective origin retires.
+      }),
+    )
+    const authority = {
+      root: tree.path,
+      context: capture.context,
+      signal: new AbortController().signal,
+      origin: scope.remoteUrl,
+      originUrl: scope.remoteUrl,
+      validate,
+      validateEffect: validate,
+    }
+    await inspectionAuthority.run(authority, () =>
+      runGit(tree.path, ['config', 'gitStacks.approvedStep', 'written']),
+    )
+    const originalHead = git(repo, 'rev-parse', 'HEAD')
+    const originalIndex = await readFile(join(repo, '.git', 'index'))
+    const originalStash = git(repo, 'stash', 'list')
+    holdCredential = true
+    const effect = inspectionAuthority.run(authority, () =>
+      runGit(tree.path, ['config', 'gitStacks.unapproved', 'written']),
+    )
+    await reached.promise
+    git(repo, 'remote', 'set-url', 'origin', join(root, 'replacement.git'))
+    const changedConfig = await readFile(join(repo, '.git', 'config'))
+    release.resolve()
+    await assert.rejects(effect, /Effective Git origin\/config changed/)
+    assert.deepEqual(await readFile(join(repo, '.git', 'config')), changedConfig)
+    assert.equal(git(repo, 'config', '--list').includes('gitstacks.unapproved='), false)
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), originalHead)
+    assert.deepEqual(await readFile(join(repo, '.git', 'index')), originalIndex)
+    assert.equal(git(repo, 'stash', 'list'), originalStash)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

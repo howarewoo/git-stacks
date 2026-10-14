@@ -2203,9 +2203,12 @@ Hidden/unloaded dependency members participate base-first; incomplete full-scope
 facts refuse the operation instead of shrinking it to visible rows. Branch hints,
 tracking, published PR bases and provider-owned native membership remain distinct.
 Every Git/ref/config effect finishes its evolved target and ordinary capture/discovery
-preflight before the original-owner dispatch fence. Actual origin/private-provider checks
-precede final synchronous Gitfile/admin/common binding and physical incarnation checks, with no later
-application preflight await; the engine's own HEAD/index checkpoints may evolve.
+preflight before the original-owner dispatch fence. The main provider validator brackets
+its final private credential await with Git's effective configuration (including conditional
+includes, worktree config and URL rewrites); its final bounded Git configuration read is
+synchronous and refuses any drift before synchronous Gitfile/admin/common binding and
+physical incarnation checks. No later application preflight await occurs; the engine's
+own HEAD/index checkpoints may evolve. This fence does not replace remote leases.
 `operationSafety(token, preview)` is read-only: it validates the existing original
 approval and retained stack/native/lifecycle plan, never mints a replacement or consumes
 the token. Open forms inspect this original owner on live inventory/provider changes,

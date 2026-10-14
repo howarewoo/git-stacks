@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { lstat, readFile, readdir } from 'node:fs/promises'
 import { lstatSync, readFileSync, realpathSync, type BigIntStats } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import type { InspectionContext } from '@git-stacks/shared/inspection'
 import type {
@@ -14,7 +15,8 @@ import type {
 import { sameOperationScope } from '@git-stacks/shared/operation-scope'
 import type { GitAction, ActionResult } from '@git-stacks/shared/types'
 import { discoverWorktrees, inspectWorktree } from './worktree-inventory'
-import { runGit, tryGit } from './git-core'
+import { runGit, tryGit, getOriginUrl, commandEnvironment, MAX_BUFFER } from './git-core'
+import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
 import { readJournal, writeJournal, withJournalLock } from './review-journal'
 import { isRecord } from '@git-stacks/shared/guards'
 
@@ -80,6 +82,37 @@ function assertGitDirectoryBinding(capture: OperationCapture): void {
     common !== realpathSync(capture.commonDirectory)
   )
     throw new Error('The original worktree administrative/common binding was replaced.')
+}
+
+/** Preserve effective Git config across the last private-provider await. */
+export function createOperationProviderValidator(
+  root: string,
+  validatePrivateProvider: (origin: string | null) => Promise<void>,
+): () => Promise<void> {
+  return async () => {
+    const runtime = await resolveGitRuntime()
+    const args = ['config', '--null', '--show-origin', '--show-scope', '--list']
+    const originalConfig = await runGit(root, args)
+    const origin = await getOriginUrl(root)
+    await validatePrivateProvider(origin)
+    // Use Git itself, including includes, conditional/worktree config and URL
+    // rewrites, rather than parsing only .git/config. No application await follows
+    // this read before the factory's synchronous physical/binding fence.
+    const currentConfig = execFileSync(runtime.executable, args, {
+      cwd: root,
+      env: gitCommandEnvironment(runtime, commandEnvironment()),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+      windowsHide: true,
+      timeout: 10_000,
+      maxBuffer: MAX_BUFFER,
+    })
+    if (currentConfig !== originalConfig)
+      throw new Error(
+        'Effective Git origin/config changed during private provider validation; no further step is authorized.',
+      )
+  }
 }
 
 /** Combined production validator, after evolved target preflight at actual dispatch. */

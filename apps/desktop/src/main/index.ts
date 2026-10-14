@@ -9,6 +9,7 @@ import {
   runRecordedOperation,
   readOperationRecords,
   validateRecordedRecovery,
+  createOperationProviderValidator,
   withCapturedOperationLock,
   validateCapturedDirectory,
   createOperationEffectValidator,
@@ -1895,28 +1896,31 @@ function installHandlers() {
           const privateCredential = capturedHost
             ? await hostCredentialAuthority(capturedHost.host)
             : null
-          const validate = createOperationEffectValidator(captured, scope, async () => {
-            const currentOrigin = await getOriginUrl(captured.worktreePath)
-            const currentCredential = capturedHost
-              ? await hostCredentialAuthority(capturedHost.host)
-              : null
-            if (
-              capturedGeneration !== hostGeneration ||
-              (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host)) ||
-              !sameOperationScope(scope, {
-                repositoryPath: captured.worktreePath,
-                remoteUrl: currentOrigin,
-                authority: cliAuthority(
-                  capturedHost?.host ?? null,
-                  capturedService?.current() ?? null,
-                ),
-              }) ||
-              privateCredential !== currentCredential
-            )
-              throw new Error(
-                'Original origin or private provider authority changed at the effect boundary; no further step is authorized.',
+          const validate = createOperationEffectValidator(
+            captured,
+            scope,
+            createOperationProviderValidator(captured.worktreePath, async (currentOrigin) => {
+              const currentCredential = capturedHost
+                ? await hostCredentialAuthority(capturedHost.host)
+                : null
+              if (
+                capturedGeneration !== hostGeneration ||
+                (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host)) ||
+                !sameOperationScope(scope, {
+                  repositoryPath: captured.worktreePath,
+                  remoteUrl: currentOrigin,
+                  authority: cliAuthority(
+                    capturedHost?.host ?? null,
+                    capturedService?.current() ?? null,
+                  ),
+                }) ||
+                privateCredential !== currentCredential
               )
-          })
+                throw new Error(
+                  'Original origin or private provider authority changed at the effect boundary; no further step is authorized.',
+                )
+            }),
+          )
           const settings = (await readSettingsFile(settingsFile())).settings
           return progressOwner.run(scope, () =>
             runRecordedOperation(captured, action, () =>
