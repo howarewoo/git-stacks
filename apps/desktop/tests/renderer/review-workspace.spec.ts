@@ -74,7 +74,7 @@ test('viewed and unviewed records survive same-head return but not a moved head 
   await expect
     .poll(async () => (await page.evaluate(() => window.desktop.reviewViewed!(42)))?.paths)
     .toContain('src/main/review.ts')
-  await switchDestination(page, 'stacks')
+  await switchDestination(page, 'branches')
   await switchDestination(page, 'review')
   await expect(
     page.getByRole('button', { name: 'Mark file as unviewed', exact: true }),

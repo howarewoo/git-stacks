@@ -204,11 +204,6 @@ const desktop: DesktopAPI = {
   pullRequestInbox: (request) => ipcRenderer.invoke('inbox:pull-requests', request),
   pullRequestInboxFilters: () => ipcRenderer.invoke('inbox:filters'),
   savePullRequestInboxFilters: (filters) => ipcRenderer.invoke('inbox:filters-save', filters),
-  graphPreferences: () => ipcRenderer.invoke('graph:preferences'),
-  saveGraphPreferences: (preferences, expectedScope) =>
-    ipcRenderer.invoke('graph:preferences-save', preferences, expectedScope),
-  resetGraphPreferences: (expectedScope) =>
-    ipcRenderer.invoke('graph:preferences-reset', expectedScope),
 }
 
 contextBridge.exposeInMainWorld('desktop', desktop)

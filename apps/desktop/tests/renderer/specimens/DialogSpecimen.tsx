@@ -1,19 +1,7 @@
 import * as React from 'react'
 import { GitBranch, RefreshCw, Trash2 } from 'lucide-react'
-import { Button } from '../components/ui/button'
-import { Checkbox } from '../components/ui/checkbox'
-import { Field } from '../components/ui/field'
-import { Input } from '../components/ui/input'
-import { Select } from '../components/ui/select'
-import { Textarea } from '../components/ui/textarea'
-import { InlineAlert } from '../components/ui/surface'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '../components/ui/dialog'
+import { Button, Checkbox, Field, Input, Select, Textarea, InlineAlert } from '@git-stacks/ui'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@git-stacks/ui'
 import {
   BlockerList,
   OperationContext,
@@ -23,13 +11,13 @@ import {
   WarningNote,
   WorkflowActions,
   WorkflowFrame,
-} from '../components/workflow-composition'
+} from '../../../src/renderer/src/components/workflow-composition'
 import {
   closeIntent,
   partialProgress,
   workflowPhase,
   type WorkflowPhase,
-} from '../components/workflow-policy'
+} from '../../../src/renderer/src/components/workflow-policy'
 import {
   blockedRestackPreview,
   completedRestackProgress,

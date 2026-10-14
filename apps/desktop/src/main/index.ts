@@ -220,7 +220,6 @@ import {
   type PullRequestInboxTarget,
 } from './pr-inbox'
 import { PullRequestInboxFilters } from './pr-inbox-filters'
-import { GraphPreferencesStore } from './graph-preferences'
 import {
   PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
   type PullRequestInboxFilterDraft,
@@ -431,38 +430,6 @@ const settingsPath = () => join(app.getPath('userData'), 'repositories.json')
 const settingsFile = () => join(app.getPath('userData'), 'settings.json')
 const inboxFiltersPath = () => join(app.getPath('userData'), 'pull-request-inbox.json')
 const inboxFilters = new PullRequestInboxFilters(inboxFiltersPath())
-const graphPreferences = new GraphPreferencesStore(
-  join(app.getPath('userData'), 'graph-preferences'),
-  async () => {
-    const root = activeRepository
-    const generation = hostGeneration
-    if (!root) return null
-    try {
-      const origin = parseRemote(await getOriginUrl(root))
-      const host = remoteHostContext(origin)
-      if (!origin || !host) return null
-      const status = await gitHubCliStatusService(host.host).read()
-      if (
-        root !== activeRepository ||
-        generation !== hostGeneration ||
-        status.state !== 'authenticated' ||
-        !status.login ||
-        !status.identity ||
-        canonicalHostName(status.host) !== canonicalHostName(host.host)
-      )
-        return null
-      return {
-        repositoryPath: root,
-        host: host.host,
-        repository: origin.fullName,
-        account: status.login,
-        authority: JSON.stringify([root, generation, status.identity]),
-      }
-    } catch {
-      return null
-    }
-  },
-)
 /**
  * The authenticated identity the queue's rows belong to. It is the identity the
  * GitHub CLI status read established: it names the host, the account, and the
@@ -1595,6 +1562,17 @@ const inspectionHandlers = new Map<
   (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown
 >()
 
+// Owned performance runs count fixed transport names only, never arguments,
+// paths, identities, credentials or application state. No renderer API is added.
+const benchmarkReadCounts =
+  process.env.GIT_STACKS_BENCH_READ_COUNTS === '1'
+    ? { requests: {} as Record<string, number>, inspections: {} as Record<string, number> }
+    : null
+if (benchmarkReadCounts)
+  Object.defineProperty(globalThis, '__gitStacksBenchmarkCounts', {
+    value: () => structuredClone(benchmarkReadCounts),
+  })
+
 const ipcMain = {
   handle<Args extends unknown[]>(
     channel: string,
@@ -1606,6 +1584,8 @@ const ipcMain = {
       Promise.resolve()
         .then(() => {
           validateSender(event)
+          if (benchmarkReadCounts)
+            benchmarkReadCounts.requests[channel] = (benchmarkReadCounts.requests[channel] ?? 0) + 1
           return listener(event, ...args)
         })
         .catch((error: unknown) => {
@@ -2023,6 +2003,9 @@ function installHandlers() {
           256,
         )
       const operation = operationValue as InspectionOperation
+      if (benchmarkReadCounts)
+        benchmarkReadCounts.inspections[operation] =
+          (benchmarkReadCounts.inspections[operation] ?? 0) + 1
       if (operation === 'cancel') {
         readKeys.cancel(context.repositoryId, requireString(argsValue[0], 'request id', 256))
         return
@@ -3155,13 +3138,6 @@ function installHandlers() {
   ipcMain.handle('inbox:filters', async (event) => {
     return inboxFiltersReady.then(() => inboxFilters.list())
   })
-  ipcMain.handle('graph:preferences', () => graphPreferences.read())
-  ipcMain.handle('graph:preferences-save', (_event, value: unknown, expectedScope: unknown) =>
-    graphPreferences.save(value, expectedScope),
-  )
-  ipcMain.handle('graph:preferences-reset', (_event, expectedScope: unknown) =>
-    graphPreferences.reset(expectedScope),
-  )
   ipcMain.handle('inbox:filters-save', async (event, value: unknown) => {
     if (!Array.isArray(value)) throw new Error('Saved filters must be a list.')
     // This write replaces the whole list, so it waits for the stored list to

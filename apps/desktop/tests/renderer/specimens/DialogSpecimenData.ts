@@ -225,8 +225,6 @@ export const liveGuardBase = {
   rejectedTokens: [] as readonly string[],
   previewBlockers: [] as readonly string[],
   expectedOidMissing: false,
-  requiresMainline: false,
-  mainline: '',
   requiresMergeMethod: false,
   mergeMethod: '',
   untitledBranches: [] as readonly string[],

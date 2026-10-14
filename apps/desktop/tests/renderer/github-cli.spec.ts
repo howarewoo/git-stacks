@@ -33,7 +33,7 @@ import { scenarios } from './fixtures/scenarios'
  */
 
 function cliStatusButton(page: Page) {
-  return page.getByTitle('GitHub CLI status')
+  return page.getByRole('button', { name: 'Settings', exact: true })
 }
 
 /**
@@ -41,7 +41,7 @@ function cliStatusButton(page: Page) {
  * announces for it.
  */
 function cliStatusDialog(page: Page): Locator {
-  return page.getByRole('dialog', { name: 'GitHub CLI authentication' })
+  return page.getByRole('dialog', { name: 'Settings', exact: true })
 }
 
 /** The measurements themselves: what was read about this computer, one per row. */
@@ -84,6 +84,10 @@ async function openCliStatusDialog(page: Page, scenario: string) {
   await settle(page)
   await cliStatusButton(page).click()
   await expect(cliStatusDialog(page)).toBeVisible()
+  await cliStatusDialog(page)
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('button', { name: 'GitHub CLI', exact: true })
+    .click()
   await settle(page)
 }
 
@@ -273,165 +277,6 @@ test.describe('Required GitHub CLI status', () => {
     await expect(page.getByRole('button', { name: 'New branch' })).toBeEnabled()
     await expect(page.getByRole('button', { name: 'Review changes' })).toHaveCount(0)
     await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
-  })
-
-  test('credential retirement removes submitted reconciliation and its repair controls', async ({
-    page,
-  }) => {
-    await openGallery(page, { scenario: 'github-cli-authenticated' })
-    const withReport = {
-      ...scenarios['github-cli-authenticated'].snapshot!,
-      reconciliation: {
-        available: true,
-        message: 'Private submitted stack from the old account',
-        stacks: [
-          {
-            key: 'private-stack',
-            base: 'main',
-            stackNumber: 17,
-            stackUrl: 'https://github.com/acme/widgets/stack/17',
-            state: 'reordered',
-            summary: 'Private submitted order',
-            submittedOrder: ['private-parent', 'private-child'],
-            members: [],
-            repairs: [],
-            blockers: [],
-          },
-        ],
-        blockers: [],
-        evidence: null,
-      },
-    }
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await page.getByRole('button', { name: 'Refresh repository' }).click()
-    await switchDestination(page, 'stacks')
-    await page
-      .locator('details.graph-reconciliation > summary', {
-        hasText: 'Submitted native order and reconciliation',
-      })
-      .click()
-    const reconciliation = page.getByRole('region', { name: 'Submitted stack reconciliation' })
-    await expect(reconciliation).toContainText('Private submitted stack from the old account')
-    await expect(reconciliation.getByRole('button', { name: /Review repairs/ })).toBeEnabled()
-    await reconciliation.getByRole('button', { name: /Review repairs/ }).click()
-    const repairDialog = page.getByRole('dialog', { name: 'Reconcile submitted stack' })
-    await expect(repairDialog).toBeVisible()
-    await publishCliStatus(page, ACCOUNT_C)
-    await expect(reconciliation).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Review repairs/ })).toHaveCount(0)
-    await expect(repairDialog).toHaveCount(0)
-    // A later report must not revive the retired account's open preview.
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await page.getByRole('button', { name: 'Refresh repository' }).click()
-    await expect(reconciliation).toBeVisible()
-    await expect(repairDialog).toHaveCount(0)
-  })
-
-  test('background snapshots preserve reviewed repair choices until an explicit re-read', async ({
-    page,
-  }) => {
-    await openGallery(page, { scenario: 'github-cli-authenticated' })
-    const preview: ReconciliationPreview = {
-      token: 'captured-repair-preview',
-      stackKey: 'private-stack',
-      state: 'reordered',
-      summary: 'Review submitted order',
-      base: 'main',
-      submittedOrder: ['feature/parent', 'feature/child'],
-      repairs: [
-        {
-          id: 'tip',
-          kind: 'adopt-remote-tip',
-          branch: 'feature/child',
-          pullRequest: null,
-          summary: 'Adopt new remote tip',
-          detail: 'Use the captured remote commit.',
-          requiresConfirmation: true,
-          evidence: null,
-        },
-        {
-          id: 'hint',
-          kind: 'clear-stale-hint',
-          branch: 'feature/child',
-          pullRequest: null,
-          summary: 'Remove old parent hint',
-          detail: 'Remove the stale recorded parent.',
-          requiresConfirmation: false,
-          evidence: null,
-        },
-      ],
-      blockers: [],
-      warnings: [],
-      capturedAt: '2026-09-25T12:00:00Z',
-    }
-    await page.evaluate((value) => {
-      window.desktop.reconciliationPreview = async () => structuredClone(value)
-    }, preview)
-    const withReport: RepositorySnapshot = {
-      ...scenarios['github-cli-authenticated'].snapshot!,
-      reconciliation: {
-        available: true,
-        message: 'Submitted order needs review.',
-        stacks: [
-          {
-            key: preview.stackKey,
-            base: preview.base,
-            stackNumber: 17,
-            stackUrl: 'https://github.com/acme/widgets/stack/17',
-            state: preview.state,
-            summary: preview.summary,
-            submittedOrder: preview.submittedOrder,
-            members: [],
-            repairs: preview.repairs,
-            blockers: [],
-          },
-        ],
-        blockers: [],
-        evidence: null,
-      },
-    }
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await page.getByRole('button', { name: 'Refresh repository' }).click()
-    await switchDestination(page, 'stacks')
-    await page
-      .locator('details.graph-reconciliation > summary', {
-        hasText: 'Submitted native order and reconciliation',
-      })
-      .click()
-    await page.getByRole('button', { name: /Review repairs/ }).click()
-    const dialog = page.getByRole('dialog', { name: 'Reconcile submitted stack' })
-    const hint = dialog.getByRole('checkbox', { name: /Remove old parent hint/ })
-    await hint.uncheck()
-    const confirmation = dialog.getByLabel(
-      'Type private-stack to enable branch and pull-request rewrites',
-    )
-    await confirmation.fill('private-stack')
-    await expect(dialog.getByRole('button', { name: 'Run 1 repair', exact: true })).toBeEnabled()
-
-    await page.evaluate((value) => window.fixture.pushSnapshot(value), withReport)
-    await settle(page)
-    await expect(hint).not.toBeChecked()
-    await expect(confirmation).toHaveValue('private-stack')
-    await expect(dialog.getByRole('button', { name: 'Run 1 repair', exact: true })).toBeEnabled()
-
-    await dialog.getByRole('button', { name: 'Re-read', exact: true }).click()
-    await expect(hint).toBeChecked()
-    await expect(confirmation).toHaveValue('')
-    await expect(dialog.getByRole('button', { name: 'Run 2 repairs', exact: true })).toBeDisabled()
-
-    await confirmation.fill('private-stack')
-    await holdDoubleCall(page, 'runAction')
-    await dialog.getByRole('button', { name: 'Run 2 repairs', exact: true }).click()
-    await expect(dialog.locator('button[aria-busy="true"]')).toBeDisabled()
-    await page.keyboard.press('Escape')
-    await expect(dialog).toBeVisible()
-    await dialog.getByRole('button', { name: 'Close dialog' }).click()
-    await expect(dialog).toBeVisible()
-    await page.evaluate((value) => window.fixture.pushSnapshot(value), withReport)
-    await settle(page)
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await releaseDoubleCalls(page, 'runAction')
-    await expect(dialog).toBeHidden()
   })
 
   test('a replaced account takes the private repositories it had discovered with it, and a held search cannot bring them back', async ({

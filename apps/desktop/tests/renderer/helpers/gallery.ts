@@ -29,13 +29,10 @@ export const STANDARD_VIEWPORTS = {
 
 export type StandardViewportName = keyof typeof STANDARD_VIEWPORTS
 
-/**
- * The in-view filter field. Its accessible name is the product's contract, so
- * it is resolved here once instead of being re-spelled by every suite.
- */
+/** The repository-local lane query; global search has a separate authority. */
 export function getViewFilterInput(page: Page): Locator {
   return page.getByRole('textbox', {
-    name: 'Filter current view branches, files, and pull requests',
+    name: 'Filter branches by branch, PR, or path',
   })
 }
 
@@ -114,15 +111,14 @@ export async function openGallery(page: Page, options: OpenGalleryOptions = {}):
   await page.goto(targetUrl)
   await expect(page.locator('#root')).toBeVisible({ timeout: 15_000 })
 
-  // The fixture gallery performs the same first click a person makes, so every
-  // scenario that has a repository starts connected. A scenario without one has
-  // no repository toolbar to wait for, and is ready as soon as it is rendered.
+  // Connected scenarios mount the actual Workbench. Loading and onboarding have
+  // no selected repository; no retired toolbar is required for readiness.
   if (
     route === 'app' &&
     !SCENARIOS_WITHOUT_A_REPOSITORY.has(scenario) &&
     scenario !== 'shell-loading'
   ) {
-    await expect(page.getByRole('toolbar', { name: 'Repository actions' })).toBeVisible({
+    await expect(page.locator('.bw-sidebar')).toBeVisible({
       timeout: 15_000,
     })
   }

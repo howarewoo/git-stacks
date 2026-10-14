@@ -14,9 +14,7 @@ export type WorkflowKind =
   | 'upstream'
   | 'pull'
   | 'merge'
-  | 'stash'
   | 'forcePush'
-  | 'commitAction'
   | 'stack'
   | 'surgery'
   | 'pr'
@@ -96,7 +94,6 @@ export type WorkflowBlockerCode =
   | 'name-required'
   | 'pull-request-unavailable'
   | 'pull-request-title-required'
-  | 'mainline-required'
   | 'merge-method-required'
   | 'publish-title-required'
   | 'remote-tip-unavailable'
@@ -126,8 +123,6 @@ export const WORKFLOW_BLOCKER_MESSAGES: Record<WorkflowBlockerCode, string> = {
   'pull-request-unavailable':
     'This pull request is no longer editable. Close the dialog and review it on GitHub.',
   'pull-request-title-required': 'Enter a pull request title before saving.',
-  'mainline-required':
-    'Choose which parent to keep for this merge commit. Revert needs that choice.',
   'merge-method-required': 'Choose a merge method before merging this pull request.',
   'publish-title-required':
     'Every branch without an existing pull request needs a title before publishing.',
@@ -158,8 +153,6 @@ export interface WorkflowGuardInput {
   expectedOidMissing: boolean
   requiresName: boolean
   name: string
-  requiresMainline: boolean
-  mainline: string
   requiresMergeMethod: boolean
   mergeMethod: string
   /** Branches that need a PR title before a publish can run. */
@@ -236,9 +229,6 @@ export function workflowBlocker(input: WorkflowGuardInput): WorkflowBlocker | nu
       return block('pull-request-unavailable')
     if (!input.pullRequestTitle.trim()) return block('pull-request-title-required')
   }
-
-  if (input.kind === 'commitAction' && input.requiresMainline && !input.mainline)
-    return block('mainline-required')
 
   if (input.kind === 'stack') {
     if (input.requiresMergeMethod && !input.mergeMethod) return block('merge-method-required')

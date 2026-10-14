@@ -124,6 +124,10 @@ Detailed behavior and limitations remain in the [README](README.md), including
   omitted data. Existing numerical budgets are owned by
   [`packages/shared/src/performance.ts`](packages/shared/src/performance.ts); see
   [Performance budgets](README.md#performance-budgets) for their measurement.
+  Lane/inspector/continuation/cache envelopes retain their original numerical
+  limits under current surface names; complete inventories are not truncated to
+  a mounted page. The shipped application does not include fixture/prototype
+  routes or standalone staging/commit/stash/development controls.
 - The product is a desktop Git/GitHub workbench, not a mobile/web client or a CRM.
   The visual reference does not expand the runtime product scope.
 - Packaging for a platform is not proof of update or verification parity. See

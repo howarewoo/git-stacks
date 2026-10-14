@@ -1,6 +1,6 @@
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import type { PullRequest } from '@git-stacks/shared/types'
-import { GRAPH_SELECTED_CACHE_LIMIT } from '@git-stacks/shared/performance'
+import { SELECTED_DETAIL_CACHE_LIMIT } from '@git-stacks/shared/performance'
 import { CommandCancelled, isCancelled, parseRemote } from './git-core'
 import { githubErrorMessage } from './github'
 
@@ -297,7 +297,7 @@ export class ProgressivePullRequestIndex {
     if (generation === this.generation) {
       this.detail.delete(number)
       this.detail.set(number, value)
-      if (this.detail.size > GRAPH_SELECTED_CACHE_LIMIT)
+      if (this.detail.size > SELECTED_DETAIL_CACHE_LIMIT)
         this.detail.delete(this.detail.keys().next().value!)
     }
     return value

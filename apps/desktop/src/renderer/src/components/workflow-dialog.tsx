@@ -11,7 +11,6 @@ import {
 import { ExternalLink, Link2, LoaderCircle, Search, Trash2 } from 'lucide-react'
 import type {
   Branch,
-  Commit,
   DesktopAPI,
   GitAction,
   MergeAction,
@@ -80,8 +79,7 @@ import {
 export type RunAction = (action: GitAction, label: string) => Promise<boolean>
 export type WorkflowRequest =
   | { kind: 'rename' | 'parent' | 'upstream'; branch: Branch }
-  | { kind: 'pull' | 'merge' | 'stash' | 'forcePush' }
-  | { kind: 'commitAction'; commit: Commit; mode: 'cherryPick' | 'revert' }
+  | { kind: 'pull' | 'merge' | 'forcePush' }
   | { kind: 'stack'; branch: string; operation: StackKind; pullRequest?: number }
   | { kind: 'surgery'; request: SurgeryRequest }
   | { kind: 'pr'; number: number }
@@ -179,10 +177,7 @@ type WorkflowData =
 interface WorkflowFormValues {
   /** Branch name typed for a rename, parent, upstream, merge, or surgery insert. */
   name: string
-  message: string
-  includeUntracked: boolean
   strategy: 'ff-only' | 'merge' | 'rebase'
-  mainline: string
   confirmation: string
   allowForce: boolean
   /** Per-branch publish choices, keyed by branch name. */
@@ -220,8 +215,7 @@ function workflowComposition(request: WorkflowRequest): WorkflowComposition {
   // surgeries only rewrite the order.
   if (request.kind === 'surgery')
     return request.request.kind === 'remove' ? 'destructive' : 'reviewed'
-  if (request.kind === 'pull' || request.kind === 'merge' || request.kind === 'commitAction')
-    return 'reviewed'
+  if (request.kind === 'pull' || request.kind === 'merge') return 'reviewed'
   return 'form'
 }
 
@@ -235,8 +229,6 @@ function requestActionType(request: WorkflowRequest): GitAction['type'] {
       return 'setParent'
     case 'upstream':
       return 'setUpstream'
-    case 'commitAction':
-      return request.mode
     case 'stack':
       return 'executeStack'
     case 'surgery':
@@ -887,12 +879,9 @@ export function WorkflowDialog({
   // pull request seeded after opening.
   const [initialValues] = React.useState<WorkflowFormValues>(() => ({
     name: initialWorkflowName(request, snapshot),
-    message: '',
-    includeUntracked: true,
     // Seeded from the app's stored defaults; the person can still change either
     // before the operation runs.
     strategy: defaults?.git.defaultPullStrategy ?? 'ff-only',
-    mainline: '',
     confirmation: '',
     allowForce: false,
     layerChoices: {},
@@ -1192,20 +1181,17 @@ export function WorkflowDialog({
         ? `${stackLabels[request.operation]}${request.operation === 'merge' ? '' : ' stack'}`
         : request.kind === 'confirm'
           ? request.title
-          : request.kind === 'commitAction'
-            ? `${request.mode === 'cherryPick' ? 'Cherry-pick' : 'Revert'} commit`
-            : (
-                {
-                  rename: 'Rename local branch',
-                  parent: 'Set stack parent',
-                  upstream: 'Set upstream',
-                  pull: 'Pull changes',
-                  merge: 'Merge into current branch',
-                  stash: 'Stash working changes',
-                  forcePush: 'Force push with lease',
-                  pr: `Pull request #${request.kind === 'pr' ? request.number : ''}`,
-                } as Record<string, string>
-              )[request.kind]
+          : (
+              {
+                rename: 'Rename local branch',
+                parent: 'Set stack parent',
+                upstream: 'Set upstream',
+                pull: 'Pull changes',
+                merge: 'Merge into current branch',
+                forcePush: 'Force push with lease',
+                pr: `Pull request #${request.kind === 'pr' ? request.number : ''}`,
+              } as Record<string, string>
+            )[request.kind]
   const description =
     request.kind === 'surgery'
       ? request.request.kind === 'insert'
@@ -1225,21 +1211,17 @@ export function WorkflowDialog({
                 ? `Integrate the upstream of ${captured.current.branch ?? 'the current branch'}. Fast-forward only never creates or rewrites commits.`
                 : request.kind === 'merge'
                   ? `Merge a selected branch into ${captured.current.branch ?? 'the current branch'}. Git stops if conflicts need attention.`
-                  : request.kind === 'stash'
-                    ? 'Save work without creating a commit. Ignored files are not included.'
-                    : request.kind === 'forcePush'
-                      ? 'Replace remote history only if its tip still matches this preview. Someone else’s newer push will be rejected.'
-                      : request.kind === 'commitAction'
-                        ? `${request.commit.subject} · ${request.commit.oid.slice(0, 10)} → ${captured.current.branch ?? 'current branch'}`
-                        : request.kind === 'pr'
-                          ? 'Manage this captured pull request without changing a checkout.'
-                          : request.kind === 'stack' && request.operation === 'restack'
-                            ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
-                            : request.kind === 'stack' && request.operation === 'publish'
-                              ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
-                              : request.kind === 'stack' && request.operation === 'sync'
-                                ? 'Review the explicitly fetched trunk, merged-layer handling, replay, retargeting and captured remote leases. Fetch is a separate Git operation; Sync never fetches while opening a preview. Conflicts pause for explicit Continue or Abort.'
-                                : 'GitHub merges the reviewed pull requests itself, bottom-to-top, and this dialog follows the result. Local branches are never retargeted or deleted for you; restack and publish the rest afterwards.'
+                  : request.kind === 'forcePush'
+                    ? 'Replace remote history only if its tip still matches this preview. Someone else’s newer push will be rejected.'
+                    : request.kind === 'pr'
+                      ? 'Manage this captured pull request without changing a checkout.'
+                      : request.kind === 'stack' && request.operation === 'restack'
+                        ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
+                        : request.kind === 'stack' && request.operation === 'publish'
+                          ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
+                          : request.kind === 'stack' && request.operation === 'sync'
+                            ? 'Review the explicitly fetched trunk, merged-layer handling, replay, retargeting and captured remote leases. Fetch is a separate Git operation; Sync never fetches while opening a preview. Conflicts pause for explicit Continue or Abort.'
+                            : 'GitHub merges the reviewed pull requests itself, bottom-to-top, and this dialog follows the result. Local branches are never retargeted or deleted for you; restack and publish the rest afterwards.'
 
   const readProgress = async () => {
     if (request.kind !== 'stack' || request.operation !== 'publish') return
@@ -1336,10 +1318,7 @@ export function WorkflowDialog({
   const actionInputFor = (values: WorkflowFormValues): WorkflowActionInput | null => {
     const {
       name,
-      message,
-      includeUntracked,
       strategy,
-      mainline,
       confirmation,
       allowForce,
       layerChoices,
@@ -1405,14 +1384,6 @@ export function WorkflowDialog({
     if (request.kind === 'upstream') return { kind: 'upstream', branch: request.branch, name }
     if (request.kind === 'pull') return { kind: 'pull', strategy }
     if (request.kind === 'merge') return { kind: 'merge', ref: name }
-    if (request.kind === 'stash') return { kind: 'stash', message, includeUntracked }
-    if (request.kind === 'commitAction')
-      return {
-        kind: 'commitAction',
-        commit: request.commit,
-        mode: request.mode,
-        mainline,
-      }
     return null
   }
 
@@ -1490,8 +1461,6 @@ export function WorkflowDialog({
             ['rename', 'parent', 'merge'].includes(request.kind) ||
             (request.kind === 'surgery' && request.request.kind !== 'remove'),
           name: values.name,
-          requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
-          mainline: values.mainline,
           requiresMergeMethod:
             request.kind === 'stack' &&
             request.operation === 'merge' &&
@@ -1797,68 +1766,6 @@ export function WorkflowDialog({
                     )}
                   </form.Field>
                 </>
-              ) : null}
-              {request.kind === 'stash' ? (
-                <>
-                  <form.Field name="message">
-                    {(field) => (
-                      <Field id="workflow-stash-message" label="Message (optional)">
-                        <Input
-                          data-workflow-first-field=""
-                          value={field.state.value}
-                          onChange={(event) => {
-                            markEdited()
-                            field.handleChange(event.target.value)
-                          }}
-                          onBlur={field.handleBlur}
-                          placeholder="Work to return to"
-                        />
-                      </Field>
-                    )}
-                  </form.Field>
-                  <form.Field name="includeUntracked">
-                    {(field) => (
-                      <Checkbox
-                        id="workflow-include-untracked"
-                        label="Include untracked files"
-                        disabled={locked || finished}
-                        checked={field.state.value}
-                        onCheckedChange={(checked) => {
-                          markEdited()
-                          field.handleChange(checked)
-                        }}
-                      />
-                    )}
-                  </form.Field>
-                </>
-              ) : null}
-              {request.kind === 'commitAction' && request.commit.parents.length > 1 ? (
-                <form.Field name="mainline">
-                  {(field) => (
-                    <Field
-                      id="workflow-mainline"
-                      label="Mainline parent for this merge commit"
-                      required
-                    >
-                      <Select
-                        data-workflow-first-field=""
-                        disabled={locked || finished}
-                        value={field.state.value}
-                        onValueChange={(value) => {
-                          markEdited()
-                          field.handleChange(value)
-                        }}
-                        options={[
-                          { value: '', label: 'Choose the parent whose changes to keep' },
-                          ...request.commit.parents.map((oid, index) => ({
-                            value: String(index + 1),
-                            label: `Parent ${index + 1}: ${oid.slice(0, 12)}`,
-                          })),
-                        ]}
-                      />
-                    </Field>
-                  )}
-                </form.Field>
               ) : null}
               {/*
                 A recovered submission is described by its journal, not by a fresh preview.

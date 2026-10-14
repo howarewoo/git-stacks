@@ -7,8 +7,6 @@
   "exports": {
     "./capabilities": "./src/capabilities.ts",
     "./conflict": "./src/conflict.ts",
-    "./graph-preferences": "./src/graph-preferences.ts",
-    "./graph-workbench": "./src/graph-workbench.ts",
     "./guards": "./src/guards.ts",
     "./host": "./src/host.ts",
     "./inspection": "./src/inspection.ts",
@@ -16,7 +14,6 @@
     "./native-operation": "./src/native-operation.ts",
     "./operation-scope": "./src/operation-scope.ts",
     "./performance": "./src/performance.ts",
-    "./pr-graph": "./src/pr-graph.ts",
     "./pr-inbox": "./src/pr-inbox.ts",
     "./pr-index": "./src/pr-index.ts",
     "./pull-request-checks": "./src/pull-request-checks.ts",

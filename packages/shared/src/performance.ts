@@ -41,17 +41,21 @@ export const WORKTREE_READ_CONCURRENCY = 2
 /** Coalesce inventory topology refreshes after debounced worktree observations. */
 export const WORKTREE_REFRESH_SETTLE_MS = 400
 
-/** Graph discovery budgets; these do not change repository-list budgets. */
-export const GRAPH_OUTLINE_ROW_LIMIT = 64
-export const GRAPH_DETAIL_NODE_LIMIT = 32
-export const GRAPH_PATH_PAGE_SIZE = 20
-export const GRAPH_SELECTED_CACHE_LIMIT = 4
-export const GRAPH_INPUT_PAINT_BUDGET_MS = 250
-export const GRAPH_PROJECTION_LAYOUT_BUDGET_MS = 100
-export const GRAPH_SCALE_HEAP_BUDGET_BYTES = 32 * 1024 * 1024
-export const GRAPH_NAVIGATION_HEAP_BUDGET_BYTES = 8 * 1024 * 1024
-export const GRAPH_WARM_SAMPLE_COUNT = 20
-export const GRAPH_NAVIGATION_CYCLE_COUNT = 30
+/**
+ * Unchanged graph envelopes mapped onto the bottom-up lane/inspector surface.
+ * Complete inventory authority is never truncated by these mounted UI pages.
+ * Ordinary repository/file lists retain LIST_PAGE_SIZE independently.
+ */
+export const LANE_ROW_PAGE_SIZE = 64
+export const LANE_RELATIONSHIP_PAGE_SIZE = 32
+export const LANE_CONTINUATION_PAGE_SIZE = 20
+export const SELECTED_DETAIL_CACHE_LIMIT = 4
+export const LANE_INPUT_PAINT_BUDGET_MS = 250
+export const LANE_PROJECTION_LAYOUT_BUDGET_MS = 100
+export const LANE_SCALE_HEAP_BUDGET_BYTES = 32 * 1024 * 1024
+export const LANE_NAVIGATION_HEAP_BUDGET_BYTES = 8 * 1024 * 1024
+export const LANE_WARM_SAMPLE_COUNT = 20
+export const LANE_NAVIGATION_CYCLE_COUNT = 30
 
 /**
  * What a snapshot deliberately left out. The renderer states these instead of
@@ -82,7 +86,7 @@ export interface BenchmarkMeasurement {
 }
 
 export interface BenchmarkReport {
-  version: 1
+  version: 3
   node: string
   platform: string
   generatedAt: string

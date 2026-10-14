@@ -1,7 +1,6 @@
 import * as React from 'react'
 import { RefreshCw } from 'lucide-react'
 import { Button } from './ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 import { InlineAlert } from './ui/surface'
 import { OperationFacts, WorkflowSection, type ContextFact } from './workflow-composition'
 import { CopyableCommand } from './onboarding'
@@ -155,40 +154,5 @@ export function GitHubCliStatusSection({
         </Button>
       </div>
     </WorkflowSection>
-  )
-}
-
-/**
- * The sidebar status dialog uses the same measured facts and terminal guidance
- * as Settings, without repeating the session in a second status block.
- */
-export function GitHubCliStatusDialog({
-  onOpenChange,
-  onRefresh,
-  open,
-  refreshing,
-  status,
-}: {
-  onOpenChange: (open: boolean) => void
-  onRefresh: () => void
-  open: boolean
-  refreshing: boolean
-  status: GitHubCliStatus | null
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="workflow-dialog" aria-label="GitHub CLI status">
-        <DialogHeader>
-          <DialogTitle>GitHub CLI authentication</DialogTitle>
-          <DialogDescription>
-            Git Stacks reads GitHub through the GitHub CLI installed on this computer. This window
-            reports the session it found.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="dialog-form">
-          <GitHubCliStatusSection onRefresh={onRefresh} refreshing={refreshing} status={status} />
-        </div>
-      </DialogContent>
-    </Dialog>
   )
 }

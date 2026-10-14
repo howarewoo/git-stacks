@@ -1417,10 +1417,10 @@ function App() {
         'palette.open': 'search',
         'view.branches': 'branches',
         'view.pullRequests': 'pull-requests',
-        'view.prInbox': 'attention',
+        'view.attention': 'attention',
         'view.review': 'review',
         'stack.openPr': 'review',
-        'view.diagnostics': 'settings',
+        'view.settings': 'settings',
         'stack.restack': 'restack',
         'stack.sync': 'sync',
       }
@@ -2403,12 +2403,24 @@ function App() {
         onOpenChange={setSettingsOpen}
         desktop={desktop}
         cliStatus={cliStatus}
-        onReadCliStatus={() =>
+        onReadCliStatus={() => {
+          const host = configuredHost.current
+          const version = cliStatusVersion.current
           void desktop
             .githubCliStatus?.()
-            .then(setCliStatus)
-            .catch((value) => setError(String(value)))
-        }
+            .then((value) => {
+              if (
+                configuredHost.current === host &&
+                cliStatusVersion.current === version &&
+                value.host === host
+              )
+                setCliStatus(value)
+            })
+            .catch((value) => {
+              if (configuredHost.current === host && cliStatusVersion.current === version)
+                setError(String(value))
+            })
+        }}
         onSettingsChange={setSettings}
         shortcutBindings={bindings}
         onShortcutBindingsChange={setBindings}

@@ -1,70 +1,56 @@
-import { expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { settle } from './gallery'
 import { DEFAULT_SCENARIO, type ScenarioName } from '../fixtures/manifest'
+import { scenarios } from '../fixtures/scenarios'
 
+/** Current production surfaces; secondary Notifications remains a modal. */
 export const DESTINATIONS = [
-  { id: 'branches', label: 'Branches', heading: 'Branches' },
-  { id: 'stacks', label: 'Stacks', heading: 'Stacks' },
-  { id: 'history', label: 'History', heading: 'History' },
-  { id: 'changes', label: 'Working changes', heading: 'Working changes' },
+  { id: 'branches', label: 'Branches', heading: 'Branches & worktrees' },
   { id: 'pullRequests', label: 'Pull requests', heading: 'Pull requests' },
-  {
-    id: 'prInbox',
-    label: 'PR Inbox',
-    heading: 'PR Inbox',
-    // Captured from the scenario that owns the queue. Every other destination
-    // is captured from the generic connected repository, which holds pull
-    // request #41 and none of the rows the Inbox shows: a capture there would
-    // show a queue whose rows open a workspace that does not contain them.
-    scenario: 'pr-inbox-queue',
-  },
-  { id: 'review', label: 'Review', heading: 'Review' },
-  { id: 'stashes', label: 'Stashes', heading: 'Stashes' },
-  { id: 'diagnostics', label: 'Diagnostics', heading: 'Diagnostics' },
-  { id: 'notifications', label: 'GitHub Notifications', heading: 'GitHub Notifications' },
+  { id: 'attention', label: 'Needs attention', heading: 'Needs attention' },
+  { id: 'activity', label: 'Activity', heading: 'Activity' },
+  { id: 'review', label: 'Review', heading: 'Review', scenario: 'review-stacked' },
 ] as const
 
-export type DestinationId = (typeof DESTINATIONS)[number]['id']
+export type DestinationId = (typeof DESTINATIONS)[number]['id'] | 'notifications'
 
-/**
- * The scenario one destination's captures are taken from.
- *
- * Named per destination rather than shared by every capture, so each one is
- * taken from a fixture that can actually show it: the Inbox's rows open
- * repositories that the generic connected fixture does not hold.
- */
 export function destinationScenario(id: DestinationId): ScenarioName {
   const destination = DESTINATIONS.find((entry) => entry.id === id)
   return destination && 'scenario' in destination ? destination.scenario : DEFAULT_SCENARIO
 }
 
-/**
- * Returns the navigation button Locator for the given workspace destination.
- */
-function getDestinationNavItem(page: Page, id: DestinationId): Locator {
-  const dest = DESTINATIONS.find((d) => d.id === id)
-  if (!dest) {
-    throw new Error(`Unknown destination id: ${id}`)
-  }
-  // The nav item label is followed by an optional count span, so match by prefix regex.
-  return page
-    .getByRole('navigation', { name: 'Workspace destinations' })
-    .getByRole('button', { name: new RegExp(`^${dest.label}(\\s|$)`) })
-}
-
-/**
- * Navigates to one of the actual App destinations via user click,
- * asserts the destination h1 heading is visible, and waits for layout to settle.
- */
+/** Navigate through genuine sidebar/PR controls, never install a fixture-only route. */
 export async function switchDestination(page: Page, id: DestinationId): Promise<void> {
-  const dest = DESTINATIONS.find((d) => d.id === id)
-  if (!dest) {
-    throw new Error(`Unknown destination id: ${id}`)
+  const notifications = page.getByRole('dialog', { name: 'Optional Notifications', exact: true })
+  if (await notifications.isVisible()) {
+    await notifications.getByRole('button', { name: 'Close', exact: true }).click()
   }
-  const navItem = getDestinationNavItem(page, id)
-  await navItem.click()
-  await expect(page.getByRole('heading', { level: 1, name: dest.heading })).toBeVisible({
-    timeout: 10_000,
-  })
+  const sidebar = page.locator('.bw-sidebar')
+  if (id === 'notifications') {
+    await sidebar.getByRole('button', { name: 'Notifications', exact: true }).click()
+    await expect(notifications).toBeVisible()
+  } else {
+    const destination = DESTINATIONS.find((entry) => entry.id === id)!
+    await sidebar
+      .getByRole('button', {
+        name: new RegExp(`^${id === 'review' ? 'Pull requests' : destination.label}(\\s|$)`),
+      })
+      .click()
+    if (id === 'review') {
+      const scenario = await page.evaluate(() => window.fixture.scenario)
+      const source = scenarios[scenario as ScenarioName]?.snapshot
+      const selected = source?.branches.find((branch) => branch.name === source.currentBranch)?.pr
+      const number = selected?.number ?? source?.pullRequests[0]?.number
+      if (!number) throw new Error(`Scenario ${scenario} has no source-confirmed PR to review.`)
+      await page
+        .locator('.wb-pr-row')
+        .filter({ hasText: new RegExp(`^#${number}\\s`) })
+        .click()
+      await expect(page.locator('.review-view')).toBeVisible()
+    }
+    await expect(
+      page.getByRole('heading', { level: 1, name: destination.heading, exact: true }),
+    ).toBeVisible()
+  }
   await settle(page)
 }

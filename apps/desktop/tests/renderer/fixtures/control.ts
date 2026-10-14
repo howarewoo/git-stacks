@@ -7,11 +7,6 @@ import type {
   InspectionArgs,
 } from '@git-stacks/shared/inspection'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
-import {
-  parseGraphPreferences,
-  type GraphPreferences,
-  type GraphPreferencesResult,
-} from '@git-stacks/shared/graph-preferences'
 import { changeGraphIndex, graphDetail } from './graph'
 import type { UpdateStatus } from '@git-stacks/shared/update'
 import { REVIEW_STACK_METADATA_LIMIT, LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
@@ -51,11 +46,7 @@ import {
 } from '@git-stacks/shared/pr-inbox'
 import type { ReviewHeadline, ReviewViewedRecord } from '@git-stacks/shared/review'
 import { sameReviewComparison } from '@git-stacks/shared/review'
-import {
-  fileViewFixtures,
-  historyCommits,
-  longDiffText,
-} from '../../../src/renderer/src/design-system/data-fixtures'
+import { fileViewFixtures, historyCommits, longDiffText } from './data'
 import {
   insertSurgeryPreview,
   leasePreview,
@@ -344,22 +335,6 @@ export function installFixtureControl(options: {
       (declared?.host === host ? declared : null)
     )
   }
-  const graphPreferenceState = new Map<string, GraphPreferences>()
-  const graphPreferenceScope = (): string | null => {
-    const remote = active?.remoteUrl?.match(
-      /^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u,
-    )
-    const cli = statusForHost(remote?.[1].toLowerCase() ?? null)
-    const account = cli ? (cli.state === 'authenticated' ? cli.login : null) : servedPrIndex?.viewer
-    return active && remote && account
-      ? JSON.stringify({
-          repositoryPath: active.path,
-          host: remote[1].toLowerCase(),
-          repository: remote[2].toLowerCase(),
-          account: account.toLowerCase(),
-        })
-      : null
-  }
   const fixtureReviewOwner = (number: number) => {
     const remote = active?.remoteUrl?.match(
       /^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u,
@@ -386,10 +361,6 @@ export function installFixtureControl(options: {
   }
   const fixtureReviewKey = (number: number) =>
     JSON.stringify([active?.path, fixtureReviewOwner(number), number])
-  const graphPreferenceKey = (scope: string): string => {
-    const { host, repository, account } = JSON.parse(scope)
-    return JSON.stringify([host, repository, account])
-  }
   const captureOperationScope = () => {
     const host =
       active?.remoteUrl
@@ -401,41 +372,6 @@ export function installFixtureControl(options: {
       authority: cliAuthority(host, statusForHost(host)),
     }
   }
-  const matchesGraphPreferenceScope = (
-    actual: string | null,
-    expected: NonNullable<GraphPreferencesResult['scope']>,
-  ): boolean => {
-    if (!actual || !expected) return false
-    const scope = JSON.parse(actual)
-    return (
-      scope.repositoryPath === expected.repositoryPath &&
-      scope.host === expected.host &&
-      scope.repository === expected.repository &&
-      scope.account === expected.account
-    )
-  }
-  const seedGraphPreferences = (): void => {
-    const scope = graphPreferenceScope()
-    if (scope && scenario.graphPreferences && !graphPreferenceState.has(graphPreferenceKey(scope)))
-      graphPreferenceState.set(graphPreferenceKey(scope), { ...scenario.graphPreferences })
-  }
-  seedGraphPreferences()
-  const graphPreferenceResult = (scope: string | null): GraphPreferencesResult =>
-    scope
-      ? {
-          state: 'ready',
-          scope: JSON.parse(scope),
-          preferences: graphPreferenceState.has(graphPreferenceKey(scope))
-            ? { ...graphPreferenceState.get(graphPreferenceKey(scope))! }
-            : null,
-        }
-      : {
-          state: 'unavailable',
-          scope: null,
-          preferences: null,
-          message:
-            'Saved graph preferences require a known current repository and authenticated account.',
-        }
   startsPending = new Set(scenario.pending ?? [])
 
   /** One destination path as a copied terminal command writes it. */
@@ -846,12 +782,24 @@ export function installFixtureControl(options: {
         : undefined
       if (context.worktreeId && (!tree || tree.missing))
         throw new Error('Selected fixture directory was removed')
-      const source = scenario.snapshotsByPath?.[repo.registeredPaths[0]] ?? scenario.snapshot
+      const source =
+        scenario.snapshotsByPath?.[tree?.path ?? repo.registeredPaths[0]] ??
+        scenario.snapshotsByPath?.[repo.registeredPaths[0]] ??
+        scenario.snapshot
       if (!source) throw new Error('Selected fixture snapshot is unavailable')
+      const treeRef = tree ? repo.refs.find((ref) => ref.id === tree.refId) : undefined
       const captured = {
         ...structuredClone(source),
         path: tree?.path ?? repo.registeredPaths[0],
-        headOid: tree?.headOid ?? source.headOid,
+        headOid: tree ? tree.headOid : source.headOid,
+        currentBranch: tree
+          ? tree.detached
+            ? null
+            : (treeRef?.name.replace(/^refs\/heads\//, '') ?? null)
+          : source.currentBranch,
+        branches: tree
+          ? source.branches.map((branch) => ({ ...branch, current: branch.ref === treeRef?.name }))
+          : source.branches,
         pullRequests:
           operation === 'pullRequestLayer'
             ? source.pullRequests
@@ -946,34 +894,6 @@ export function installFixtureControl(options: {
       } finally {
         active = previous
       }
-    },
-    graphPreferences: () => {
-      record('graphPreferences', [])
-      return admittedAnswer('graphPreferences', () => graphPreferenceResult(graphPreferenceScope()))
-    },
-    saveGraphPreferences: (value, expectedScope) => {
-      record('saveGraphPreferences', [value, expectedScope])
-      const scope = graphPreferenceScope()
-      const admitted = matchesGraphPreferenceScope(scope, expectedScope)
-      const preferences = parseGraphPreferences(value)
-      return answer('saveGraphPreferences', () => {
-        if (!preferences) throw new Error('Invalid graph preferences.')
-        if (!admitted || !scope || scope !== graphPreferenceScope())
-          return graphPreferenceResult(null)
-        graphPreferenceState.set(graphPreferenceKey(scope), { ...preferences })
-        return graphPreferenceResult(scope)
-      })
-    },
-    resetGraphPreferences: (expectedScope) => {
-      record('resetGraphPreferences', [expectedScope])
-      const scope = graphPreferenceScope()
-      const admitted = matchesGraphPreferenceScope(scope, expectedScope)
-      return answer('resetGraphPreferences', () => {
-        if (!admitted || !scope || scope !== graphPreferenceScope())
-          return graphPreferenceResult(null)
-        graphPreferenceState.delete(graphPreferenceKey(scope))
-        return graphPreferenceResult(scope)
-      })
     },
     worktreeInventory: (request) => {
       record('worktreeInventory', [request])
@@ -2604,7 +2524,6 @@ export function installFixtureControl(options: {
               (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
           ),
         )
-      seedGraphPreferences()
       // This double is installed once and outlives any number of scenario
       // changes. Only the answers change here: the mounted window keeps the
       // repository it opened, its destination, and its reads in flight, so

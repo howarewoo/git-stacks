@@ -27,7 +27,7 @@ import {
   stashFixtures,
   stagedOnlyChanges,
   unstagedOnlyChanges,
-} from '../../../src/renderer/src/design-system/data-fixtures'
+} from './data'
 import { EMPTY_SNAPSHOT_LIMITS, LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 import { DEFAULT_SETTINGS } from '@git-stacks/shared/settings'
 import type { NotificationInbox } from '@git-stacks/shared/notifications'
@@ -53,11 +53,12 @@ import type { ScenarioName } from './manifest'
 import { reviewRail, stackMember } from './review'
 import { graphIndex, graphSnapshot } from './graph'
 import { snapshotInventory } from './inventory'
+import { cutoverReference, cutoverScale, cutoverInspection } from './cutover'
 
 /**
  * Deterministic snapshot data for every gallery scenario. Repository shapes are reused from
  * `tests/fixtures/workflow-scenarios.ts` and
- * `src/renderer/src/design-system/data-fixtures.ts`; only the ancestry and long-content
+ * `tests/renderer/fixtures/data.ts`; only the ancestry and long-content
  * fixtures are built here, because no existing fixture covers those shapes.
  */
 
@@ -1447,38 +1448,12 @@ function graphScenario(
 }
 
 export const scenarios: Record<ScenarioName, FixtureScenario> = {
+  'cutover-inspection': cutoverInspection(),
+  'cutover-reference': cutoverReference,
+  'cutover-250': cutoverScale(250),
+  'cutover-1000': cutoverScale(1000),
+  'cutover-5000': cutoverScale(5000),
   'graph-250': graphScenario('graph-250', 250),
-  'graph-preferences': {
-    ...graphScenario('graph-preferences', 250),
-    graphPreferences: {
-      preset: 'my-prs',
-      text: '#51',
-      author: '',
-      status: 'all',
-      collapse: false,
-      name: 'Authored chain',
-    },
-  },
-  'graph-preferences-held': {
-    ...graphScenario('graph-preferences-held', 250),
-    pending: ['graphPreferences'],
-    githubCliStatus: {
-      state: 'authenticated',
-      host: 'github.com',
-      login: graphIndex(250).viewer,
-      version: '2.62.0',
-      identity: 'cli:graph-preferences:1',
-      message: null,
-    },
-    graphPreferences: {
-      preset: 'my-prs',
-      text: '#51',
-      author: '',
-      status: 'all',
-      collapse: false,
-      name: 'Late saved view',
-    },
-  },
   'graph-1000': graphScenario('graph-1000', 1000),
   'graph-5000': graphScenario('graph-5000', 5000),
   'graph-partial': graphScenario('graph-partial', 1000, 'partial'),

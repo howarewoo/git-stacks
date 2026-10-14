@@ -33,7 +33,7 @@ test('a branch picker preserves the empty choice and Escape dismisses only its p
 test('checkbox labels and Space both update controlled state while mixed state stays distinct', async ({
   page,
 }) => {
-  await openGallery(page, { route: 'controls' })
+  await openGallery(page, { route: 'foundations' })
   const checkbox = page.getByRole('checkbox', { name: 'Include untracked files', exact: true })
   await expect(checkbox).toBeChecked()
   await page.getByText('Include untracked files', { exact: true }).click()
@@ -49,7 +49,7 @@ test('checkbox labels and Space both update controlled state while mixed state s
 test('a segmented filter cannot deselect its current choice and supports arrow navigation', async ({
   page,
 }) => {
-  await openGallery(page, { route: 'controls' })
+  await openGallery(page, { route: 'foundations' })
   const group = page.getByRole('group', { name: 'Repository filter', exact: true })
   const all = group.getByRole('button', { name: 'All', exact: true })
   await all.click()

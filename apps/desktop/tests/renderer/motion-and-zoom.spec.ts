@@ -58,15 +58,6 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
         })
         expect(hasHorizontalScroll).toBe(false)
 
-        if (destination.id === 'changes') {
-          await expect(
-            page.getByRole('heading', { level: 2, name: 'Staged', exact: true }),
-          ).toBeVisible()
-          await expect(
-            page.getByRole('heading', { level: 2, name: 'Unstaged', exact: true }),
-          ).toBeVisible()
-        }
-
         const box = await heading.boundingBox()
         expect(box).not.toBeNull()
         if (box) {

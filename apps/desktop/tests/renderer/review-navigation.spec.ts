@@ -9,7 +9,6 @@ import {
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { scenarios } from './fixtures/scenarios'
-import { graphIndex } from './fixtures/graph'
 
 async function refreshReviewChoices(page: Page, freshOriginalOwner = false) {
   // Credential retirement removes remote choices; re-entry requires a fresh repository read.
@@ -25,52 +24,6 @@ async function refreshReviewChoices(page: Page, freshOriginalOwner = false) {
   await expect(selected.or(choice)).toBeVisible()
   if (await choice.isVisible()) await choice.click()
   await expect(page.locator('.review-headline-title')).toContainText('#42')
-}
-
-for (const destination of ['pullRequests', 'stacks'] as const) {
-  test(`${destination} PR links open readonly Review rather than management`, async ({ page }) => {
-    await openGallery(page, { scenario: 'review-stacked' })
-    await switchDestination(page, destination)
-    if (destination === 'pullRequests') {
-      await page.getByPlaceholder('Filter view', { exact: true }).fill('cancellation')
-      const link = page.getByRole('button', { name: /^Open pull request #42 / })
-      await link.focus()
-      await link.press('Enter')
-    } else {
-      await page
-        .locator('[data-graph-outline-row]')
-        .filter({ hasText: '#42' })
-        .locator('button')
-        .first()
-        .click()
-      const reviewLink = page.getByRole('button', { name: 'Review #42', exact: true })
-      await reviewLink.focus()
-      await page.keyboard.press('Enter')
-    }
-    await expect(page.locator('.review-view')).toContainText(
-      '#42 Give the review workspace its own cancellation ids',
-    )
-    await expect(page.getByRole('dialog')).toHaveCount(0)
-    await expect(page.getByRole('group', { name: 'Synchronization actions' })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
-    await page
-      .getByRole('button', {
-        name: destination === 'pullRequests' ? 'Return to Pull requests' : 'Return to Stacks',
-        exact: true,
-      })
-      .click()
-    if (destination === 'pullRequests') {
-      await expect(page.getByPlaceholder('Filter view', { exact: true })).toHaveValue(
-        'cancellation',
-      )
-      await expect(page.getByRole('button', { name: /^Open pull request #42 / })).toBeFocused()
-    } else {
-      await expect(page.getByRole('button', { name: 'Review #42', exact: true })).toBeFocused()
-    }
-    const calls = await getDoubleCalls(page)
-    expect(calls.some((call) => call.call === 'reviewHeadline' && call.args[0] === 42)).toBe(true)
-    expect(calls.filter((call) => call.call === 'runAction')).toHaveLength(0)
-  })
 }
 
 test('history clearing explains unavailable owner proof while snapshots are already readable', async ({
@@ -233,152 +186,6 @@ test('history clear rejects stale-owner admission and held authority replacement
     }
   }, original.owner)
   expect(stale).toBe('The captured review owner changed before provider dispatch.')
-})
-
-test('qualified Review return retains graph filters, selected identity, camera and outline scroll without mutation', async ({
-  page,
-}) => {
-  await openGallery(page, { scenario: 'graph-250' })
-  await switchDestination(page, 'stacks')
-  const outline = page.getByRole('list', { name: 'Matching items and prerequisite context' })
-  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('Change')
-  await outline.evaluate((element) => {
-    element.scrollTop = 900
-  })
-  await expect.poll(() => outline.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
-  const row = page.locator('[data-graph-outline-row]').filter({ hasText: '#181 Change 181' })
-  // Search narrows the bounded outline to the actual remote PR, not a synthetic branch.
-  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('#181')
-  await row.locator('button').first().click()
-  await page.getByRole('button', { name: 'Zoom graph out' }).click()
-  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('Change')
-  await outline.evaluate((element) => {
-    element.scrollTop = 900
-  })
-  const beforeScroll = await outline.evaluate((element) => element.scrollTop)
-  await page.getByRole('button', { name: 'Review #181', exact: true }).click()
-  await expect(page.locator('.review-view')).toBeVisible()
-  await holdDoubleCall(page, 'prIndex')
-  await expect(page.locator('#workspace-view-heading-stacks')).toHaveCount(1)
-  await expect(page.locator('#workspace-view-heading-review')).toHaveCount(1)
-  const back = page.getByRole('button', { name: 'Return to Stacks', exact: true })
-  await back.focus()
-  await back.press('Enter')
-  await expect(page.getByRole('searchbox', { name: 'Search indexed PRs' })).toHaveValue('Change')
-  await expect(page.locator('.graph-camera')).toContainText('90%')
-  await expect(page.getByRole('button', { name: 'Review #181', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Review #181', exact: true })).toBeFocused()
-  await expect.poll(() => outline.evaluate((element) => element.scrollTop)).toBe(beforeScroll)
-  const calls = await getDoubleCalls(page)
-  expect(
-    calls.filter((call) =>
-      [
-        'runAction',
-        'reviewSubmit',
-        'reviewReply',
-        'reviewSetResolved',
-        'rerunPullRequestCheck',
-      ].includes(call.call),
-    ),
-  ).toEqual([])
-  await page.evaluate(() => window.fixture.unhold('prIndex'))
-  await releaseDoubleCalls(page, 'prIndex')
-})
-
-test('return restores dependent paths and selected context even when a background title leaves the filter', async ({
-  page,
-}) => {
-  await openGallery(page, { scenario: 'graph-250' })
-  await switchDestination(page, 'stacks')
-  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('#40')
-  await page
-    .locator('[data-graph-outline-row]')
-    .filter({ hasText: '#40 Change 40' })
-    .locator('button')
-    .first()
-    .click()
-  await page.getByText(/Dependent paths ·/).click()
-  await page.getByRole('searchbox', { name: 'Search dependent paths' }).fill('#181')
-  await page.getByRole('button', { name: '#181 Change 181', exact: true }).click()
-  const nodes = await page.locator('[data-graph-node]').allTextContents()
-  await page.getByRole('button', { name: 'Zoom graph out' }).click()
-  await page.getByRole('button', { name: 'Review #40', exact: true }).click()
-  await page.getByRole('button', { name: 'Return to Stacks', exact: true }).click()
-  await expect(page.getByRole('searchbox', { name: 'Search dependent paths' })).toHaveValue('#181')
-  expect(await page.locator('[data-graph-node]').allTextContents()).toEqual(nodes)
-  await expect(page.locator('.graph-camera')).toContainText('90%')
-  await page.getByRole('searchbox', { name: 'Search indexed PRs' }).fill('Change 40')
-  await page.getByRole('button', { name: 'Review #40', exact: true }).click()
-  const index = graphIndex(250)
-  await page.evaluate(
-    (value) =>
-      window.fixture.pushPrIndex({
-        ...value,
-        pullRequests: value.pullRequests.map((pr) =>
-          pr.number === 40 ? { ...pr, title: 'Retitled while Review was open' } : pr,
-        ),
-      }),
-    index,
-  )
-  await page.getByRole('button', { name: 'Return to Stacks', exact: true }).click()
-  await expect(page.getByRole('searchbox', { name: 'Search indexed PRs' })).toHaveValue('Change 40')
-  await expect(page.locator('[data-graph-outline-row]').filter({ hasText: '#40' })).toContainText(
-    'Selected · outside active filter',
-  )
-  await expect(page.getByRole('button', { name: 'Review #40', exact: true })).toBeVisible()
-  expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'runAction')).toEqual([])
-})
-
-test('account replacement retires the return context and display but keeps the original qualified journal for re-entry', async ({
-  page,
-}) => {
-  await openGallery(page, { scenario: 'review-stacked' })
-  await switchDestination(page, 'stacks')
-  await page
-    .locator('[data-graph-outline-row]')
-    .filter({ hasText: '#42' })
-    .locator('button')
-    .first()
-    .click()
-  await page.getByRole('button', { name: 'Review #42', exact: true }).click()
-  await page
-    .getByRole('button', { name: 'Comment on src/main/review.ts line 2 on the head', exact: true })
-    .click()
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
-  await page.getByRole('button', { name: 'Add pending comment', exact: true }).click()
-  await page
-    .getByRole('textbox', { name: 'Comment on src/main/review.ts:2 (head)', exact: true })
-    .fill('Original account unfinished text.')
-  await settle(page)
-  const original = await page.evaluate(async () => ({
-    cli: await window.desktop.githubCliStatus!(),
-    record: await window.desktop.reviewDrafts!(42),
-  }))
-  await page.evaluate(() =>
-    window.fixture.publishCliStatus({
-      state: 'authenticated',
-      host: 'github.com',
-      login: 'replacement-account',
-      version: '2.62.0',
-      identity: 'cli:github.com:replacement-account:2',
-      message: null,
-    }),
-  )
-  await expect(page.locator('.review-draft')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Return to Stacks', exact: true })).toHaveCount(0)
-  expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toBeNull()
-  await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
-  await refreshReviewChoices(page, true)
-  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
-  await expect(
-    page.getByRole('textbox', { name: 'Comment on src/main/review.ts:2 (head)', exact: true }),
-  ).toHaveValue('Original account unfinished text.')
-  expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toEqual(original.record)
-  expect(
-    (await getDoubleCalls(page)).filter((entry) =>
-      ['runAction', 'reviewSubmit', 'reviewReply', 'reviewSetResolved'].includes(entry.call),
-    ),
-  ).toEqual([])
 })
 
 test('a late account rejection preserves only the latest qualified unsent edits for their original owner', async ({
@@ -720,7 +527,7 @@ test('a failed conversation refresh keeps qualified authored words editable with
   const saves = (await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSetDrafts')
   expect(saves).toHaveLength(admittedBefore + 2)
   expect(saves.at(-1)?.args[1]).not.toBe(original!.updatedAt)
-  await switchDestination(page, 'stacks')
+  await switchDestination(page, 'branches')
   await switchDestination(page, 'review')
   await page.getByRole('button', { name: 'Conversation', exact: true }).click()
   await expect(editor).toHaveValue('These original-owner words remain editable while offline.')
@@ -781,7 +588,7 @@ test('historical saved draft edits persist their original comparison when live f
   await expect(page.getByRole('button', { name: 'Add pending comment', exact: true })).toHaveCount(
     0,
   )
-  await switchDestination(page, 'stacks')
+  await switchDestination(page, 'branches')
   await switchDestination(page, 'review')
   await page.getByRole('button', { name: 'Conversation', exact: true }).click()
   await expect(editor).toHaveValue('B retained despite unavailable live files.')
@@ -903,7 +710,7 @@ test('Review retains pane, file comparison and unsent composition across readonl
   const record = (await getDoubleCalls(page))
     .filter((call) => call.call === 'reviewSetDrafts')
     .at(-1)?.args[0]
-  await switchDestination(page, 'stacks')
+  await switchDestination(page, 'branches')
   await switchDestination(page, 'review')
   await expect(page.getByRole('button', { name: 'Conversation', exact: true })).toHaveAttribute(
     'aria-pressed',
@@ -914,49 +721,6 @@ test('Review retains pane, file comparison and unsent composition across readonl
   expect(calls.filter((call) => call.call === 'reviewSetDrafts').at(-1)?.args[0]).toEqual(record)
   expect(calls.filter((call) => call.call === 'runAction')).toEqual([])
   expect(calls.filter((call) => call.call === 'reviewSubmit')).toEqual([])
-})
-
-test('same-number cross-repository Inbox navigation retires held old Review reads', async ({
-  page,
-}) => {
-  await openGallery(page, { scenario: 'pr-inbox-same-number' })
-  await switchDestination(page, 'prInbox')
-  await page.getByRole('searchbox', { name: 'Search the queue', exact: true }).fill('#81')
-  await holdDoubleCall(page, 'reviewHeadline')
-  await page
-    .locator('.pr-inbox-item')
-    .filter({ hasText: 'Add a GitHub-derived PR Inbox' })
-    .getByRole('button')
-    .click()
-  await settle(page)
-  await switchDestination(page, 'prInbox')
-  const entry = page
-    .locator('.pr-inbox-item')
-    .filter({ hasText: 'Charge every native-stack page' })
-    .getByRole('button')
-  await entry.focus()
-  await entry.press('Enter')
-  await releaseDoubleCalls(page, 'reviewHeadline', 'newest')
-  await settle(page)
-  const review = page.locator('.review-view')
-  await expect(review).toContainText('#81 Charge every native-stack page to the refresh budget')
-  await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')
-  await expect(review).toContainText('checks failing')
-  await releaseDoubleCalls(page, 'reviewHeadline', 'oldest')
-  await settle(page)
-  await expect(review).toContainText('#81 Charge every native-stack page to the refresh budget')
-  await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')
-  await expect(review).toContainText('checks failing')
-  await page.getByRole('button', { name: 'Return to PR Inbox', exact: true }).click()
-  await expect(page.getByRole('searchbox', { name: 'Search the queue', exact: true })).toHaveValue(
-    '#81',
-  )
-  await expect(entry).toBeFocused()
-  const calls = await getDoubleCalls(page)
-  expect(
-    calls.filter((call) => call.call === 'reviewHeadline' && call.args[0] === 81).length,
-  ).toBeGreaterThanOrEqual(2)
-  expect(calls.filter((call) => call.call === 'runAction')).toHaveLength(0)
 })
 
 for (const entrypoint of ['inspector', 'palette']) {
@@ -994,36 +758,6 @@ for (const entrypoint of ['inspector', 'palette']) {
     expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
   })
 }
-
-test('a retained PR absent from the opened repository settles as unavailable rather than crashing', async ({
-  page,
-}) => {
-  await openGallery(page, { scenario: 'pr-inbox-queue' })
-  await switchDestination(page, 'prInbox')
-  await page
-    .locator('.pr-inbox-item')
-    .filter({ hasText: 'Add a GitHub-derived PR Inbox' })
-    .getByRole('button')
-    .click()
-  await expect(page.locator('.review-headline')).toContainText('#81 Add a GitHub-derived PR Inbox')
-  await page
-    .getByRole('button', {
-      name: 'design-system-specimens /Users/ada/Code/design-system-specimens',
-      exact: true,
-    })
-    .click()
-  await settle(page)
-  await holdDoubleCall(page, 'reviewHeadline')
-  await switchDestination(page, 'review')
-  const review = page.locator('.review-view')
-  await expect(review).toBeVisible()
-  await expect(page.locator('.review-headline')).toHaveCount(0)
-  await expect(review).not.toContainText('not in this fixture snapshot')
-  await releaseDoubleCalls(page, 'reviewHeadline')
-  await expect(review).toContainText('Pull request #81 is not in this fixture snapshot.')
-  await expect(page.locator('.review-headline')).toHaveCount(0)
-  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
-})
 
 test('full native rail supports nonadjacent readonly selection and preserves the original draft identity', async ({
   page,
@@ -1220,48 +954,6 @@ test('nullable partial enrichment retains independent native lifecycle and draft
   await expect(closedDraft).toContainText('Checks unknown')
   await expect(closedDraft).toContainText('Review unknown')
   await expect(closedDraft).toContainText('partial')
-})
-
-test('native-only Stacks keeps full readonly submitted membership with wrapping titles', async ({
-  page,
-}) => {
-  await openGallery(page, { scenario: 'review-long-stack', viewport: { width: 720, height: 470 } })
-  const snapshot = scenarios['review-long-stack'].snapshot
-  if (!snapshot) throw new Error('Native stack scenario requires a snapshot')
-  await page.evaluate(
-    (value) => {
-      if (!window.fixture) throw new Error('Fixture control unavailable')
-      window.fixture.pushSnapshot(value)
-    },
-    {
-      ...snapshot,
-      currentBranch: snapshot.defaultBranch,
-      branches: snapshot.branches.filter(
-        (branch) => !branch.remote && branch.name === snapshot.defaultBranch,
-      ),
-    },
-  )
-  await switchDestination(page, 'stacks')
-  const disclosure = page.locator('.graph-reconciliation')
-  await disclosure.locator(':scope > summary').click()
-  const submitted = disclosure.locator('.graph-submitted-order')
-  await expect(submitted.locator('li')).toHaveCount(40)
-  const selected = submitted.locator('button').filter({ hasText: '#136' })
-  await expect(selected).toContainText('Keep the selected late layer reachable')
-  expect(
-    await selected.evaluate((button) => {
-      const container = button.closest('.graph-reconciliation')
-      if (!container) throw new Error('Submitted disclosure unavailable')
-      return (
-        button.getBoundingClientRect().width <= container.clientWidth &&
-        container.scrollWidth <= container.clientWidth
-      )
-    }),
-  ).toBe(true)
-  await selected.click()
-  await expect(page.locator('.review-headline')).toContainText('#136')
-  await expect(page.getByRole('dialog')).toHaveCount(0)
-  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toEqual([])
 })
 
 test('remapped Review file and native-layer commands respect boundaries, editors, and readonly navigation', async ({

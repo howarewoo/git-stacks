@@ -58,7 +58,14 @@ import {
   type WorkbenchFact,
 } from './branch-workbench-model'
 import './branch-workbench.css'
-import { LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
+import {
+  LIST_PAGE_SIZE,
+  LANE_ROW_PAGE_SIZE,
+  LANE_RELATIONSHIP_PAGE_SIZE,
+  LANE_CONTINUATION_PAGE_SIZE,
+} from '@git-stacks/shared/performance'
+
+const relationshipChildPageSize = LANE_RELATIONSHIP_PAGE_SIZE - 2
 
 export interface BranchWorkbenchProps {
   snapshot: BranchWorkbenchSnapshot
@@ -187,6 +194,7 @@ function RelationshipLines({
     const body = svg.current?.parentElement
     if (!body) return
     const measure = () => {
+      const started = performance.now()
       const origin = body.getBoundingClientRect()
       const next: Record<string, { x: number; y: number }> = {}
       for (const row of body.querySelectorAll<HTMLElement>('[data-branch-id]')) {
@@ -199,6 +207,14 @@ function RelationshipLines({
           x: trackBox.left - origin.left + 14 + Number(row.dataset.lane) * step,
           y: box.top - origin.top + box.height / 2,
         }
+      }
+      const root = body.closest<HTMLElement>('[data-lane-projection-ms]')
+      if (root) {
+        const layoutMs = performance.now() - started
+        root.dataset.laneLayoutMs = String(layoutMs)
+        root.dataset.laneProjectionLayoutMs = String(
+          Number(root.dataset.laneProjectionMs) + layoutMs,
+        )
       }
       setPoints(next)
     }
@@ -305,6 +321,7 @@ export function BranchWorkbench({
   const [localTab, setLocalTab] = useState(viewState.tab)
   const tab = controlledInspector ? viewState.tab : localTab
   const [relationshipPage, setRelationshipPage] = useState(0)
+  const [continuationPage, setContinuationPage] = useState(0)
   const [worktreePage, setWorktreePage] = useState(0)
   const [repositoryPage, setRepositoryPage] = useState(() =>
     Math.max(
@@ -328,6 +345,17 @@ export function BranchWorkbench({
     return () => media.removeEventListener('change', update)
   }, [])
   const scroll = useRef<HTMLDivElement>(null)
+  const pendingRowFocus = useRef<string | null>(null)
+  useLayoutEffect(() => {
+    const id = pendingRowFocus.current
+    if (!id) return
+    const row = document.getElementById(`branch-${id}`)
+    if (row) {
+      pendingRowFocus.current = null
+      row.focus()
+      row.scrollIntoView({ block: 'nearest' })
+    }
+  }, [page, focusedBranchId])
   useLayoutEffect(() => {
     if (scroll.current) scroll.current.scrollTop = viewState.scroll
   }, [surface, repositoryId])
@@ -458,26 +486,37 @@ export function BranchWorkbench({
     selectedContext = selectedContext.parentId ? byId.get(selectedContext.parentId) : undefined
   }
   const allEntries = topology.filter((entry) => included.has(entry.branch.id))
-  const pageCount = Math.max(1, Math.ceil(allEntries.length / LIST_PAGE_SIZE))
+  const pageCount = Math.max(1, Math.ceil(allEntries.length / LANE_ROW_PAGE_SIZE))
   const currentPage = Math.min(page, pageCount - 1)
-  const entries = allEntries.slice(currentPage * LIST_PAGE_SIZE, (currentPage + 1) * LIST_PAGE_SIZE)
+  const entries = allEntries.slice(
+    currentPage * LANE_ROW_PAGE_SIZE,
+    (currentPage + 1) * LANE_ROW_PAGE_SIZE,
+  )
   const pageIds = new Set(entries.map((entry) => entry.branch.id))
-  const omittedEdges = entries.filter(
-    (entry) => entry.parentId && !pageIds.has(entry.parentId),
-  ).length
+  const offPageEntries = entries.filter((entry) => entry.parentId && !pageIds.has(entry.parentId))
+  const continuationPages = Math.max(
+    1,
+    Math.ceil(offPageEntries.length / LANE_CONTINUATION_PAGE_SIZE),
+  )
+  const currentContinuationPage = Math.min(continuationPage, continuationPages - 1)
   const mountedChildren = new Map<string, number>()
   for (const entry of entries)
     if (entry.parentId)
       mountedChildren.set(entry.parentId, (mountedChildren.get(entry.parentId) ?? 0) + 1)
   const selectedChildren = topology.filter((entry) => entry.parentId === selectedBranchId)
+  const currentRelationshipPage = Math.min(
+    relationshipPage,
+    Math.max(0, Math.ceil(selectedChildren.length / relationshipChildPageSize) - 1),
+  )
   const oldSelection = useRef(selectedBranchId)
   useEffect(() => {
     if (oldSelection.current === selectedBranchId) return
     oldSelection.current = selectedBranchId
     const index = allEntries.findIndex((entry) => entry.branch.id === selectedBranchId)
-    if (index >= 0) setPage(Math.floor(index / LIST_PAGE_SIZE))
+    if (index >= 0) setPage(Math.floor(index / LANE_ROW_PAGE_SIZE))
     setChecked(new Set())
     setRelationshipPage(0)
+    setContinuationPage(0)
     setWorktreePage(0)
     setInspectorOpen(Boolean(selectedBranchId))
   }, [selectedBranchId, allEntries])
@@ -854,7 +893,7 @@ export function BranchWorkbench({
                           (entry) => entry.branch.id === selected.id,
                         )
                         if (index >= 0) {
-                          setPage(Math.floor(index / LIST_PAGE_SIZE))
+                          setPage(Math.floor(index / LANE_ROW_PAGE_SIZE))
                           setChecked(new Set())
                         }
                         document
@@ -868,8 +907,8 @@ export function BranchWorkbench({
                   </div>
                   {selectedChildren
                     .slice(
-                      relationshipPage * LIST_PAGE_SIZE,
-                      (relationshipPage + 1) * LIST_PAGE_SIZE,
+                      currentRelationshipPage * relationshipChildPageSize,
+                      (currentRelationshipPage + 1) * relationshipChildPageSize,
                     )
                     .map(({ branch }) => (
                       <Button
@@ -889,12 +928,12 @@ export function BranchWorkbench({
                         </small>
                       </Button>
                     ))}
-                  {selectedChildren.length > LIST_PAGE_SIZE ? (
+                  {selectedChildren.length > relationshipChildPageSize ? (
                     <div className="bw-between">
                       <Button
                         size="xs"
-                        disabled={!relationshipPage}
-                        onClick={() => setRelationshipPage(relationshipPage - 1)}
+                        disabled={!currentRelationshipPage}
+                        onClick={() => setRelationshipPage(currentRelationshipPage - 1)}
                       >
                         Previous descendants
                       </Button>
@@ -902,9 +941,10 @@ export function BranchWorkbench({
                       <Button
                         size="xs"
                         disabled={
-                          (relationshipPage + 1) * LIST_PAGE_SIZE >= selectedChildren.length
+                          (currentRelationshipPage + 1) * relationshipChildPageSize >=
+                          selectedChildren.length
                         }
-                        onClick={() => setRelationshipPage(relationshipPage + 1)}
+                        onClick={() => setRelationshipPage(currentRelationshipPage + 1)}
                       >
                         Next descendants
                       </Button>
@@ -948,11 +988,7 @@ export function BranchWorkbench({
       </Tabs>
     ) : null
   return (
-    <div
-      className="bw-app"
-      data-density={displayDensity}
-      data-lane-projection-layout-ms={layout.elapsed}
-    >
+    <div className="bw-app" data-density={displayDensity} data-lane-projection-ms={layout.elapsed}>
       <header className="bw-topbar">
         <div className="bw-brand">
           <span>
@@ -1319,11 +1355,49 @@ export function BranchWorkbench({
                   another object explicitly; no similarly named object is substituted.
                 </p>
               ) : null}
-              {omittedEdges ? (
-                <p role="status">
-                  {omittedEdges} parent connections continue on another page; no complete edge is
-                  drawn.
-                </p>
+              {offPageEntries.length ? (
+                <section aria-label="Off-page parent continuations">
+                  <p role="status">
+                    {offPageEntries.length} parent connections continue on another page; no complete
+                    edge is drawn across an unmounted endpoint.
+                  </p>
+                  {offPageEntries
+                    .slice(
+                      currentContinuationPage * LANE_CONTINUATION_PAGE_SIZE,
+                      (currentContinuationPage + 1) * LANE_CONTINUATION_PAGE_SIZE,
+                    )
+                    .map((entry) => (
+                      <Button
+                        key={entry.branch.id}
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => inspect(entry.parentId!)}
+                      >
+                        Locate parent {byId.get(entry.parentId!)?.branch.ref} of {entry.branch.ref}
+                      </Button>
+                    ))}
+                  {continuationPages > 1 ? (
+                    <div className="bw-between">
+                      <Button
+                        size="xs"
+                        disabled={!currentContinuationPage}
+                        onClick={() => setContinuationPage(currentContinuationPage - 1)}
+                      >
+                        Previous continuations
+                      </Button>
+                      <span>
+                        Continuations {currentContinuationPage + 1} / {continuationPages}
+                      </span>
+                      <Button
+                        size="xs"
+                        disabled={currentContinuationPage + 1 >= continuationPages}
+                        onClick={() => setContinuationPage(currentContinuationPage + 1)}
+                      >
+                        Next continuations
+                      </Button>
+                    </div>
+                  ) : null}
+                </section>
               ) : null}
               <div className="bw-lane-guide">
                 <GitBranch />
@@ -1389,21 +1463,23 @@ export function BranchWorkbench({
                             event.target instanceof HTMLElement &&
                             event.target.closest('.bw-branch-name, .bw-subtitle')
                           if (event.target !== event.currentTarget && !identityControl) return
-                          const index = entries.indexOf(entry)
+                          const index = allEntries.indexOf(entry)
                           const next =
                             event.key === 'ArrowDown'
-                              ? Math.min(index + 1, entries.length - 1)
+                              ? Math.min(index + 1, allEntries.length - 1)
                               : event.key === 'ArrowUp'
                                 ? Math.max(index - 1, 0)
                                 : event.key === 'Home'
                                   ? 0
                                   : event.key === 'End'
-                                    ? entries.length - 1
+                                    ? allEntries.length - 1
                                     : null
                           if (next !== null) {
                             event.preventDefault()
-                            setFocusedBranchId(entries[next].branch.id)
-                            document.getElementById(`branch-${entries[next].branch.id}`)?.focus()
+                            const id = allEntries[next].branch.id
+                            pendingRowFocus.current = id
+                            setFocusedBranchId(id)
+                            setPage(Math.floor(next / LANE_ROW_PAGE_SIZE))
                           } else if (
                             event.target === event.currentTarget &&
                             (event.key === 'Enter' || event.key === ' ')

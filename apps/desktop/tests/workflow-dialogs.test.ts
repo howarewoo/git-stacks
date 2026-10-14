@@ -37,7 +37,6 @@ import {
   featureBranch,
   followUpBranch,
   leasePreview,
-  mergeCommit,
   mergePreview,
   openPullRequest,
   pausedRestackProgress,
@@ -70,8 +69,6 @@ function guard(overrides: Partial<WorkflowGuardInput> = {}): WorkflowGuardInput 
     expectedOidMissing: false,
     requiresName: true,
     name: 'feature/renamed',
-    requiresMainline: false,
-    mainline: '',
     requiresMergeMethod: false,
     mergeMethod: '',
     untitledBranches: [],
@@ -349,15 +346,7 @@ test('restack, publish, and merge keep their own requirements', () => {
   assert.equal(workflowBlocker({ ...merge, mergeMethod: 'squash' }), null)
 })
 
-test('a merge commit and a pull request keep their own requirements', () => {
-  const commit = guard({
-    kind: 'commitAction',
-    requiresName: false,
-    requiresMainline: true,
-  })
-  assert.equal(workflowBlocker(commit)?.code, 'mainline-required')
-  assert.equal(workflowBlocker({ ...commit, mainline: '2' }), null)
-
+test('pull request editing refuses absent permissions and empty titles', () => {
   const pr = guard({ kind: 'pr', requiresName: false, pullRequestTitle: 'Cover checkout' })
   assert.equal(workflowBlocker(pr), null)
   assert.equal(
@@ -427,30 +416,12 @@ test('the representative flows produce their exact reviewed payloads', () => {
       { type: 'pull', strategy: 'rebase' },
     ],
     [
-      { kind: 'stash', message: '  work in progress  ', includeUntracked: true },
-      {
-        type: 'stash',
-        message: 'work in progress',
-        includeUntracked: true,
-      },
-    ],
-    [
       { kind: 'merge', ref: 'refs/heads/feature/checkout-tests' },
       {
         type: 'merge',
         ref: 'refs/heads/feature/checkout-tests',
         expectedHead: '2222222222222222222222222222222222222222',
         expectedHeadRef: 'refs/heads/feature/checkout',
-      },
-    ],
-    [
-      { kind: 'commitAction', commit: mergeCommit, mode: 'revert', mainline: '2' },
-      {
-        type: 'revert',
-        oid: '4444444444444444444444444444444444444444',
-        expectedHead: '2222222222222222222222222222222222222222',
-        expectedHeadRef: 'refs/heads/feature/checkout',
-        mainline: 2,
       },
     ],
     [
@@ -608,16 +579,6 @@ test('a blocked preview and a missing captured HEAD never dispatch a mutation', 
     workflowAction(
       { kind: 'merge', ref: 'refs/heads/feature/checkout-tests' },
       { headOid: null, currentBranch: null },
-    ),
-    null,
-  )
-  assert.equal(
-    workflowAction(
-      { kind: 'commitAction', commit: mergeCommit, mode: 'cherryPick', mainline: '' },
-      {
-        headOid: null,
-        currentBranch: 'feature/checkout',
-      },
     ),
     null,
   )

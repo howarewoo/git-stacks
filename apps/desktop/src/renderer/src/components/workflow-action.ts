@@ -1,6 +1,5 @@
 import type {
   Branch,
-  Commit,
   MergeAction,
   MergeMethod,
   GitAction,
@@ -25,9 +24,7 @@ export type WorkflowActionInput =
   | { kind: 'upstream'; branch: Branch; name: string }
   | { kind: 'pull'; strategy: 'ff-only' | 'merge' | 'rebase' }
   | { kind: 'merge'; ref: string }
-  | { kind: 'stash'; message: string; includeUntracked: boolean }
   | { kind: 'forcePush'; push: PushPreview | null; confirmation: string }
-  | { kind: 'commitAction'; commit: Commit; mode: 'cherryPick' | 'revert'; mainline: string }
   | { kind: 'confirm'; action: GitAction; label: string }
   | { kind: 'pr'; number: number; title: string; body: string; draft: boolean }
   | {
@@ -100,12 +97,8 @@ export function workflowActionLabel(input: WorkflowActionInput): string {
       return 'Pull changes'
     case 'merge':
       return 'Merge branch'
-    case 'stash':
-      return 'Stash changes'
     case 'forcePush':
       return 'Force push with lease'
-    case 'commitAction':
-      return input.mode === 'cherryPick' ? 'Cherry-pick commit' : 'Revert commit'
     case 'stack':
       return stackActionLabel(input.operation)
     case 'submit':
@@ -144,24 +137,9 @@ export function workflowAction(
         expectedHead: context.headOid,
         expectedHeadRef: expectedHeadRef(context.currentBranch),
       }
-    case 'stash':
-      return {
-        type: 'stash',
-        message: input.message.trim(),
-        includeUntracked: input.includeUntracked,
-      }
     case 'forcePush':
       if (!input.push || input.confirmation !== input.push.branch) return null
       return { type: 'forcePush', preview: input.push }
-    case 'commitAction':
-      if (!context.headOid) return null
-      return {
-        type: input.mode,
-        oid: input.commit.oid,
-        expectedHead: context.headOid,
-        expectedHeadRef: expectedHeadRef(context.currentBranch),
-        mainline: input.mainline ? Number(input.mainline) : null,
-      }
     case 'confirm':
       return input.action
     case 'pr':

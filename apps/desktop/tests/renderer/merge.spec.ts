@@ -334,7 +334,7 @@ test.describe('Persistent remote recovery in the actual App', () => {
     })
     const recovery = page.getByRole('region', { name: 'Remote operation recovery' })
     await expect(recovery).toContainText('Captured remote update was refused')
-    for (const destination of ['changes', 'review', 'history', 'branches'] as const) {
+    for (const destination of ['attention', 'review', 'activity', 'branches'] as const) {
       await switchDestination(page, destination)
       await expect(recovery).toContainText('Captured push feature/checkout-tests')
       await expect(
@@ -355,7 +355,7 @@ test.describe('Persistent remote recovery in the actual App', () => {
     ).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await recovery.getByRole('button', { name: 'Review publication recovery' }).click()
     await expect(page.getByRole('dialog')).toContainText('Captured push feature/checkout-tests')
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
@@ -432,7 +432,7 @@ test.describe('Persistent remote recovery in the actual App', () => {
     await expect(recovery).toContainText('Current captured merge')
     await expect(recovery).not.toContainText('Retired merge must not appear')
     await expect(recovery).not.toContainText('Retired result')
-    for (const destination of ['changes', 'review', 'history', 'branches'] as const) {
+    for (const destination of ['attention', 'review', 'activity', 'branches'] as const) {
       await switchDestination(page, destination)
       await expect(recovery).toContainText('Current captured merge')
       await expect(recovery).not.toContainText('Retired result')
@@ -542,7 +542,7 @@ test.describe('Persistent remote recovery in the actual App', () => {
     await expect(recovery).toContainText('Current captured merge')
     await expect(recovery).not.toContainText('Retired merge must not appear')
     await expect(recovery).not.toContainText('Retired result')
-    for (const destination of ['changes', 'review', 'history', 'branches'] as const) {
+    for (const destination of ['attention', 'review', 'activity', 'branches'] as const) {
       await switchDestination(page, destination)
       await expect(recovery).toContainText('Current captured merge')
       await expect(recovery).not.toContainText('Retired result')
