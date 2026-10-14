@@ -1529,9 +1529,14 @@ function App() {
       }
       if (id === 'search.focus') {
         event.preventDefault()
-        document
-          .querySelector<HTMLInputElement>('[aria-label="Filter branches by branch, PR, or path"]')
-          ?.focus()
+        if (surface === 'attention') attentionSearch.current?.focus()
+        else {
+          document
+            .querySelector<HTMLInputElement>(
+              '[aria-label="Filter branches by branch, PR, or path"]',
+            )
+            ?.focus()
+        }
       }
     }
     window.addEventListener('keydown', keydown)

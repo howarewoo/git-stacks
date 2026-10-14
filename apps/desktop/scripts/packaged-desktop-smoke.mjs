@@ -5,9 +5,9 @@
  * Launches the real electron-builder output against a disposable environment (temporary Chromium
  * user data, temporary Git and gh configuration, temporary Git repository with a local bare
  * "remote") and drives the shipped renderer UI: packaging, window chrome, real 200% zoom,
- * sandbox/preload wiring, external-link guarding, and representative Git operations (fetch, branch
- * creation, stage/commit, stash/pop, merge-conflict resolution, merge abort). Every Git assertion
- * is checked against the real `git` binary on the disposable repository, never the app snapshot.
+ * sandbox/preload wiring, external-link guarding, captured Fetch, linked worktree creation,
+ * and read-only Unicode file inspection. Every Git assertion is checked against the real `git`
+ * binary on the disposable repository, never the app snapshot.
  *
  * The IPC boundary is exercised the same way: a second window this smoke owns, and the shipped
  * window's own main frame at a foreign origin, both send real requests through the shipped preload
@@ -1832,8 +1832,8 @@ async function run(options) {
       // main process only through callable bridge members, with no Node globals
       // and no direct module access. Which members the bridge offers is the
       // product's business, not a fixed inventory to re-pin; that the bridge
-      // actually works is proved by the repository, commit, and conflict steps
-      // below, which all drive it and assert their Git effects.
+      // actually works is proved by the captured Fetch, linked worktree and
+      // read-only inspection steps below, which assert real repository state.
       for (const [key, value] of Object.entries(renderer.types)) {
         assertEqual(value, 'function', `window.desktop.${key} is not callable`)
       }

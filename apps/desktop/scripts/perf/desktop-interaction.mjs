@@ -169,8 +169,12 @@ export async function measureDesktop(repoRoot, fixture, options = {}) {
   const mainPort = options.observe ? await freePort() : null
   mkdirSync(join(userData, 'gh'), { recursive: true })
   writeFileSync(join(userData, 'gitconfig'), '')
+  // The production series never adopts a development renderer, host session,
+  // credential, trust override or injected Node/Electron/library runtime.
+  const unsafeInherited =
+    /^(GIT_|GH_|GITHUB_|GIT_STACKS_|SSH_|NODE_|ELECTRON_|LD_|DYLD_)|^SSLKEYLOGFILE$|^KRB5CCNAME$|(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY|SESSION)/iu
   const ownedEnvironment = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !/^(?:GIT_|GH_|GITHUB_|SSH_)/.test(key)),
+    Object.entries(process.env).filter(([key]) => !unsafeInherited.test(key)),
   )
   const started = performance.now()
   const branchCount = options.branchCount ?? 3001
@@ -190,7 +194,6 @@ export async function measureDesktop(repoRoot, fixture, options = {}) {
       stdio: ['ignore', 'ignore', 'pipe'],
       env: {
         ...ownedEnvironment,
-        ELECTRON_RENDERER_URL: process.env.ELECTRON_RENDERER_URL ?? '',
         GIT_STACKS_REPO: fixture,
         GIT_STACKS_USER_DATA: userData,
         GIT_CONFIG_NOSYSTEM: '1',
@@ -209,14 +212,7 @@ export async function measureDesktop(repoRoot, fixture, options = {}) {
   let client
   let mainClient
   try {
-    client = await connect(
-      await pageTarget(
-        port,
-        child,
-        () => errors,
-        process.env.ELECTRON_RENDERER_URL || 'app://git-stacks',
-      ),
-    )
+    client = await connect(await pageTarget(port, child, () => errors, 'app://git-stacks'))
     await until(
       client,
       `document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('${branchCount} matches · 0 context · ${Math.max(0, branchCount - rowLimit)} unmounted') && document.querySelectorAll('.bw-lane-row').length === ${Math.min(branchCount, rowLimit)}`,

@@ -23,6 +23,14 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await search.getByRole('combobox').focus()
     await page.keyboard.press('Escape')
     await expect(search).not.toBeVisible()
+    await switchDestination(page, 'attention')
+    const attentionNavigation = page
+      .getByRole('complementary', { name: 'Workspace navigation' })
+      .getByRole('button', { name: /^Needs attention/ })
+    await attentionNavigation.focus()
+    await page.keyboard.press('/')
+    await expect(page.getByRole('textbox', { name: 'Search needs attention' })).toBeFocused()
+    expect(await getDispatchedActions(page)).toEqual([])
   })
 
   test('sidebar destinations are keyboard activatable without a Git mutation', async ({ page }) => {

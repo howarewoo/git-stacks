@@ -59,8 +59,22 @@ for (const viewport of [
             return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
           }),
         )
-        const rail = viewport.width < 1200 ? 188 : viewport.width <= 1350 ? 204 : 224
-        const inspector = viewport.width < 1200 ? 324 : viewport.width <= 1350 ? 348 : 376
+        const rail =
+          viewport.width < 1200
+            ? 188
+            : viewport.width <= 1350
+              ? 204
+              : viewport.width >= 1680
+                ? 236
+                : 224
+        const inspector =
+          viewport.width < 1200
+            ? 324
+            : viewport.width <= 1350
+              ? 348
+              : viewport.width >= 1680
+                ? 408
+                : 376
         const gutters = viewport.width < 1200 ? 32 : 48
         expect(geometry.map((panel) => panel.width)).toEqual([
           rail,

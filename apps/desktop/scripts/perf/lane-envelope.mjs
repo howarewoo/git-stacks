@@ -23,8 +23,9 @@ export async function runLaneEnvelope(repoRoot, workspace, out) {
   const source = await sourceProvenance(repoRoot)
   for (const objects of [250, 1000, 5000]) {
     const fixture = buildLaneFixture(workspace, objects)
+    const branchCount = objects + 3
     const result = await measureDesktop(repoRoot, fixture, {
-      branchCount: objects + 3,
+      branchCount,
       target: `feature/lane-${objects - 1}`,
       rowLimit: LANE_ROW_PAGE_SIZE,
       observe: async ({ client, evaluate, until, click, readCounts }) => {
@@ -38,7 +39,7 @@ export async function runLaneEnvelope(repoRoot, workspace, out) {
         const initial = (await client.send('Runtime.getHeapUsage')).usedSize
         for (let sample = 0; sample < LANE_WARM_SAMPLE_COUNT; sample++) {
           const value = sample % 2 ? `feature/lane-${objects - 1}` : ''
-          const matches = value ? 1 : objects + 2
+          const matches = value ? 1 : branchCount
           await evaluate(
             client,
             `globalThis.__lanePaint = new Promise((resolve, reject) => {
