@@ -1,5 +1,5 @@
 import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
-import { snapshotInventory } from './inventory'
+import { inventoryFixture, snapshotInventory } from './inventory'
 import type {
   InspectionResult,
   InspectionOperation,
@@ -279,6 +279,7 @@ interface WaitingCall {
  */
 export function installFixtureControl(options: {
   scenario: string
+  inventoryConsumer?: () => boolean
   onScenarioChange: (name: string) => void
   reviewCache: FixtureControl['reviewCache']
 }): FixtureControl {
@@ -321,14 +322,11 @@ export function installFixtureControl(options: {
   )
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
+  let inventoryConsumer = options.inventoryConsumer?.() ?? false
+  let retainedConsumerInventory: WorktreeInventory | null = null
   let servedInventory =
     scenario.inventory ??
-    snapshotInventory(
-      Object.values(
-        scenario.snapshotsByPath ??
-          (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
-      ),
-    )
+    (inventoryConsumer ? inventoryFixture() : snapshotInventory([...snapshotSources.values()]))
   const inventoryListeners = new Set<(value: WorktreeInventory) => void>()
   let active: RepositorySnapshot | null = scenario.snapshot
   const cliStatuses = new Map<string, GitHubCliStatus>()
@@ -911,6 +909,16 @@ export function installFixtureControl(options: {
     },
     worktreeInventory: (request) => {
       record('worktreeInventory', [request])
+      const consumer = options.inventoryConsumer?.() ?? false
+      if (!scenario.inventory && consumer !== inventoryConsumer) {
+        const generation = servedInventory.generation + 1
+        if (inventoryConsumer) retainedConsumerInventory = servedInventory
+        servedInventory = consumer
+          ? (retainedConsumerInventory ?? inventoryFixture())
+          : snapshotInventory([...snapshotSources.values()].map(answeredForServedCredential))
+        servedInventory = { ...servedInventory, generation }
+        inventoryConsumer = consumer
+      }
       const admitted = structuredClone(servedInventory)
       return answer('worktreeInventory', () => admitted)
     },
@@ -961,7 +969,10 @@ export function installFixtureControl(options: {
     },
     openRepository: (path) => {
       record('openRepository', path === undefined ? [] : [path])
-      const requested = path === undefined ? undefined : scenario.snapshotsByPath?.[path]
+      const requested =
+        path === undefined
+          ? active
+          : (snapshotSources.get(path) ?? scenario.snapshotsByPath?.[path])
       const opened = requested ?? scenario.snapshot
       if (!opened) throw new Error('No repository is open in this fixture.')
       // What this read answers is settled when it is admitted, under the
@@ -2536,14 +2547,11 @@ export function installFixtureControl(options: {
       ))
         snapshotSources.set(path, value)
       servedPrIndex = scenario.prIndex
+      inventoryConsumer = options.inventoryConsumer?.() ?? false
+      retainedConsumerInventory = null
       servedInventory =
         scenario.inventory ??
-        snapshotInventory(
-          Object.values(
-            scenario.snapshotsByPath ??
-              (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
-          ),
-        )
+        (inventoryConsumer ? inventoryFixture() : snapshotInventory([...snapshotSources.values()]))
       // This double is installed once and outlives any number of scenario
       // changes. Only the answers change here: the mounted window keeps the
       // repository it opened, its destination, and its reads in flight, so
@@ -2590,7 +2598,15 @@ export function installFixtureControl(options: {
       // session becomes the new one, so a read asked for afterwards answers as
       // the replacement rather than as the session it replaced, and the window
       // is told about it without having asked.
+      const previous = statusForHost(status.host)
       cliStatuses.set(status.host, status)
+      if (!scenario.inventory && !inventoryConsumer && previous?.identity !== status.identity) {
+        servedInventory = {
+          ...snapshotInventory([...snapshotSources.values()].map(answeredForServedCredential)),
+          generation: servedInventory.generation + 1,
+        }
+        for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+      }
       for (const listener of cliStatusListeners) listener(status)
     },
     hold(call) {
@@ -2672,7 +2688,7 @@ export function installFixtureControl(options: {
           .toLowerCase() ?? null
       const owner = statusForHost(host)
       if (owner) publishedSnapshotOwners.set(value, owner)
-      if (!scenario.inventory) {
+      if (!scenario.inventory && !inventoryConsumer) {
         if (
           !snapshotSources.has(value.path) &&
           snapshotSources.size === 1 &&

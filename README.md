@@ -2180,9 +2180,15 @@ original authored text. Attention/Review return restores the originating surface
 Global search is independent of local lane filters and includes full path/ref-kind
 context, debounce, bounded pages, keyboard selection and explicit read errors.
 Branch-only selection resets the directory and tab atomically; worktree selection
-retains only the exact chosen directory. Pending Attention→Review navigation is
-generation-fenced and retired by a newer explicit destination. The single shortcut
-dispatcher observes the existing confirmed settings query, including live remaps.
+retains only the exact chosen directory. Pending Attention→Review navigation and
+delayed explicit folder registration activation are fenced by newer inspection
+navigation; registration itself still completes and must be confirmed by inventory.
+Same-owner pending repository reads keep their prior qualified inspection answer;
+API or provider-owner replacement cannot reuse it. Qualified Review stays mounted
+across sidebar destinations, retaining Code scroll, selected lines and original
+unsent composition. Explicit narrow inspector dismissal survives readonly updates.
+The single shortcut dispatcher observes the existing confirmed settings query,
+including live remaps.
 
 Returning from Review restores focus to the original qualified branch or source
 entry as well as its controlled filters, page and scroll. If the selected branch
@@ -2269,10 +2275,15 @@ stays separately disclosed as an original authored draft, not claimed as current
 metadata or sent outside the fresh offered scope. Provider-owner retirement cannot
 silently move that draft to a replacement principal. Fresh PR metadata forms use only
 their own provider snapshot/generation, never an unrelated spent local Git approval.
-Captured progress reads and events use the minted `OperationCapture.scope`, not a UI
-cache identity. The persistent Workbench shell retains original-owner publication and
-merge subscriptions while a modal is hidden; foreign scope events cannot replace its
-immutable saved choices, and status inspection never dispatches Resume automatically.
+Captured progress reads and events use the minted `OperationCapture.scope` through
+its original qualified inspection API, not a UI cache identity or ambient journal
+reader. The persistent Workbench shell owns publication/merge subscriptions, initial
+reads and query observers while a modal is hidden. Dialog teardown cannot remove
+those outcomes; an unavailable later read keeps the last confirmed result visible.
+Foreign scope events cannot replace immutable saved choices, and status inspection
+never dispatches Resume automatically. Attention full-list saved-filter writes wait
+for the current store reread, even when an older successful answer is cached, and
+remain single-flight so a stale list cannot erase independently authored filters.
 Publication review discloses full local/base/remote-lease OIDs, push effects and original
 native membership/resulting order. Reviewed merge discloses its full base-first
 downstack and the membership included in the selected request.

@@ -41,7 +41,8 @@ for (const viewport of [
         document.documentElement.dataset.gsTheme = selectedTheme
       }, theme)
       await expect(page.locator('html')).toHaveAttribute('data-gs-theme', theme)
-      await expect(page.locator('.bw-main')).toHaveCSS(
+      const main = page.getByRole('main', { name: 'Branch workbench', exact: true })
+      await expect(main).toHaveCSS(
         'background-color',
         theme === 'dark' ? 'rgb(26, 31, 39)' : 'rgb(255, 255, 255)',
       )
@@ -49,15 +50,17 @@ for (const viewport of [
       if (viewport.width < 1040) {
         await expect(page.getByRole('dialog', { name: 'Selected branch details' })).toBeVisible()
       }
-      await expect(page.locator('.bw-main h1')).toHaveText('Branches & worktrees')
+      await expect(main.getByRole('heading', { level: 1 })).toHaveText('Branches & worktrees')
       await expect(page.locator('.bw-lane-row.bw-selected')).toContainText('feat/worktree-registry')
       await expect(page.locator('.bw-node')).toHaveCount(19)
       if (viewport.width >= 1040) {
         const geometry = await page.locator('.bw-shell').evaluate((shell) =>
-          ['.bw-sidebar', '.bw-main', '.bw-inspector'].map((selector) => {
-            const bounds = shell.querySelector(selector)!.getBoundingClientRect()
-            return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
-          }),
+          ['.bw-sidebar', '.bw-main[aria-label="Branch workbench"]', '.bw-inspector'].map(
+            (selector) => {
+              const bounds = shell.querySelector(selector)!.getBoundingClientRect()
+              return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+            },
+          ),
         )
         const rail =
           viewport.width < 1200

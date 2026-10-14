@@ -168,6 +168,7 @@ test.describe('Required GitHub CLI status', () => {
   }) => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
     await settle(page)
+    const originalStatus = await page.evaluate(() => window.desktop.githubCliStatus!())
 
     // The branch that carries a pull request, so the inspector's checks and the
     // review workspace both have real GitHub data behind them to be retired.
@@ -197,7 +198,6 @@ test.describe('Required GitHub CLI status', () => {
     await publishCliStatus(page, ACCOUNT_B)
 
     await expect(page.getByRole('button', { name: 'Review pull request' })).toHaveCount(0)
-    await expect(branch).toContainText('No pull request')
     await expect(checks.getByText('ci', { exact: true })).toHaveCount(0)
     await expect(
       page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
@@ -206,7 +206,13 @@ test.describe('Required GitHub CLI status', () => {
 
     // The session on screen is still the one that replaced it.
     await cliStatusButton(page).click()
-    await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()
+    await cliStatusDialog(page)
+      .getByRole('navigation', { name: 'Settings sections' })
+      .getByRole('button', { name: 'GitHub CLI', exact: true })
+      .click()
+    await expect(
+      cliStatusFacts(page).getByText(originalStatus.login!, { exact: true }),
+    ).toHaveCount(0)
     expect(await getDispatchedActions(page)).toEqual([])
   })
 

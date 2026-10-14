@@ -1,3 +1,5 @@
+import * as React from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   sameOperationScope,
   type OperationProgress,
@@ -88,4 +90,67 @@ export function mergeProgressAfterRead(
       message: `${merged} of ${layers.length} captured pull requests are confirmed merged. Other outcomes remain as reported; omitted targets are not assumed complete.`,
     },
   }
+}
+
+/** The captured owner, not a visible dialog, owns journal reads and zero-lifetime caches. */
+export function useOperationProgressProjection(
+  api: DesktopAPI | null,
+  scope: OperationScope | null,
+) {
+  const queryClient = useQueryClient()
+  const keys = React.useMemo(
+    () =>
+      scope
+        ? operationProgressKeys(scope)
+        : {
+            publication: ['operation-publication', null],
+            merge: ['operation-merge', null],
+            mergeProgress: ['operation-merge-progress', null],
+          },
+    [scope],
+  )
+  useQuery({ queryKey: keys.publication, enabled: false })
+  useQuery({ queryKey: keys.merge, enabled: false })
+  useQuery({ queryKey: keys.mergeProgress, enabled: false })
+  React.useEffect(() => {
+    if (!scope || !api) return
+    let active = true
+    const unsubscribe = subscribeOperationProgress(api, queryClient, scope)
+    if (api.submitStackProgress) {
+      void queryClient
+        .fetchQuery({
+          queryKey: keys.publication,
+          queryFn: async ({ signal }) => {
+            const value = await readOperationProgress(api.submitStackProgress!, scope, signal)
+            if (!active || signal.aborted) throw new Error('Retired publication read')
+            return value
+          },
+        })
+        .catch(() => {})
+    }
+    if (api.mergeStatus) {
+      void queryClient
+        .fetchQuery({
+          queryKey: keys.merge,
+          queryFn: async ({ signal }) => {
+            const value = await readOperationProgress(api.mergeStatus!, scope, signal)
+            if (!active || signal.aborted) throw new Error('Retired merge read')
+            queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
+              keys.mergeProgress,
+              (previous) => mergeProgressAfterRead(previous, value),
+            )
+            return value
+          },
+        })
+        .catch(() => {})
+    }
+    return () => {
+      active = false
+      unsubscribe()
+      void queryClient.cancelQueries({ queryKey: keys.publication, exact: true })
+      void queryClient.cancelQueries({ queryKey: keys.merge, exact: true })
+      // The zero-lifetime cache retires when its last observer does. Do not
+      // remove keys still observed by this same captured owner or recovery.
+    }
+  }, [api, queryClient, scope, keys])
 }

@@ -6,6 +6,7 @@ import {
   releaseDoubleCalls,
   publishCliStatus,
 } from './helpers/gallery'
+import { switchDestination } from './helpers/destinations'
 import type { Page } from '@playwright/test'
 
 const writes = [
@@ -169,4 +170,79 @@ test('generated local diff pages preserve exact 1000-line boundaries and reset f
     0,
   )
   await noWrites(page)
+})
+
+test('a pending saved-filter reread cannot overwrite independently authored local filters', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'review-stacked' })
+  await switchDestination(page, 'attention')
+  const name = page.getByRole('textbox', { name: 'Attention filter name', exact: true })
+  const save = page.getByRole('button', { name: 'Save filter', exact: true })
+  await expect(name).toBeEnabled()
+  await name.fill('Original authored filter')
+  await save.click()
+  await expect(name).toBeEnabled()
+  const original = await page.evaluate(() => window.desktop.pullRequestInboxFilters!())
+  expect(original.map((filter) => filter.name)).toContain('Original authored filter')
+  await switchDestination(page, 'branches')
+  const independentlyAuthored = await page.evaluate(async (filters) => {
+    return window.desktop.savePullRequestInboxFilters!([
+      ...filters,
+      { ...filters[0], id: undefined, name: 'Independent local author' },
+    ])
+  }, original)
+  await holdDoubleCall(page, 'pullRequestInboxFilters')
+  await switchDestination(page, 'attention')
+  await expect(name).toBeDisabled()
+  await expect(save).toBeDisabled()
+  expect(
+    await page.evaluate(
+      () =>
+        window.fixture.calls.filter((call) => call.call === 'savePullRequestInboxFilters').length,
+    ),
+  ).toBe(2)
+  await releaseDoubleCalls(page, 'pullRequestInboxFilters')
+  await expect(name).toBeEnabled()
+  await name.fill('Newest authored filter')
+  await save.click()
+  await expect(name).toBeEnabled()
+  const stored = await page.evaluate(() => window.desktop.pullRequestInboxFilters!())
+  expect(stored.filter((filter) => filter.name !== 'Newest authored filter')).toEqual(
+    independentlyAuthored,
+  )
+  expect(stored.filter((filter) => filter.name === 'Newest authored filter')).toHaveLength(1)
+  await noWrites(page)
+})
+
+test('a delayed explicit folder registration cannot replace a newer inspected destination', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'review-stacked' })
+  await holdDoubleCall(page, 'addRepository')
+  await page.evaluate(() => window.fixture.dropRepository!(['/Users/ada/Code/git-stacks']))
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => window.fixture.calls.filter((call) => call.call === 'addRepository').length,
+      ),
+    )
+    .toBe(1)
+  await switchDestination(page, 'attention')
+  const inventoryReads = await page.evaluate(
+    () => window.fixture.calls.filter((call) => call.call === 'worktreeInventory').length,
+  )
+  await releaseDoubleCalls(page, 'addRepository')
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => window.fixture.calls.filter((call) => call.call === 'worktreeInventory').length,
+      ),
+    )
+    .toBeGreaterThan(inventoryReads)
+  await settle(page)
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'Needs attention', exact: true }),
+  ).toBeVisible()
+  expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
 })

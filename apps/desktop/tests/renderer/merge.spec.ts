@@ -172,6 +172,28 @@ test('recovery reads only an explicitly captured directory and browsing never re
   expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   await page.keyboard.press('Escape')
   await expect(dialog).not.toBeVisible()
+  await page.evaluate(() => {
+    window.fixture.pushMergeProgress({
+      scope: window.fixture.operationScope(),
+      source: 'action',
+      progress: {
+        action: 'default',
+        status: 'failed',
+        message: 'Captured outcomes arrived while recovery was closed',
+        layers: [
+          {
+            branch: 'feature/checkout-tests',
+            pullRequest: 41,
+            status: 'merged',
+            detail: 'Confirmed by the captured producer',
+            mergedOid: '4444444444444444444444444444444444444444',
+            queue: null,
+            requestUuid: 'closed-recovery',
+          },
+        ],
+      },
+    })
+  })
   for (const destination of ['activity', 'attention', 'pullRequests', 'branches'] as const) {
     await switchDestination(page, destination)
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
@@ -180,6 +202,13 @@ test('recovery reads only an explicitly captured directory and browsing never re
   await page.getByRole('button', { name: 'Operations and recovery', exact: true }).click()
   await expect(dialog).toBeVisible()
   await expect(recovery).toBeVisible()
+  await expect(recovery).toContainText('Captured outcomes arrived while recovery was closed')
+  await page.evaluate(() =>
+    window.fixture.failNext('mergeStatus', 'Journal is temporarily unavailable'),
+  )
+  await recovery.getByRole('button', { name: 'Refresh merge outcomes', exact: true }).click()
+  await expect(recovery).toContainText('Recovery read unavailable')
+  await expect(recovery).toContainText('Confirmed by the captured producer')
   expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
 })
 

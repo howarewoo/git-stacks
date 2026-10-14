@@ -518,7 +518,7 @@ export function BranchWorkbench({
     setRelationshipPage(0)
     setContinuationPage(0)
     setWorktreePage(0)
-    setInspectorOpen(Boolean(selectedBranchId))
+    if (!narrow) setInspectorOpen(Boolean(selectedBranchId))
   }, [selectedBranchId, allEntries])
   const focusId = entries.some((entry) => entry.branch.id === focusedBranchId)
     ? focusedBranchId
@@ -1129,7 +1129,8 @@ export function BranchWorkbench({
             {sidebarUtilities}
           </div>
         </aside>
-        {mainPanel ?? (
+        {mainPanel}
+        {(!mainPanel || surface === 'branches') && (
           <WorkbenchPane
             className="bw-main"
             aria-label="Branch workbench"

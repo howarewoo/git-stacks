@@ -5,7 +5,6 @@ import {
   mergeProgressAfterRead,
   operationProgressKeys,
   readOperationProgress,
-  subscribeOperationProgress,
 } from '../lib/operation-progress'
 import { GitBranch, GitMerge, LoaderCircle, TriangleAlert } from 'lucide-react'
 import type {
@@ -73,47 +72,6 @@ function RemoteOperationStatus({
     queryKey: mergeProgressKey,
     enabled: false,
   })
-  React.useEffect(() => {
-    let active = true
-    const unsubscribeProgress = subscribeOperationProgress(desktop, queryClient, scope)
-    if (desktop?.submitStackProgress) {
-      void queryClient
-        .fetchQuery({
-          queryKey: publicationKey,
-          queryFn: async ({ signal }) => {
-            const value = await readOperationProgress(desktop.submitStackProgress!, scope, signal)
-            if (!active || signal.aborted) throw new Error('Retired publication read')
-            return value
-          },
-        })
-        .catch(() => {})
-    }
-    if (desktop?.mergeStatus) {
-      void queryClient
-        .fetchQuery({
-          queryKey: mergeKey,
-          queryFn: async ({ signal }) => {
-            const value = await readOperationProgress(desktop.mergeStatus!, scope, signal)
-            if (!active || signal.aborted) throw new Error('Retired merge read')
-            queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
-              mergeProgressKey,
-              (previous) => mergeProgressAfterRead(previous, value),
-            )
-            return value
-          },
-        })
-        .catch(() => {})
-    }
-    return () => {
-      active = false
-      unsubscribeProgress()
-      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true })
-      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true })
-      queryClient.removeQueries({ queryKey: publicationKey, exact: true })
-      queryClient.removeQueries({ queryKey: mergeKey, exact: true })
-      queryClient.removeQueries({ queryKey: mergeProgressKey, exact: true })
-    }
-  }, [desktop, queryClient, publicationKey, mergeKey, mergeProgressKey, scope])
   const progress = publication.data?.progress
   const mergeEnvelope = pushedMerge.data ?? merge.data
   const mergeResult = mergeEnvelope?.progress

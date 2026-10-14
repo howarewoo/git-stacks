@@ -603,13 +603,15 @@ const shiftedStashes: Stash[] = [
 ]
 
 /** The one open, mergeable pull request, reused by the merge read-back scenario. */
+const lifecycleOpenPr = { ...pullRequestFixtures[0], head: 'feature/lifecycle-open' }
+
 const lifecycleOpenBranch = local({
   name: 'feature/lifecycle-open',
   current: true,
   parent: 'main',
   parentTip: oid('local:main'),
   ahead: 1,
-  pr: pullRequestFixtures[0],
+  pr: lifecycleOpenPr,
   subject: 'Open pull request branch',
 })
 
@@ -650,7 +652,7 @@ const checksBranch = local({
   parent: 'main',
   parentTip: oid('local:main'),
   ahead: 3,
-  pr: pullRequestFixtures[0],
+  pr: lifecycleOpenPr,
   subject: 'Split the file inspector',
 })
 
@@ -1928,7 +1930,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       branches: lifecycleBranches,
       currentBranch: 'feature/lifecycle-open',
       pullRequests: [
-        pullRequestFixtures[0],
+        lifecycleOpenPr,
         pullRequestFixtures[1],
         pullRequestFixtures[2],
         pullRequestFixtures[3],
@@ -1951,7 +1953,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: repository({
       branches: [mainBranch, checksBranch],
       currentBranch: 'feature/lifecycle-open',
-      pullRequests: [pullRequestFixtures[0]],
+      pullRequests: [lifecycleOpenPr],
     }),
     recentRepositories,
     pullRequestChecks: { 42: mixedChecksReport },
@@ -1963,7 +1965,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: repository({
       branches: [mainBranch, checksBranch],
       currentBranch: 'feature/lifecycle-open',
-      pullRequests: [pullRequestFixtures[0]],
+      pullRequests: [lifecycleOpenPr],
     }),
     recentRepositories,
     pullRequestChecks: { 42: staleChecksReport },
@@ -2040,7 +2042,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: repository({
       branches: [mainBranch, lifecycleOpenBranch],
       currentBranch: 'feature/lifecycle-open',
-      pullRequests: [pullRequestFixtures[0]],
+      pullRequests: [lifecycleOpenPr],
     }),
     recentRepositories,
     mergeStatus: failedMergeStatus,
