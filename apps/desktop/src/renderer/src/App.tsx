@@ -63,8 +63,9 @@ import type { DesktopAPI, GitHubCliStatus, RepositorySnapshot } from '@git-stack
 import type { AppSettings } from '@git-stacks/shared/settings'
 import type { InspectionContext } from '@git-stacks/shared/inspection'
 import type { NotificationInbox, NotificationThread } from '@git-stacks/shared/notifications'
+import type { PullRequestInboxFilter } from '@git-stacks/shared/pr-inbox'
 import { LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
-import { sameOperationScope, type OperationScope } from '@git-stacks/shared/operation-scope'
+import { cliAuthority, sameOperationScope, type OperationScope } from '@git-stacks/shared/operation-scope'
 import './components/workbench-shell.css'
 
 function App() {
@@ -94,6 +95,7 @@ function App() {
   const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
   const [recoveryOpen, setRecoveryOpen] = React.useState(false)
   const [operationBusy, setOperationBusy] = React.useState(false)
+  const [repositoryOpening, setRepositoryOpening] = React.useState(false)
   const [discoveryWorktrees, setDiscoveryWorktrees] = React.useState(false)
   const [discoveryPage, setDiscoveryPage] = React.useState(0)
   const [historyOpen, setHistoryOpen] = React.useState(false)
@@ -101,6 +103,16 @@ function App() {
   const [credentialOpen, setCredentialOpen] = React.useState(false)
   const [notificationInbox, setNotificationInbox] = React.useState<NotificationInbox | null>(null)
   const [notificationBusy, setNotificationBusy] = React.useState(false)
+  const [notificationError, setNotificationError] = React.useState<string | null>(null)
+  const [credentialError, setCredentialError] = React.useState<string | null>(null)
+  const notificationGeneration = React.useRef(0)
+  const notificationLock = React.useRef(false)
+  const cliReadGeneration = React.useRef(0)
+  const [cliRefreshing, setCliRefreshing] = React.useState(false)
+  const originFocus = React.useRef<string | null>(null)
+  const restoreOriginFocus = React.useRef(false)
+  const [attentionFilter, setAttentionFilter] = React.useState<PullRequestInboxFilter>()
+  const [operationAuthority, setOperationAuthority] = React.useState('')
   const [workflow, setWorkflow] = React.useState<WorkflowRequest | null>(null)
   const [operationSnapshot, setOperationSnapshot] = React.useState<RepositorySnapshot | null>(null)
   const operationScope = React.useRef<OperationScope | null>(null)
@@ -328,13 +340,18 @@ function App() {
       const next = value.identity ?? ''
       const previous = principals.get(value.host)
       principals.set(value.host, next)
-      if (value.host === configuredHost.current) setCliStatus(value)
+      if (value.host === configuredHost.current) {
+        cliReadGeneration.current += 1
+        setCliRefreshing(false)
+        setCliStatus(value)
+      }
+      if (operationScope.current?.authority.split('|')[0] === value.host)
+        setOperationAuthority(cliAuthority(value.host, value))
       if (previous === undefined || previous === next) return
       setProviderEpoch((epoch) => epoch + 1)
       setDetails({})
       retirePendingReview()
       setReturnOrigin(null)
-      setNotificationInbox(null)
       const capturedReads = (query: { queryKey: readonly unknown[] }) =>
         query.queryKey[0]?.toString().startsWith('inspection-') === true ||
         query.queryKey[0] === 'workbench-attention'
@@ -398,6 +415,15 @@ function App() {
     return () => media.removeEventListener('change', apply)
   }, [settings])
   React.useEffect(() => {
+    notificationGeneration.current += 1
+    notificationLock.current = false
+    setNotificationBusy(false)
+    setNotificationInbox(null)
+    setNotificationError(null)
+    setCredentialError(null)
+    setCredentialOpen(false)
+  }, [settings?.github.host])
+  React.useEffect(() => {
     if (!desktop || !notificationOpen) return
     let retired = false
     setNotificationInbox(null)
@@ -405,14 +431,14 @@ function App() {
       if (!retired && value.host === settings?.github.host) setNotificationInbox(value)
     }
     if (!desktop.notifications) {
-      setError('The Notifications service is unavailable in this runtime.')
+      setNotificationError('The Notifications service is unavailable in this runtime.')
       return
     }
     void desktop
       .notifications()
       .then(accept)
       .catch((value) => {
-        if (!retired) setError(String(value))
+        if (!retired) setNotificationError(String(value))
       })
     const stop = desktop.onNotifications?.(accept)
     return () => {
@@ -462,6 +488,12 @@ function App() {
       const origin = current.reviewOrigin ?? returnOrigin
       if (origin) return origin
     }
+    originFocus.current =
+      surface !== 'branches' && document.activeElement instanceof HTMLElement
+        ? (document.activeElement.getAttribute('aria-label') ??
+          document.activeElement.textContent?.trim() ??
+          null)
+        : null
     return {
       repositoryId,
       surface: surface === 'review' ? 'branches' : surface,
@@ -473,6 +505,7 @@ function App() {
   }
   const returnToOrigin = () => {
     const origin = surface === 'review' ? (current.reviewOrigin ?? returnOrigin) : returnOrigin
+    restoreOriginFocus.current = true
     if (origin) {
       navigate(origin.repositoryId, origin.surface)
       const saved = memoryRef.current[origin.repositoryId] ?? emptyRepositoryMemory
@@ -492,6 +525,22 @@ function App() {
     }
     setReturnOrigin(null)
   }
+  React.useLayoutEffect(() => {
+    if (!restoreOriginFocus.current || surface === 'review') return
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('[role="main"] button')]
+    const target =
+      buttons.find(
+        (button) =>
+          originFocus.current !== null &&
+          (button.getAttribute('aria-label') === originFocus.current ||
+            button.textContent?.trim() === originFocus.current),
+      ) ??
+      document.querySelector<HTMLButtonElement>('.bw-branch-name[aria-pressed="true"]')
+    if (target) {
+      target.focus({ preventScroll: true })
+      restoreOriginFocus.current = false
+    }
+  }, [surface, current.selectedId, inbox.data])
   const reviewSelected = () => {
     if (!selected?.pullRequest) {
       setError('Select a source-qualified pull request to review.')
@@ -556,6 +605,7 @@ function App() {
           'The directory, provider or principal changed while preparing the operation.',
         )
       operationScope.current = scope
+      setOperationAuthority(scope.authority)
       const tree = owner.worktrees.find((tree) => tree.path === scope.repositoryPath)
       operationContext.current = {
         ...target,
@@ -804,9 +854,11 @@ function App() {
       }
       if (id === 'search.focus') {
         event.preventDefault()
-        document
-          .querySelector<HTMLInputElement>('[aria-label="Filter branches by branch, PR, or path"]')
-          ?.focus()
+        if (surface === 'attention') attentionSearch.current?.focus()
+        else
+          document
+            .querySelector<HTMLInputElement>('[aria-label="Filter branches by branch, PR, or path"]')
+            ?.focus()
       }
     }
     window.addEventListener('keydown', keydown)
@@ -884,17 +936,34 @@ function App() {
       (item) => !query || `${item.label} ${item.context}`.toLowerCase().includes(query),
     )
   }, [snapshot, globalQuery, inventory.data])
-  const notify = async (operation: () => Promise<NotificationInbox> | undefined) => {
-    if (notificationBusy) return
+  const notify = async (
+    operation: (current: () => boolean) => Promise<NotificationInbox | undefined> | undefined,
+    credential = false,
+  ) => {
+    if (notificationLock.current) return
+    const generation = ++notificationGeneration.current
+    const host = configuredHost.current
+    const current = () =>
+      generation === notificationGeneration.current && host === configuredHost.current
+    notificationLock.current = true
     setNotificationBusy(true)
+    const setFailure = credential ? setCredentialError : setNotificationError
+    setFailure(null)
     try {
-      const value = await operation()
+      const value = await operation(current)
+      if (!current()) return
       if (!value) throw new Error('This Notifications action is unavailable in this runtime.')
-      if (value.host === settings?.github.host) setNotificationInbox(value)
+      if (value.host === host) {
+        setNotificationInbox(value)
+        if (credential) setCredentialOpen(false)
+      }
     } catch (value) {
-      setError(String(value))
+      if (current()) setFailure(String(value))
     } finally {
-      setNotificationBusy(false)
+      if (current()) {
+        notificationLock.current = false
+        setNotificationBusy(false)
+      }
     }
   }
   const secondaryRows = React.useMemo(() => {
@@ -930,6 +999,7 @@ function App() {
     surface === 'branches' ? undefined : (
       <WorkbenchPane
         className="bw-main wb-secondary"
+        role="main"
         aria-label={surface}
         header={
           <div className="bw-panel-head">
@@ -1009,6 +1079,8 @@ function App() {
             savedFilters={inboxFilters.data ?? []}
             savingFilters={savingInboxFilters}
             filtersReady={inboxFilters.isSuccess}
+            initialFilter={attentionFilter}
+            onFilterChange={setAttentionFilter}
             searchInputRef={attentionSearch}
             onDismissError={() => setError(null)}
             onRefresh={() => void inbox.refetch()}
@@ -1176,14 +1248,18 @@ function App() {
           <>
             <Button
               variant="ghost"
-              onClick={() =>
+              disabled={repositoryOpening}
+              onClick={() => {
+                if (repositoryOpening) return
+                setRepositoryOpening(true)
                 void desktop
                   .openRepository()
                   .then(() => {
                     void inventory.refetch()
                   })
                   .catch((value) => setError(String(value)))
-              }
+                  .finally(() => setRepositoryOpening(false))
+              }}
             >
               Add repository
             </Button>
@@ -1506,12 +1582,25 @@ function App() {
         onOpenChange={setSettingsOpen}
         desktop={desktop}
         cliStatus={cliStatus}
-        onReadCliStatus={() =>
+        cliRefreshing={cliRefreshing}
+        onReadCliStatus={() => {
+          const generation = ++cliReadGeneration.current
+          const host = configuredHost.current
+          setCliRefreshing(true)
           void desktop
             .githubCliStatus?.()
-            .then(setCliStatus)
-            .catch((value) => setError(String(value)))
-        }
+            .then((value) => {
+              if (generation === cliReadGeneration.current && host === configuredHost.current)
+                setCliStatus(value)
+            })
+            .catch((value) => {
+              if (generation === cliReadGeneration.current && host === configuredHost.current)
+                setError(String(value))
+            })
+            .finally(() => {
+              if (generation === cliReadGeneration.current) setCliRefreshing(false)
+            })
+        }}
         onSettingsChange={setSettings}
         shortcutBindings={bindings}
         onShortcutBindingsChange={setBindings}
@@ -1534,9 +1623,9 @@ function App() {
           <DialogTitle>Optional Notifications</DialogTitle>
           <NotificationCenterView
             busy={notificationBusy}
-            error={error}
+            error={notificationError}
             inbox={notificationInbox}
-            onDismissError={() => setError(null)}
+            onDismissError={() => setNotificationError(null)}
             onRefresh={() => void notify(() => desktop.refreshNotifications?.())}
             onMarkAllRead={() => void notify(() => desktop.markNotificationRead?.('all'))}
             onMarkRead={(id) => void notify(() => desktop.markNotificationRead?.(id))}
@@ -1548,15 +1637,15 @@ function App() {
               if (thread.url)
                 void desktop.openExternal(thread.url).catch((value) => setError(String(value)))
             }}
-            onOpenCredential={() => setCredentialOpen(true)}
+            onOpenCredential={() => {
+              setCredentialError(null)
+              setCredentialOpen(true)
+            }}
             onRemoveCredential={() =>
-              void desktop
-                .removeNotificationCredential?.()
-                .then(() => desktop.notifications?.())
-                .then((value) => {
-                  if (value) setNotificationInbox(value)
-                })
-                .catch((value) => setError(String(value)))
+              void notify(async (current) => {
+                await desktop.removeNotificationCredential?.()
+                if (current()) return desktop.notifications?.()
+              })
             }
           />
         </DialogContent>
@@ -1575,7 +1664,7 @@ function App() {
           operationScope.current?.repositoryPath === recovery.data.path ? (
             <OperationBanner
               snapshot={recovery.data}
-              authority={authority}
+              authority={operationAuthority}
               desktop={scoped}
               showingOperation={null}
               busy={operationBusy}
@@ -1621,29 +1710,23 @@ function App() {
         open={credentialOpen}
         onOpenChange={setCredentialOpen}
         busy={notificationBusy}
-        error={error}
+        error={credentialError}
         host={settings?.github.host ?? cliStatus?.host ?? 'github.com'}
         login={cliStatus?.login ?? null}
-        onSubmit={(token, consent, host) => {
-          setNotificationBusy(true)
-          void desktop
-            .saveNotificationCredential?.(token, consent, host)
-            .then(() => {
-              setCredentialOpen(false)
-              return desktop.notifications?.()
-            })
-            .then((value) => {
-              if (value) setNotificationInbox(value)
-            })
-            .catch((value) => setError(String(value)))
-            .finally(() => setNotificationBusy(false))
-        }}
+        onSubmit={(token, consent, host) =>
+          void notify(async (current) => {
+            await desktop.updateSettings?.({ notifications: { enabled: true } })
+            if (!current()) return
+            await desktop.saveNotificationCredential?.(token, consent, host)
+            if (current()) return desktop.notifications?.()
+          }, true)
+        }
       />
       {workflow && operationSnapshot ? (
         <WorkflowDialog
           request={workflow}
           snapshot={operationSnapshot}
-          authority={JSON.stringify([operationSnapshot.path, operationSnapshot.remoteUrl])}
+          authority={operationAuthority}
           busy={operationBusy}
           actionError={error}
           onClearActionError={() => setError(null)}

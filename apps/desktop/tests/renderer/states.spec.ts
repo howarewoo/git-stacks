@@ -1,15 +1,16 @@
 import { expect, test } from '@playwright/test'
 import { getDispatchedActions, openGallery, releaseDoubleCalls, settle } from './helpers/gallery'
-import { switchDestination } from './helpers/destinations'
-import { openRestackDialog, openStashDialog } from './helpers/dialogs'
+import { openRestackDialog } from './helpers/dialogs'
 
 test.describe('Async loading and workflow recovery', () => {
   test.describe('History states', () => {
     test('history-loading shows loading indicator until released', async ({ page }) => {
       await openGallery(page, { scenario: 'history-loading' })
-      await switchDestination(page, 'history')
+      await page.getByRole('button', { name: 'main', exact: true }).click()
+      await page.getByRole('button', { name: 'Inspect branch history', exact: true }).click()
 
-      const loadingMsg = page.locator('.history-view').getByRole('status')
+      const dialog = page.getByRole('dialog', { name: 'Selected committed history' })
+      const loadingMsg = dialog.getByRole('status')
       await expect(loadingMsg).toBeVisible()
 
       // Settle the pending history call
@@ -18,36 +19,44 @@ test.describe('Async loading and workflow recovery', () => {
 
       await expect(loadingMsg).not.toBeVisible()
       // Commits should now be rendered
-      await expect(page.locator('.history-row').first()).toBeVisible()
+      await expect(dialog.getByRole('button').filter({ hasText: / · [a-f0-9]{10}$/ }).first()).toBeVisible()
     })
 
-    test('a failed refresh during a pending diff leaves History retryable', async ({ page }) => {
-      await openGallery(page, { scenario: 'history-loading' })
+    test('a failed committed history read can be retried by reopening the selected context', async ({ page }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+      await page.getByRole('button', { name: 'main', exact: true }).click()
+      await page.evaluate(() => window.fixture.failNext('history', 'The selected ref disappeared.'))
+      const trigger = page.getByRole('button', { name: 'Inspect branch history', exact: true })
+      await trigger.click()
+      const dialog = page.getByRole('dialog', { name: 'Selected committed history' })
+      await expect(dialog.getByRole('alert')).toHaveText('The selected ref disappeared.')
+      await page.keyboard.press('Escape')
+      await expect(dialog).not.toBeVisible()
+      await trigger.click()
+      await expect(dialog.getByRole('button').filter({ hasText: / · [a-f0-9]{10}$/ }).first()).toBeVisible()
+      await expect(dialog.getByRole('alert')).toHaveCount(0)
+      expect(await getDispatchedActions(page)).toEqual([])
+    })
+
+    test('closing a pending commit diff leaves the next history context usable', async ({ page }) => {
+      await openGallery(page, { scenario: 'shell-connected' })
+      await page.getByRole('button', { name: 'main', exact: true }).click()
       await page.evaluate(() => window.fixture.hold('commitDiff'))
-      await switchDestination(page, 'history')
-      await releaseDoubleCalls(page, 'history')
-      await expect(page.getByText('Reading commit diff…')).toBeVisible()
-
-      await page.evaluate(() => {
-        const refresh = window.desktop.refresh
-        window.desktop.refresh = async () => ({
-          ...(await refresh()),
-          headOid: 'f'.repeat(40),
-        })
-        window.fixture.failNext('history', 'The selected ref disappeared.')
-      })
-      await page.getByRole('button', { name: 'Refresh repository', exact: true }).click()
-      await expect(page.getByRole('alert')).toHaveText('The selected ref disappeared.')
-      const reload = page.getByRole('button', { name: 'Reload history', exact: true })
-      await expect(reload).toBeEnabled()
-      await expect(page.getByLabel('History branch', { exact: true })).toBeEnabled()
-
+      const trigger = page.getByRole('button', { name: 'Inspect branch history', exact: true })
+      await trigger.click()
+      const dialog = page.getByRole('dialog', { name: 'Selected committed history' })
+      const commits = dialog.getByRole('button').filter({ hasText: / · [a-f0-9]{10}$/ })
+      await commits.first().click()
+      await expect(dialog.getByRole('status')).toHaveText('Reading selected context…')
+      await page.keyboard.press('Escape')
       await releaseDoubleCalls(page, 'commitDiff')
-      await reload.click()
-      await expect(page.locator('.history-row').first()).toBeVisible()
-      await expect(page.getByText('Reading commit diff…')).not.toBeVisible()
-      await expect(page.getByRole('alert')).toHaveCount(0)
-      await expect(reload).toBeEnabled()
+      await page.evaluate(() => window.fixture.unhold('commitDiff'))
+      await trigger.click()
+      await expect(commits.first()).toBeVisible()
+      await commits.first().click()
+      await expect(dialog.locator('.wb-code')).toBeVisible()
+      await expect(dialog.getByRole('status')).toHaveCount(0)
+      expect(await getDispatchedActions(page)).toEqual([])
     })
   })
 
@@ -97,39 +106,5 @@ test.describe('Async loading and workflow recovery', () => {
       await expect(submitBtn).toBeEnabled()
     })
 
-    test('a failed stash retains the dialog and entered message', async ({ page }) => {
-      await openGallery(page, { scenario: 'workflow-action-error' })
-      const dialog = await openStashDialog(page)
-      const messageInput = dialog.getByRole('textbox', { name: 'Message (optional)', exact: true })
-      await messageInput.fill('WIP survives a failed stash')
-
-      const submitBtn = dialog.getByRole('button', {
-        name: 'Stash working changes',
-        exact: true,
-      })
-      await submitBtn.click()
-      await settle(page)
-
-      const failure = dialog.getByRole('alert')
-      await expect(failure).toBeVisible()
-
-      await expect(dialog).toBeVisible()
-      await expect(messageInput).toHaveValue('WIP survives a failed stash')
-    })
-
-    test('workflow-conflict-recovery directs user to resolve conflicts in working changes', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'workflow-conflict-recovery' })
-
-      const banner = page.getByRole('region', { name: 'Git operation status' })
-      await expect(banner).toBeVisible()
-
-      const viewChangesBtn = banner.getByRole('button', { name: 'View changes', exact: true })
-      await viewChangesBtn.click()
-      await settle(page)
-
-      await expect(page.getByRole('heading', { level: 1, name: 'Working changes' })).toBeVisible()
-    })
   })
 })

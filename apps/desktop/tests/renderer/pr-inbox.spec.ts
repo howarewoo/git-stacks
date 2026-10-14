@@ -79,7 +79,7 @@ async function assertReachableInboxElement(element: Locator): Promise<void> {
 test.describe('PR Inbox queue', () => {
   test.beforeEach(async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-queue' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
   })
 
   test('structured lifecycle criteria toggle through the shared checkbox keyboard control', async ({
@@ -148,7 +148,7 @@ test.describe('PR Inbox queue', () => {
       page.getByText('#81 Add a GitHub-derived PR Inbox across registered repositories').first(),
     ).toBeVisible()
     await expect(
-      page.locator('[data-workspace-surface="review"]').getByText('checks passing').first(),
+      page.getByRole('main', { name: 'review', exact: true }).getByText('checks passing').first(),
     ).toBeVisible()
     await expect(page.getByText('Pull request #81 is not in this fixture snapshot')).toHaveCount(0)
     await expect(page.getByText('No pull request selected')).toHaveCount(0)
@@ -176,10 +176,8 @@ test.describe('PR Inbox queue', () => {
     await expect(page.getByText('No pull request selected')).toHaveCount(0)
     // The origin the workspace reports is the repository the row named, so the
     // remote this window would use is that one and not a look-alike.
-    await page.locator('summary', { hasText: 'Repository info' }).click()
-    await expect(
-      page.getByText('git@github.com:howarewoo/design-system-specimens.git'),
-    ).toBeVisible()
+    await expect(page.getByRole('button', { name: /^howarewoo\/design-system-specimens ·/u }))
+      .toHaveAttribute('aria-pressed', 'true')
   })
 
   test('the search chord reaches the queue, with a repository open and without one', async ({
@@ -198,7 +196,7 @@ test.describe('PR Inbox queue', () => {
     // The queue carries no repository toolbar search of its own, so there was no
     // second field for the chord to have reached.
     await openGallery(page, { scenario: 'pr-inbox-no-repository' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await page.getByRole('heading', { level: 1, name: 'PR Inbox' }).click()
     await page.keyboard.press('/')
     const queueSearch = page.getByRole('searchbox', { name: 'Search the queue' })
@@ -292,7 +290,7 @@ test.describe('PR Inbox queue', () => {
     await switchGalleryRoute(page, 'index')
     await holdDoubleCall(page, 'pullRequestInboxFilters')
     await switchGalleryRoute(page, 'app')
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
 
     // Nothing can be written or edited while the stored list is unknown: the
     // name field and Save are refused outright, and the filter that is already
@@ -405,7 +403,7 @@ test.describe('PR Inbox queue', () => {
     // report holds no rows at all, so anything on screen now would be the
     // destination inventing them.
     await openGallery(page, { scenario: 'pr-inbox-retired' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(rows(page)).toHaveCount(0)
     // And the reason says what happened to the read, and nothing about the
     // person: not signed out, not offline, not never read.
@@ -452,7 +450,7 @@ test.describe('PR Inbox queue', () => {
     // read that is not gated puts its error on screen. Releasing the abandoned
     // read earlier would let the destination's next read clear that error
     // first, and the gate would never be exercised at all.
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(refresh).toBeDisabled()
     const started = (await getDoubleCalls(page)).filter(
       (entry) => entry.call === 'pullRequestInbox',
@@ -509,14 +507,14 @@ test.describe('PR Inbox queue', () => {
 test.describe('PR Inbox states', () => {
   test('a confirmed read that holds nothing reads as empty, not unconfirmed', async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-empty' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(page.getByRole('heading', { name: 'Nothing in Review requested' })).toBeVisible()
     await expect(page.getByText('The queue is unconfirmed')).toHaveCount(0)
   })
 
   test('a degraded repository is named and never counted as fully read', async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-partial' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(page.getByRole('status')).toContainText('Some repositories could not be read')
     await expect(
       page.getByText(/design-system-specimens \(read without review or check metadata\)/u),
@@ -526,7 +524,7 @@ test.describe('PR Inbox states', () => {
 
   test('an unreachable GitHub keeps the confirmed rows behind the reason', async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-unavailable' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(page.getByText('GitHub is unreachable')).toBeVisible()
     await expect(rows(page)).toHaveCount(2)
   })
@@ -536,7 +534,7 @@ test.describe('PR Inbox states', () => {
       scenario: 'pr-inbox-queue',
       viewport: STANDARD_VIEWPORTS.zoom200,
     })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await settle(page)
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
@@ -561,7 +559,7 @@ test.describe('PR Inbox states', () => {
   }) => {
     await openGallery(page, { scenario: 'pr-inbox-first-read' })
     await holdDoubleCall(page, 'pullRequestInbox')
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(page.getByRole('status')).toHaveText('Reading the pull request queue from GitHub…')
     // Neither of the two answers that would be a claim GitHub never made.
     await expect(page.getByText('The queue is unconfirmed')).toHaveCount(0)
@@ -581,7 +579,7 @@ test.describe('PR Inbox states', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'pr-inbox-queue' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(rows(page)).toHaveCount(2)
     await expect(page.getByText('Reading the pull request queue from GitHub…')).toHaveCount(0)
 
@@ -589,7 +587,7 @@ test.describe('PR Inbox states', () => {
     // coming back has to offer the same refresh, not a disabled control for a
     // read that finished long ago.
     await switchDestination(page, 'pullRequests')
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(page.getByRole('button', { name: 'Refresh the PR Inbox' })).toBeEnabled()
   })
 })
@@ -597,7 +595,7 @@ test.describe('PR Inbox states', () => {
 test.describe('PR Inbox to Review, in one window', () => {
   test.beforeEach(async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-queue' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
   })
 
   test('one walk through the queue reads both pull requests without touching Git', async ({
@@ -609,7 +607,7 @@ test.describe('PR Inbox to Review, in one window', () => {
       page.getByText('#81 Add a GitHub-derived PR Inbox across registered repositories').first(),
     ).toBeVisible()
     await expect(
-      page.locator('[data-workspace-surface="review"]').getByText('checks passing').first(),
+      page.getByRole('main', { name: 'review', exact: true }).getByText('checks passing').first(),
     ).toBeVisible()
     // Its files and its commits are read for that pull request, from that
     // pull request's own head rather than the branch that happens to be checked
@@ -617,22 +615,20 @@ test.describe('PR Inbox to Review, in one window', () => {
     await expect(page.getByText('src/main/review.ts').first()).toBeVisible()
 
     // Back to the queue, and into the other registered repository.
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await rows(page).nth(1).getByRole('button').click()
     await expect(
       page.getByText('#77 Charge every native-stack page to the refresh budget').first(),
     ).toBeVisible()
     await expect(
-      page.locator('[data-workspace-surface="review"]').getByText('checks failing').first(),
+      page.getByRole('main', { name: 'review', exact: true }).getByText('checks failing').first(),
     ).toBeVisible()
     await expect(page.getByText('src/main/review.ts').first()).toBeVisible()
     // The workspace on screen is that repository's, with its own canonical
     // origin: nothing here resolved the row against the repository that was
     // already open.
-    await page.locator('summary', { hasText: 'Repository info' }).click()
-    await expect(
-      page.getByText('git@github.com:howarewoo/design-system-specimens.git'),
-    ).toBeVisible()
+    await expect(page.getByRole('button', { name: /^howarewoo\/design-system-specimens ·/u }))
+      .toHaveAttribute('aria-pressed', 'true')
 
     const reads = (await getDoubleCalls(page)).filter(
       (entry) => entry.call === 'reviewFiles' || entry.call === 'reviewCommits',
@@ -648,7 +644,7 @@ test.describe('PR Inbox to Review, in one window', () => {
 
     // And the queue is still there to refresh, in the same window, with the
     // same rows: walking away from it did not end it.
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await page.getByRole('button', { name: 'Refresh the PR Inbox' }).click()
     await settle(page)
     await expect(rows(page)).toHaveCount(2)
@@ -658,7 +654,7 @@ test.describe('PR Inbox to Review, in one window', () => {
 test.describe('PR Inbox transitions', () => {
   test.beforeEach(async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-queue' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await expect(rows(page)).toHaveCount(2)
   })
 
@@ -696,7 +692,7 @@ test.describe('PR Inbox transitions', () => {
     await page.getByRole('button', { name: 'Refresh the PR Inbox' }).click()
     // Leaving and returning starts read B, which is also held.
     await switchDestination(page, 'branches')
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
 
     // Independently complete B (newest) first and assert its confirmed rows
     // are visible and distinguishable before the retired answer is staged or lands.
@@ -727,7 +723,7 @@ test.describe('PR Inbox transitions', () => {
     await refresh.click()
     // Leaving and returning starts read B, which remains held and pending.
     await switchDestination(page, 'branches')
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
 
     // Release only A's failure (oldest) while B remains held.
     expect(await releaseDoubleCalls(page, 'pullRequestInbox', 'oldest')).toBe(1)
@@ -780,30 +776,6 @@ test.describe('PR Inbox transitions', () => {
     await expect(page.getByRole('status')).toContainText('read without knowing whose queue this is')
   })
 
-  test('a world with no repository open does not answer with the one that was', async ({
-    page,
-  }) => {
-    // The foreign row is opened first, so this window is showing a repository
-    // the next world will not have.
-    await rows(page).nth(1).getByRole('button').click()
-    await page.locator('summary', { hasText: 'Repository info' }).click()
-    await expect(
-      page.getByText('git@github.com:howarewoo/design-system-specimens.git'),
-    ).toBeVisible()
-    const before = (await getDoubleCalls(page)).filter((entry) => entry.call === 'refresh').length
-
-    await changeScenario(page, 'shell-no-repository')
-    await page.getByRole('button', { name: 'Refresh repository' }).click()
-    await settle(page)
-
-    // The window asked, and the read failed. Serving the repository of the
-    // world that was would keep a workspace on screen that nothing holds any
-    // more, and would report it as a read that just succeeded.
-    expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'refresh').length).toBe(
-      before + 1,
-    )
-    await expect(page.getByRole('alert')).toBeVisible()
-  })
 })
 
 test.describe('PR Inbox identity', () => {
@@ -811,7 +783,7 @@ test.describe('PR Inbox identity', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'pr-inbox-host-switch' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
 
     // The person narrows the queue before anything changes, so a remount would
     // be visible: a destination that came back from scratch would hold an
@@ -820,10 +792,6 @@ test.describe('PR Inbox identity', () => {
     await search.click()
     await search.pressSequentially('native-stack')
     await expect(rows(page)).toHaveCount(1)
-    // The CLI status read is still outstanding, and the window says so rather
-    // than claiming an identity it has not been told about.
-    const cliStatus = page.getByTitle('GitHub CLI status')
-    await expect(cliStatus).toHaveText('GitHub CLI: checking')
 
     // A refresh for github.com is asked for and admitted before any of this
     // happens; only its answer is held back. That is the case the fence is for:
@@ -835,17 +803,9 @@ test.describe('PR Inbox identity', () => {
     // Still spinning: the read is outstanding, not answered and merely ignored.
     await expect(refresh).toBeDisabled()
 
-    // Another host is named through the real Settings control: the palette's
-    // Settings entry, then the GitHub section's own field and its own button.
+    // Change host through the current Settings button and retained GitHub section.
     await search.blur()
-    await page.keyboard.press('Meta+k')
-    const palette = page.getByRole('dialog', { name: 'Command palette' })
-    if (!(await palette.isVisible())) await page.keyboard.press('Control+k')
-    await expect(palette).toBeVisible()
-    // Two palette entries start with "Settings", so the entry that opens the
-    // dialog is named by the detail that follows its label rather than by the
-    // label alone.
-    await palette.getByRole('option', { name: /^Settings… \(/u }).click()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Settings' })
     await expect(dialog).toBeVisible()
     await dialog
@@ -880,7 +840,6 @@ test.describe('PR Inbox identity', () => {
     await expect(rows(page)).toHaveCount(0)
     await expect(search).toHaveValue('native-stack')
     await expect(page.getByRole('alert')).toHaveCount(0)
-    await expect(cliStatus).toHaveText('GitHub CLI: checking')
 
     // The refresh that was admitted for github.com answers now, late, and it
     // succeeded: it is github.com's own queue, read for the account this window
@@ -900,7 +859,6 @@ test.describe('PR Inbox identity', () => {
     await settle(page)
     await expect(rows(page)).toHaveCount(0)
     await expect(page.getByRole('alert')).toHaveCount(0)
-    await expect(cliStatus).toHaveText('GitHub CLI: checking')
 
     // The host that was named answers for itself, and only then does this
     // window have an account to read GitHub as. This fixture serves each
@@ -908,7 +866,6 @@ test.describe('PR Inbox identity', () => {
     // now cannot be the queue github.com's account could see.
     await publishCliStatus(page, HOST_B)
     await settle(page)
-    await expect(cliStatus).toHaveText('GitHub CLI: signed in')
     await page.getByRole('button', { name: 'Refresh the PR Inbox' }).click()
     await settle(page)
     await expect(rows(page)).toHaveCount(1)
@@ -926,7 +883,7 @@ test.describe('PR Inbox identity', () => {
 test.describe('structured Inbox saved views', () => {
   test.beforeEach(async ({ page }) => {
     await openGallery(page, { scenario: 'pr-inbox-structured' })
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
   })
 
   test('multi-repository author/reviewer/review/check/size criteria and sort survive reopening', async ({
@@ -957,7 +914,7 @@ test.describe('structured Inbox saved views', () => {
     ).toBeVisible()
     await switchGalleryRoute(page, 'index')
     await switchGalleryRoute(page, 'app')
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await groupRail(page).getByRole('button', { name: 'Two repositories', exact: true }).click()
     await expect(
       page.getByRole('checkbox', { name: 'howarewoo/git-stacks', exact: true }),
@@ -1007,7 +964,7 @@ test.describe('structured Inbox saved views', () => {
       },
     ])
     await switchGalleryRoute(page, 'app')
-    await switchDestination(page, 'prInbox')
+    await switchDestination(page, 'attention')
     await groupRail(page)
       .getByRole('button', { name: 'Mixed case repository', exact: true })
       .click()

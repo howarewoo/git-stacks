@@ -20,7 +20,7 @@ import type { FixtureCall } from './fixtures/types'
  */
 
 const THREADS = 'GitHub notification threads'
-/** The inbox's own toolbar button, distinct from the shell's "Refresh repository". */
+/** The inbox's own refresh button, scoped to the optional Notifications dialog. */
 const REFRESH = { name: 'Refresh', exact: true } as const
 
 async function openNotifications(page: Page, scenario: ScenarioName): Promise<void> {
@@ -34,7 +34,7 @@ function threadList(page: Page) {
 }
 
 function inbox(page: Page) {
-  return page.getByRole('main')
+  return page.getByRole('dialog', { name: 'Optional Notifications', exact: true })
 }
 
 function row(page: Page, title: string) {
@@ -82,7 +82,7 @@ async function tabToControl(page: Page, control: Locator, limit = 240): Promise<
  */
 async function openAuthorizationDialog(page: Page): Promise<Locator> {
   await inbox(page).getByRole('button', { name: 'Authorize notifications' }).click()
-  const dialog = page.getByRole('dialog')
+  const dialog = page.getByRole('dialog', { name: 'GitHub Notifications credential', exact: true })
   await expect(dialog).toBeVisible()
   await dialog.getByLabel('Personal access token').fill('ghp_testtokentesttokentesttoken')
   await dialog.getByRole('checkbox', { name: /I understand the boundary/ }).check()
@@ -140,7 +140,7 @@ async function cutOverWithDialogOpen(page: Page, host: string): Promise<Locator>
   // The new host has no credential of its own, so the person is offered its own
   // authorization, and its dialog is open when the late answer finally lands.
   await inbox(page).getByRole('button', { name: 'Authorize notifications' }).click()
-  const forNewHost = page.getByRole('dialog')
+  const forNewHost = page.getByRole('dialog', { name: 'GitHub Notifications credential', exact: true })
   await expect(forNewHost).toBeVisible()
   return forNewHost
 }
@@ -152,13 +152,10 @@ async function cutOverWithDialogOpen(page: Page, host: string): Promise<Locator>
  * come from the window asking for it.
  */
 async function selectGitHubHost(page: Page, host: string): Promise<void> {
-  await page.keyboard.press('Meta+k')
-  if (!(await page.getByRole('dialog', { name: 'Command palette' }).isVisible())) {
-    await page.keyboard.press('Control+k')
-  }
-  const palette = page.getByRole('dialog', { name: 'Command palette' })
-  await expect(palette).toBeVisible()
-  await palette.getByRole('option', { name: /^Settings/ }).click()
+  const credential = page.getByRole('dialog', { name: 'GitHub Notifications credential', exact: true })
+  if (await credential.isVisible()) await credential.getByRole('button', { name: 'Close dialog' }).click()
+  await inbox(page).getByRole('button', { name: 'Close dialog' }).click()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: /Settings/ })
   await expect(dialog).toBeVisible()
   await dialog.getByRole('button', { name: 'GitHub', exact: true }).click()
@@ -167,6 +164,7 @@ async function selectGitHubHost(page: Page, host: string): Promise<void> {
   await expect(dialog.getByText(`GitHub host set to ${host}.`, { exact: false })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
+  await switchDestination(page, 'notifications')
 }
 
 test.describe('Notification Center states and transitions', () => {
@@ -185,7 +183,7 @@ test.describe('Notification Center states and transitions', () => {
     await openNotifications(page, 'notifications-awaiting-credential')
 
     await page.getByRole('button', { name: 'Authorize notifications' }).click()
-    const dialog = page.getByRole('dialog')
+    const dialog = page.getByRole('dialog', { name: 'GitHub Notifications credential', exact: true })
     await expect(dialog).toBeVisible()
     // The host is named before anything is typed: it is the host this token is
     // acknowledged for, and it travels with the token rather than being chosen
@@ -199,7 +197,7 @@ test.describe('Notification Center states and transitions', () => {
 
     await dialog.getByRole('button', { name: 'Authorize notifications' }).click()
 
-    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByRole('dialog', { name: 'GitHub Notifications credential', exact: true })).toHaveCount(0)
     await expect(threadList(page)).toBeVisible()
     await expect(threadList(page).getByRole('listitem')).toHaveCount(3)
     await expect(row(page, 'Tidy the stack ordering rules')).toBeVisible()
@@ -286,7 +284,7 @@ test.describe('Notification Center states and transitions', () => {
     await openNotifications(page, 'notifications-awaiting-credential')
 
     await page.getByRole('button', { name: 'Authorize notifications' }).click()
-    const dialog = page.getByRole('dialog')
+    const dialog = page.getByRole('dialog', { name: 'GitHub Notifications credential', exact: true })
     await dialog.getByLabel('Personal access token').fill('ghp_fixture_never_real')
     await dialog.getByRole('checkbox').check()
     await page.evaluate(() => {
@@ -370,7 +368,7 @@ test.describe('Notification Center states and transitions', () => {
   test('the consent dialog keeps global shortcuts from running through it', async ({ page }) => {
     await openNotifications(page, 'notifications-awaiting-credential')
     await page.getByRole('button', { name: 'Authorize notifications' }).click()
-    const dialog = page.getByRole('dialog')
+    const dialog = page.getByRole('dialog', { name: 'GitHub Notifications credential', exact: true })
     await expect(dialog).toBeVisible()
 
     const token = dialog.getByLabel('Personal access token')
@@ -379,7 +377,7 @@ test.describe('Notification Center states and transitions', () => {
     await page.keyboard.press('Control+k')
     await settle(page)
 
-    await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(0)
+    await expect(page.getByRole('dialog', { name: 'Global search' })).toHaveCount(0)
     await expect(dialog).toBeVisible()
     await expect(token).toBeFocused()
   })

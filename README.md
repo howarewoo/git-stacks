@@ -1935,6 +1935,18 @@ These are the extreme cases the app states rather than hanging or crashing on.
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
 
+The application fixtures exercise the current workbench shell: Branches & worktrees,
+Pull requests, Needs attention, and Activity. Full Review starts from a qualified PR;
+committed history and Notifications open in dialogs. Renderer helpers wait for the
+workbench heading, not the retired repository toolbar. Legacy graph-camera and
+removed mutation-control assertions are not contracts for this shell.
+
+Review return preserves the originating filter, selection, scroll and keyboard focus.
+Held CLI reads cannot replace newer provider status. Notifications keep their
+independent credential ownership, fence late host-scoped answers, and complete
+enable → credential save → inbox read before dismissing authorization. Captured
+operation progress is checked against its provider authority, not an inspection key.
+
 ### v5 workbench foundation and matched visual evidence
 
 The current visual/product contract is [#243](https://github.com/howarewoo/git-stacks/issues/243)

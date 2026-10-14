@@ -572,6 +572,7 @@ export function BranchWorkbench({
       >
         <WorkbenchPane
           className="bw-inspector"
+          role="complementary"
           aria-label="Selected branch details"
           header={
             <>
@@ -1091,6 +1092,7 @@ export function BranchWorkbench({
         {mainPanel ?? (
           <WorkbenchPane
             className="bw-main"
+            role="main"
             aria-label="Branch workbench"
             header={
               <>
@@ -1553,7 +1555,7 @@ export function BranchWorkbench({
               {!entries.length ? (
                 <div className="bw-empty">
                   <Search />
-                  <h3>No matching branches</h3>
+                  <h2>No matching branches</h2>
                   <p>Try another branch, PR, path, or worktree filter.</p>
                 </div>
               ) : null}
