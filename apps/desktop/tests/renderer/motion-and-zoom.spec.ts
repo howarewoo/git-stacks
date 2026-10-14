@@ -20,7 +20,9 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
       })
       expect(hasHorizontalScroll).toBe(false)
 
-      const navButtons = page.getByRole('complementary', { name: 'Workspace navigation' }).getByRole('button')
+      const navButtons = page
+        .getByRole('complementary', { name: 'Workspace navigation' })
+        .getByRole('button')
       const navCount = await navButtons.count()
       expect(navCount).toBeGreaterThan(0)
       for (let i = 0; i < navCount; i++) {
@@ -43,7 +45,9 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
       }
     })
 
-    test('selected branch inspector remains keyboard operable at compact reflow', async ({ page }) => {
+    test('selected branch inspector remains keyboard operable at compact reflow', async ({
+      page,
+    }) => {
       await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
       const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
       await expect(inspector).toBeVisible()
@@ -57,7 +61,9 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
         expect(box!.x).toBeGreaterThanOrEqual(0)
         expect(box!.x + box!.width).toBeLessThanOrEqual(720)
       }
-      expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false)
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+      ).toBe(false)
     })
 
     // Every destination — not just the two the suite used to name — has to
@@ -74,7 +80,6 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
           return document.documentElement.scrollWidth > window.innerWidth
         })
         expect(hasHorizontalScroll).toBe(false)
-
 
         const box = await heading.boundingBox()
         expect(box).not.toBeNull()

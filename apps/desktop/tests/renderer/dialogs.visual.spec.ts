@@ -5,7 +5,6 @@ import { openRestackDialog } from './helpers/dialogs'
 test.describe('Representative dialogs visual regression @visual', () => {
   test.use({ viewport: STANDARD_VIEWPORTS.standard })
 
-
   test('captures "Restack stack" reviewed dialog', async ({ page }) => {
     await openGallery(page, { scenario: 'ancestry-requires-restack' })
     const dialog = await openRestackDialog(page)

@@ -93,31 +93,49 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     expect(await getDispatchedActions(page)).toEqual([])
   })
 
-  test('paged branch groups move within the mounted page and remain reachable after paging back', async ({
+  test('paged branch groups keep arrows page-relative and Home/End reach the complete outline', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'branches-deep-chain' })
     const rows = page.locator('.bw-lane-row')
     const initial = await rows.first().getAttribute('data-branch-id')
+    await page.getByRole('button', { name: 'feature/deep-0619', exact: true }).click()
+    const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
+    await expect(inspector).toContainText('feature/deep-0619')
+    const inspected = await inspector.textContent()
     await page.getByRole('button', { name: 'Next page', exact: true }).click()
     await settle(page)
     expect(await rows.first().getAttribute('data-branch-id')).not.toBe(initial)
+    await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled()
     await rows.first().focus()
+    await page.keyboard.press('ArrowUp')
+    await expect(rows.first()).toBeFocused()
     await page.keyboard.press('ArrowDown')
     await expect(rows.nth(1)).toBeFocused()
+    await rows.last().focus()
+    await page.keyboard.press('ArrowDown')
+    await expect(rows.last()).toBeFocused()
     await page.keyboard.press('End')
     await expect(rows.last()).toBeFocused()
+    await expect(rows.last().getByRole('button', { name: 'main', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeDisabled()
+    await expect(page.locator('.bw-lane-row[tabindex="0"]')).toHaveCount(1)
+    expect(await inspector.textContent()).toBe(inspected)
+    await page.getByRole('button', { name: 'Previous page', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Next page', exact: true })).toBeEnabled()
+    await rows.first().focus()
     await page.keyboard.press('Home')
     await expect(rows.first()).toBeFocused()
+    await expect(rows.first()).toHaveAttribute('data-branch-id', initial!)
+    await expect(page.getByRole('button', { name: 'Previous page', exact: true })).toBeDisabled()
     expect(
       await rows.evaluateAll(
         (elements) => elements.filter((element) => element.tabIndex === 0).length,
       ),
     ).toBe(1)
-    await page.getByRole('button', { name: 'Previous page', exact: true }).click()
-    await expect(rows.first()).toHaveAttribute('data-branch-id', initial!)
-    await rows.first().focus()
-    await expect(rows.first()).toBeFocused()
+    expect(await inspector.textContent()).toBe(inspected)
+    expect(await getDispatchedActions(page)).toEqual([])
   })
 
   test('branch groups leave modified stack-navigation chords to the global dispatcher', async ({

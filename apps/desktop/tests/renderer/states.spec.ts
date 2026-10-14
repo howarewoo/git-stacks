@@ -19,10 +19,17 @@ test.describe('Async loading and workflow recovery', () => {
 
       await expect(loadingMsg).not.toBeVisible()
       // Commits should now be rendered
-      await expect(dialog.getByRole('button').filter({ hasText: / · [a-f0-9]{10}$/ }).first()).toBeVisible()
+      await expect(
+        dialog
+          .getByRole('button')
+          .filter({ hasText: / · [a-f0-9]{10}$/ })
+          .first(),
+      ).toBeVisible()
     })
 
-    test('a failed committed history read can be retried by reopening the selected context', async ({ page }) => {
+    test('a failed committed history read can be retried by reopening the selected context', async ({
+      page,
+    }) => {
       await openGallery(page, { scenario: 'shell-connected' })
       await page.getByRole('button', { name: 'main', exact: true }).click()
       await page.evaluate(() => window.fixture.failNext('history', 'The selected ref disappeared.'))
@@ -33,12 +40,19 @@ test.describe('Async loading and workflow recovery', () => {
       await page.keyboard.press('Escape')
       await expect(dialog).not.toBeVisible()
       await trigger.click()
-      await expect(dialog.getByRole('button').filter({ hasText: / · [a-f0-9]{10}$/ }).first()).toBeVisible()
+      await expect(
+        dialog
+          .getByRole('button')
+          .filter({ hasText: / · [a-f0-9]{10}$/ })
+          .first(),
+      ).toBeVisible()
       await expect(dialog.getByRole('alert')).toHaveCount(0)
       expect(await getDispatchedActions(page)).toEqual([])
     })
 
-    test('closing a pending commit diff leaves the next history context usable', async ({ page }) => {
+    test('closing a pending commit diff leaves the next history context usable', async ({
+      page,
+    }) => {
       await openGallery(page, { scenario: 'shell-connected' })
       await page.getByRole('button', { name: 'main', exact: true }).click()
       await page.evaluate(() => window.fixture.hold('commitDiff'))
@@ -105,6 +119,5 @@ test.describe('Async loading and workflow recovery', () => {
       )
       await expect(submitBtn).toBeEnabled()
     })
-
   })
 })

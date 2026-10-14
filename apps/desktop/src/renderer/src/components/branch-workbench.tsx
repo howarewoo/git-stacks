@@ -278,6 +278,7 @@ export function BranchWorkbench({
   const [folded, setFolded] = useState<Set<string>>(new Set(viewState.folded))
   const [checked, setChecked] = useState<Set<string>>(new Set())
   const [focusedBranchId, setFocusedBranchId] = useState<string | null>(selectedBranchId)
+  const pendingRowFocus = useRef<string | null>(null)
   const [localTab, setLocalTab] = useState(viewState.tab)
   const tab = controlledInspector ? viewState.tab : localTab
   const [relationshipPage, setRelationshipPage] = useState(0)
@@ -444,6 +445,11 @@ export function BranchWorkbench({
   const pageCount = Math.max(1, Math.ceil(allEntries.length / LIST_PAGE_SIZE))
   const currentPage = Math.min(page, pageCount - 1)
   const entries = allEntries.slice(currentPage * LIST_PAGE_SIZE, (currentPage + 1) * LIST_PAGE_SIZE)
+  useLayoutEffect(() => {
+    if (!pendingRowFocus.current) return
+    document.getElementById(`branch-${pendingRowFocus.current}`)?.focus()
+    pendingRowFocus.current = null
+  }, [currentPage, focusedBranchId])
   const pageIds = new Set(entries.map((entry) => entry.branch.id))
   const omittedEdges = entries.filter(
     (entry) => entry.parentId && !pageIds.has(entry.parentId),
@@ -1349,17 +1355,24 @@ export function BranchWorkbench({
                             event.target instanceof HTMLElement &&
                             event.target.closest('.bw-branch-name, .bw-subtitle')
                           if (event.target !== event.currentTarget && !identityControl) return
+                          if (event.key === 'Home' || event.key === 'End') {
+                            event.preventDefault()
+                            const index = event.key === 'Home' ? 0 : allEntries.length - 1
+                            const id = allEntries[index].branch.id
+                            setFocusedBranchId(id)
+                            if (Math.floor(index / LIST_PAGE_SIZE) !== currentPage) {
+                              pendingRowFocus.current = id
+                              setPage(Math.floor(index / LIST_PAGE_SIZE))
+                            } else document.getElementById(`branch-${id}`)?.focus()
+                            return
+                          }
                           const index = entries.indexOf(entry)
                           const next =
                             event.key === 'ArrowDown'
                               ? Math.min(index + 1, entries.length - 1)
                               : event.key === 'ArrowUp'
                                 ? Math.max(index - 1, 0)
-                                : event.key === 'Home'
-                                  ? 0
-                                  : event.key === 'End'
-                                    ? entries.length - 1
-                                    : null
+                                : null
                           if (next !== null) {
                             event.preventDefault()
                             setFocusedBranchId(entries[next].branch.id)
