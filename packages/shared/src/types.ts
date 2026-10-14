@@ -1283,7 +1283,6 @@ export interface PullRequestLayerRead {
   pullRequest: PullRequest
   observedAt: string
 }
-
 export interface DesktopAPI {
   /**
    * What the configured GitHub host was observed to support. Every field is a

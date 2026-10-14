@@ -651,6 +651,9 @@ test('automated accessibility and measured essential boundaries and focus contra
 
 for (const theme of ['light', 'dark'])
   test(`representative ${theme} visual baseline @visual`, async ({ page }) => {
+    // Keep the tall specimen inside the viewport. Chromium's beyond-viewport
+    // capture transiently resizes to 1×1, triggering responsive reflow.
+    await page.setViewportSize({ width: 1280, height: 1600 })
     await page.goto('/')
     await page.evaluate((theme) => {
       document.documentElement.dataset.gsTheme = theme

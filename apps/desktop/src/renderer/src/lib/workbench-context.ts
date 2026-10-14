@@ -120,6 +120,7 @@ export function readWorkbenchMemory(): Record<string, RepositoryViewMemory> {
           tab: ['overview', 'changes', 'checks', 'discussion'].includes(view.tab)
             ? view.tab
             : 'overview',
+
           worktreeId: typeof view.worktreeId === 'string' ? view.worktreeId : null,
           refScope: view.refScope === 'local' || view.refScope === 'remote' ? view.refScope : 'all',
         },

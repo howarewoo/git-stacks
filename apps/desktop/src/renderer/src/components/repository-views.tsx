@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { sameOperationScope, type OperationProgress } from '@git-stacks/shared/operation-scope'
+import type { OperationProgress } from '@git-stacks/shared/operation-scope'
 import {
   mergeProgressAfterRead,
   operationProgressKeys,
@@ -97,65 +97,6 @@ function RemoteOperationStatus({
     queryKey: mergeProgressKey,
     enabled: false,
   })
-  React.useEffect(() => {
-    let active = true
-    let publicationRevision = 0
-    let mergeRevision = 0
-    const unsubscribePublication = desktop?.onSubmitStackProgress?.((event) => {
-      if (!active || !sameOperationScope(event.scope, scope)) return
-      const revision = ++publicationRevision
-      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true }).then(() => {
-        if (active && revision === publicationRevision)
-          queryClient.setQueryData(publicationKey, event)
-      })
-    })
-    const unsubscribeMerge = desktop?.onMergeProgress?.((event) => {
-      if (!active || !sameOperationScope(event.scope, scope)) return
-      const revision = ++mergeRevision
-      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true }).then(() => {
-        if (active && revision === mergeRevision)
-          queryClient.setQueryData(mergeProgressKey, event.progress === null ? null : event)
-      })
-    })
-    if (desktop?.submitStackProgress) {
-      void queryClient
-        .fetchQuery({
-          queryKey: publicationKey,
-          queryFn: async ({ signal }) => {
-            const value = await readOperationProgress(desktop.submitStackProgress!, scope, signal)
-            if (!active || signal.aborted) throw new Error('Retired publication read')
-            return value
-          },
-        })
-        .catch(() => {})
-    }
-    if (desktop?.mergeStatus) {
-      void queryClient
-        .fetchQuery({
-          queryKey: mergeKey,
-          queryFn: async ({ signal }) => {
-            const value = await readOperationProgress(desktop.mergeStatus!, scope, signal)
-            if (!active || signal.aborted) throw new Error('Retired merge read')
-            queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
-              mergeProgressKey,
-              (previous) => mergeProgressAfterRead(previous, value),
-            )
-            return value
-          },
-        })
-        .catch(() => {})
-    }
-    return () => {
-      active = false
-      unsubscribePublication?.()
-      unsubscribeMerge?.()
-      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true })
-      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true })
-      queryClient.removeQueries({ queryKey: publicationKey, exact: true })
-      queryClient.removeQueries({ queryKey: mergeKey, exact: true })
-      queryClient.removeQueries({ queryKey: mergeProgressKey, exact: true })
-    }
-  }, [desktop, queryClient, publicationKey, mergeKey, mergeProgressKey, scope])
   const progress = publication.data?.progress
   const mergeEnvelope = pushedMerge.data ?? merge.data
   const mergeResult = mergeEnvelope?.progress

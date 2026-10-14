@@ -115,7 +115,7 @@ test.describe('Leaving a review', () => {
     const body = 'Keep every character in this unsent draft.'
     await editor.pressSequentially(body, { delay: 10 })
     await expect(editor).toHaveValue(body)
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     await expect(editor).toHaveValue(body)
@@ -148,7 +148,7 @@ test.describe('Leaving a review', () => {
     await page.evaluate(() => window.fixture.hold('reviewSubmit'))
     await page.getByRole('button', { name: 'Submit 1 comment as one review' }).click()
     await expect.poll(async () => (await submissions(page)).length).toBe(1)
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await page.evaluate(() => window.fixture.release('reviewSubmit'))
     await switchDestination(page, 'review')
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
@@ -238,7 +238,7 @@ test.describe('Leaving a review', () => {
     // reading and deciding, and it is where an identity is easiest to lose: the
     // count that names the next comment lives with the drafts, and nothing is
     // on screen to rebuild it from.
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await settle(page)
 
@@ -344,7 +344,7 @@ test.describe('Leaving a review', () => {
     await addPendingComment(page, 'Comment on src/main/review.ts:1 (head)', 'Unfinished thought.')
     await expect(page.locator('.review-draft')).toHaveCount(1)
 
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await settle(page)
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
@@ -369,7 +369,7 @@ test.describe('Leaving a review', () => {
     // The read is held on a promise that returns whatever the journal held the
     // moment the read started, which is what the main process would have read,
     // rather than whatever it holds by the time the test lets it answer.
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await page.evaluate(() => {
       const bridge = window.desktop
       const read = bridge.reviewDrafts?.bind(bridge)
@@ -467,7 +467,7 @@ test.describe('Anchors that no longer name their line', () => {
       'Comment on src/main/review.ts:1 (head)',
       'Written before the push.',
     )
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await settle(page)
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()

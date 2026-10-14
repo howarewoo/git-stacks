@@ -45,6 +45,7 @@ export type FixtureCall =
   | 'recentRepositories'
   | 'openRepository'
   | 'refresh'
+  | 'worktreeStatus'
   | 'prIndex'
   | 'prIndexDetail'
   | 'graphPreferences'

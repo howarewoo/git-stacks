@@ -1735,7 +1735,7 @@ function installHandlers() {
       const controller = readKeys.claim(context.repositoryId, requestId, purpose)
       return inspectionReads
         .read(
-          'workbench-inspection',
+          context.repositoryId,
           async (signal) => {
             const registered = inventory
               .current()
@@ -2189,35 +2189,46 @@ function installHandlers() {
     const root = repository()
     const generation = hostGeneration
     try {
+      const authority = inventory
+        .current()
+        .repositories.find(
+          (repo) =>
+            repo.registeredPaths.includes(root) ||
+            repo.worktrees.some((tree) => tree.path === root),
+        )?.identity.id
       // A mutation claims the repository lane: background reads end first, so a
       // stage or a commit never waits on a network that is not answering.
-      return await scheduler.mutate(root, () =>
-        // Naming the repository is the admission check: a switch can complete
-        // while this action waited for the background reads it ends, and an
-        // action must never apply to the repository the window already left.
-        operations.write(
-          () =>
-            inGitRuntime(async () => {
-              // The merge tool configured in Settings wins over Git's own
-              // configuration for the one action that consults it.
-              const settings = (await readSettingsFile(settingsFile())).settings
-              if (
-                action.type === 'submitStack' ||
-                action.type === 'submitStackRetry' ||
-                action.type === 'submitStackDismiss' ||
-                action.type === 'executeStack'
-              ) {
-                const scope = await repositoryOperationScope(root)
-                if (generation !== hostGeneration) throw new CommandCancelled()
-                progressOwner = scope
-              }
-              try {
-                return await runAction(root, action, settings.git.mergeTool)
-              } finally {
-                progressOwner = null
-              }
-            }),
-          root,
+      // Claim inspection first: its adoption checks still need the background lane
+      // while unwinding, so taking that lane first would deadlock nested reads.
+      return await inspectionReads.mutate(authority ?? root, () =>
+        scheduler.mutate(root, () =>
+          // Naming the repository is the admission check: a switch can complete
+          // while this action waited for the background reads it ends, and an
+          // action must never apply to the repository the window already left.
+          operations.write(
+            () =>
+              inGitRuntime(async () => {
+                // The merge tool configured in Settings wins over Git's own
+                // configuration for the one action that consults it.
+                const settings = (await readSettingsFile(settingsFile())).settings
+                if (
+                  action.type === 'submitStack' ||
+                  action.type === 'submitStackRetry' ||
+                  action.type === 'submitStackDismiss' ||
+                  action.type === 'executeStack'
+                ) {
+                  const scope = await repositoryOperationScope(root)
+                  if (generation !== hostGeneration) throw new CommandCancelled()
+                  progressOwner = scope
+                }
+                try {
+                  return await runAction(root, action, settings.git.mergeTool)
+                } finally {
+                  progressOwner = null
+                }
+              }),
+            root,
+          ),
         ),
       )
     } catch (error) {
