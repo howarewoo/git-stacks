@@ -925,12 +925,13 @@ export function WorkflowDialog({
   const instance = React.useId()
   const queryScope = React.useMemo(() => ({ instance, authority }), [instance, authority])
   const operationScope = React.useMemo(
-    () => ({
-      repositoryPath: snapshot.path,
-      remoteUrl: snapshot.remoteUrl,
-      authority,
-    }),
-    [snapshot.path, snapshot.remoteUrl, authority],
+    () =>
+      capturedAuthority?.scope ?? {
+        repositoryPath: snapshot.path,
+        remoteUrl: snapshot.remoteUrl,
+        authority,
+      },
+    [capturedAuthority?.scope, snapshot.path, snapshot.remoteUrl, authority],
   )
   const operationKeys = React.useMemo(() => operationProgressKeys(operationScope), [operationScope])
   const {
@@ -1099,24 +1100,29 @@ export function WorkflowDialog({
     void queryClient.fetchQuery({ queryKey: previewKey, queryFn: load, staleTime: 0 }).then(
       (data) => {
         if (!active) return
-        setRejectedIdentities([])
         if (data.kind === 'stack') {
-          // Entered layer choices survive a preview reload; untouched layers are seeded
-          // from the reviewed offer so title, body, draft and base start where Git Stacks
-          // proposes them.
-          form.setFieldValue('layerChoices', (current) =>
-            Object.fromEntries(
+          // Keep authored text, including layers no longer in the fresh offer.
+          // Reload replaces facts, not authorship, and base-write consent must
+          // be explicitly offered again for every freshly reviewed layer.
+          form.setFieldValue('layerChoices', (current) => ({
+            ...current,
+            ...Object.fromEntries(
               (data.value.publish?.layers ?? []).map((layer) => [
                 layer.branch,
-                current[layer.branch] ?? {
-                  title: layer.title,
-                  body: layer.body,
-                  draft: layer.draft,
-                  updateBase: layer.updateBase,
-                },
+                current[layer.branch]
+                  ? {
+                      ...current[layer.branch],
+                      updateBase: attempt > 0 ? false : current[layer.branch].updateBase,
+                    }
+                  : {
+                      title: layer.title,
+                      body: layer.body,
+                      draft: layer.draft,
+                      updateBase: attempt > 0 ? false : layer.updateBase,
+                    },
               ]),
             ),
-          )
+          }))
         } else if (data.kind === 'surgery') {
           if (requestedName !== null && requestedName !== form.getFieldValue('name'))
             queryClient.setQueryData(previewKey, { kind: 'local' })
@@ -1354,25 +1360,31 @@ export function WorkflowDialog({
     }
     if (request.kind === 'stack') {
       if (!preview) return null
-      return request.operation === 'publish'
-        ? {
-            kind: 'submit',
-            preview,
-            allowForce,
-            layers: layerChoices,
-            confirmation,
-            confirmationTarget,
-          }
-        : {
-            kind: 'stack',
-            operation: request.operation,
-            preview,
-            allowForce,
-            confirmation,
-            confirmationTarget,
-            mergeMethod,
-            mergeAction,
-          }
+      if (request.operation === 'publish') {
+        const activeChoices: Record<string, PublishLayerChoice> = {}
+        for (const layer of preview.publish?.layers ?? []) {
+          const choice = layerChoices[layer.branch]
+          if (choice) activeChoices[layer.branch] = choice
+        }
+        return {
+          kind: 'submit',
+          preview,
+          allowForce,
+          layers: activeChoices,
+          confirmation,
+          confirmationTarget,
+        }
+      }
+      return {
+        kind: 'stack',
+        operation: request.operation,
+        preview,
+        allowForce,
+        confirmation,
+        confirmationTarget,
+        mergeMethod,
+        mergeAction,
+      }
     }
     if (request.kind === 'surgery') {
       if (!surgery) return null
@@ -2371,7 +2383,11 @@ export function WorkflowDialog({
                                 >
                                   <Input
                                     readOnly={!layer.create || recovering}
-                                    value={choice?.title ?? ''}
+                                    value={
+                                      !layer.create && !recovering
+                                        ? layer.title
+                                        : (choice?.title ?? '')
+                                    }
                                     onChange={(event) => setChoice({ title: event.target.value })}
                                   />
                                 </Field>
@@ -2387,6 +2403,26 @@ export function WorkflowDialog({
                                     />
                                   </Field>
                                 ) : null}
+                                {!layer.create &&
+                                !recovering &&
+                                choice &&
+                                (choice.title !== layer.title || choice.body) ? (
+                                  <OperationContext
+                                    title={`Retained authored draft — ${layer.branch}`}
+                                    description="The fresh offer found an existing PR. Original-owner authored text stays retained here; it is not sent to that PR."
+                                    facts={[
+                                      { label: 'Authored title', value: choice.title },
+                                      {
+                                        label: 'Authored body',
+                                        value: choice.body || 'Empty authored body',
+                                      },
+                                      {
+                                        label: 'Authored visibility',
+                                        value: choice.draft ? 'Draft' : 'Ready',
+                                      },
+                                    ]}
+                                  />
+                                ) : null}
                                 {layer.create ? (
                                   <Checkbox
                                     id={`draft-${id}`}
@@ -2401,6 +2437,25 @@ export function WorkflowDialog({
                           })
                         }}
                       </form.Field>
+                      {!recovering
+                        ? Object.entries(values.layerChoices)
+                            .filter(
+                              ([branch]) =>
+                                !publishOffer?.layers.some((layer) => layer.branch === branch),
+                            )
+                            .map(([branch, choice]) => (
+                              <OperationContext
+                                key={`retained-${branch}`}
+                                title={`Retained authored draft — ${branch}`}
+                                description="Outside the fresh offered scope; this retained text is not included in the action."
+                                facts={[
+                                  { label: 'Title', value: choice.title },
+                                  { label: 'Body', value: choice.body || 'Empty authored body' },
+                                  { label: 'Visibility', value: choice.draft ? 'Draft' : 'Ready' },
+                                ]}
+                              />
+                            ))
+                        : null}
                     </>
                   ) : null}
                   {request.operation === 'merge' ? (
@@ -2810,16 +2865,40 @@ export function WorkflowDialog({
             ) : null}
             {!loading &&
             (((error || actionError) && previewKinds.includes(request.kind)) ||
-              (request.kind === 'surgery' && !surgery)) ? (
+              (request.kind === 'surgery' && !surgery) ||
+              (capturedAuthority &&
+                !safety.current &&
+                (request.kind === 'stack' || request.kind === 'surgery'))) ? (
               <Button
                 variant="secondary"
-                disabled={busy}
+                disabled={busy || !providerSourceCurrent}
                 onClick={() => {
+                  if (!providerSourceCurrent) return
+                  if (identity)
+                    setRejectedIdentities((previous) =>
+                      previous.includes(identity) ? previous : [...previous, identity],
+                    )
+                  setIdentity(null)
+                  form.setFieldValue('allowForce', false)
+                  form.setFieldValue('confirmation', '')
+                  form.setFieldValue('closePullRequests', false)
+                  form.setFieldValue('layerChoices', (current) =>
+                    Object.fromEntries(
+                      Object.entries(current).map(([branch, choice]) => [
+                        branch,
+                        { ...choice, updateBase: false },
+                      ]),
+                    ),
+                  )
                   setError(null)
                   onClearActionError()
                   setAttempt((value) => value + 1)
                 }}
-                tooltip="Read the latest repository and GitHub state to replace this preview. No Git changes are made."
+                tooltip={
+                  providerSourceCurrent
+                    ? 'Explicitly inspect the same original owner. Authored text stays; force and base-write approvals must be given again. No Git changes are made.'
+                    : 'The original provider retired. Original-owner input stays retained; this form cannot move to the replacement principal.'
+                }
               >
                 Reload preview
               </Button>

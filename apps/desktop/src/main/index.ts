@@ -11,6 +11,7 @@ import {
   validateRecordedRecovery,
   withCapturedOperationLock,
   validateCapturedDirectory,
+  createOperationEffectValidator,
 } from './operation-authority'
 import type { OperationCapture } from '@git-stacks/shared/operation-scope'
 import { parseReviewComposerDraft } from '@git-stacks/shared/review-threads'
@@ -1894,44 +1895,28 @@ function installHandlers() {
           const privateCredential = capturedHost
             ? await hostCredentialAuthority(capturedHost.host)
             : null
-          let effectAdmitted = false
-          const validate = async () => {
-            const fresh = await discoverWorktrees(captured.worktreePath)
+          const validate = createOperationEffectValidator(captured, scope, async () => {
+            const currentOrigin = await getOriginUrl(captured.worktreePath)
+            const currentCredential = capturedHost
+              ? await hostCredentialAuthority(capturedHost.host)
+              : null
             if (
-              fresh.identity.id !== captured.repositoryId ||
-              !fresh.worktrees.some(
-                (tree) =>
-                  tree.id === captured.worktreeId &&
-                  tree.path === captured.worktreePath &&
-                  !tree.missing,
-              ) ||
               capturedGeneration !== hostGeneration ||
               (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host)) ||
               !sameOperationScope(scope, {
                 repositoryPath: captured.worktreePath,
-                remoteUrl: await getOriginUrl(captured.worktreePath),
+                remoteUrl: currentOrigin,
                 authority: cliAuthority(
                   capturedHost?.host ?? null,
                   capturedService?.current() ?? null,
                 ),
               }) ||
-              (capturedHost &&
-                privateCredential !== (await hostCredentialAuthority(capturedHost.host)))
+              privateCredential !== currentCredential
             )
               throw new Error(
-                'Original local or provider authority changed during the operation; no further step is authorized.',
+                'Original origin or private provider authority changed at the effect boundary; no further step is authorized.',
               )
-            if (!effectAdmitted) await revalidateOperation(captured, scope)
-            // HEAD/index may legitimately evolve under the engine's own captured
-            // checkpoints; physical ownership and provider authority never may.
-            await validateCapturedDirectory(captured)
-            if (
-              capturedGeneration !== hostGeneration ||
-              (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host))
-            )
-              throw new Error('Provider authority changed at the effect boundary.')
-            effectAdmitted = true
-          }
+          })
           const settings = (await readSettingsFile(settingsFile())).settings
           return progressOwner.run(scope, () =>
             runRecordedOperation(captured, action, () =>

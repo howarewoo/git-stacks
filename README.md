@@ -2202,13 +2202,27 @@ worktree lifecycle use the real existing main engines and typed preload boundary
 Hidden/unloaded dependency members participate base-first; incomplete full-scope
 facts refuse the operation instead of shrinking it to visible rows. Branch hints,
 tracking, published PR bases and provider-owned native membership remain distinct.
-Every Git/ref/config effect is fenced again after its awaited preflight, with original
-physical/provider authority retained as the engine's own HEAD/index checkpoints evolve.
+Every Git/ref/config effect finishes its evolved target and ordinary capture/discovery
+preflight before the original-owner dispatch fence. Actual origin/private-provider checks
+precede final synchronous Gitfile/admin/common binding and physical incarnation checks, with no later
+application preflight await; the engine's own HEAD/index checkpoints may evolve.
 `operationSafety(token, preview)` is read-only: it validates the existing original
 approval and retained stack/native/lifecycle plan, never mints a replacement or consumes
 the token. Open forms inspect this original owner on live inventory/provider changes,
 focus and a five-second cadence; drift latches the approval retired while authored
 titles, bodies and selected targets remain unchanged. A fresh preview is explicit.
+Safety-retired stack/surgery offers expose **Reload preview** for the same original
+physical/provider owner. Authored names, titles and bodies survive; original preview
+identities remain retired, and force, typed confirmation, close and base-write consent
+must be given again. Text for a layer leaving the offer or becoming an existing PR
+stays separately disclosed as an original authored draft, not claimed as current PR
+metadata or sent outside the fresh offered scope. Provider-owner retirement cannot
+silently move that draft to a replacement principal. Fresh PR metadata forms use only
+their own provider snapshot/generation, never an unrelated spent local Git approval.
+Captured progress reads and events use the minted `OperationCapture.scope`, not a UI
+cache identity. The persistent Workbench shell retains original-owner publication and
+merge subscriptions while a modal is hidden; foreign scope events cannot replace its
+immutable saved choices, and status inspection never dispatches Resume automatically.
 Publication review discloses full local/base/remote-lease OIDs, push effects and original
 native membership/resulting order. Reviewed merge discloses its full base-first
 downstack and the membership included in the selected request.
@@ -2244,8 +2258,13 @@ display-name fallbacks and `init.defaultBranch` do not prove a tip landed. Assum
 entries and materialized skip-worktree contents are excluded without changing index
 flags; genuinely absent sparse entries remain distinguishable. Incarnation-qualified
 unresolved operation owners are retained for recovery, with unreadable history refusing
-the whole batch. A postdispatch child interruption remains unconfirmed, retains known
-partial effects and stops the remaining targets; it is not reported as a no-effect failure.
+the whole batch. Validated later terminal recovery excludes immutable historical paused
+records, but live retained progress still blocks. Original lifecycle previews also retain
+each target's physical/common/admin authority separately from the execution owner:
+an unconfirmed removal of B from A protects B's same incarnation against fresh-token
+replay; unknown target authority fails closed, while confirmed and proven not-run peers
+do not become permanent blockers. A postdispatch child interruption remains unconfirmed,
+retains known partial effects and stops successors, not reported as a no-effect failure.
 Every directory is revalidated before removal; completed/failed/not-run/uncertain
 partial effects are retained, never called a rollback. Removing a worktree retains
 its branch and PR; registration-only removal and protected local/remote branch

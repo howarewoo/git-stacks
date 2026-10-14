@@ -1,10 +1,11 @@
 import * as React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { sameOperationScope, type OperationProgress } from '@git-stacks/shared/operation-scope'
+import type { OperationProgress } from '@git-stacks/shared/operation-scope'
 import {
   mergeProgressAfterRead,
   operationProgressKeys,
   readOperationProgress,
+  subscribeOperationProgress,
 } from '../lib/operation-progress'
 import {
   ChevronRight,
@@ -99,24 +100,7 @@ function RemoteOperationStatus({
   })
   React.useEffect(() => {
     let active = true
-    let publicationRevision = 0
-    let mergeRevision = 0
-    const unsubscribePublication = desktop?.onSubmitStackProgress?.((event) => {
-      if (!active || !sameOperationScope(event.scope, scope)) return
-      const revision = ++publicationRevision
-      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true }).then(() => {
-        if (active && revision === publicationRevision)
-          queryClient.setQueryData(publicationKey, event)
-      })
-    })
-    const unsubscribeMerge = desktop?.onMergeProgress?.((event) => {
-      if (!active || !sameOperationScope(event.scope, scope)) return
-      const revision = ++mergeRevision
-      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true }).then(() => {
-        if (active && revision === mergeRevision)
-          queryClient.setQueryData(mergeProgressKey, event.progress === null ? null : event)
-      })
-    })
+    const unsubscribeProgress = subscribeOperationProgress(desktop, queryClient, scope)
     if (desktop?.submitStackProgress) {
       void queryClient
         .fetchQuery({
@@ -147,8 +131,7 @@ function RemoteOperationStatus({
     }
     return () => {
       active = false
-      unsubscribePublication?.()
-      unsubscribeMerge?.()
+      unsubscribeProgress()
       void queryClient.cancelQueries({ queryKey: publicationKey, exact: true })
       void queryClient.cancelQueries({ queryKey: mergeKey, exact: true })
       queryClient.removeQueries({ queryKey: publicationKey, exact: true })

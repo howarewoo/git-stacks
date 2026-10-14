@@ -12,6 +12,8 @@ export function operationInspectionAPI(
   api: DesktopAPI,
   target: InspectionContext,
   expected: OperationScope,
+  original: OperationCapture,
+  current: () => boolean,
   accept: (capture: OperationCapture) => void,
 ): DesktopAPI {
   const context = {
@@ -19,7 +21,7 @@ export function operationInspectionAPI(
     worktreeId: target.worktreeId,
     pullRequestId: target.pullRequestId,
   }
-  return inspectionAPI(api, context, undefined, async (operation) => {
+  return inspectionAPI(api, context, current, async (operation) => {
     if (
       ![
         'stackPreview',
@@ -30,11 +32,26 @@ export function operationInspectionAPI(
       ].includes(operation)
     )
       return context
+    if (!current())
+      throw new Error(
+        'The original provider session retired; authored input cannot be requalified.',
+      )
     if (!api.captureOperation) throw new Error('Captured operation authority is unavailable.')
     const value = await api.captureOperation(target)
-    if (!sameOperationScope(expected, value.scope))
+    if (
+      !current() ||
+      !sameOperationScope(expected, value.scope) ||
+      value.repositoryId !== original.repositoryId ||
+      value.worktreeId !== original.worktreeId ||
+      value.worktreePath !== original.worktreePath ||
+      value.directoryIdentity !== original.directoryIdentity ||
+      value.commonDirectory !== original.commonDirectory ||
+      value.commonIdentity !== original.commonIdentity ||
+      value.gitDirectory !== original.gitDirectory ||
+      value.gitDirectoryIdentity !== original.gitDirectoryIdentity
+    )
       throw new Error(
-        'Original provider authority changed; approval cannot move to another account or repository.',
+        'Original physical directory or provider authority changed; authored input cannot move to a replacement owner.',
       )
     accept(value)
     return { ...context, operationToken: value.token }

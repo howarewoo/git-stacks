@@ -35,10 +35,13 @@ export async function validateInspectionDispatch(): Promise<void> {
 
 export async function validateOperationEffect(): Promise<void> {
   const captured = inspectionAuthority.getStore()
+  captured?.signal.throwIfAborted()
+  // Evolved target checks may await Git/filesystem/journal reads. They must
+  // finish before the original owner's final physical/provider dispatch fence.
+  await operationEffectGuard.getStore()?.()
   if (captured?.validateEffect) {
     captured.signal.throwIfAborted()
     await captured.validateEffect()
     captured.signal.throwIfAborted()
   }
-  await operationEffectGuard.getStore()?.()
 }

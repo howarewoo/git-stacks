@@ -3,7 +3,8 @@ import { getStackProgress, getSubmitStackProgress, validateStackAction } from '.
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { lstat, readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstatSync, readFileSync, realpathSync, type BigIntStats } from 'node:fs'
+import { join, resolve } from 'node:path'
 import type { InspectionContext } from '@git-stacks/shared/inspection'
 import type {
   OperationScope,
@@ -17,8 +18,8 @@ import { runGit, tryGit } from './git-core'
 import { readJournal, writeJournal, withJournalLock } from './review-journal'
 import { isRecord } from '@git-stacks/shared/guards'
 
-async function incarnation(path: string): Promise<string> {
-  const value = await lstat(path, { bigint: true })
+const directoryStatOptions = { bigint: true } as const
+function directoryIncarnation(value: BigIntStats): string {
   if (
     !value.isDirectory() ||
     value.isSymbolicLink() ||
@@ -27,6 +28,9 @@ async function incarnation(path: string): Promise<string> {
   )
     throw new Error('Cannot establish the selected directory incarnation.')
   return `${value.dev}:${value.ino}:${value.birthtimeNs}`
+}
+async function incarnation(path: string): Promise<string> {
+  return directoryIncarnation(await lstat(path, directoryStatOptions))
 }
 
 export async function validateCapturedDirectory(capture: OperationCapture): Promise<void> {
@@ -43,6 +47,80 @@ export async function validateCapturedDirectory(capture: OperationCapture): Prom
     throw new Error(
       'The original worktree, common repository or administrative directory was replaced.',
     )
+}
+
+function pointerDirectory(value: string, base: string, prefix: string): string {
+  const end = value.endsWith('\r\n')
+    ? value.length - 2
+    : value.endsWith('\n')
+      ? value.length - 1
+      : value.length
+  if (!value.startsWith(prefix) || end <= prefix.length)
+    throw new Error('Original Git directory binding cannot be established.')
+  return realpathSync(resolve(base, value.slice(prefix.length, end)))
+}
+
+function assertGitDirectoryBinding(capture: OperationCapture): void {
+  const entry = join(capture.worktreePath, '.git')
+  const entryStat = lstatSync(entry, directoryStatOptions)
+  if (!entryStat.isDirectory() && !entryStat.isFile())
+    throw new Error('Original Git directory binding cannot follow a replacement or symlink.')
+  const admin = entryStat.isDirectory()
+    ? realpathSync(entry)
+    : pointerDirectory(readFileSync(entry, 'utf8'), capture.worktreePath, 'gitdir: ')
+  let commonPointer: string | null = null
+  try {
+    commonPointer = readFileSync(join(admin, 'commondir'), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const common = commonPointer === null ? admin : pointerDirectory(commonPointer, admin, '')
+  if (
+    admin !== realpathSync(capture.gitDirectory) ||
+    common !== realpathSync(capture.commonDirectory)
+  )
+    throw new Error('The original worktree administrative/common binding was replaced.')
+}
+
+/** Combined production validator, after evolved target preflight at actual dispatch. */
+export function createOperationEffectValidator(
+  capture: OperationCapture,
+  scope: OperationScope,
+  validateProvider: () => Promise<void>,
+): () => Promise<void> {
+  let admitted = false
+  return async () => {
+    // Only the first effect compares the original HEAD/index/ref fingerprint.
+    // Later owned steps retain their engine's evolved checkpoints.
+    if (!admitted) await revalidateOperation(capture, scope)
+    const fresh = await discoverWorktrees(capture.worktreePath)
+    if (
+      fresh.identity.id !== capture.repositoryId ||
+      !fresh.worktrees.some(
+        (tree) =>
+          tree.id === capture.worktreeId && tree.path === capture.worktreePath && !tree.missing,
+      )
+    )
+      throw new Error('The original execution worktree authority was retired.')
+    // Actual origin/private credentials are read only after all ordinary
+    // capture/discovery/target preflight awaits. Final Git binding and physical
+    // checks are synchronous: no further application await can retire the
+    // owner between provider validation and this dispatch boundary.
+    await validateProvider()
+    assertGitDirectoryBinding(capture)
+    if (
+      directoryIncarnation(lstatSync(capture.worktreePath, directoryStatOptions)) !==
+        capture.directoryIdentity ||
+      directoryIncarnation(lstatSync(capture.commonDirectory, directoryStatOptions)) !==
+        capture.commonIdentity ||
+      directoryIncarnation(lstatSync(capture.gitDirectory, directoryStatOptions)) !==
+        capture.gitDirectoryIdentity
+    )
+      throw new Error(
+        'The original worktree, common repository or administrative directory was replaced.',
+      )
+    admitted = true
+  }
 }
 
 /** Inspection cannot mint mutation authority. Capture includes the entire local dependency/ref domain. */
@@ -325,11 +403,16 @@ export async function runRecordedOperation(
   }
 }
 
-/** Safety reads exclude only the request currently owning this durable record. */
+/** Exclude only this request and independently validated terminal recovery projections. */
 export async function unresolvedOperationRecords(root: string): Promise<OperationRecord[]> {
   const own = operationRecord.getStore()?.record.id
   return (await readOperationRecords(root)).filter(
-    (record) => record.id !== own && ['active', 'paused', 'unconfirmed'].includes(record.state),
+    (record) =>
+      record.id !== own &&
+      ['active', 'paused', 'unconfirmed'].includes(record.state) &&
+      (!record.resolution ||
+        Boolean(record.stackProgress) ||
+        Boolean(record.publication && record.publication.status !== 'completed')),
   )
 }
 
@@ -407,6 +490,9 @@ export async function readOperationRecords(root: string): Promise<OperationRecor
     )
     value.stackProgress = null
     value.publication = null
+    // Resolution is derived from later confirmed original-authority recovery,
+    // never trusted from persisted display/status fields.
+    delete value.resolution
     if (
       owner?.gitDirectory &&
       value.recovery &&
@@ -481,7 +567,7 @@ export async function readOperationRecords(root: string): Promise<OperationRecor
       !record.recovery ||
       record.state === 'completed' ||
       record.stackProgress ||
-      record.publication
+      (record.publication && record.publication.status !== 'completed')
     )
       continue
     const resolved = terminal.get(`${record.recovery.kind}:${record.recovery.id}`)

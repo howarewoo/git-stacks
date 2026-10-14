@@ -4,6 +4,7 @@ import { WorktreeLifecycleDialog } from './components/worktree-lifecycle-dialog'
 import { ReconciliationPanel } from './components/reconciliation-view'
 import * as React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { subscribeOperationProgress } from './lib/operation-progress'
 import {
   Button,
   Command,
@@ -196,6 +197,11 @@ function App() {
     )
   const operationCapture = React.useRef<OperationCapture | null>(null)
   const [approvedCapture, setApprovedCapture] = React.useState<OperationCapture | null>(null)
+  const approvedScope = approvedCapture?.scope
+  React.useEffect(() => {
+    if (!approvedScope) return
+    return subscribeOperationProgress(desktop, client, approvedScope)
+  }, [desktop, client, approvedScope])
   const [lifecycle, setLifecycle] = React.useState<{
     repositoryId: string
     mode: 'create' | 'remove'
@@ -356,20 +362,29 @@ function App() {
   const operationApi = React.useMemo(() => {
     const target = operationContext.current
     const expected = operationScope.current
-    if (!desktop || !target || !expected) return undefined
-    return operationInspectionAPI(desktop, target, expected, (value) => {
-      if (
-        JSON.stringify(operationContext.current) !== JSON.stringify(target) ||
-        !operationScope.current ||
-        !sameOperationScope(operationScope.current, expected)
-      )
-        throw new Error(
-          'The original preview was retired; its approval cannot replace a newer target.',
+    const original = approvedCapture
+    const generation = operationCaptureGeneration.current
+    if (!desktop || !target || !expected || !original) return undefined
+    return operationInspectionAPI(
+      desktop,
+      target,
+      expected,
+      original,
+      () => providerGeneration.current === generation,
+      (value) => {
+        if (
+          JSON.stringify(operationContext.current) !== JSON.stringify(target) ||
+          !operationScope.current ||
+          !sameOperationScope(operationScope.current, expected)
         )
-      operationCapture.current = value
-      operationCaptureGeneration.current = providerGeneration.current
-      setApprovedCapture(value)
-    })
+          throw new Error(
+            'The original preview was retired; its approval cannot replace a newer target.',
+          )
+        operationCapture.current = value
+        operationCaptureGeneration.current = providerGeneration.current
+        setApprovedCapture(value)
+      },
+    )
   }, [
     desktop,
     workflow,
@@ -2763,11 +2778,13 @@ function App() {
                 tree.missing,
               ]),
           ])}
-          capturedAuthority={approvedCapture}
+          capturedAuthority={providerWorkflow ? null : approvedCapture}
           providerManagement={Boolean(providerWorkflow)}
           providerSourceCurrent={
-            (!providerWorkflow || providerWorkflow.generation === providerGeneration.current) &&
-            (!approvedCapture || operationCaptureGeneration.current === providerGeneration.current)
+            providerWorkflow
+              ? providerWorkflow.generation === providerGeneration.current
+              : !approvedCapture ||
+                operationCaptureGeneration.current === providerGeneration.current
           }
           actionError={error}
           onClearActionError={() => setError(null)}

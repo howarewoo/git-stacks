@@ -11,15 +11,16 @@ import {
   runRecordedOperation,
   recordOperationResult,
   validateRecordedRecovery,
-  validateCapturedDirectory,
+  createOperationEffectValidator,
+  unresolvedOperationRecords,
 } from '../src/main/operation-authority'
 import { previewWorktreeLifecycle, executeWorktreeLifecycle } from '../src/main/worktree-lifecycle'
 import { discoverWorktrees } from '../src/main/worktree-inventory'
 import { RepositoryScheduler } from '../src/main/repository-scheduler'
 import { getSnapshot, runAction } from '../src/main/git'
 import { previewStack, getStackProgress } from '../src/main/stacks'
-import { operationEffectGuard } from '../src/main/inspection-context'
-import { runGit } from '../src/main/git-core'
+import { inspectionAuthority, operationEffectGuard } from '../src/main/inspection-context'
+import { runGit, getOriginUrl } from '../src/main/git-core'
 import { readMergeObservations } from '../src/main/merge-async'
 import { writeJournal } from '../src/main/review-journal'
 import { randomUUID } from 'node:crypto'
@@ -417,6 +418,20 @@ test('owned Skip drops only the conflicted commit, keeps the later commit and re
     )!
     assert.equal(original.state, 'paused')
     assert.equal(original.recovery?.id, paused.operationId)
+    const originalJournal = join(
+      approval.commonDirectory,
+      'git-stacks-operations',
+      `${original.id}.json`,
+    )
+    const originalBytes = await readFile(originalJournal)
+    assert.ok((await unresolvedOperationRecords(repo)).some((record) => record.id === original.id))
+    const cleanupRequest = {
+      kind: 'remove' as const,
+      repositoryId: inventory.identity.id,
+      worktreeIds: [owner.id],
+    }
+    const interruptedCleanup = await previewWorktreeLifecycle(repo, cleanupRequest)
+    assert.ok(interruptedCleanup.blockers.some((reason) => reason.includes(original.id)))
     const otherPrincipal = await captureOperation(directory, context, {
       ...originalScope,
       authority: 'different-principal',
@@ -469,6 +484,20 @@ test('owned Skip drops only the conflicted commit, keeps the later commit and re
     assert.deepEqual(retained.preview, original.preview)
     const skipped = records.find((record) => record.action.type === 'operationSkip')!
     assert.equal(skipped.recovery?.id, paused.operationId)
+    assert.equal(
+      (await unresolvedOperationRecords(repo)).some((record) => record.id === original.id),
+      false,
+    )
+    assert.deepEqual(await readFile(originalJournal), originalBytes)
+    // Publish and prove landing through real disposable Git without changing
+    // the primary checkout. Confirmed history must not permanently retain it.
+    git(directory, 'push', '-u', 'origin', 'layer')
+    git(directory, 'push', 'origin', 'layer:main')
+    const recoveredCleanup = await previewWorktreeLifecycle(repo, cleanupRequest)
+    assert.deepEqual(recoveredCleanup.blockers, [])
+    assert.deepEqual(await readFile(originalJournal), originalBytes)
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), primaryHead)
+    assert.equal(git(repo, 'stash', 'list'), '')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -572,6 +601,7 @@ test('cleanup retains an incarnation-qualified unresolved owner and allows only 
       message: 'Original native dispatch retained',
       result: null,
       remoteDispatch: 'intent',
+      resolution: 'completed',
     }
     const journal = join(capture.commonDirectory, 'git-stacks-operations', `${id}.json`)
     await writeJournal(journal, 'records', [record])
@@ -597,44 +627,81 @@ test('cleanup retains an incarnation-qualified unresolved owner and allows only 
   }
 })
 
-test('the final Git effect fence refuses a replaced selected directory after held preflight without writing either incarnation', async () => {
-  const { root, repo, scope } = await fixture()
-  try {
-    const tree = await linked(repo, join(root, 'selected'), 'selected')
-    const inventory = await discoverWorktrees(repo)
-    const capture = await captureOperation(
-      tree.path,
-      { repositoryId: inventory.identity.id, worktreeId: tree.id },
-      { ...scope, repositoryPath: tree.path },
-    )
-    const reached = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<void>()
-    const effect = operationEffectGuard.run(
-      async () => {
-        reached.resolve()
-        await release.promise
-        await validateCapturedDirectory(capture)
-      },
-      () =>
-        runGit(tree.path, [
-          '-c',
-          'advice.detachedHead=false',
-          'config',
-          'gitStacks.unapproved',
-          'written',
-        ]),
-    )
-    await reached.promise
-    const moved = join(root, 'retained')
-    await rename(tree.path, moved)
-    await cp(moved, tree.path, { recursive: true })
-    release.resolve()
-    await assert.rejects(effect, /replaced/)
-    assert.equal(git(repo, 'config', '--list').includes('gitstacks.unapproved='), false)
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-})
+for (const drift of ['physical owner', 'origin', 'private credential'] as const) {
+  test(`combined final Git effect authority refuses ${drift} retirement during evolved target preflight`, async () => {
+    const { root, repo, scope } = await fixture()
+    try {
+      const tree = await linked(repo, join(root, 'selected'), 'selected')
+      const inventory = await discoverWorktrees(repo)
+      const selectedScope = { ...scope, repositoryPath: tree.path }
+      const capture = await captureOperation(
+        tree.path,
+        { repositoryId: inventory.identity.id, worktreeId: tree.id },
+        selectedScope,
+      )
+      const primaryHead = git(repo, 'rev-parse', 'HEAD')
+      const primaryIndex = await readFile(join(repo, '.git', 'index'))
+      let credential = 'original-private-authority'
+      const validate = createOperationEffectValidator(capture, selectedScope, async () => {
+        const currentOrigin = await getOriginUrl(tree.path)
+        if (currentOrigin !== scope.remoteUrl || credential !== 'original-private-authority')
+          throw new Error('Original origin or private provider authority retired.')
+      })
+      const authority = {
+        root: tree.path,
+        context: capture.context,
+        signal: new AbortController().signal,
+        origin: scope.remoteUrl,
+        originUrl: scope.remoteUrl,
+        validate,
+        validateEffect: validate,
+      }
+      // Prove later effects use evolved facts, not the original fingerprint:
+      // this actual admitted first Git write legitimately changes local config.
+      await inspectionAuthority.run(authority, () =>
+        runGit(tree.path, ['config', 'gitStacks.approvedStep', 'written']),
+      )
+      const reached = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<void>()
+      const effect = inspectionAuthority.run(authority, () =>
+        operationEffectGuard.run(
+          async () => {
+            reached.resolve()
+            await release.promise
+            // An ordinary engine guard can complete successfully while the
+            // original owner/provider independently retires.
+            assert.equal(git(repo, 'rev-parse', 'selected'), tree.headOid)
+          },
+          () =>
+            runGit(tree.path, [
+              '-c',
+              'advice.detachedHead=false',
+              'config',
+              'gitStacks.unapproved',
+              'written',
+            ]),
+        ),
+      )
+      await reached.promise
+      if (drift === 'physical owner') {
+        const moved = join(root, 'retained')
+        await rename(tree.path, moved)
+        await cp(moved, tree.path, { recursive: true })
+      } else if (drift === 'origin') {
+        git(repo, 'config', 'remote.origin.url', join(root, 'unapproved-origin.git'))
+      } else credential = 'replacement-private-authority'
+      release.resolve()
+      await assert.rejects(effect, /replaced|retired/)
+      assert.equal(git(repo, 'config', 'gitStacks.approvedStep'), 'written')
+      assert.equal(git(repo, 'config', '--list').includes('gitstacks.unapproved='), false)
+      assert.equal(git(repo, 'rev-parse', 'HEAD'), primaryHead)
+      assert.deepEqual(await readFile(join(repo, '.git', 'index')), primaryIndex)
+      assert.equal(git(repo, 'stash', 'list'), '')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}
 
 test('strict merge-history reads distinguish absence from malformed remembered requests without retiring them', async () => {
   const { root, repo } = await fixture()
@@ -649,6 +716,64 @@ test('strict merge-history reads distinguish absence from malformed remembered r
       await assert.rejects(readMergeObservations(repo, { strict: true }))
       assert.equal(await readFile(journal, 'utf8'), contents)
     }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the combined final provider-await fence refuses a rewired Git administrative binding without writing either clone', async () => {
+  const { root, repo, remote, scope } = await fixture()
+  try {
+    const tree = await linked(repo, join(root, 'selected'), 'selected')
+    const other = join(root, 'independent-clone')
+    git(repo, 'clone', '--no-checkout', remote, other)
+    const inventory = await discoverWorktrees(repo)
+    const selectedScope = { ...scope, repositoryPath: tree.path }
+    const capture = await captureOperation(
+      tree.path,
+      { repositoryId: inventory.identity.id, worktreeId: tree.id },
+      selectedScope,
+    )
+    const reached = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let holdProvider = false
+    const validate = createOperationEffectValidator(capture, selectedScope, async () => {
+      assert.equal(await getOriginUrl(tree.path), scope.remoteUrl)
+      if (holdProvider) {
+        reached.resolve()
+        await release.promise
+      }
+    })
+    const authority = {
+      root: tree.path,
+      context: capture.context,
+      signal: new AbortController().signal,
+      origin: scope.remoteUrl,
+      originUrl: scope.remoteUrl,
+      validate,
+      validateEffect: validate,
+    }
+    await inspectionAuthority.run(authority, () =>
+      runGit(tree.path, ['config', 'gitStacks.approvedStep', 'written']),
+    )
+    const originalIndex = await readFile(join(repo, '.git', 'index'))
+    const originalHead = git(repo, 'rev-parse', 'HEAD')
+    holdProvider = true
+    const effect = inspectionAuthority.run(authority, () =>
+      runGit(tree.path, ['config', 'gitStacks.unapproved', 'written']),
+    )
+    await reached.promise
+    const pointer = join(tree.path, '.git')
+    const originalPointer = await readFile(pointer)
+    await writeFile(pointer, `gitdir: ${join(other, '.git')}\n`)
+    release.resolve()
+    await assert.rejects(effect, /administrative\/common binding was replaced/)
+    assert.equal(git(repo, 'config', '--list').includes('gitstacks.unapproved='), false)
+    assert.equal(git(other, 'config', '--list').includes('gitstacks.unapproved='), false)
+    assert.equal(git(repo, 'rev-parse', 'HEAD'), originalHead)
+    assert.deepEqual(await readFile(join(repo, '.git', 'index')), originalIndex)
+    // Restore only this intentionally corrupted disposable fixture file.
+    await writeFile(pointer, originalPointer)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

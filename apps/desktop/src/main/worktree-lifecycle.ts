@@ -10,6 +10,7 @@ import { discoverWorktrees, inspectWorktree } from './worktree-inventory'
 import { runGit, tryGit, validateBranchName, isExitCode } from './git-core'
 import { recordOperationPreview, unresolvedOperationRecords } from './operation-authority'
 import { validateOperationEffect, operationEffectGuard } from './inspection-context'
+import { isRecord } from '@git-stacks/shared/guards'
 
 interface Plan {
   root: string
@@ -140,6 +141,13 @@ async function inspectPlan(
       path: request.directory,
       ref: request.newBranch ? `refs/heads/${request.newBranch}` : ref.name,
       oid: ref.oid,
+      authority: {
+        commonDirectory: repository.identity.commonDirectory,
+        commonIdentity,
+        directoryIdentity: null,
+        gitDirectory: null,
+        gitDirectoryIdentity: null,
+      },
       blockers,
       effect: request.newBranch
         ? `Create a new directory and branch from ${ref.name} at ${ref.oid}; existing directories remain unchanged.`
@@ -163,6 +171,10 @@ async function inspectPlan(
       if (!found) throw new Error('A selected worktree disappeared; the batch is not trimmed.')
       const blockers: string[] = []
       const tree = await inspectWorktree(found)
+      const physicalIdentity = tree.missing ? null : await directoryIdentity(tree.path)
+      const administrativeIdentity = tree.gitDirectory
+        ? await directoryIdentity(tree.gitDirectory)
+        : null
       if (tree.kind !== 'linked')
         blockers.push('Primary and bare repositories cannot be cleaned up.')
       if (tree.missing)
@@ -220,17 +232,78 @@ async function inspectPlan(
         blockers.push('Active or interrupted Git/app operation requires separate recovery.')
       for (const record of unresolved) {
         if (
-          record.capture.commonIdentity === commonIdentity &&
+          record.capture.commonIdentity !== commonIdentity ||
+          record.capture.commonDirectory !== repository.identity.commonDirectory
+        )
+          continue
+        if (
           record.context.worktreeId === tree.id &&
           record.worktreePath === tree.path &&
           record.capture.gitDirectory === tree.gitDirectory &&
           !tree.missing &&
-          record.capture.directoryIdentity === (await directoryIdentity(tree.path)) &&
-          record.capture.gitDirectoryIdentity === (await directoryIdentity(tree.gitDirectory!))
+          record.capture.directoryIdentity === physicalIdentity &&
+          record.capture.gitDirectoryIdentity === administrativeIdentity
         )
           blockers.push(
             `Unresolved ${record.action.type} operation ${record.id} retains this owner for independent recovery.`,
           )
+        if (record.action.type !== 'executeWorktreeLifecycle') continue
+        const original = record.preview
+        if (
+          !isRecord(original) ||
+          (original.kind !== 'create' && original.kind !== 'remove') ||
+          original.repositoryId !== record.repositoryId ||
+          !Array.isArray(original.targets)
+        )
+          throw new Error(`Original lifecycle target authority is unreadable for ${record.id}.`)
+        for (const target of original.targets) {
+          if (
+            !isRecord(target) ||
+            typeof target.path !== 'string' ||
+            !target.path ||
+            (original.kind === 'remove' &&
+              (typeof target.worktreeId !== 'string' || !target.worktreeId))
+          )
+            throw new Error(`Original lifecycle target scope is unreadable for ${record.id}.`)
+          if (target.path !== tree.path && target.worktreeId !== tree.id) continue
+          const outcome = record.result?.worktreeLifecycle?.targets.find(
+            (effect) => effect.path === target.path,
+          )
+          // Confirmed effects and proven no-dispatch peers are not replay
+          // hazards merely because another target left this batch uncertain.
+          if (outcome && ['completed', 'not-run', 'failed'].includes(outcome.state)) continue
+          const authority = target.authority
+          if (
+            !isRecord(authority) ||
+            typeof authority.commonDirectory !== 'string' ||
+            !authority.commonDirectory ||
+            authority.commonDirectory !== record.capture.commonDirectory ||
+            typeof authority.commonIdentity !== 'string' ||
+            !authority.commonIdentity ||
+            authority.commonIdentity !== record.capture.commonIdentity ||
+            typeof authority.directoryIdentity !== 'string' ||
+            !authority.directoryIdentity ||
+            typeof authority.gitDirectory !== 'string' ||
+            !authority.gitDirectory ||
+            typeof authority.gitDirectoryIdentity !== 'string' ||
+            !authority.gitDirectoryIdentity
+          ) {
+            blockers.push(
+              `Unconfirmed lifecycle target ${record.id} has unknown original physical authority; independent recovery is required.`,
+            )
+            continue
+          }
+          if (
+            authority.commonDirectory === repository.identity.commonDirectory &&
+            authority.commonIdentity === commonIdentity &&
+            authority.directoryIdentity === physicalIdentity &&
+            authority.gitDirectory === tree.gitDirectory &&
+            authority.gitDirectoryIdentity === administrativeIdentity
+          )
+            blockers.push(
+              `Unconfirmed lifecycle operation ${record.id} retains this exact target incarnation for independent recovery.`,
+            )
+        }
       }
       const ref = repository.refs.find((ref) => ref.id === tree.refId)
       if (!base || !tree.headOid || !(await ancestor(root, tree.headOid, base.oid)))
@@ -255,23 +328,26 @@ async function inspectPlan(
           operation: tree.operation,
           index: tree.indexSignature,
         },
-        tree.missing ? null : await directoryIdentity(tree.path),
+        physicalIdentity,
         tree.gitDirectory ? await activeJournal(tree.gitDirectory) : null,
       )
       if (!tree.missing && tree.gitDirectory)
         identities.set(
           tree.id,
-          JSON.stringify([
-            await directoryIdentity(tree.path),
-            await directoryIdentity(tree.gitDirectory),
-            tree.indexSignature,
-          ]),
+          JSON.stringify([physicalIdentity, administrativeIdentity, tree.indexSignature]),
         )
       preview.targets.push({
         worktreeId: tree.id,
         path: tree.path,
         ref: ref?.name ?? null,
         oid: tree.headOid,
+        authority: {
+          commonDirectory: repository.identity.commonDirectory,
+          commonIdentity,
+          directoryIdentity: physicalIdentity,
+          gitDirectory: tree.gitDirectory,
+          gitDirectoryIdentity: administrativeIdentity,
+        },
         blockers,
         effect:
           'Remove only this linked directory with Git worktree remove, without force; retain its branch, pull request and other worktrees.',

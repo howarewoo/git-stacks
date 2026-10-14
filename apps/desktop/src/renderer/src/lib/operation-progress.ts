@@ -3,7 +3,8 @@ import {
   type OperationProgress,
   type OperationScope,
 } from '@git-stacks/shared/operation-scope'
-import type { MergeProgress, MergeStatus } from '@git-stacks/shared/types'
+import type { DesktopAPI, MergeProgress, MergeStatus } from '@git-stacks/shared/types'
+import type { QueryClient } from '@tanstack/react-query'
 
 /** Shell and recovery dialogs observe one scoped projection of the durable journal. */
 export function operationProgressKeys(scope: OperationScope) {
@@ -12,6 +13,39 @@ export function operationProgressKeys(scope: OperationScope) {
     publication: ['operation-publication', ...identity],
     merge: ['operation-merge', ...identity],
     mergeProgress: ['operation-merge-progress', ...identity],
+  }
+}
+
+/** Original-owner event projection, independent of the current visible destination. */
+export function subscribeOperationProgress(
+  desktop: Pick<DesktopAPI, 'onSubmitStackProgress' | 'onMergeProgress'> | null | undefined,
+  queryClient: QueryClient,
+  scope: OperationScope,
+): () => void {
+  const keys = operationProgressKeys(scope)
+  let active = true
+  let publicationRevision = 0
+  let mergeRevision = 0
+  const unsubscribePublication = desktop?.onSubmitStackProgress?.((event) => {
+    if (!active || !sameOperationScope(event.scope, scope)) return
+    const revision = ++publicationRevision
+    void queryClient.cancelQueries({ queryKey: keys.publication, exact: true }).then(() => {
+      if (active && revision === publicationRevision)
+        queryClient.setQueryData(keys.publication, event)
+    })
+  })
+  const unsubscribeMerge = desktop?.onMergeProgress?.((event) => {
+    if (!active || !sameOperationScope(event.scope, scope)) return
+    const revision = ++mergeRevision
+    void queryClient.cancelQueries({ queryKey: keys.merge, exact: true }).then(() => {
+      if (active && revision === mergeRevision)
+        queryClient.setQueryData(keys.mergeProgress, event.progress === null ? null : event)
+    })
+  })
+  return () => {
+    active = false
+    unsubscribePublication?.()
+    unsubscribeMerge?.()
   }
 }
 

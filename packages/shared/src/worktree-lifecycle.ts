@@ -8,11 +8,20 @@ export type WorktreeLifecycleRequest =
     }
   | { kind: 'remove'; repositoryId: string; worktreeIds: string[] }
 
+/** Original target identity, distinct from the operation's execution owner. */
+export interface WorktreeLifecycleTargetAuthority {
+  commonDirectory: string
+  commonIdentity: string
+  directoryIdentity: string | null
+  gitDirectory: string | null
+  gitDirectoryIdentity: string | null
+}
 export interface WorktreeLifecycleTarget {
   worktreeId: string | null
   path: string
   ref: string | null
   oid: string | null
+  authority: WorktreeLifecycleTargetAuthority
   blockers: string[]
   effect: string
 }
