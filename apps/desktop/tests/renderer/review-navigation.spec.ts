@@ -9,6 +9,7 @@ import {
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { scenarios } from './fixtures/scenarios'
+import { cutoverScale } from './fixtures/cutover'
 
 async function refreshReviewChoices(page: Page, freshOriginalOwner = false) {
   // Credential retirement removes remote choices; re-entry requires a fresh repository read.
@@ -18,12 +19,58 @@ async function refreshReviewChoices(page: Page, freshOriginalOwner = false) {
       scenarios['review-stacked'].snapshot!,
     )
   }
-  await page.getByRole('button', { name: 'Refresh repository', exact: true }).click()
-  const selected = page.locator('.review-headline-title').filter({ hasText: '#42' })
-  const choice = page.locator('.review-chooser').getByRole('button').filter({ hasText: '#42 ' })
-  await expect(selected.or(choice)).toBeVisible()
-  if (await choice.isVisible()) await choice.click()
+  await switchDestination(page, 'branches')
+  await page.getByRole('button', { name: 'Discover worktrees', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Discovered existing worktrees' }).press('Escape')
+  await page.locator('.bw-subtitle').filter({ hasText: /#42\b/ }).first().click()
+  await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
   await expect(page.locator('.review-headline-title')).toContainText('#42')
+}
+
+for (const destination of ['pullRequests', 'branches'] as const) {
+  test(`${destination} PR links open readonly Review rather than management`, async ({ page }) => {
+    await openGallery(page, { scenario: 'review-stacked' })
+    await switchDestination(page, destination)
+    if (destination === 'pullRequests') {
+      const link = page.locator('.wb-pr-row').filter({
+        has: page.locator('.wb-row-title').filter({ hasText: /^#42 / }),
+      })
+      await link.focus()
+      await link.press('Enter')
+    } else {
+      await page
+        .getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
+        .fill('cancellation')
+      await page.locator('.bw-subtitle').filter({ hasText: /#42\b/ }).first().click()
+      const reviewLink = page.getByRole('button', { name: 'Review pull request', exact: true })
+      await reviewLink.focus()
+      await reviewLink.press('Enter')
+    }
+    await expect(page.locator('.review-view')).toContainText(
+      '#42 Give the review workspace its own cancellation ids',
+    )
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
+    if (destination === 'pullRequests') {
+      await expect(page.getByRole('heading', { name: 'Pull requests', exact: true })).toBeVisible()
+      await expect(
+        page.locator('.wb-pr-row').filter({
+          has: page.locator('.wb-row-title').filter({ hasText: /^#42 / }),
+        }),
+      ).toBeFocused()
+    } else {
+      await expect(
+        page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' }),
+      ).toHaveValue('cancellation')
+      await expect(
+        page.getByRole('button', { name: 'Review pull request', exact: true }),
+      ).toBeVisible()
+      await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
+    }
+    const calls = await getDoubleCalls(page)
+    expect(calls.some((call) => call.call === 'reviewHeadline' && call.args[0] === 42)).toBe(true)
+    expect(calls.filter((call) => call.call === 'runAction')).toHaveLength(0)
+  })
 }
 
 test('history clearing explains unavailable owner proof while snapshots are already readable', async ({
@@ -188,6 +235,124 @@ test('history clear rejects stale-owner admission and held authority replacement
   expect(stale).toBe('The captured review owner changed before provider dispatch.')
 })
 
+test('qualified Review return retains branch filters, selected identity and scroll without mutation', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'cutover-250' })
+  await switchDestination(page, 'branches')
+  const filter = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
+  const list = page.locator('.bw-main-scroll')
+  await filter.fill('#40')
+  await page.locator('.bw-subtitle').filter({ hasText: /#40\b/ }).first().click()
+  await filter.fill('Change')
+  await list.evaluate((element) => {
+    element.scrollTop = 900
+  })
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  const beforeScroll = await list.evaluate((element) => element.scrollTop)
+  await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
+  await expect(page.locator('.review-view')).toContainText('#40')
+  const back = page.getByRole('button', { name: 'Return to original context', exact: true })
+  await back.focus()
+  await back.press('Enter')
+  await expect(filter).toHaveValue('Change')
+  await expect(page.getByRole('complementary', { name: 'Selected branch details' })).toContainText(
+    'graph/change-40',
+  )
+  // The original page/scroll stays intact when the selected row is outside its
+  // mounted window; return focus belongs to the same branch's initiating control.
+  await expect(page.getByRole('button', { name: 'Review pull request', exact: true })).toBeFocused()
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(beforeScroll)
+  const calls = await getDoubleCalls(page)
+  expect(
+    calls.filter((call) =>
+      [
+        'runAction',
+        'reviewSubmit',
+        'reviewReply',
+        'reviewSetResolved',
+        'rerunPullRequestCheck',
+      ].includes(call.call),
+    ),
+  ).toEqual([])
+})
+
+test('return retains selected branch context when a background title leaves the filter', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'cutover-250' })
+  await switchDestination(page, 'branches')
+  const filter = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
+  await filter.fill('Change 40')
+  await page.locator('.bw-subtitle').filter({ hasText: /#40\b/ }).first().click()
+  await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
+  const changed = structuredClone(cutoverScale(250).inventory!)
+  changed.generation += 1
+  for (const repo of changed.repositories)
+    for (const pr of repo.pullRequests)
+      if (pr.number === 40) pr.facts.title = 'Retitled while Review was open'
+  await page.evaluate((inventory) => window.fixture.pushInventory(inventory), changed)
+  await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
+  await expect(filter).toHaveValue('Change 40')
+  await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toHaveText('graph/change-40')
+  await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
+  await expect(page.locator('.bw-lane-row.bw-selected')).toHaveAttribute(
+    'aria-label',
+    /Context: does not match current filter/,
+  )
+  await expect(page.getByRole('button', { name: 'Review pull request', exact: true })).toBeVisible()
+  expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'runAction')).toEqual([])
+})
+
+test('account replacement retires the return context and display but keeps the original qualified journal for re-entry', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'review-stacked' })
+  await switchDestination(page, 'branches')
+  await page.locator('.bw-subtitle').filter({ hasText: /#42\b/ }).first().click()
+  await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
+  await page
+    .getByRole('button', { name: 'Comment on src/main/review.ts line 2 on the head', exact: true })
+    .click()
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+  await page.getByRole('button', { name: 'Add pending comment', exact: true }).click()
+  await page
+    .getByRole('textbox', { name: 'Comment on src/main/review.ts:2 (head)', exact: true })
+    .fill('Original account unfinished text.')
+  await settle(page)
+  const original = await page.evaluate(async () => ({
+    cli: await window.desktop.githubCliStatus!(),
+    record: await window.desktop.reviewDrafts!(42),
+  }))
+  await page.evaluate(() =>
+    window.fixture.publishCliStatus({
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'replacement-account',
+      version: '2.62.0',
+      identity: 'cli:github.com:replacement-account:2',
+      message: null,
+    }),
+  )
+  await expect(page.locator('.review-draft')).toHaveCount(0)
+  await expect(
+    page.getByRole('button', { name: 'Return to original context', exact: true }),
+  ).toHaveCount(0)
+  expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toBeNull()
+  await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
+  await refreshReviewChoices(page, true)
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+  await expect(
+    page.getByRole('textbox', { name: 'Comment on src/main/review.ts:2 (head)', exact: true }),
+  ).toHaveValue('Original account unfinished text.')
+  expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toEqual(original.record)
+  expect(
+    (await getDoubleCalls(page)).filter((entry) =>
+      ['runAction', 'reviewSubmit', 'reviewReply', 'reviewSetResolved'].includes(entry.call),
+    ),
+  ).toEqual([])
+})
+
 test('a late account rejection preserves only the latest qualified unsent edits for their original owner', async ({
   page,
 }) => {
@@ -252,9 +417,7 @@ test('a late account rejection preserves only the latest qualified unsent edits 
   await releaseDoubleCalls(page, 'reviewSetDrafts')
   await expect(page.getByText('Local review edits are not saved', { exact: true })).toBeVisible()
   expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toBeNull()
-  await expect(page.locator('.review-view')).not.toContainText(
-    'Latest unsent original-account text.',
-  )
+  await expect(page.locator('.review-view')).toHaveCount(0)
   await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
   await page.evaluate((snapshot) => window.fixture.pushSnapshot(snapshot), {
     ...scenarios['review-stacked'].snapshot!,
@@ -691,7 +854,7 @@ test('a held initial journal read cannot be dispatched as an observed absence', 
   ).toEqual([])
 })
 
-test('Review retains pane, file comparison and unsent composition across readonly graph navigation', async ({
+test('Review retains pane, file comparison and unsent composition across readonly branch navigation', async ({
   page,
 }) => {
   await openGallery(page, { scenario: 'review-stacked' })
@@ -723,15 +886,58 @@ test('Review retains pane, file comparison and unsent composition across readonl
   expect(calls.filter((call) => call.call === 'reviewSubmit')).toEqual([])
 })
 
-for (const entrypoint of ['inspector', 'palette']) {
+test('same-number cross-repository Inbox navigation retires held old Review reads', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'pr-inbox-same-number' })
+  await switchDestination(page, 'attention')
+  await page.getByRole('textbox', { name: 'Search needs attention', exact: true }).fill('#81')
+  await holdDoubleCall(page, 'reviewHeadline')
+  await page
+    .locator('.wb-attention-row')
+    .filter({ hasText: 'Add a GitHub-derived PR Inbox' })
+    .click()
+  await settle(page)
+  await switchDestination(page, 'attention')
+  const entry = page
+    .locator('.wb-attention-row')
+    .filter({ hasText: 'Charge every native-stack page' })
+  await entry.focus()
+  await entry.press('Enter')
+  await releaseDoubleCalls(page, 'reviewHeadline', 'newest')
+  await settle(page)
+  const review = page.locator('.review-view')
+  await expect(review).toContainText('#81 Charge every native-stack page to the refresh budget')
+  await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')
+  await expect(review).toContainText('checks failing')
+  await releaseDoubleCalls(page, 'reviewHeadline', 'oldest')
+  await settle(page)
+  await expect(review).toContainText('#81 Charge every native-stack page to the refresh budget')
+  await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')
+  await expect(review).toContainText('checks failing')
+  await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
+  await expect(
+    page.getByRole('textbox', { name: 'Search needs attention', exact: true }),
+  ).toHaveValue('#81')
+  await expect(entry).toBeFocused()
+  const calls = await getDoubleCalls(page)
+  expect(
+    calls.filter((call) => call.call === 'reviewHeadline' && call.args[0] === 81).length,
+  ).toBeGreaterThanOrEqual(2)
+  expect(calls.filter((call) => call.call === 'runAction')).toHaveLength(0)
+})
+
+for (const entrypoint of ['inspector', 'discussion'] as const) {
   test(`${entrypoint} opens the same readonly Review workspace`, async ({ page }) => {
     await openGallery(page, { scenario: 'review-stacked' })
+    await page.locator('.bw-subtitle').filter({ hasText: /#42\b/ }).first().click()
     if (entrypoint === 'inspector') {
-      await page.getByRole('button', { name: 'Review changes', exact: true }).click()
+      await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
     } else {
-      await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
-      await page.getByRole('combobox').fill('Review PR #42')
-      await page.getByRole('option', { name: /^Review PR #42…/ }).click()
+      await page.getByRole('tab', { name: 'Discussion', exact: true }).click()
+      await page
+        .getByRole('button', { name: 'Open full review and original durable drafts', exact: true })
+        .click()
     }
     await expect(page.locator('.review-headline')).toContainText(
       '#42 Give the review workspace its own cancellation ids',
@@ -741,23 +947,36 @@ for (const entrypoint of ['inspector', 'palette']) {
       'true',
     )
     await expect(page.getByRole('dialog')).toHaveCount(0)
-    await page.getByRole('button', { name: 'Return to Branches', exact: true }).click()
-    await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const focused = document.activeElement
-          return (
-            focused?.id === 'workspace-view-heading-branches' ||
-            (focused instanceof HTMLButtonElement &&
-              (focused.textContent?.trim() === 'Review changes' ||
-                focused.getAttribute('aria-label') === 'Open command palette'))
-          )
-        }),
-      )
-      .toBe(true)
+    await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
+    await expect(
+      page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+    ).toBeVisible()
+    await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
     expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
   })
 }
+
+test('changing repository retires the previous repository qualified Review selection', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'pr-inbox-queue' })
+  await switchDestination(page, 'attention')
+  await page
+    .locator('.wb-attention-row')
+    .filter({ hasText: 'Add a GitHub-derived PR Inbox' })
+    .click()
+  await expect(page.locator('.review-headline')).toContainText('#81 Add a GitHub-derived PR Inbox')
+  await page
+    .getByRole('button', {
+      name: /design-system-specimens.*\/Users\/ada\/Code\/design-system-specimens/,
+    })
+    .click()
+  await expect(
+    page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+  ).toBeVisible()
+  await expect(page.locator('.review-view')).toHaveCount(0)
+  expect((await getDoubleCalls(page)).filter((call) => call.call === 'runAction')).toHaveLength(0)
+})
 
 test('full native rail supports nonadjacent readonly selection and preserves the original draft identity', async ({
   page,
@@ -961,12 +1180,9 @@ test('remapped Review file and native-layer commands respect boundaries, editors
 }) => {
   await openGallery(page, { scenario: 'review-stacked' })
   await switchDestination(page, 'review')
-  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
-  const palette = page.getByRole('dialog', { name: 'Command palette', exact: true })
-  await palette.getByRole('combobox').fill('Keyboard shortcuts')
-  await page.keyboard.press('Enter')
-  const shortcuts = page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true })
-  await expect(shortcuts).toBeVisible()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const shortcuts = page.getByRole('dialog', { name: 'Settings', exact: true })
+  await shortcuts.getByRole('button', { name: 'Shortcuts', exact: true }).click()
   for (const [, label, chord] of [
     ['review.nextFile', 'Next file in review', 'Alt+Shift+N'],
     ['review.previousFile', 'Previous file in review', 'Alt+Shift+P'],

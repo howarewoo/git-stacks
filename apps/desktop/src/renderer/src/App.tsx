@@ -152,6 +152,8 @@ function App() {
   const [notificationBusy, setNotificationBusy] = React.useState(false)
   const notificationLock = React.useRef(false)
   const notificationGeneration = React.useRef(0)
+  const [notificationError, setNotificationError] = React.useState<string | null>(null)
+  const [credentialError, setCredentialError] = React.useState<string | null>(null)
   const [attentionFilter, setAttentionFilter] = React.useState<PullRequestInboxFilter>({
     group: 'all',
     search: '',
@@ -254,6 +256,12 @@ function App() {
   const providerGeneration = React.useRef(0)
   const principalIdentities = React.useRef(new Map<string, string>())
   const cliStatusVersion = React.useRef(0)
+  const cliReadGeneration = React.useRef(0)
+  const [cliRefreshing, setCliRefreshing] = React.useState(false)
+  const originFocus = React.useRef<{ identity: string | null; label: string | null } | null>(null)
+  const restoreOriginFocus = React.useRef<NonNullable<RepositoryViewMemory['reviewOrigin']> | null>(
+    null,
+  )
   const configuredHost = React.useRef(settings?.github.host ?? 'github.com')
   configuredHost.current = settings?.github.host ?? 'github.com'
   const reviewCommands = React.useRef<ReviewCommands | null>(null)
@@ -552,6 +560,8 @@ function App() {
     let retired = false
     const host = settings.github.host
     const version = cliStatusVersion.current
+    const generation = ++cliReadGeneration.current
+    setCliRefreshing(true)
     setCliStatus(null)
     setDetails({})
     providerGeneration.current += 1
@@ -561,12 +571,21 @@ function App() {
     void desktop
       .githubCliStatus()
       .then((value) => {
-        if (retired || cliStatusVersion.current !== version || value.host !== host) return
+        if (
+          retired ||
+          cliReadGeneration.current !== generation ||
+          cliStatusVersion.current !== version ||
+          value.host !== host
+        )
+          return
         principalIdentities.current.set(value.host, value.identity ?? '')
         setCliStatus(value)
       })
       .catch((value) => {
-        if (!retired) setError(String(value))
+        if (!retired && cliReadGeneration.current === generation) setError(String(value))
+      })
+      .finally(() => {
+        if (!retired && cliReadGeneration.current === generation) setCliRefreshing(false)
       })
     return () => {
       retired = true
@@ -575,7 +594,11 @@ function App() {
   React.useEffect(() => {
     if (!desktop) return
     const stopStatus = desktop.onGitHubCliStatus?.((value) => {
-      cliStatusVersion.current += 1
+      if (value.host === configuredHost.current) {
+        cliStatusVersion.current += 1
+        cliReadGeneration.current += 1
+        setCliRefreshing(false)
+      }
       const next = value.identity ?? ''
       const previous = principalIdentities.current.get(value.host)
       principalIdentities.current.set(value.host, next)
@@ -586,6 +609,8 @@ function App() {
       setDetails({})
       retirePendingReview()
       setReturnOrigin(null)
+      originFocus.current = null
+      restoreOriginFocus.current = null
       void client.cancelQueries({ predicate: providerReadQuery })
       client.removeQueries({ predicate: providerReadQuery })
       // Account-owned text and journals survive; a review target is not transferred to another principal.
@@ -663,22 +688,36 @@ function App() {
     return () => media.removeEventListener('change', apply)
   }, [settings])
   React.useEffect(() => {
+    notificationGeneration.current += 1
+    notificationLock.current = false
+    setNotificationBusy(false)
+    setNotificationInbox(null)
+    setNotificationError(null)
+    setCredentialError(null)
+    setCredentialOpen(false)
+  }, [settings?.github.host])
+  React.useEffect(() => {
     if (!desktop || !notificationOpen) return
     let retired = false
-    notificationGeneration.current += 1
+    const generation = ++notificationGeneration.current
+    notificationLock.current = false
+    setNotificationBusy(false)
     setNotificationInbox(null)
     const accept = (value: NotificationInbox) => {
       if (!retired && value.host === settings?.github.host) setNotificationInbox(value)
     }
     if (!desktop.notifications) {
-      setError('The Notifications service is unavailable in this runtime.')
+      setNotificationError('The Notifications service is unavailable in this runtime.')
       return
     }
     void desktop
       .notifications()
-      .then(accept)
+      .then((value) => {
+        if (generation === notificationGeneration.current) accept(value)
+      })
       .catch((value) => {
-        if (!retired) setError(String(value))
+        if (!retired && generation === notificationGeneration.current)
+          setNotificationError(String(value))
       })
     const stop = desktop.onNotifications?.(accept)
     return () => {
@@ -729,6 +768,14 @@ function App() {
       const origin = current.reviewOrigin ?? returnOrigin
       if (origin) return origin
     }
+    const active = document.activeElement
+    originFocus.current =
+      active instanceof HTMLButtonElement
+        ? {
+            identity: active.getAttribute('data-collaboration-id'),
+            label: active.getAttribute('aria-label') ?? active.textContent?.trim() ?? null,
+          }
+        : null
     return {
       repositoryId,
       surface: surface === 'review' ? 'branches' : surface,
@@ -758,7 +805,47 @@ function App() {
       setSurface('branches')
     }
     setReturnOrigin(null)
+    restoreOriginFocus.current = origin ?? {
+      repositoryId,
+      surface: 'branches',
+      selectedId: current.selectedId,
+      worktreeId: current.view.worktreeId,
+      tab: current.view.tab,
+      pullRequestId: current.pullRequestId,
+    }
   }
+  React.useLayoutEffect(() => {
+    const expected = restoreOriginFocus.current
+    if (!expected || surface === 'review') return
+    if (
+      expected.repositoryId !== repositoryId ||
+      expected.surface !== surface ||
+      (expected.selectedId !== undefined && expected.selectedId !== current.selectedId)
+    ) {
+      restoreOriginFocus.current = null
+      return
+    }
+    const remembered = originFocus.current
+    const rememberedButton = remembered?.identity
+      ? document.querySelector<HTMLButtonElement>(
+          `button[data-collaboration-id="${CSS.escape(remembered.identity)}"]`,
+        )
+      : remembered?.label
+        ? Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(
+            (button) =>
+              !button.disabled &&
+              (button.getAttribute('aria-label') ?? button.textContent?.trim()) ===
+                remembered.label,
+          )
+        : null
+    const target =
+      (expected.surface === 'branches'
+        ? document.querySelector<HTMLButtonElement>('.bw-branch-name[aria-pressed="true"]')
+        : null) ?? rememberedButton
+    if (!target) return
+    restoreOriginFocus.current = null
+    target.focus({ preventScroll: true })
+  }, [surface, repositoryId, current.selectedId, inbox.data, prPage.data])
   const reviewSelected = () => {
     if (!selected?.pullRequest) {
       setError('Select a source-qualified pull request to review.')
@@ -1522,22 +1609,36 @@ function App() {
       (item) => !query || `${item.label} ${item.context}`.toLowerCase().includes(query),
     )
   }, [snapshot, globalQuery, inventory.data])
-  const notify = async (operation: () => Promise<NotificationInbox> | undefined) => {
+  const notify = async (
+    operation: (isCurrent: () => boolean) => Promise<NotificationInbox | undefined> | undefined,
+    credential = false,
+  ) => {
     if (notificationLock.current) return
     notificationLock.current = true
-    const generation = notificationGeneration.current
+    const generation = ++notificationGeneration.current
     const host = configuredHost.current
+    const isCurrent = () =>
+      generation === notificationGeneration.current && host === configuredHost.current
     setNotificationBusy(true)
+    setNotificationError(null)
+    if (credential) setCredentialError(null)
     try {
-      const value = await operation()
+      const value = await operation(isCurrent)
+      if (!isCurrent()) return
       if (!value) throw new Error('This Notifications action is unavailable in this runtime.')
-      if (generation === notificationGeneration.current && value.host === host)
-        setNotificationInbox(value)
+      if (value.host !== host) throw new Error('The Notifications answer belongs to another host.')
+      setNotificationInbox(value)
+      if (credential) setCredentialOpen(false)
     } catch (value) {
-      if (generation === notificationGeneration.current) setError(String(value))
+      if (isCurrent()) {
+        if (credential) setCredentialError(String(value))
+        else setNotificationError(String(value))
+      }
     } finally {
-      notificationLock.current = false
-      setNotificationBusy(false)
+      if (isCurrent()) {
+        notificationLock.current = false
+        setNotificationBusy(false)
+      }
     }
   }
   const openCollaborationTarget = (target: CollaborationTarget) => {
@@ -1635,6 +1736,7 @@ function App() {
       <WorkbenchPane
         className="bw-main wb-secondary"
         aria-label={surface}
+        role="main"
         header={
           surface === 'review' &&
           selected?.pullRequest?.id === current.pullRequestId &&
@@ -2331,20 +2433,14 @@ function App() {
         open={localRepositoryOpen}
         onOpenChange={setLocalRepositoryOpen}
         onClone={() => setDiscoveryOpen(true)}
-        onOpened={(value) => {
-          void inventory
-            .refetch()
-            .then((result) => {
-              const repo = result.data?.repositories.find((repo) =>
-                repo.registeredPaths.includes(value.path),
-              )
-              if (!repo) {
-                setError('The opened repository was not confirmed in the inventory.')
-                return
-              }
-              navigate(repo.identity.id, 'branches')
-            })
-            .catch((value) => setError(String(value)))
+        onOpened={async (value) => {
+          const result = await inventory.refetch()
+          if (result.error) throw result.error
+          const repo = result.data?.repositories.find((repo) =>
+            repo.registeredPaths.includes(value.path),
+          )
+          if (!repo) throw new Error('The opened repository was not confirmed in the inventory.')
+          navigate(repo.identity.id, 'branches')
         }}
       />
       <Dialog
@@ -2403,22 +2499,38 @@ function App() {
         onOpenChange={setSettingsOpen}
         desktop={desktop}
         cliStatus={cliStatus}
+        cliRefreshing={cliRefreshing}
         onReadCliStatus={() => {
+          if (!desktop.githubCliStatus) {
+            setError('GitHub CLI status is unavailable in this runtime.')
+            return
+          }
           const host = configuredHost.current
           const version = cliStatusVersion.current
+          const generation = ++cliReadGeneration.current
+          setCliRefreshing(true)
           void desktop
             .githubCliStatus?.()
             .then((value) => {
               if (
                 configuredHost.current === host &&
                 cliStatusVersion.current === version &&
+                cliReadGeneration.current === generation &&
                 value.host === host
               )
                 setCliStatus(value)
             })
             .catch((value) => {
-              if (configuredHost.current === host && cliStatusVersion.current === version)
+              if (
+                configuredHost.current === host &&
+                cliStatusVersion.current === version &&
+                cliReadGeneration.current === generation
+              )
                 setError(String(value))
+            })
+            .finally(() => {
+              if (configuredHost.current === host && cliReadGeneration.current === generation)
+                setCliRefreshing(false)
             })
         }}
         onSettingsChange={setSettings}
@@ -2443,9 +2555,9 @@ function App() {
           <DialogTitle>Optional Notifications</DialogTitle>
           <NotificationCenterView
             busy={notificationBusy}
-            error={error}
+            error={notificationError}
             inbox={notificationInbox}
-            onDismissError={() => setError(null)}
+            onDismissError={() => setNotificationError(null)}
             onRefresh={() => void notify(() => desktop.refreshNotifications?.())}
             onMarkAllRead={() => void notify(() => desktop.markNotificationRead?.('all'))}
             onMarkRead={(id) => void notify(() => desktop.markNotificationRead?.(id))}
@@ -2457,12 +2569,16 @@ function App() {
               if (thread.url)
                 void desktop.openExternal(thread.url).catch((value) => setError(String(value)))
             }}
-            onOpenCredential={() => setCredentialOpen(true)}
+            onOpenCredential={() => {
+              setCredentialError(null)
+              setCredentialOpen(true)
+            }}
             onRemoveCredential={() =>
-              void notify(async () => {
+              void notify(async (isCurrent) => {
                 if (!desktop.removeNotificationCredential || !desktop.notifications)
                   throw new Error('Notifications credential removal is unavailable.')
                 await desktop.removeNotificationCredential()
+                if (!isCurrent()) return undefined
                 return desktop.notifications()
               })
             }
@@ -2663,17 +2779,23 @@ function App() {
         open={credentialOpen}
         onOpenChange={setCredentialOpen}
         busy={notificationBusy}
-        error={error}
+        error={credentialError}
         host={settings?.github.host ?? cliStatus?.host ?? 'github.com'}
         login={notificationInbox?.login ?? null}
         onSubmit={(token, consent, host) => {
-          void notify(async () => {
-            if (!desktop.saveNotificationCredential || !desktop.notifications)
+          void notify(async (isCurrent) => {
+            if (
+              !desktop.updateSettings ||
+              !desktop.saveNotificationCredential ||
+              !desktop.notifications
+            )
               throw new Error('Notifications credential storage is unavailable.')
+            await desktop.updateSettings({ notifications: { enabled: true } })
+            if (!isCurrent()) return undefined
             await desktop.saveNotificationCredential(token, consent, host)
-            if (host === configuredHost.current) setCredentialOpen(false)
+            if (!isCurrent()) return undefined
             return desktop.notifications()
-          })
+          }, true)
         }}
       />
       {nativeManagement &&

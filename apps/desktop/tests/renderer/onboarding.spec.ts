@@ -8,31 +8,10 @@ import {
 } from './helpers/gallery'
 
 test.describe('Onboarding and repository discovery', () => {
-  test('displays detected Git environment facts and standard Git explanation', async ({ page }) => {
+  test('offers local registration and discovery without a repository open', async ({ page }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await settle(page)
-
-    // Standard Git explanation is clearly visible
-    await expect(
-      page.getByText(
-        'A repository stays ordinary Git: clone it here, then keep using it in your terminal, your editor, or GitHub Desktop.',
-      ),
-    ).toBeVisible()
-
-    // Environment detection facts are rendered
-    await expect(page.getByText('Ada Lovelace <ada@example.invalid>')).toBeVisible()
-    await expect(page.getByText('main', { exact: true })).toBeVisible()
-    await expect(page.getByText('Credential helper: osxkeychain')).toBeVisible()
-    await expect(page.getByText('ssh client on PATH (OpenSSH 9.8p1)')).toBeVisible()
-
-    // Primary action buttons are available
-    await expect(page.getByRole('button', { name: 'Search GitHub', exact: true })).toBeVisible()
-    await expect(
-      page.getByRole('button', { name: 'Add local repository', exact: true }),
-    ).toBeVisible()
-
-    // Visual proof of the onboarding empty state pane
-    await page.screenshot({ path: 'test-results/onboarding-pane.png' })
+    await expect(page.getByRole('button', { name: 'Find and clone', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add repository', exact: true })).toBeEnabled()
   })
 
   test('searches accessible repositories, previews commands, and handles clone collisions and cancellation', async ({
@@ -42,7 +21,7 @@ test.describe('Onboarding and repository discovery', () => {
     await settle(page)
 
     // Open clone dialog
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await expect(dialog).toBeVisible()
 
@@ -106,7 +85,7 @@ test.describe('Onboarding and repository discovery', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     const repository = dialog.getByRole('button').filter({ hasText: 'howarewoo/git-stacks' })
     await repository.click()
@@ -133,7 +112,7 @@ test.describe('Onboarding and repository discovery', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await expect(dialog.getByText('howarewoo/git-stacks')).toBeVisible()
     await holdDoubleCall(page, 'searchRepositories')
@@ -170,7 +149,7 @@ test.describe('Onboarding and repository discovery', () => {
       })
     })
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await dialog.getByRole('button').filter({ hasText: 'howarewoo/git-stacks' }).click()
     await dialog.getByRole('button', { name: 'Choose folder', exact: true }).click()
@@ -192,20 +171,22 @@ test.describe('Onboarding and repository discovery', () => {
     await expect(copy).toHaveText('Copy')
   })
 
-  test('adding an existing repository and drag-and-drop triggers repository registration', async ({
+  test('dropping an existing directory registers it and opens its read-only branch context', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await settle(page)
-
-    // Drag-and-drop folder triggers addRepository via preload event
     await page.evaluate(() => {
-      window.fixture.dropRepository?.(['/mock/path/dropped-repo'])
+      window.fixture.setScenario('shell-connected')
+      window.fixture.dropRepository?.(['/Users/ada/Code/git-stacks'])
     })
-
-    // Fixture records addRepository call
-    const calls = await page.evaluate(() => window.fixture.calls)
-    const addCalls = calls.filter((c) => c.call === 'addRepository')
-    expect(addCalls.length).toBeGreaterThanOrEqual(1)
+    await expect(
+      page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+    ).toBeVisible()
+    await expect(page.locator('.bw-sidebar button[aria-pressed="true"]')).toHaveAttribute(
+      'aria-label',
+      expect.stringContaining('/Users/ada/Code/git-stacks'),
+    )
+    await expect(page.getByRole('button', { name: 'main', exact: true })).toBeVisible()
+    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 })

@@ -464,7 +464,7 @@ export function BranchWorkbench({
     if (filter === 'Ready to merge' && branch.readyToMerge !== true) return false
     if (
       query &&
-      !`${branch.ref} ${branch.title} ${branch.pullRequest?.number ?? ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
+      !`${branch.ref} ${branch.title} ${branch.pullRequest ? `#${branch.pullRequest.number}` : ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
         .toLowerCase()
         .includes(query.toLowerCase())
     )
@@ -628,6 +628,7 @@ export function BranchWorkbench({
         <WorkbenchPane
           className="bw-inspector"
           aria-label="Selected branch details"
+          role="complementary"
           header={
             <>
               <div className="bw-inspector-head">
@@ -1132,6 +1133,7 @@ export function BranchWorkbench({
           <WorkbenchPane
             className="bw-main"
             aria-label="Branch workbench"
+            role="main"
             header={
               <>
                 <div className="bw-panel-head">
@@ -1672,7 +1674,7 @@ export function BranchWorkbench({
               {!entries.length ? (
                 <div className="bw-empty">
                   <Search />
-                  <h3>No matching branches</h3>
+                  <h2>No matching branches</h2>
                   <p>Try another branch, PR, path, or worktree filter.</p>
                 </div>
               ) : null}

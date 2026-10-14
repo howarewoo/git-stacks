@@ -182,7 +182,7 @@ for (const size of [
   }
 }
 
-test('a queued repository operation retains reading and composition while head/base safety remains immediate', async ({
+test('a refreshed head/base retains reading and composition while comparison safety remains immediate', async ({
   page,
 }) => {
   await openLongReview(page, { width: 1000, height: 700 })
@@ -195,7 +195,7 @@ test('a queued repository operation retains reading and composition while head/b
     name: 'Comment on src/long-review.ts:12 (head)',
     exact: true,
   })
-  await editor.fill('Keep this sentence while the repository operation waits.')
+  await editor.fill('Keep this sentence while the displayed comparison becomes stale.')
   await page.getByRole('textbox', { name: 'Review summary' }).fill('Keep the decision summary too.')
   await page.getByRole('button', { name: 'Code', exact: true }).click()
   const region = page.locator('.review-unified')
@@ -203,13 +203,6 @@ test('a queued repository operation retains reading and composition while head/b
     element.scrollTop = 200
   })
   const scroll = await region.evaluate((element) => element.scrollTop)
-  await holdDoubleCall(page, 'runAction')
-  await page.getByRole('button', { name: 'Open command palette', exact: true }).click()
-  await page.getByRole('combobox').fill('Fetch remote updates')
-  await page.getByRole('option', { name: /^Fetch remote updates/ }).click()
-  await expect
-    .poll(() => page.evaluate(() => window.fixture.pending.includes('runAction')))
-    .toBe(true)
   await answerNextDoubleCall(page, 'reviewFiles', {
     ...reviewFileSet(42, 'new-head-observed-while-busy'),
     files: [
@@ -236,7 +229,9 @@ test('a queued repository operation retains reading and composition while head/b
   ).toHaveCount(0)
   expect(await region.evaluate((element) => element.scrollTop)).toBe(scroll)
   await page.getByRole('button', { name: 'Conversation', exact: true }).click()
-  await expect(editor).toHaveValue('Keep this sentence while the repository operation waits.')
+  await expect(editor).toHaveValue(
+    'Keep this sentence while the displayed comparison becomes stale.',
+  )
   await expect(page.getByRole('textbox', { name: 'Review summary' })).toHaveValue(
     'Keep the decision summary too.',
   )
@@ -244,8 +239,6 @@ test('a queued repository operation retains reading and composition while head/b
     page.locator('.review-submit').getByRole('button', { name: /Submit/ }),
   ).toBeDisabled()
   expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSubmit')).toEqual([])
-  await page.evaluate(() => window.fixture.unhold('runAction'))
-  await releaseDoubleCalls(page, 'runAction')
 })
 
 test('a refreshed comparison never launders a saved comment onto the new head', async ({

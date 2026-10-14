@@ -313,6 +313,12 @@ export function installFixtureControl(options: {
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
 
   let scenario = scenarioFor(options.scenario)
+  const snapshotSources = new Map(
+    Object.entries(
+      scenario.snapshotsByPath ??
+        (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+    ),
+  )
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
   let servedInventory =
@@ -783,8 +789,8 @@ export function installFixtureControl(options: {
       if (context.worktreeId && (!tree || tree.missing))
         throw new Error('Selected fixture directory was removed')
       const source =
-        scenario.snapshotsByPath?.[tree?.path ?? repo.registeredPaths[0]] ??
-        scenario.snapshotsByPath?.[repo.registeredPaths[0]] ??
+        snapshotSources.get(tree?.path ?? repo.registeredPaths[0]) ??
+        snapshotSources.get(repo.registeredPaths[0]) ??
         scenario.snapshot
       if (!source) throw new Error('Selected fixture snapshot is unavailable')
       const treeRef = tree ? repo.refs.find((ref) => ref.id === tree.refId) : undefined
@@ -811,17 +817,25 @@ export function installFixtureControl(options: {
         if (!selected || args[0] !== selected.number)
           throw new Error('The request does not address the captured pull request.')
       }
-      if (operation === 'refresh')
-        return answer('refresh', () => captured as InspectionResult<typeof operation>)
-      if (operation === 'worktreeStatus')
-        return {
-          path: captured.path,
-          currentBranch: captured.currentBranch,
-          headOid: captured.headOid,
-          files: captured.files,
-          filesTruncated: captured.limits.filesTruncated,
-          observedAt: new Date().toISOString(),
-        } as InspectionResult<typeof operation>
+      if (operation === 'refresh') {
+        record('refresh', [])
+        return admittedAnswer('refresh', () => captured as InspectionResult<typeof operation>)
+      }
+      if (operation === 'worktreeStatus') {
+        record('worktreeStatus', [])
+        return admittedAnswer(
+          'worktreeStatus',
+          () =>
+            ({
+              path: captured.path,
+              currentBranch: captured.currentBranch,
+              headOid: captured.headOid,
+              files: captured.files,
+              filesTruncated: captured.limits.filesTruncated,
+              observedAt: new Date().toISOString(),
+            }) as InspectionResult<typeof operation>,
+        )
+      }
       if (operation === 'repositoryOperationScope')
         return {
           repositoryPath: captured.path,
@@ -2515,6 +2529,12 @@ export function installFixtureControl(options: {
     },
     setScenario(name) {
       scenario = scenarioFor(name)
+      snapshotSources.clear()
+      for (const [path, value] of Object.entries(
+        scenario.snapshotsByPath ??
+          (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+      ))
+        snapshotSources.set(path, value)
       servedPrIndex = scenario.prIndex
       servedInventory =
         scenario.inventory ??
@@ -2652,6 +2672,20 @@ export function installFixtureControl(options: {
           .toLowerCase() ?? null
       const owner = statusForHost(host)
       if (owner) publishedSnapshotOwners.set(value, owner)
+      if (!scenario.inventory) {
+        if (
+          !snapshotSources.has(value.path) &&
+          snapshotSources.size === 1 &&
+          active?.path !== value.path
+        )
+          snapshotSources.clear()
+        snapshotSources.set(value.path, value)
+        servedInventory = {
+          ...snapshotInventory(Array.from(snapshotSources.values())),
+          generation: servedInventory.generation + 1,
+        }
+        for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+      }
       active = value
       push('repository:background-snapshot', value)
     },

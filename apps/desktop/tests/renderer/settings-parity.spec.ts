@@ -6,13 +6,7 @@ async function openSettings(
   scenario: 'settings-ready' | 'settings-managed',
 ) {
   await openGallery(page, { scenario })
-  await page.keyboard.press('Meta+k')
-  if (!(await page.getByRole('dialog', { name: 'Command palette' }).isVisible()))
-    await page.keyboard.press('Control+k')
-  await page
-    .getByRole('option', { name: /Settings/ })
-    .first()
-    .click()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
   return page.getByRole('dialog', { name: 'Settings', exact: true })
 }
 

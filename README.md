@@ -424,37 +424,28 @@ refresh never reports the pull requests on screen as freshly checked. When the
 issue read fails, the last confirmed issues stay listed and the reason they are
 unconfirmed is shown, instead of an empty inbox that looks current.
 
-The title bar states remote freshness in words, with the age of the last
-confirmed data, and says when local Git still works. Cached responses are
-display only: the native stacks capability the snapshot asks GitHub about on
-every interval is read with its validator, and review submission, publish,
-and force-push always re-read GitHub live. A high-impact mutation that lost
-its answer is never replayed on reconnect — it is listed with its reason until
-dismissed.
+Remote facts in the workbench and inspector retain their observed freshness and
+unknown/unavailable states; navigation does not authorize a refresh or mutation.
+Cached responses are display only. Native capability checks, review submission,
+publication and force-with-lease execution revalidate captured authority live.
+An accepted high-impact effect whose answer was lost is never replayed on reconnect.
 
-Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
-palette. The safety suite advances pending hover timers after opening a
-destructive dialog to verify that contextual cards cannot cover its warning.
+Renderer checks distinguish `/` in-view filtering from `Mod+K` global search,
+exercise modal/menu focus containment and return, and reject unintended mutations.
+The retired graph hover-card/timer presentation is not a production path.
 
 ### Deleting branches
 
-In **Branches**, choose **Select branches**, check the branches to remove, then
-choose **Delete selected**. Remote-only rows can be selected directly in **All**;
-switching to **Remote** is not required. The first checked branch chooses local or
-remote deletion for the batch. Other branch types are disabled until you
-**Clear selection**, so local and remote deletions cannot be mixed.
+In **Branches & worktrees**, check the exact rows or the mounted-page checkbox,
+then choose **Preview selected local branch deletion…** or
+**Preview selected remote branch deletion…**. The preview captures repository,
+qualified refs, tips and the explicitly chosen execution directory. Mixed or
+ineligible targets are refused rather than silently replaced with another scope.
 
-**Select all visible** selects eligible rows of the batch's type on the currently
-mounted page only. With no checked branches, it selects local branches when any
-eligible local rows are visible; otherwise it selects remote branches. Check a
-remote row first to select all visible remotes in a mixed list.
-
-Selections remain counted across paging, search, **All**, **With PRs**, and filters
-matching their type. Switching to an incompatible **Local** or **Remote** filter
-clears the checked branches without exiting selection mode.
-**Clear selection** also keeps selection mode open; **Done selecting** exits it.
-A successful deletion clears the checked branches without exiting selection mode.
-Opening another repository clears the selection and exits selection mode.
+Checked rows are page-local: paging, search/status/ref/worktree filters, folds
+and repository changes clear the batch. **Clear selection** clears checked rows
+without changing the inspected branch. Selecting or inspecting a row never
+deletes or checks out anything.
 
 The confirmation lists each selected local ref and captured tip. Confirm with
 the delete button; typing a branch name is not required, including when
@@ -1144,7 +1135,7 @@ Diagnostics.
 
 ## Settings
 
-Settings is reachable from the command palette (**Settings…**). Preferences are
+Settings is reachable from the sidebar footer and its confirmed keyboard shortcut. Preferences are
 stored in `settings.json` under the app's user-data directory, which main owns
 and validates; the renderer never chooses or writes that path.
 
@@ -2193,6 +2184,14 @@ retains only the exact chosen directory. Pending Attention→Review navigation i
 generation-fenced and retired by a newer explicit destination. The single shortcut
 dispatcher observes the existing confirmed settings query, including live remaps.
 
+Returning from Review restores focus to the original qualified branch or source
+entry as well as its controlled filters, page and scroll. If the selected branch
+is outside that unchanged mounted window, focus returns to its initiating
+inspector control rather than silently paging/scrolling. Qualified PR/Attention
+entry keys survive title/fact updates. A newer repository, surface, selection or
+primary account retires pending focus; no old private entry transfers to a
+replacement principal. Branch search accepts bare and `#`-prefixed PR numbers.
+
 `DesktopAPI.inspect(context, operation, args, requestId)` is the typed captured-read
 boundary. Main validates sender and the fixed operation table, resolves registered
 repository authority, freshly discovers and verifies worktree administrative/path
@@ -2210,6 +2209,12 @@ Snapshot and captured conflict inspections skip automatic journal/lock recovery.
 Captured historical comparison never fetches missing Git objects: it uses local
 objects, a validated provider endpoint comparison, or an explicit unavailable
 result. Existing explicit operational recovery and object-fetch behavior is retained.
+
+The actual App fixture dispatcher keeps mutable per-directory snapshot sources,
+admits refresh/status answers when the request starts, and projects watcher
+snapshots into the genuine inventory subscription. Explicitly supplied typed
+inventory remains authoritative. Held reads cannot adopt a newer snapshot on
+release; linked-directory HEAD/index/file facts remain exact to that directory.
 
 Overview, Changes, Checks and Discussion belong to the exact selected context.
 Multiple associated directories require an explicit choice. Changes shows staged
@@ -2359,6 +2364,18 @@ remain separate; local/provider authority and recovery regressions use disposabl
 real repositories. Native/manual/assistive-technology/provider acceptance and final
 Electron timing/heap certification for #243/#255 remain **USER-DEFERRED**. Neither
 compilation nor browser/model evidence passes those gates or permits sandbox changes.
+
+CLI refresh has its own pending read generation and configured-host fence. A
+status event retires only the configured-host read, and a late completion cannot
+replace the current account or unlock a newer refresh. Local repository opening
+uses the real registration dialog's independent single-flight lock through
+inventory confirmation, not only through the native picker.
+
+Optional Notifications retains separate inbox/credential errors and host-scoped
+read/write admission. Consent submission enables the separately authorized module,
+saves its credential and reads its inbox in that order, checking the original
+host/generation between steps. Host changes retire old answers/errors and pending
+credential UI; primary `gh` account changes do not erase this independent inbox.
 
 ### Integrated cutover coverage and manual-ready delivery
 
@@ -3229,11 +3246,11 @@ desktop application is a separate matter from all of
 this: a packaged, signed install is verified on its own terms and none of the
 evidence here says anything about it.
 
-## Changes workspace
+## Retained file-operation domain contracts
 
-Select a file row to inspect its staged and working-tree diffs. The separate file checkbox stages or unstages the whole file; its mixed state means the file has changes on both sides of the index. File-row selection alone never stages anything. If Git rejects a file action, the index is unchanged and the mixed checkbox still reflects the partially staged file after refresh.
+The main-process file/index and partial-patch engines remain domain contracts; the retired development workspace and its staging controls are not production destinations. The current inspector reads HEAD→index and index→directory without mutation. Use an external editor or terminal for development and staging.
 
-For a text file, use the per-hunk **Stage hunk** or **Unstage hunk** button to move just that hunk between the working tree and index. Toggle changed lines within a hunk to include or exclude them, then apply the hunk; toggling a line alone does not write to Git. With focus on a hunk, Up/Down/Home/End move among hunks, and Enter or S applies the focused hunk. Keyboard activation of an individual line button only changes its selection.
+Whole-file and partial-text domain operations remain guarded by exact file/index identities. A mixed status means a path has changes on both sides of the index, not that any inspected lines have been staged.
 
 Only staged changes enter the next commit. Each hunk action checks the selected file's index and working-tree identity again, then takes Git's index lock before copying the complete current index. Another file staged while the diff was loading is preserved; a Git writer that encounters the owned lock must retry. If the selected file changed, refresh the inspector and review the diff. Renames and copies, new or deleted files, binary/untracked/conflicted files, unsupported text diffs, and oversized diffs require whole-file handling or conflict resolution rather than partial patching. Selected text patches retain adjacent replacement order, exact repeated-line positions, zero-context insertion anchors, CRLF, no-newline markers, and quoted Unicode paths where Git can safely apply them.
 
@@ -3278,8 +3295,8 @@ Sync Stack never rewrites published remote history without explicit confirmation
 If Git encounters conflicts during the rebase cascade:
 
 1. The operation pauses in `git-stacks-stack.json` in the selected worktree's Git administrative directory, saving its stable recovery identity, active replay proof and backup refs under `refs/git-stacks/backups/<id>/<hex-encoded-branch>`.
-2. Conflicted files appear in the selected directory's Changes view and conflict resolver; other directories are not borrowed.
-3. Resolve and stage conflicts, then use **Continue** to resume the original owned replay. **Skip…** separately confirms dropping only the exact current paused commit; later commits and conflicts still follow the original journal.
+2. Inspect conflicted paths in the exact selected directory's read-only Changes inspector; no other directory is borrowed.
+3. Resolve and stage conflicts in an external editor or terminal, then use **Continue** in the captured recovery workflow to resume the original owned replay. **Skip…** separately confirms dropping only the exact current paused commit; later commits and conflicts still follow the original journal.
 4. **Abort** restores recorded local tips and metadata only where their current identities remain proven. External changes block rollback; already published remote or provider effects are not undone. Recovery retains the original force consent and leases.
 
 ## Linked issues

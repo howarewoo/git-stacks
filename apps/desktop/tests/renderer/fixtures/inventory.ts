@@ -186,7 +186,7 @@ export function snapshotInventory(snapshots: readonly RepositorySnapshot[]): Wor
           upstream: branch.upstreamRef ? refId(branch.upstreamRef) : null,
           ahead: branch.ahead,
           behind: branch.behind,
-          worktreeIds: branch.current ? [worktreeId] : [],
+          worktreeIds: branch.name === snapshot.currentBranch ? [worktreeId] : [],
           pullRequestIds: branch.pr ? [prId(branch.pr.number)] : [],
         })),
         worktrees: [
