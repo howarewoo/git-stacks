@@ -49,9 +49,10 @@ services; do not interrupt jobs or delete retained runner data during the cutove
 
 ## Install the agent skills
 
-The repository's `.agents/skills/` directory contains two standalone skills:
-`flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack, and
-`submit-stack-for-review` submits an existing full stack for review, strictly bottom-up.
+The repository's `.agents/skills/` directory contains three standalone skills:
+`flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack,
+`split-pr` breaks one large PR into a reviewable stack without changing its final code,
+and `submit-stack-for-review` submits an existing full stack for review, strictly bottom-up.
 Install them with the [Skills CLI](https://github.com/vercel-labs/skills) using
 Node.js and `npx`; cloning this repository, installing pnpm dependencies, or
 building the desktop app is not required.
@@ -71,11 +72,11 @@ cd /path/to/your/repository
 npx skills add howarewoo/git-stacks
 ```
 
-The CLI prompts for skills and host agents. To select both skills and a specific
+The CLI prompts for skills and host agents. To select all three skills and a specific
 host non-interactively (Codex in this example):
 
 ```sh
-npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --yes
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph split-pr submit-stack-for-review --agent codex --yes
 ```
 
 Replace `codex` with your host's Skills CLI agent identifier, or omit both `--agent`
@@ -84,7 +85,7 @@ projects, add `--global`; this writes to the selected agent's user-level skill
 location rather than the current project:
 
 ```sh
-npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --global --yes
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph split-pr submit-stack-for-review --agent codex --global --yes
 ```
 
 Each skill is a self-contained `SKILL.md`. Using these GitHub workflows requires
@@ -95,8 +96,8 @@ Installation alone does not authorize PR mutations.
 When changing skill packaging or these commands, verify discovery and actual
 project/global installation from outside this repository with the current Skills
 CLI. Use disposable project directories and an isolated `HOME` and XDG directories
-for the global check; compare both installed `SKILL.md` files byte-for-byte with
-source and confirm only the current two skills are discovered and installed.
+for the global check; compare all three installed `SKILL.md` files byte-for-byte with
+source and confirm only the current three skills are discovered and installed.
 For an unpushed candidate, substitute the absolute local checkout path for
 `howarewoo/git-stacks`; this proves local packaging, not remote availability.
 Record CLI version, exact commands, outcomes, source hashes, and limits in the PR.
