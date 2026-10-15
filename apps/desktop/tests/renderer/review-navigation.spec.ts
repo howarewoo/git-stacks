@@ -35,7 +35,7 @@ for (const destination of ['pullRequests', 'branches'] as const) {
       const link = page
         .locator('.wb-secondary-list')
         .getByRole('button')
-        .filter({ hasText: '#42 ·' })
+        .filter({ hasText: '#42 Give the review workspace' })
       await link.focus()
       await link.press('Enter')
     } else {
@@ -55,7 +55,10 @@ for (const destination of ['pullRequests', 'branches'] as const) {
     if (destination === 'pullRequests') {
       await expect(page.getByRole('heading', { name: 'Pull requests', exact: true })).toBeVisible()
       await expect(
-        page.locator('.wb-secondary-list').getByRole('button').filter({ hasText: '#42 ·' }),
+        page
+          .locator('.wb-secondary-list')
+          .getByRole('button')
+          .filter({ hasText: '#42 Give the review workspace' }),
       ).toBeFocused()
     } else {
       await expect(
@@ -892,19 +895,17 @@ test('same-number cross-repository Inbox navigation retires held old Review read
 }) => {
   await openGallery(page, { scenario: 'pr-inbox-same-number' })
   await switchDestination(page, 'attention')
-  await page.getByRole('searchbox', { name: 'Search the queue', exact: true }).fill('#81')
+  await page.getByRole('textbox', { name: 'Search needs attention', exact: true }).fill('#81')
   await holdDoubleCall(page, 'reviewHeadline')
   await page
-    .locator('.pr-inbox-item')
+    .locator('.wb-attention-row')
     .filter({ hasText: 'Add a GitHub-derived PR Inbox' })
-    .getByRole('button')
     .click()
   await settle(page)
   await switchDestination(page, 'attention')
   const entry = page
-    .locator('.pr-inbox-item')
+    .locator('.wb-attention-row')
     .filter({ hasText: 'Charge every native-stack page' })
-    .getByRole('button')
   await entry.focus()
   await entry.press('Enter')
   await releaseDoubleCalls(page, 'reviewHeadline', 'newest')
@@ -919,9 +920,9 @@ test('same-number cross-repository Inbox navigation retires held old Review read
   await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')
   await expect(review).toContainText('checks failing')
   await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
-  await expect(page.getByRole('searchbox', { name: 'Search the queue', exact: true })).toHaveValue(
-    '#81',
-  )
+  await expect(
+    page.getByRole('textbox', { name: 'Search needs attention', exact: true }),
+  ).toHaveValue('#81')
   await expect(entry).toBeFocused()
   const calls = await getDoubleCalls(page)
   expect(
@@ -965,9 +966,8 @@ test('changing repository retires the previous repository qualified Review selec
   await openGallery(page, { scenario: 'pr-inbox-queue' })
   await switchDestination(page, 'attention')
   await page
-    .locator('.pr-inbox-item')
+    .locator('.wb-attention-row')
     .filter({ hasText: 'Add a GitHub-derived PR Inbox' })
-    .getByRole('button')
     .click()
   await expect(page.locator('.review-headline')).toContainText('#81 Add a GitHub-derived PR Inbox')
   await page

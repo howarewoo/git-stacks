@@ -64,11 +64,16 @@ import {
 import { sameReviewComparison } from '@git-stacks/shared/review'
 import type {
   ReviewDraft,
+  ReviewComposerDraft,
   ReviewDraftRecord,
   ReviewDraftRecovery,
   ReviewOwner,
 } from '@git-stacks/shared/review-threads'
-import { sameReviewDraft } from '@git-stacks/shared/review-threads'
+import {
+  sameReviewDraft,
+  sameReviewComposerDraft,
+  newReviewDraftId,
+} from '@git-stacks/shared/review-threads'
 import { ReviewDiff } from './review-diff'
 import type { ReviewHistory } from '@git-stacks/shared/review-snapshots'
 import {
@@ -233,7 +238,11 @@ export function ReviewView({
       query?.queryKey[1] === authority && query.queryKey[2] === number ? previous : undefined,
   })
   const headline = headlineQuery.data ?? null
-  const revision = [headline?.pullRequest.headOid, headline?.pullRequest.base]
+  const revision = [
+    headline?.pullRequest.headOid,
+    headline?.pullRequest.base,
+    headline?.pullRequest.baseOid,
+  ]
   const filesQuery = useQuery({
     queryKey: [...rootKey, 'files', ...revision],
     enabled: Boolean(headline && desktop?.reviewFiles),
@@ -338,6 +347,7 @@ export function ReviewView({
             continue
           const matching =
             sameReviewComparison(record.comparison, captured.record.comparison) &&
+            sameReviewComposerDraft(record.composer, captured.record.composer) &&
             record.drafts.length === captured.record.drafts.length &&
             record.drafts.every((draft, index) =>
               sameReviewDraft(draft, captured.record.drafts[index]),
@@ -380,7 +390,11 @@ export function ReviewView({
     displayedFiles.current = { identity, files: latestFiles }
   }
   const files = displayedFiles.current.files
-  const observedRevision = JSON.stringify([observedPullRequest?.headOid, observedPullRequest?.base])
+  const observedRevision = JSON.stringify([
+    observedPullRequest?.headOid,
+    observedPullRequest?.base,
+    observedPullRequest?.baseOid,
+  ])
   const observedAtRead = React.useRef({ files, revision: observedRevision })
   if (observedAtRead.current.files !== files) {
     observedAtRead.current = { files, revision: observedRevision }
@@ -634,12 +648,26 @@ export function ReviewView({
     },
     retry: false,
   })
-  const saveDrafts = (drafts: ReviewDraft[]) => {
+  const saveDrafts = (
+    drafts: ReviewDraft[],
+    composer = liveDraftRecord.current?.composer ?? {
+      id: newReviewDraftId(),
+      summary: '',
+      event: 'COMMENT' as const,
+      replies: [],
+    },
+  ) => {
     if (number === null || !draftOwner?.viewer) return
     const preservesSavedComparison =
       draftRecord !== null &&
-      (drafts.length === 0 ||
-        draftRecord.drafts.some((saved) => drafts.some((draft) => draft.id === saved.id)))
+      (draftRecord.drafts.some((saved) => drafts.some((draft) => draft.id === saved.id)) ||
+        Boolean(
+          draftRecord.composer &&
+            (draftRecord.composer.summary ||
+              draftRecord.composer.event !== 'COMMENT' ||
+              draftRecord.composer.replies.length),
+        ) ||
+        !files)
     const comparison = preservesSavedComparison ? draftRecord.comparison : files?.comparison
     if (!comparison) {
       setError('Read the current comparison before composing a new inline comment.')
@@ -655,6 +683,7 @@ export function ReviewView({
       ...draftOwner,
       comparison,
       drafts,
+      ...(composer ? { composer } : {}),
       updatedAt: new Date(
         Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0),
       ).toISOString(),
@@ -952,15 +981,23 @@ export function ReviewView({
       ((observedAtRead.current.revision !== observedRevision &&
         ((observedPullRequest?.headOid &&
           observedPullRequest.headOid !== files.comparison.headOid) ||
-          (observedPullRequest && observedPullRequest.base !== files.comparison.baseRef))) ||
+          (observedPullRequest && observedPullRequest.base !== files.comparison.baseRef) ||
+          (observedPullRequest?.baseOid &&
+            observedPullRequest.baseOid !== files.comparison.baseOid))) ||
         (headline?.pullRequest.headOid &&
           headline.pullRequest.headOid !== files.comparison.headOid) ||
         (headline && headline.pullRequest.base !== files.comparison.baseRef) ||
+        (headline?.pullRequest.baseOid &&
+          headline.pullRequest.baseOid !== files.comparison.baseOid) ||
         (latestFiles && !sameReviewComparison(latestFiles.comparison, files.comparison))),
   )
   const draftComparisonChanged = Boolean(
     files &&
-      draftRecord?.drafts.length &&
+      draftRecord &&
+      (draftRecord.drafts.length ||
+        draftRecord.composer?.summary ||
+        (draftRecord.composer?.event && draftRecord.composer.event !== 'COMMENT') ||
+        draftRecord.composer?.replies.length) &&
       !sameReviewComparison(draftRecord.comparison, files.comparison),
   )
   const frozenReason = draftComparisonChanged
@@ -1637,6 +1674,14 @@ export function ReviewView({
                     selection={selection}
                     onClearSelection={() => setSelection(null)}
                     onDraftChange={saveDrafts}
+                    canCompose={Boolean(
+                      draftOwner?.viewer &&
+                        (draftRecord?.comparison || files?.comparison) &&
+                        (retainedLocalWrite || verifiedDraftRecord.current !== undefined),
+                    )}
+                    onComposerChange={(composer: ReviewComposerDraft) =>
+                      saveDrafts(liveDraftRecord.current?.drafts ?? [], composer)
+                    }
                     onReload={reloadReview}
                     onSelect={selectThreadLine}
                     frozenReason={submissionFrozenReason}
@@ -1753,6 +1798,14 @@ function ReviewHeadlineBlock({
   filesComparison: ReviewComparison | null
 }) {
   const pr = headline.pullRequest
+  const provider = React.useMemo(() => {
+    try {
+      const url = new URL(pr.url)
+      return { host: url.hostname, repository: url.pathname.split('/').slice(1, 3).join('/') }
+    } catch {
+      return { host: 'Host unknown', repository: 'Repository unknown' }
+    }
+  }, [pr.url])
   return (
     <header className="review-headline">
       <div className="review-headline-title">
@@ -1766,6 +1819,9 @@ function ReviewHeadlineBlock({
             #{pr.number} {pr.title}
           </p>
         </details>
+        <span>
+          {provider.host}/{provider.repository} · {pr.author ?? 'Author unknown'}
+        </span>
         <div className="pr-detail-meta">
           <Badge variant={pr.state === 'OPEN' ? 'success' : 'secondary'}>
             {pr.state.toLowerCase()}
@@ -1779,9 +1835,13 @@ function ReviewHeadlineBlock({
         </div>
       </div>
       <p className="review-headline-refs">
-        <code>{pr.head}</code>
+        <code>
+          {provider.host}/{pr.headRepository ?? 'Head repository unknown'}:{pr.head}
+        </code>
         <ArrowUpRight aria-hidden="true" className="size-3.5" />
-        <code>{pr.base}</code>
+        <code>
+          {provider.host}/{provider.repository}:{pr.base}
+        </code>
         {pr.headOid ? (
           <span className="review-headline-oid">
             head <code>{pr.headOid.slice(0, 7)}</code>

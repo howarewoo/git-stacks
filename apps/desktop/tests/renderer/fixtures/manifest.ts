@@ -95,6 +95,7 @@ export const SCENARIO_NAMES = [
   'review-force-pushed',
   'review-stacked',
   'review-long-stack',
+  'review-uncached-native-layer',
   'review-stack-partial',
   'review-stack-error',
   'review-stack-stale',

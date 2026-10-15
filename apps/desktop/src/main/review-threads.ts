@@ -10,6 +10,7 @@ import type {
   ReviewMutationResult,
   ReviewPermissions,
   ReviewSubmission,
+  ReviewComposition,
   ReviewThread,
   ReviewThreadComment,
   ReviewThreadRead,
@@ -34,7 +35,9 @@ import {
   recordUncertainWrite,
   reserveUncertainWrite,
   removeDeliveredReviewDrafts,
+  retireDeliveredComposerText,
   assertReviewDraftOwner,
+  assertReviewCompositionOwner,
   retireSettledWrites,
 } from './review-drafts'
 import { markReviewSnapshotReviewed } from './review-snapshots'
@@ -978,10 +981,25 @@ export async function submitReview(
   // and before the request is journalled or sent, not after.
 
   const sendable = submission.drafts.filter((draft) => draft.body.trim() !== '')
-  if (sendable.length === 0) throw new Error('Write at least one comment before submitting.')
+  if (sendable.length === 0 && submission.event === 'COMMENT' && submission.body.trim() === '')
+    throw new Error('Write a review summary or pending comment before submitting.')
   if (submission.event === 'REQUEST_CHANGES' && submission.body.trim() === '') {
     throw new Error('Requesting changes needs a summary saying what must change.')
   }
+  if (sendable.length === 0 && !submission.compositionId)
+    throw new Error('Save the original overall review composition before submitting.')
+  if (submission.compositionId)
+    await assertReviewCompositionOwner(
+      repoPath,
+      repo,
+      submission.viewer,
+      number,
+      submission.comparison,
+      submission.compositionId,
+      submission.body,
+      submission.event,
+      signal,
+    )
 
   const files = await readReviewFilesFrom(remote, number, signal)
   if (files.comparison.headOid === null) {
@@ -1009,7 +1027,7 @@ export async function submitReview(
   const comments = sendable.map((draft) =>
     wireComment(byId.get(draft.id)!, draft, reviewDraftStart(draft).path),
   )
-  // The attempt is identified by the comments it would post, the comparison it
+  // An inline attempt is identified by the comments it would post, the comparison it
   // would post them on, and the drafts they came from — not by the summary. A
   // reviewer who edits only the summary has not written a different review, and
   // keying on the summary would let them post the same comments twice by
@@ -1017,10 +1035,13 @@ export async function submitReview(
   // alone cannot say which composition they are: the same line carrying the same
   // words twice is two pieces of work, and a recovery has to be able to tell
   // them apart.
+  // With no inline identities, the minted durable overall composition identifies
+  // the attempt; a deliberate new decision at the same comparison is distinct.
   const attempt = reviewAttemptId(
     comments,
     files.comparison,
     sendable.map((d) => d.id),
+    submission.compositionId,
   )
   // Each comment is recorded with the draft it came from. `comments` is built
   // from `sendable` in order, so the two are index for index.
@@ -1044,6 +1065,7 @@ export async function submitReview(
       await revalidateReviewOwner(repoPath, number, submission, submission.comparison, signal)
     },
     signal,
+    submission.compositionId,
   )
 
   // Re-sending because the network looked idle is how a review gets posted
@@ -1062,6 +1084,7 @@ export async function submitReview(
     files.comparison,
     draftIds,
     signal,
+    submission.compositionId,
   )
   if (guard.unsettled) throw new ReviewWriteUncertainError(guard.unsettled)
   // Comments GitHub already holds are left out of what is sent now, so a
@@ -1094,8 +1117,12 @@ export async function submitReview(
   // Everything in this payload is already on GitHub, so the outcome GitHub
   // recorded for the review that carried them is what is reported.
   // Settled evidence stays until a later payload acknowledges retirement.
-  if (undelivered.length === 0) {
-    const settledReview = guard.settled[0]
+  if (undelivered.length === 0 && (sendable.length > 0 || guard.settled.length > 0)) {
+    const settledReview =
+      guard.settled.find((receipt) => receipt.composition?.id === submission.compositionId) ??
+      guard.settled[0]
+    if (!settledReview)
+      throw new ReviewOutcomeUnknownError('No confirmed original review receipt is available.')
     if (files.comparison.headOid) {
       await markReviewSnapshotReviewed(
         repoPath,
@@ -1116,11 +1143,26 @@ export async function submitReview(
       submission.comparison,
       authorizeCapturedAttempt,
     )
+    if (settledReview.composition)
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        {
+          compositionId: settledReview.composition.id,
+          summary: settledReview.composition.summary,
+          event: settledReview.composition.event,
+          comparison: submission.comparison,
+        },
+        authorizeCapturedAttempt,
+      )
     return {
-      id: settledReview?.id ?? attempt,
-      state: settledReview?.state ?? '',
-      url: settledReview?.url ?? null,
+      id: settledReview.id,
+      state: settledReview.state,
+      url: settledReview.url,
       delivered: [...delivered],
+      ...(settledReview.composition ? { deliveredComposition: settledReview.composition } : {}),
     }
   }
 
@@ -1131,10 +1173,11 @@ export async function submitReview(
   const sentAt = new Date().toISOString()
   const boundary = await readReviewBoundary(remote, number, signal)
   const journalled = {
-    id: reviewAttemptId(toSend, files.comparison, postedIds),
+    id: reviewAttemptId(toSend, files.comparison, postedIds, submission.compositionId),
     number,
     kind: 'review' as const,
     summary: submission.body,
+    ...(submission.compositionId ? { compositionId: submission.compositionId } : {}),
     threadId: null,
     headOid: files.comparison.headOid,
     // The whole comparison, because the head alone does not identify a diff: a
@@ -1175,6 +1218,18 @@ export async function submitReview(
       )
       const liveBlocked = livePermissions.blocked[submission.event]
       if (liveBlocked) throw new Error(liveBlocked)
+      if (submission.compositionId)
+        await assertReviewCompositionOwner(
+          repoPath,
+          repo,
+          submission.viewer,
+          number,
+          submission.comparison,
+          submission.compositionId,
+          submission.body,
+          submission.event,
+          signal,
+        )
     },
     signal,
   )
@@ -1241,8 +1296,16 @@ export async function submitReview(
   // Provider confirmation and durable bookkeeping are separate. A local
   // publication failure must retain the guard, not masquerade as a refusal.
   const record = isRecord(responseData) ? responseData : {}
-  const settledId = typeof record.id === 'number' ? String(record.id) : String(record.id ?? '')
-  const settledState = typeof record.state === 'string' ? record.state : ''
+  if (
+    !Number.isSafeInteger(record.id) ||
+    (record.id as number) <= 0 ||
+    record.state !== stateForEvent(submission.event)
+  )
+    throw new ReviewOutcomeUnknownError(
+      'The provider did not confirm a usable review identity and the requested decision; authored text and its dispatched-attempt guard were retained.',
+    )
+  const settledId = String(record.id)
+  const settledState = record.state as string
   // GitHub answered, so this attempt is settled — but the record is kept as
   // settled evidence rather than deleted. A crash or failed draft cleanup
   // must not lose the proof that these comments reached GitHub. Retiring it
@@ -1280,6 +1343,15 @@ export async function submitReview(
     state: settledState,
     url: typeof record.html_url === 'string' ? record.html_url : null,
     delivered: [...delivered],
+    ...(submission.compositionId
+      ? {
+          deliveredComposition: {
+            id: submission.compositionId,
+            summary: submission.body,
+            event: submission.event,
+          },
+        }
+      : {}),
   }
   // Durable cleanup belongs to this captured repository/account, not the
   // renderer's current destination or authority. Keep it outside the POST
@@ -1294,6 +1366,20 @@ export async function submitReview(
     submission.comparison,
     authorizeCapturedAttempt,
   )
+  if (submission.compositionId)
+    await retireDeliveredComposerText(
+      repoPath,
+      repo,
+      permissions.viewer,
+      number,
+      {
+        compositionId: submission.compositionId,
+        summary: submission.body,
+        event: submission.event,
+        comparison: submission.comparison,
+      },
+      authorizeCapturedAttempt,
+    )
   return result
 }
 
@@ -1315,6 +1401,7 @@ function reviewAttemptId(
   comments: readonly Record<string, unknown>[],
   comparison: ReviewComparison,
   draftIds: readonly string[],
+  compositionId?: string,
 ): string {
   const positions = comments
     .map((comment) =>
@@ -1326,7 +1413,9 @@ function reviewAttemptId(
   const where = [comparison.headOid, comparison.baseOid, comparison.baseRef]
     .map((part) => String(part ?? ''))
     .join(':')
-  return shortHash(`${where}\0${draftIds.join(',')}\0${positions}`)
+  return shortHash(
+    `${where}\0${draftIds.join(',')}\0${positions}${comments.length === 0 ? `\0${compositionId ?? ''}` : ''}`,
+  )
 }
 
 /**
@@ -1394,6 +1483,7 @@ async function reconcileOverlappingAttempts(
   comparison: ReviewComparison,
   draftIds: readonly string[],
   signal?: AbortSignal,
+  compositionId?: string,
 ): Promise<{
   delivered: Set<string>
   unsettled: ReviewUncertainWrite | null
@@ -1416,13 +1506,15 @@ async function reconcileOverlappingAttempts(
       // record about this submission rather than a stranger's: the record
       // composed at least one of the comments being sent now, so it can prove
       // that one landed. Where it cannot, the comment is sent.
-      entry.draftIds.some((theirs) => draftIds.includes(theirs)),
+      (entry.draftIds.some((theirs) => draftIds.includes(theirs)) ||
+        Boolean(compositionId && entry.compositionId === compositionId)),
   )
   for (const attempt of outstanding) {
     // A receipt without the original authored version cannot certify cleanup
     // or authorize posting an overlapping draft again.
     if (
-      attempt.comments.length === 0 ||
+      attempt.event === null ||
+      (attempt.comments.length === 0 && !attempt.compositionId) ||
       attempt.comments.some(
         (comment) =>
           comment.draftId !== null &&
@@ -1431,8 +1523,14 @@ async function reconcileOverlappingAttempts(
       )
     )
       return { delivered, unsettled: attempt, settled }
+    const confirmedReceipt =
+      attempt.settled !== null &&
+      /^\d+$/.test(attempt.settled.reviewId) &&
+      Number.isSafeInteger(Number(attempt.settled.reviewId)) &&
+      Number(attempt.settled.reviewId) > 0 &&
+      attempt.settled.state === stateForEvent(attempt.event)
     const landed =
-      attempt.settled !== null
+      confirmedReceipt && attempt.settled
         ? { id: attempt.settled.reviewId, state: attempt.settled.state, url: attempt.settled.url }
         : await findSettledReview(remote, number, attempt, signal)
     // GitHub holds exactly this review, so the comments it posted are already
@@ -1440,8 +1538,19 @@ async function reconcileOverlappingAttempts(
     // they were composed under, so the payload that follows leaves out those and
     // nothing else.
     if (landed) {
-      settled.push(landed)
-      if (attempt.settled === null) {
+      settled.push({
+        ...landed,
+        ...(attempt.compositionId && attempt.event
+          ? {
+              composition: {
+                id: attempt.compositionId,
+                summary: attempt.summary,
+                event: attempt.event,
+              },
+            }
+          : {}),
+      })
+      if (!confirmedReceipt) {
         await recordUncertainWrite(
           repoPath,
           {
@@ -1563,6 +1672,7 @@ interface SettledReview {
   id: string
   state: string
   url: string | null
+  composition?: ReviewComposition
 }
 
 /**
@@ -1620,7 +1730,8 @@ function matchAttemptReview(
   commentsByReview: Map<number, UncertainComment[]>,
   attempt: ReviewUncertainWrite,
 ): SettledReview | null {
-  if (attempt.comments.length === 0) return null
+  if (!Number.isSafeInteger(review.id) || review.id <= 0) return null
+  if (attempt.comments.length === 0 && !attempt.compositionId) return null
   if (review.author !== attempt.viewer) return null
   if (review.commitId !== attempt.headOid) return null
   if (review.state !== stateForEvent(attempt.event)) return null
@@ -1788,6 +1899,14 @@ export async function replyToThread(
     // and the record retired: sending again would be a second copy of the same
     // reply, which is the duplicate this guard prevents.
     if (landed) {
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        { threadId, body },
+        authorizeCapturedAttempt,
+      )
       await clearUncertainWrite(
         repoPath,
         repo,
@@ -1906,6 +2025,14 @@ export async function replyToThread(
       body,
     )
     if (landed) {
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        { threadId, body },
+        authorizeCapturedAttempt,
+      )
       await clearUncertainWrite(
         repoPath,
         repo,
@@ -1924,6 +2051,18 @@ export async function replyToThread(
     ? data.addPullRequestReviewThreadReply
     : null
   const comment = payload && isRecord(payload.comment) ? payload.comment : null
+  if (!comment || typeof comment.id !== 'string' || !comment.id)
+    throw new ReviewOutcomeUnknownError(
+      'The provider did not confirm the reply identity; authored text and its dispatched-attempt guard were retained.',
+    )
+  await retireDeliveredComposerText(
+    repoPath,
+    repo,
+    permissions.viewer,
+    number,
+    { threadId, body },
+    authorizeCapturedAttempt,
+  )
   await clearUncertainWrite(
     repoPath,
     repo,
@@ -1933,9 +2072,9 @@ export async function replyToThread(
     authorizeCapturedAttempt,
   )
   return {
-    id: comment && typeof comment.id === 'string' ? comment.id : '',
+    id: comment.id,
     state: 'created',
-    url: comment && typeof comment.url === 'string' ? comment.url : null,
+    url: typeof comment.url === 'string' ? comment.url : null,
   }
 }
 

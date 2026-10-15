@@ -203,7 +203,6 @@ export interface WorkbenchViewState {
   page: number
   unfilteredScroll?: number
   unfilteredPage?: number
-  density: 'compact' | 'standard'
 }
 
 export const initialWorkbenchView: WorkbenchViewState = {
@@ -216,7 +215,6 @@ export const initialWorkbenchView: WorkbenchViewState = {
   worktreeId: null,
   scroll: 0,
   page: 0,
-  density: 'compact',
 }
 
 /** Postorder lets descendant counts propagate once, without repeated ancestor walks. */

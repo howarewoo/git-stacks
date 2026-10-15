@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, execFileSync } from 'node:child_process'
 import { existsSync, writeFileSync, watch } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,7 +47,9 @@ import {
   writeReviewDrafts,
   retireSettledWrites,
   removeDeliveredReviewDrafts,
+  retireDeliveredComposerText,
 } from '../src/main/review-drafts'
+import { readReviewedHeads } from '../src/main/review-snapshots'
 import {
   newReviewDraftId,
   reviewDraftsAt,
@@ -65,6 +67,7 @@ import {
   resolveReviewAnchor,
   ReviewRevisionMovedError,
   readReviewHeadline,
+  readNativeStackLayer,
 } from '../src/main/review'
 import {
   adjacentReviewFileIndex,
@@ -87,6 +90,7 @@ import {
 } from '@git-stacks/shared/review'
 import type { PullRequestStackMember } from '@git-stacks/shared/types'
 import type { ReviewComparison, ReviewFileSet, ReviewLineRef } from '@git-stacks/shared/review'
+import { inspectionAuthority } from '../src/main/inspection-context'
 
 /** The shape GitHub's "list pull request files" endpoint returns for one file. */
 function apiFile(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1977,7 +1981,12 @@ function threadDouble(options: DoubleOptions = {}): {
         // This provider's viewer is immutable. Bind the installed wrapper, not
         // the base fixture, so authority/origin and post-dispatch race hooks
         // still execute on the exact requests the consumer sends.
-        return { rest: this.rest.bind(this), graphql: this.graphql.bind(this) }
+        return {
+          authority: await this.credentialAuthority(),
+          rest: this.rest.bind(this),
+          graphql: this.graphql.bind(this),
+          paginate: this.paginate.bind(this),
+        }
       },
       async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
         if (request.signal?.aborted)
@@ -2975,7 +2984,12 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
     },
     async pinCredential() {
       // This fixture always serves ada and counts the actual dispatched POST.
-      return { rest: this.rest.bind(this), graphql: this.graphql.bind(this) }
+      return {
+        authority: await this.credentialAuthority(),
+        rest: this.rest.bind(this),
+        graphql: this.graphql.bind(this),
+        paginate: this.paginate.bind(this),
+      }
     },
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
       const path = request.path ?? ''
@@ -3176,12 +3190,10 @@ test('a lost review is settled by asking GitHub what it holds, not by the summar
     drafts: [draft({ id: 'd1', ref: at, body: text })],
   })
 
-  // GitHub accepted the review and the response was lost. The double builds the
-  // landed review from the body the code actually sent, so this can only be
-  // settled if what was sent is what the record says was attempted. The summary
-  // is component-local state, so reopening the workspace or editing a sentence
-  // must not change what the attempt was — and the record, not the composer, is
-  // what a reconciliation compares against.
+  // GitHub accepted the review and the response was lost. The double builds its
+  // receipt from the actual request. Editing the summary does not change the
+  // authored inline identities dispatched; reconciliation compares the original
+  // attempted version rather than current composer edits.
   const landed = threadDouble({
     files: [apiFile({ patch })],
     failReviewOnce: { status: 502, message: 'Bad Gateway' },
@@ -7287,4 +7299,692 @@ test('a settled write is still forgotten when its payload no longer carries it',
     [],
     'an unanswered payload is what retires the evidence, and only that',
   )
+})
+
+test('overall review and thread text survive reopening and retire only exact confirmed versions', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const authorize = authorizedTestJournal(workspace.repo)
+  const input: ReviewDraftRecord = {
+    ...JOURNAL_OWNER,
+    number: 7,
+    comparison: comparison(),
+    drafts: [],
+    composer: {
+      id: 'composition-original',
+      summary: 'Original overall review',
+      event: 'REQUEST_CHANGES',
+      replies: [{ threadId: 'thread-one', body: 'Original reply' }],
+    },
+    updatedAt: '2026-10-13T10:00:00Z',
+  }
+  const first = await writeReviewDrafts(workspace.repo, input, null, authorize)
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer,
+    input.composer,
+  )
+  assert.equal(await readReviewDrafts(workspace.repo, input.repo, 'another-account', 7), null)
+  const newer = await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...first,
+      composer: {
+        ...first.composer!,
+        id: 'composition-newer',
+        summary: 'Newer overall review',
+        replies: [{ threadId: 'thread-one', body: 'Newer reply' }],
+      },
+    },
+    first.updatedAt,
+    authorize,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    {
+      compositionId: input.composer!.id,
+      summary: input.composer!.summary,
+      event: 'REQUEST_CHANGES',
+      comparison: input.comparison,
+    },
+    authorize,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    { threadId: 'thread-one', body: 'Original reply' },
+    authorize,
+  )
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer,
+    newer.composer,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    {
+      compositionId: newer.composer!.id,
+      summary: newer.composer!.summary,
+      event: 'REQUEST_CHANGES',
+      comparison: { ...input.comparison, baseOid: 'c'.repeat(40) },
+    },
+    authorize,
+  )
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer,
+    newer.composer,
+  )
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    {
+      compositionId: newer.composer!.id,
+      summary: newer.composer!.summary,
+      event: 'REQUEST_CHANGES',
+      comparison: input.comparison,
+    },
+    authorize,
+  )
+  const afterReview = await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7)
+  assert.equal(afterReview?.composer?.summary, '')
+  assert.deepEqual(afterReview?.composer?.replies, newer.composer!.replies)
+  await retireDeliveredComposerText(
+    workspace.repo,
+    input.repo,
+    input.viewer,
+    7,
+    { threadId: 'thread-one', body: 'Newer reply' },
+    authorize,
+  )
+  assert.deepEqual(
+    (await readReviewDrafts(workspace.repo, input.repo, input.viewer, 7))?.composer?.replies,
+    [],
+  )
+  await assert.rejects(
+    writeReviewDrafts(workspace.repo, newer, newer.updatedAt, authorize),
+    /Saved drafts changed/,
+  )
+})
+
+test('invalid saved composer text is reported without replacing the private journal', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts-qualified.json')
+  const malformed = JSON.stringify({
+    version: 1,
+    records: [
+      {
+        ...JOURNAL_OWNER,
+        number: 7,
+        comparison: comparison(),
+        drafts: [],
+        composer: {
+          id: 'composition-corrupt',
+          summary: 'Owned text',
+          event: 'COMMENT',
+          replies: [
+            { threadId: 'one', body: 'one' },
+            { threadId: 'one', body: 'other' },
+          ],
+        },
+        updatedAt: '2026-10-13T10:00:00Z',
+      },
+    ],
+  })
+  await writeFile(journal, malformed)
+  await assert.rejects(
+    readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7),
+  )
+  assert.equal(await readFile(journal, 'utf8'), malformed)
+})
+
+test('a summary-only review is actually submitted and its confirmed composer text retires', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  const { transport, writes } = threadDouble()
+  setGitHubTransport(transport)
+  t.after(() => setGitHubTransport(null))
+  const body = 'Overall review without an invented inline anchor'
+  await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...JOURNAL_OWNER,
+      number: 7,
+      comparison: comparison(),
+      drafts: [],
+      composer: { id: 'composition-only', summary: body, event: 'COMMENT', replies: [] },
+      updatedAt: '2026-10-13T10:00:00Z',
+    },
+    null,
+    authorizedTestJournal(workspace.repo),
+  )
+  const result = await submitReview(workspace.repo, 7, {
+    ...JOURNAL_OWNER,
+    event: 'COMMENT',
+    body,
+    compositionId: 'composition-only',
+    comparison: comparison(),
+    drafts: [],
+  })
+  assert.ok(result.id)
+  assert.equal(writes.filter((write) => write.path.endsWith('/pulls/7/reviews')).length, 1)
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.composer
+      ?.summary,
+    '',
+  )
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts-qualified.json')
+  const before = await readFile(journal, 'utf8')
+  await assert.rejects(
+    submitReview(workspace.repo, 7, {
+      ...JOURNAL_OWNER,
+      event: 'COMMENT',
+      body: '',
+      comparison: comparison(),
+      drafts: [],
+    }),
+  )
+  assert.equal(writes.filter((write) => write.path.endsWith('/pulls/7/reviews')).length, 1)
+  assert.equal(await readFile(journal, 'utf8'), before)
+})
+
+test('a confirmed summary composition survives failed retirement and stale-window replay without duplicate provider writes', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const provider = threadDouble()
+  const journal = join(workspace.repo, '.git', 'git-stacks-review-drafts-qualified.json')
+  const backup = `${journal}.retirement-failure`
+  let faulted = false
+  setGitHubTransport({
+    ...provider.transport,
+    rest: async <T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> => {
+      const response = await provider.transport.rest<T>(request)
+      if (!faulted && request.method === 'POST' && request.path?.endsWith('/pulls/7/reviews')) {
+        faulted = true
+        await rename(journal, backup)
+        await mkdir(journal)
+      }
+      return response
+    },
+  })
+  const record = await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...JOURNAL_OWNER,
+      number: 7,
+      comparison: comparison(),
+      drafts: [],
+      composer: {
+        id: 'confirmed-composition',
+        summary: 'Overall review',
+        event: 'COMMENT',
+        replies: [],
+      },
+      updatedAt: new Date().toISOString(),
+    },
+    null,
+    authorizedTestJournal(workspace.repo),
+  )
+  const submission = {
+    ...JOURNAL_OWNER,
+    compositionId: record.composer!.id,
+    body: record.composer!.summary,
+    event: 'COMMENT' as const,
+    comparison: record.comparison,
+    drafts: [],
+  }
+  await assert.rejects(submitReview(workspace.repo, 7, submission))
+  assert.equal(
+    (await readUncertainWrites(workspace.repo, JOURNAL_OWNER.repo, 7, JOURNAL_OWNER.viewer))[0]
+      ?.settled?.state,
+    'COMMENTED',
+  )
+  await rm(journal, { recursive: true })
+  await rename(backup, journal)
+  const recovered = await submitReview(workspace.repo, 7, submission)
+  const staleWindow = await submitReview(workspace.repo, 7, submission)
+  assert.equal(staleWindow.id, recovered.id)
+  assert.equal(
+    provider.writes.filter((request) => request.path.endsWith('/pulls/7/reviews')).length,
+    1,
+  )
+  const retired = await readReviewDrafts(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    JOURNAL_OWNER.viewer,
+    7,
+  )
+  assert.equal(retired?.composer?.summary, '')
+  const next = await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...retired!,
+      composer: { ...retired!.composer!, id: 'distinct-composition', summary: submission.body },
+    },
+    retired!.updatedAt,
+    authorizedTestJournal(workspace.repo),
+  )
+  const distinct = await submitReview(workspace.repo, 7, {
+    ...submission,
+    compositionId: next.composer!.id,
+  })
+  assert.notEqual(
+    distinct.id,
+    recovered.id,
+    'an explicitly new composition at the same comparison is not mistaken for the old receipt',
+  )
+  await assert.rejects(submitReview(workspace.repo, 7, submission))
+  assert.equal(
+    provider.writes.filter((request) => request.path.endsWith('/pulls/7/reviews')).length,
+    2,
+  )
+})
+
+test('a lost summary-only response reconciles the exact provider receipt without another POST', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const provider = threadDouble({ failReviewOnce: { status: 502, message: 'Bad Gateway' } })
+  setGitHubTransport(provider.transport)
+  const saved = await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...JOURNAL_OWNER,
+      number: 7,
+      comparison: comparison(),
+      drafts: [],
+      composer: {
+        id: 'lost-summary-composition',
+        summary: 'Retained overall words',
+        event: 'COMMENT',
+        replies: [],
+      },
+      updatedAt: new Date().toISOString(),
+    },
+    null,
+    authorizedTestJournal(workspace.repo),
+  )
+  const submission = {
+    ...JOURNAL_OWNER,
+    comparison: saved.comparison,
+    compositionId: saved.composer!.id,
+    body: saved.composer!.summary,
+    event: 'COMMENT' as const,
+    drafts: [],
+  }
+  await assert.rejects(submitReview(workspace.repo, 7, submission), {
+    name: 'ReviewOutcomeUnknownError',
+  })
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.composer
+      ?.summary,
+    submission.body,
+  )
+  const recovered = await submitReview(workspace.repo, 7, submission)
+  assert.equal(recovered.state, 'COMMENTED')
+  assert.deepEqual(
+    recovered.deliveredComposition,
+    saved.composer && {
+      id: saved.composer.id,
+      summary: saved.composer.summary,
+      event: saved.composer.event,
+    },
+  )
+  assert.equal(
+    provider.writes.filter((request) => request.path.endsWith('/pulls/7/reviews')).length,
+    1,
+  )
+  assert.equal(
+    (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))?.composer
+      ?.summary,
+    '',
+  )
+})
+
+test('recovering an earlier inline review retires its receipt only and preserves a newer unsent overall decision', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const patch = '@@ -1,2 +1,3 @@\n keep\n+added\n tail'
+  const entry = file({ diff: { kind: 'text', hunks: hunks(patch) } })
+  const hunk = textHunk(entry, 0)
+  const ref = refFor(
+    hunk,
+    hunk.lines.findIndex((line) => line.side === 'head' && line.newLine !== null),
+  )
+  const inline = draft({ id: 'receipt-inline', ref, body: 'Original inline words' })
+  const provider = threadDouble({
+    files: [apiFile({ patch })],
+    failReviewOnce: { status: 502, message: 'Bad Gateway' },
+  })
+  setGitHubTransport(provider.transport)
+  const original = await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...JOURNAL_OWNER,
+      number: 7,
+      comparison: comparison(),
+      drafts: [inline],
+      composer: {
+        id: 'original-overall',
+        summary: 'Original overall words',
+        event: 'COMMENT',
+        replies: [],
+      },
+      updatedAt: new Date().toISOString(),
+    },
+    null,
+    authorizedTestJournal(workspace.repo),
+  )
+  await assert.rejects(
+    submitReview(workspace.repo, 7, {
+      ...JOURNAL_OWNER,
+      comparison: original.comparison,
+      compositionId: original.composer!.id,
+      event: 'COMMENT',
+      body: original.composer!.summary,
+      drafts: [inline],
+    }),
+    { name: 'ReviewOutcomeUnknownError' },
+  )
+  const newer = await writeReviewDrafts(
+    workspace.repo,
+    {
+      ...original,
+      composer: {
+        id: 'newer-overall',
+        summary: 'Newer overall words remain unsent',
+        event: 'REQUEST_CHANGES',
+        replies: [],
+      },
+    },
+    original.updatedAt,
+    authorizedTestJournal(workspace.repo),
+  )
+  const recovered = await submitReview(workspace.repo, 7, {
+    ...JOURNAL_OWNER,
+    comparison: newer.comparison,
+    compositionId: newer.composer!.id,
+    event: newer.composer!.event,
+    body: newer.composer!.summary,
+    drafts: [inline],
+  })
+  const reopened = await readReviewDrafts(
+    workspace.repo,
+    JOURNAL_OWNER.repo,
+    JOURNAL_OWNER.viewer,
+    7,
+  )
+  assert.equal(recovered.deliveredComposition?.id, original.composer!.id)
+  assert.deepEqual(reopened?.composer, newer.composer)
+  assert.deepEqual(reopened?.drafts, [])
+  assert.equal(
+    provider.writes.filter((request) => request.path.endsWith('/pulls/7/reviews')).length,
+    1,
+  )
+  const explicitNext = await submitReview(workspace.repo, 7, {
+    ...JOURNAL_OWNER,
+    comparison: newer.comparison,
+    compositionId: newer.composer!.id,
+    event: newer.composer!.event,
+    body: newer.composer!.summary,
+    drafts: [],
+  })
+  assert.equal(explicitNext.state, 'CHANGES_REQUESTED')
+  assert.equal(
+    provider.writes.filter((request) => request.path.endsWith('/pulls/7/reviews')).length,
+    2,
+  )
+})
+
+test('malformed successful review responses retain text and unknown guards without a confirmed baseline', async (t) => {
+  for (const malformed of [
+    null,
+    {},
+    { id: 0, state: 'COMMENTED' },
+    { id: 17 },
+    { id: 17, state: 'PENDING' },
+  ]) {
+    const workspace = await reviewWorkspace()
+    t.after(workspace.dispose)
+    const provider = threadDouble()
+    setGitHubTransport({
+      ...provider.transport,
+      rest: async <T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> => {
+        const response = await provider.transport.rest<T>(request)
+        return request.method === 'POST' && request.path?.endsWith('/pulls/7/reviews')
+          ? { ...response, data: malformed as T }
+          : response
+      },
+    })
+    const saved = await writeReviewDrafts(
+      workspace.repo,
+      {
+        ...JOURNAL_OWNER,
+        number: 7,
+        comparison: comparison(),
+        drafts: [],
+        composer: {
+          id: 'malformed-response-composition',
+          summary: 'Do not clear these words',
+          event: 'COMMENT',
+          replies: [],
+        },
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      authorizedTestJournal(workspace.repo),
+    )
+    const submission = {
+      ...JOURNAL_OWNER,
+      comparison: saved.comparison,
+      compositionId: saved.composer!.id,
+      event: 'COMMENT' as const,
+      body: saved.composer!.summary,
+      drafts: [],
+    }
+    await assert.rejects(submitReview(workspace.repo, 7, submission), {
+      name: 'ReviewOutcomeUnknownError',
+    })
+    assert.deepEqual(
+      (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))
+        ?.composer,
+      saved.composer,
+    )
+    assert.equal(
+      (await readUncertainWrites(workspace.repo, JOURNAL_OWNER.repo, 7, JOURNAL_OWNER.viewer))[0]
+        ?.settled,
+      null,
+    )
+    assert.equal(
+      (await readReviewedHeads(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer)).has(7),
+      false,
+    )
+    const recovered = await submitReview(workspace.repo, 7, submission)
+    assert.equal(recovered.state, 'COMMENTED')
+    assert.equal(
+      provider.writes.filter((request) => request.path.endsWith('/pulls/7/reviews')).length,
+      1,
+    )
+  }
+  t.after(() => setGitHubTransport(null))
+})
+
+test('each overall review decision confirms only its expected provider state', async (t) => {
+  for (const event of ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as const) {
+    const workspace = await reviewWorkspace()
+    t.after(workspace.dispose)
+    const provider = threadDouble()
+    setGitHubTransport(provider.transport)
+    const saved = await writeReviewDrafts(
+      workspace.repo,
+      {
+        ...JOURNAL_OWNER,
+        number: 7,
+        comparison: comparison(),
+        drafts: [],
+        composer: {
+          id: `decision-${event}`,
+          summary: 'Decision-specific review words',
+          event,
+          replies: [],
+        },
+        updatedAt: new Date().toISOString(),
+      },
+      null,
+      authorizedTestJournal(workspace.repo),
+    )
+    const result = await submitReview(workspace.repo, 7, {
+      ...JOURNAL_OWNER,
+      comparison: saved.comparison,
+      compositionId: saved.composer!.id,
+      event,
+      body: saved.composer!.summary,
+      drafts: [],
+    })
+    assert.equal(
+      result.state,
+      { COMMENT: 'COMMENTED', APPROVE: 'APPROVED', REQUEST_CHANGES: 'CHANGES_REQUESTED' }[event],
+    )
+    assert.equal(
+      (await readReviewDrafts(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer, 7))
+        ?.composer?.summary,
+      '',
+    )
+    assert.equal(
+      (await readReviewedHeads(workspace.repo, JOURNAL_OWNER.repo, JOURNAL_OWNER.viewer)).get(7)
+        ?.headOid,
+      saved.comparison.headOid,
+    )
+  }
+  t.after(() => setGitHubTransport(null))
+})
+
+test('exact native-layer reads verify membership and reject retired origin results', async (t) => {
+  const workspace = await reviewWorkspace()
+  t.after(workspace.dispose)
+  t.after(() => setGitHubTransport(null))
+  const head = 'a'.repeat(40)
+  const { transport } = scriptedTransport([{ head, base: 'b'.repeat(40) }], [])
+  transport.rest = async <T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> => {
+    if (!request.path?.includes('/stacks'))
+      throw new Error(`Unexpected native-layer protocol read: ${request.path}`)
+    return {
+      status: 200,
+      rateLimit: rateLimit(),
+      data: [
+        {
+          id: 77,
+          number: 77,
+          open: true,
+          base: { ref: 'main' },
+          pull_requests: Array.from({ length: 201 }, (_, index) => ({
+            number: index + 1,
+            state: index === 200 ? 'closed' : 'open',
+            draft: false,
+            head: { ref: `layer-${index + 1}`, sha: head },
+          })),
+        },
+      ] as T,
+    }
+  }
+  const exactReads: number[] = []
+  let pauseTarget = false
+  let enter!: () => void
+  let release!: () => void
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve
+  })
+  const paused = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  transport.graphql = async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
+    if (query.includes('layer0:')) return { repository: {} } as T
+    if (query.includes('latestReviews'))
+      return {
+        repository: {
+          pullRequest: {
+            headRefOid: head,
+            reviewRequests: { nodes: [], pageInfo: { hasNextPage: false } },
+            latestReviews: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+        },
+      } as T
+    const number = Number(variables.number)
+    exactReads.push(number)
+    if (pauseTarget && number === 201) {
+      enter()
+      await paused
+    }
+    return {
+      repository: {
+        defaultBranchRef: { name: 'main' },
+        pullRequest: {
+          number,
+          title: `Actual provider layer ${number}`,
+          url: `https://github.com/acme/widgets/pull/${number}`,
+          headRefName: `layer-${number}`,
+          headRefOid: head,
+          baseRefName: 'main',
+          baseRefOid: 'b'.repeat(40),
+          isDraft: false,
+          state: number === 201 ? 'MERGED' : 'OPEN',
+          body: 'Source-confirmed body',
+        },
+      },
+    } as T
+  }
+  setGitHubTransport(transport)
+  const layer = await readNativeStackLayer(workspace.repo, 1, 201)
+  assert.equal(layer.pullRequest.number, 201)
+  assert.equal(layer.pullRequest.state, 'MERGED')
+  assert.equal(layer.sourcePullRequest.number, 1)
+  assert.deepEqual(exactReads, [1, 201])
+  await assert.rejects(readNativeStackLayer(workspace.repo, 1, 999))
+  assert.equal(exactReads.includes(999), false, 'a nonmember cannot dispatch an exact target read')
+  pauseTarget = true
+  const origin = execFileSync(
+    'git',
+    ['-C', workspace.repo, 'config', '--get', 'remote.origin.url'],
+    { encoding: 'utf8' },
+  ).trim()
+  const controller = new AbortController()
+  const retired = inspectionAuthority.run(
+    {
+      root: workspace.repo,
+      context: { repositoryId: 'captured-native-layer', pullRequestId: 'captured-source-pr' },
+      signal: controller.signal,
+      origin,
+      originUrl: origin,
+      validate: async () => {
+        if (
+          execFileSync('git', ['-C', workspace.repo, 'config', '--get', 'remote.origin.url'], {
+            encoding: 'utf8',
+          }).trim() !== origin
+        )
+          throw new Error('The captured origin was retired.')
+      },
+    },
+    () => readNativeStackLayer(workspace.repo, 1, 201, controller.signal),
+  )
+  await entered
+  execFileSync('git', [
+    '-C',
+    workspace.repo,
+    'remote',
+    'set-url',
+    'origin',
+    'https://github.com/retired/origin.git',
+  ])
+  release()
+  await assert.rejects(retired)
 })

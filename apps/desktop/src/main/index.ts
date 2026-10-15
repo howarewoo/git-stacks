@@ -1,3 +1,4 @@
+import { parseReviewComposerDraft } from '@git-stacks/shared/review-threads'
 import { inspectionAuthority, validateInspectionDispatch } from './inspection-context'
 import {
   INSPECTION_CHANNELS,
@@ -8,7 +9,11 @@ import { discoverWorktrees } from './worktree-inventory'
 import { LIST_PAGE_SIZE, WORKTREE_READ_CONCURRENCY } from '@git-stacks/shared/performance'
 import type { InventoryRequest } from '@git-stacks/shared/worktree-inventory'
 import { WorktreeInventoryService, adoptionPaths } from './worktree-inventory'
-import { cliAuthority, type OperationScope } from '@git-stacks/shared/operation-scope'
+import {
+  cliAuthority,
+  sameOperationScope,
+  type OperationScope,
+} from '@git-stacks/shared/operation-scope'
 import {
   app,
   BrowserWindow,
@@ -57,6 +62,7 @@ import {
   readReviewCommits,
   readReviewFiles,
   readReviewHeadline,
+  readNativeStackLayer,
   reviewRepositoryIdentity,
 } from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
@@ -84,6 +90,7 @@ import {
   rerunPullRequestCheck,
 } from './pull-request-checks'
 import type { PullRequestChecksOptions } from './pull-request-checks'
+import type { PullRequestPage, PullRequest, PullRequestLayerRead } from '@git-stacks/shared/types'
 import type {
   ReviewDraft,
   ReviewDraftRecord,
@@ -167,6 +174,7 @@ import {
   GITHUB_DOTCOM_HOST,
   githubHostContext,
   hostTransport,
+  withGitHubCredentialSession,
   probeGitHubHost,
   remoteHostContext,
   type GitHubHostContext,
@@ -266,6 +274,8 @@ const inventory = new WorktreeInventoryService(
   (registeredPaths) => {
     if (activeRepository && registeredPaths.includes(activeRepository)) sync.notifyLocalChange()
   },
+  {},
+  (root, signal) => getSnapshot(root, signal, undefined, 'reuse', false, true),
 )
 const inventoryKeys = new RequestRegistry()
 
@@ -1269,6 +1279,9 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
   if (typeof record.viewer !== 'string' || record.viewer.length > 128) {
     throw new Error('Invalid review draft record.')
   }
+  const composer =
+    record.composer === undefined ? undefined : parseReviewComposerDraft(record.composer)
+  if (composer === null) throw new Error('Invalid saved review composer text.')
   return {
     number: record.number,
     repo: record.repo,
@@ -1277,6 +1290,7 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
     // the diff they were read from.
     comparison: requireComparison(record.comparison),
     drafts: record.drafts.map(requireDraft),
+    ...(composer ? { composer } : {}),
     updatedAt: record.updatedAt,
   }
 }
@@ -1312,10 +1326,20 @@ function requireSubmission(value: unknown): ReviewSubmission {
   if (typeof submission.comparison !== 'object' || submission.comparison === null) {
     throw new Error('Invalid review submission.')
   }
+  if (
+    submission.compositionId !== undefined &&
+    (typeof submission.compositionId !== 'string' ||
+      !submission.compositionId ||
+      submission.compositionId.length > 128)
+  )
+    throw new Error('Invalid review composition identity.')
   return {
     ...requireReviewOwner(submission),
     event: event as ReviewEvent,
     body: submission.body,
+    ...(typeof submission.compositionId === 'string'
+      ? { compositionId: submission.compositionId }
+      : {}),
     drafts: submission.drafts.map(requireDraft),
     // The comparison the diff was rendered from. Without it the backend cannot
     // tell a review of what the reviewer read from a review of whatever the head
@@ -1583,6 +1607,60 @@ function requireUpdateService(): UpdateService {
   return updateService
 }
 function installHandlers() {
+  ipcMain.handle(
+    'repository:pull-request-page',
+    (event, stateValue: unknown, cursorValue: unknown) => {
+      if (!inspectionAuthority.getStore())
+        throw new Error('Captured repository context is required.')
+      if (
+        typeof stateValue !== 'string' ||
+        !['OPEN', 'CLOSED', 'MERGED', 'ALL'].includes(stateValue)
+      )
+        throw new Error('Choose a supported pull request lifecycle.')
+      const cursor =
+        cursorValue === null ? null : requireString(cursorValue, 'pull request cursor', 2048)
+      return readRepository(
+        async (root, signal) => {
+          const origin = await getOriginUrl(root, signal)
+          if (!origin) throw new Error('This repository has no provider origin.')
+          const page = await getPullRequestIndexPage(
+            origin,
+            cursor,
+            false,
+            signal,
+            stateValue as 'OPEN' | 'CLOSED' | 'MERGED' | 'ALL',
+            true,
+          )
+          return {
+            pullRequests: page.pullRequests,
+            next: page.next,
+            observedAt: new Date().toISOString(),
+            nativeMessage: page.nativeMessage,
+          }
+        },
+        'pull-request-page',
+        'github',
+      )
+    },
+  )
+  ipcMain.handle(
+    'repository:pull-request-layer',
+    (event, sourceValue: unknown, memberValue: unknown, requestId: unknown) => {
+      if (!inspectionAuthority.getStore())
+        throw new Error('Captured pull request context is required.')
+      return readRepository(
+        (root, signal) =>
+          readNativeStackLayer(
+            root,
+            requirePullRequestNumber(sourceValue),
+            requirePullRequestNumber(memberValue),
+            signal,
+          ),
+        requestIdClaim(requestId, 'pull-request-layer'),
+        'github',
+      )
+    },
+  )
   ipcMain.handle('inspection:snapshot', () => {
     if (!inspectionAuthority.getStore()) throw new Error('Captured repository context is required.')
     return readRepository(
@@ -1643,7 +1721,13 @@ function installHandlers() {
           : requireString(requestIdValue, 'request id', 256)
       const purpose =
         operation.startsWith('review') ||
+        operation === 'pullRequestPage' ||
         operation === 'pullRequest' ||
+        operation === 'pullRequestLayer' ||
+        operation === 'pullRequestAction' ||
+        operation === 'searchIssues' ||
+        operation === 'pullRequestIssueLinks' ||
+        operation === 'previewIssueLink' ||
         operation === 'pullRequestChecks' ||
         operation === 'rerunPullRequestCheck' ||
         (operation === 'refresh' && !context.worktreeId)
@@ -1715,10 +1799,14 @@ function installHandlers() {
                   'The selected ref no longer has this qualified pull request association.',
                 )
               const first = argsValue[0]
-              const number = isRecord(first) ? first.number : first
+              const number = isRecord(first) ? (first.number ?? first.prNumber) : first
               if (
                 operation.startsWith('review') ||
                 operation === 'pullRequest' ||
+                operation === 'pullRequestLayer' ||
+                operation === 'pullRequestAction' ||
+                operation === 'pullRequestIssueLinks' ||
+                operation === 'previewIssueLink' ||
                 operation === 'pullRequestChecks' ||
                 operation === 'rerunPullRequestCheck'
               ) {
@@ -1728,6 +1816,11 @@ function installHandlers() {
             } else if (
               operation.startsWith('review') ||
               operation === 'pullRequest' ||
+              operation === 'pullRequestLayer' ||
+              operation === 'pullRequestAction' ||
+              operation === 'searchIssues' ||
+              operation === 'pullRequestIssueLinks' ||
+              operation === 'previewIssueLink' ||
               operation === 'pullRequestChecks' ||
               operation === 'rerunPullRequestCheck'
             ) {
@@ -1811,6 +1904,24 @@ function installHandlers() {
             signal.throwIfAborted()
             if (operation === 'refresh' && !context.worktreeId)
               inventory.adoptRemote(result as RepositorySnapshot)
+            if (operation === 'pullRequestPage' && originUrl) {
+              const page = result as PullRequestPage
+              inventory.adoptPullRequestPage(
+                context.repositoryId,
+                page.pullRequests,
+                originUrl,
+                page.observedAt,
+              )
+            }
+            if (operation === 'pullRequestLayer' && originUrl) {
+              const layer = result as PullRequestLayerRead
+              inventory.adoptPullRequestPage(
+                context.repositoryId,
+                [layer.pullRequest, layer.sourcePullRequest],
+                originUrl,
+                layer.observedAt,
+              )
+            }
             return result
           },
           controller.signal,
@@ -2036,6 +2147,48 @@ function installHandlers() {
     if (typeof id !== 'string' || !id) throw new Error('A pending mutation id is required.')
     return sync.dismissPendingMutation(id)
   })
+  ipcMain.handle(
+    'repository:pull-request-action',
+    async (_event, value: unknown, expectedValue: unknown) => {
+      if (!inspectionAuthority.getStore()?.context.pullRequestId)
+        throw new Error('Captured pull request authority is required.')
+      if (
+        !isRecord(value) ||
+        !['updatePr', 'closePr', 'reopenPr', 'linkIssue', 'unlinkIssue'].includes(
+          String(value.type),
+        )
+      )
+        throw new Error('This captured channel permits only pull request management.')
+      const action = value as unknown as Parameters<typeof runAction>[1]
+      const root = repository()
+      try {
+        return await operations.write(() =>
+          inGitRuntime(async () => {
+            if (
+              !isRecord(expectedValue) ||
+              typeof expectedValue.repositoryPath !== 'string' ||
+              typeof expectedValue.authority !== 'string' ||
+              (expectedValue.remoteUrl !== null && typeof expectedValue.remoteUrl !== 'string')
+            )
+              throw new Error('A captured provider scope is required.')
+            const current = await repositoryOperationScope(root)
+            if (!sameOperationScope(current, expectedValue as unknown as OperationScope))
+              throw new Error(
+                'The captured provider or account changed; no pull request management was sent.',
+              )
+            const host = remoteHostContext(parseRemote(current.remoteUrl))
+            if (!host) throw new Error('A captured GitHub host is required.')
+            const session = await gitHubCliStatusService(host.host).pinCredential(current.authority)
+            await validateInspectionDispatch()
+            return withGitHubCredentialSession(host, session, () => runAction(root, action))
+          }),
+        )
+      } catch (error) {
+        sync.recordMutationFailure(action, error)
+        throw error
+      }
+    },
+  )
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     const root = repository()
     const generation = hostGeneration
@@ -2620,6 +2773,35 @@ function installHandlers() {
             // registered since must retire it rather than publish it.
             const finalIdentity = await inboxIdentityNow()
             if (combined.aborted || finalIdentity !== identity) throw new CommandCancelled()
+            if (
+              (report.refresh.state === 'fresh' || report.refresh.state === 'partial') &&
+              report.refresh.confirmedAt
+            ) {
+              const listed = new Map<string, { originUrl: string; facts: PullRequest[] }>()
+              const current = inventory.current()
+              for (const item of report.items) {
+                const repo = current.repositories.find(
+                  (repo) =>
+                    repo.registeredPaths.includes(item.repositoryPath) &&
+                    repo.remote?.host.toLowerCase() === item.host.toLowerCase() &&
+                    repo.remote.fullName.toLowerCase() === item.repository.toLowerCase(),
+                )
+                const originUrl = targets.find(
+                  (target) => target.path === item.repositoryPath,
+                )?.originUrl
+                if (!repo || !originUrl) continue
+                const entry = listed.get(repo.identity.id) ?? { originUrl, facts: [] }
+                entry.facts.push(item)
+                listed.set(repo.identity.id, entry)
+              }
+              for (const [id, page] of listed)
+                inventory.adoptPullRequestPage(
+                  id,
+                  page.facts,
+                  page.originUrl,
+                  report.refresh.confirmedAt,
+                )
+            }
             return report
           },
           requestIdClaim(asked.requestId, 'inbox-refresh'),

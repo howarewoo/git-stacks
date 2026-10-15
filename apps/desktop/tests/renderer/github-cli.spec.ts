@@ -213,14 +213,19 @@ test.describe('Required GitHub CLI status', () => {
     await holdDoubleCall(page, 'openRepository')
     const add = page.getByRole('button', { name: 'Add repository', exact: true })
     await add.click()
-    await expect(add).toBeDisabled()
+    // The open dialog is modal: its own folder chooser is the local switch.
+    const local = page.getByRole('dialog', { name: 'Open a local repository', exact: true })
+    const choose = local.getByRole('button', { name: 'Choose folder', exact: true })
+    await choose.click()
+    await expect(choose).toBeDisabled()
 
     await publishCliStatus(page, ACCOUNT_B)
     // Main can have persisted B already. Neither a second open nor a local
     // mutation against B may run while the renderer still displays A.
-    await expect(add).toBeDisabled()
+    await expect(choose).toBeDisabled()
     expect(await releaseDoubleCalls(page, 'openRepository')).toBe(1)
     await settle(page)
+    await expect(local).toHaveCount(0)
 
     const opened = scenarios['shell-long-content'].snapshot!
     await expect(

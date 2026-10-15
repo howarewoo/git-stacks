@@ -13,6 +13,7 @@ import {
   DialogTitle,
   DialogDescription,
   WorkbenchPane,
+  Select,
 } from '@git-stacks/ui'
 import { BranchWorkbench } from './components/branch-workbench'
 import {
@@ -34,14 +35,34 @@ import {
 } from './components/review-view'
 import { SettingsDialog } from './components/settings-dialog'
 import { RepositoryDiscoveryDialog } from './components/onboarding'
+import { LocalRepositoryDialog } from './components/local-repository-dialog'
 import {
   NotificationCenterView,
   NotificationCredentialDialog,
 } from './components/notification-center-view'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { OperationBanner } from './components/repository-views'
-import { PullRequestInboxView } from './components/pr-inbox-view'
+import {
+  AttentionView,
+  ActivityView,
+  PullRequestList,
+  type AttentionViewState,
+  type ActivityViewState,
+} from './components/collaboration-views'
+import {
+  attentionItems,
+  collaborationObservations,
+  activityTransitions,
+  type CollaborationTarget,
+  type CollaborationObservation,
+  type ObservedActivity,
+} from './lib/collaboration'
+import {
+  PULL_REQUEST_INBOX_REFRESH_MS,
+  type PullRequestInboxFilter,
+} from '@git-stacks/shared/pr-inbox'
 import { useWorktreeInventory } from './lib/worktree-inventory'
+import { useSettingsMutation } from './lib/settings-query'
 import { projectWorkbenchInventory } from './lib/workbench-inventory'
 import { inspectionAPI } from './lib/inspection-api'
 import {
@@ -59,16 +80,15 @@ import {
   matchesChord,
   type ShortcutId,
 } from '@git-stacks/shared/shortcuts'
-import type { DesktopAPI, GitHubCliStatus, RepositorySnapshot } from '@git-stacks/shared/types'
+import type {
+  DesktopAPI,
+  GitHubCliStatus,
+  RepositorySnapshot,
+  PullRequestAction,
+} from '@git-stacks/shared/types'
 import type { AppSettings } from '@git-stacks/shared/settings'
 import type { InspectionContext } from '@git-stacks/shared/inspection'
 import type { NotificationInbox, NotificationThread } from '@git-stacks/shared/notifications'
-import type { PullRequestInboxFilter, PullRequestInboxReport } from '@git-stacks/shared/pr-inbox'
-import {
-  PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
-  PULL_REQUEST_INBOX_REFRESH_MS,
-} from '@git-stacks/shared/pr-inbox'
-import { createRequestGate } from './lib/request-gate'
 import { LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 import {
   cliAuthority,
@@ -77,6 +97,15 @@ import {
 } from '@git-stacks/shared/operation-scope'
 import { useOperationProgressProjection } from './lib/operation-progress'
 import './components/workbench-shell.css'
+
+const providerReadQuery = (query: { queryKey: readonly unknown[] }) =>
+  [
+    'inspection-repository',
+    'inspection-authority',
+    'workbench-attention',
+    'collaboration-pr-page',
+  ].includes(String(query.queryKey[0])) ||
+  (query.queryKey[0] === 'review' && !query.queryKey.includes('drafts'))
 
 function App() {
   const desktop: DesktopAPI | null = window.desktop ?? null
@@ -98,10 +127,9 @@ function App() {
   const [paletteOpen, setPaletteOpen] = React.useState(false)
   const [globalQuery, setGlobalQuery] = React.useState('')
   const [globalPage, setGlobalPage] = React.useState(0)
-  const [activityPage, setActivityPage] = React.useState(0)
-  const pullRequestScroll = React.useRef<HTMLDivElement>(null)
   const [searchReady, setSearchReady] = React.useState(true)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  const [localRepositoryOpen, setLocalRepositoryOpen] = React.useState(false)
   const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
   const [recoveryOpen, setRecoveryOpen] = React.useState(false)
   const [operationBusy, setOperationBusy] = React.useState(false)
@@ -121,10 +149,42 @@ function App() {
   const [cliRefreshing, setCliRefreshing] = React.useState(false)
   const originFocus = React.useRef<string | null>(null)
   const restoreOriginFocus = React.useRef(false)
-  const [attentionFilter, setAttentionFilter] = React.useState<PullRequestInboxFilter>()
+  const [attentionFilter, setAttentionFilter] = React.useState<PullRequestInboxFilter>({
+    group: 'all',
+    search: '',
+    criteria: {},
+    sort: 'updated-desc',
+  })
+  const [attentionState, setAttentionState] = React.useState<AttentionViewState>({
+    page: 0,
+    scroll: 0,
+    filterName: '',
+    savedFilterId: '',
+  })
+  const [activityState, setActivityState] = React.useState<ActivityViewState>({
+    repositoryId: '',
+    page: 0,
+    scroll: 0,
+  })
+  const inboxFilterLock = React.useRef(false)
+  const [events, setEvents] = React.useState<ObservedActivity[]>([])
+  const previousObservations = React.useRef(new Map<string, CollaborationObservation>())
   const [operationAuthority, setOperationAuthority] = React.useState('')
   const [workflow, setWorkflow] = React.useState<WorkflowRequest | null>(null)
   const [operationSnapshot, setOperationSnapshot] = React.useState<RepositorySnapshot | null>(null)
+  const [providerWorkflow, setProviderWorkflow] = React.useState<{
+    api: DesktopAPI
+    scope: OperationScope
+    target: InspectionContext
+    generation: number
+  } | null>(null)
+  const actionLock = React.useRef(false)
+  const workflowAdmissionLock = React.useRef(false)
+  const [createPrTarget, setCreatePrTarget] = React.useState<{
+    repositoryId: string
+    branches: { id: string; name: string }[]
+  } | null>(null)
+  const [createPrRef, setCreatePrRef] = React.useState('')
   const operationScope = React.useRef<OperationScope | null>(null)
   const operationContext = React.useRef<InspectionContext | null>(null)
   const journalScope = React.useMemo(
@@ -145,6 +205,8 @@ function App() {
     repositoryId: string
     number: number
     generation: number
+    remoteId?: string
+    error?: string
   } | null>(null)
   const navigationGeneration = React.useRef(0)
   const inspectionNavigation = React.useRef(0)
@@ -152,6 +214,10 @@ function App() {
     navigationGeneration.current += 1
     setPendingReview(null)
   }, [])
+  const densityWrite = useSettingsMutation((density: 'compact' | 'standard') => {
+    if (!desktop?.updateSettings) throw new Error('Settings writes are unavailable.')
+    return desktop.updateSettings({ appearance: { density } })
+  })
   const [savingInboxFilters, setSavingInboxFilters] = React.useState(false)
   const attentionSearch = React.useRef<HTMLInputElement>(null)
   const [bindings, setBindings] = React.useState(defaultShortcutBindings)
@@ -169,6 +235,9 @@ function App() {
   const [cliStatus, setCliStatus] = React.useState<GitHubCliStatus | null>(null)
   const principals = React.useRef(new Map<string, string>())
   const [providerEpoch, setProviderEpoch] = React.useState(0)
+  const providerGeneration = React.useRef(0)
+  const principalIdentities = React.useRef(new Map<string, string>())
+  const cliStatusVersion = React.useRef(0)
   const configuredHost = React.useRef(settings?.github.host ?? 'github.com')
   configuredHost.current = settings?.github.host ?? 'github.com'
   const reviewCommands = React.useRef<ReviewCommands | null>(null)
@@ -180,6 +249,14 @@ function App() {
     () => projectWorkbenchInventory(inventory.data, details),
     [inventory.data, details],
   )
+  React.useEffect(() => {
+    previousObservations.current.clear()
+    setEvents([])
+  }, [providerEpoch, settings?.github.host])
+  React.useEffect(() => {
+    const registered = new Set(inventory.data?.repositories.map((repo) => repo.identity.id) ?? [])
+    setEvents((events) => events.filter((event) => registered.has(event.target.repositoryId)))
+  }, [inventory.data?.repositories.map((repo) => repo.identity.id).join('\0')])
   const repository = inventory.data?.repositories.find((repo) => repo.identity.id === repositoryId)
   const selected = snapshot.branches.find(
     (branch) => branch.id === current.selectedId && branch.repositoryId === repositoryId,
@@ -317,70 +394,83 @@ function App() {
     repository?.remote?.id,
     authorityRead.data?.authority,
   ])
-  const inboxKey = React.useMemo(
-    () =>
-      ['workbench-attention', settings?.github.host ?? 'github.com', cliStatus?.identity] as const,
-    [settings?.github.host, cliStatus?.identity],
-  )
-  const initialInboxHost = React.useRef<string | null>(null)
-  if (initialInboxHost.current === null && settings) initialInboxHost.current = settings.github.host
-  const inboxGate = React.useRef(createRequestGate()).current
-  const [inboxError, setInboxError] = React.useState<string | null>(null)
-  const inbox = useQuery<PullRequestInboxReport>({
-    queryKey: inboxKey,
-    enabled: false,
-    gcTime: 0,
+  const prPage = useQuery({
+    queryKey: [
+      'collaboration-pr-page',
+      repositoryId,
+      current.pullRequestLifecycle,
+      current.pullRequestCursor,
+      providerEpoch,
+    ],
+    enabled: Boolean(desktop?.inspect && repository?.remote && surface === 'pull-requests'),
+    queryFn: async ({ signal }) => {
+      const api = inspectionAPI(desktop!, { repositoryId })
+      const cancel = () => void api.cancel('pull-request-page')
+      signal.addEventListener('abort', cancel, { once: true })
+      try {
+        if (!api.pullRequestPage) throw new Error('Captured provider listing is unavailable.')
+        const state =
+          current.pullRequestLifecycle === 'draft'
+            ? 'OPEN'
+            : (current.pullRequestLifecycle.toUpperCase() as 'ALL' | 'OPEN' | 'CLOSED' | 'MERGED')
+        const page = await api.pullRequestPage(state, current.pullRequestCursor)
+        signal.throwIfAborted()
+        return page
+      } finally {
+        signal.removeEventListener('abort', cancel)
+      }
+    },
+    refetchOnWindowFocus: false,
+    retry: false,
   })
-  const loadInbox = React.useCallback(async () => {
-    if (!desktop?.pullRequestInbox) return
-    if (
-      initialInboxHost.current !== null &&
-      settings?.github.host !== initialInboxHost.current &&
-      cliStatus?.host !== settings?.github.host
-    )
-      return
-    inboxGate.reset()
-    const claim = inboxGate.claim()
-    setInboxError(null)
-    await client.cancelQueries({ queryKey: inboxKey, exact: true })
-    if (!inboxGate.current(claim)) return
-    try {
-      await client.fetchQuery({
-        queryKey: inboxKey,
-        staleTime: 0,
-        queryFn: async () => {
-          const value = await desktop.pullRequestInbox!({
-            requestId: 'inbox-refresh',
-            mergedWithinDays: PULL_REQUEST_INBOX_MERGED_WINDOW_DAYS,
-          })
-          if (!inboxGate.current(claim)) throw new CancelledError()
-          return value
-        },
-      })
-    } catch (value) {
-      if (inboxGate.current(claim) && !(value instanceof CancelledError))
-        setInboxError(value instanceof Error ? value.message : String(value))
-    }
-  }, [desktop, client, inboxKey, inboxGate, settings?.github.host, cliStatus?.host])
+  const inbox = useQuery({
+    queryKey: [
+      'workbench-attention',
+      cliStatus?.host,
+      cliStatus?.identity,
+      providerEpoch,
+      inventory.data?.repositories.map((repo) => repo.identity.id).join('\0'),
+    ],
+    enabled: Boolean(desktop?.pullRequestInbox && surface === 'attention'),
+    queryFn: async ({ signal }) => {
+      const id = `attention-${crypto.randomUUID()}`
+      signal.addEventListener('abort', () => void desktop?.cancel(id), { once: true })
+      const value = await desktop!.pullRequestInbox!({ requestId: id })
+      signal.throwIfAborted()
+      return value
+    },
+    gcTime: 0,
+    refetchInterval: () =>
+      document.visibilityState === 'visible' && document.hasFocus()
+        ? PULL_REQUEST_INBOX_REFRESH_MS
+        : false,
+    refetchOnWindowFocus: false,
+    retry: false,
+  })
   React.useEffect(() => {
-    if (surface !== 'attention') return
-    setInboxError(null)
-    void loadInbox()
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void loadInbox()
-    }, PULL_REQUEST_INBOX_REFRESH_MS)
-    return () => {
-      window.clearInterval(timer)
-      inboxGate.reset()
-      void client.cancelQueries({ queryKey: inboxKey, exact: true })
-      void desktop?.cancel('inbox-refresh')
-    }
-  }, [surface, loadInbox, inboxGate, client, inboxKey, desktop])
+    const current = collaborationObservations(inventory.data, inbox.data)
+    const transitions = activityTransitions(previousObservations.current, current)
+    if (transitions.length)
+      setEvents((events) => [...transitions.reverse(), ...events].slice(0, LIST_PAGE_SIZE))
+  }, [inventory.data, inbox.data])
   const inboxFilters = useQuery({
     queryKey: ['workbench-attention-filters'],
     enabled: Boolean(desktop?.pullRequestInboxFilters && surface === 'attention'),
     queryFn: () => desktop!.pullRequestInboxFilters!(),
   })
+  React.useEffect(() => {
+    if (surface !== 'attention') void client.cancelQueries({ queryKey: ['workbench-attention'] })
+    if (surface !== 'pull-requests')
+      void client.cancelQueries({ queryKey: ['collaboration-pr-page'] })
+    const retireHidden = () => {
+      if (document.visibilityState !== 'visible') {
+        void client.cancelQueries({ queryKey: ['workbench-attention'] })
+        void client.cancelQueries({ queryKey: ['collaboration-pr-page'] })
+      }
+    }
+    document.addEventListener('visibilitychange', retireHidden)
+    return () => document.removeEventListener('visibilitychange', retireHidden)
+  }, [surface, client])
   const updateMemory = React.useCallback(
     (id: string, patch: Partial<RepositoryViewMemory>) => {
       if (
@@ -409,30 +499,49 @@ function App() {
       setDetails((previous) => ({ ...previous, [repositoryId]: repoRead.data! }))
   }, [repoRead.data, repositoryId])
   React.useEffect(() => {
-    if (!repositoryId && snapshot.repositories.length) {
+    if (
+      !repositoryId &&
+      surface !== 'attention' &&
+      surface !== 'activity' &&
+      snapshot.repositories.length
+    ) {
       const first = snapshot.repositories[0].id
       setRepositoryId(first)
       setSurface((memoryRef.current[first] ?? emptyRepositoryMemory).surface)
     }
   }, [snapshot.repositories, repositoryId])
   React.useEffect(() => {
-    if (!desktop) return
+    if (!desktop?.githubCliStatus || !settings?.github.host) return
     let retired = false
-    let statusVersion = 0
+    const host = settings.github.host
+    const version = cliStatusVersion.current
+    setCliStatus(null)
+    setDetails({})
+    providerGeneration.current += 1
+    setProviderEpoch((epoch) => epoch + 1)
+    void client.cancelQueries({ predicate: providerReadQuery })
+    client.removeQueries({ predicate: providerReadQuery })
     void desktop
-      .githubCliStatus?.()
+      .githubCliStatus()
       .then((value) => {
-        if (!retired && statusVersion === 0 && value.host === configuredHost.current) {
-          acceptStatus(value)
-        }
+        if (retired || cliStatusVersion.current !== version || value.host !== host) return
+        principalIdentities.current.set(value.host, value.identity ?? '')
+        setCliStatus(value)
       })
       .catch((value) => {
         if (!retired) setError(String(value))
       })
-    const acceptStatus = (value: GitHubCliStatus) => {
+    return () => {
+      retired = true
+    }
+  }, [desktop, settings?.github.host, client])
+  React.useEffect(() => {
+    if (!desktop) return
+    const stopStatus = desktop.onGitHubCliStatus?.((value) => {
+      cliStatusVersion.current += 1
       const next = value.identity ?? ''
-      const previous = principals.current.get(value.host)
-      principals.current.set(value.host, next)
+      const previous = principalIdentities.current.get(value.host)
+      principalIdentities.current.set(value.host, next)
       if (value.host === configuredHost.current) {
         cliReadGeneration.current += 1
         setCliRefreshing(false)
@@ -441,15 +550,13 @@ function App() {
       if (operationScope.current?.authority.split('|')[0] === value.host)
         setOperationAuthority(cliAuthority(value.host, value))
       if (previous === undefined || previous === next) return
+      providerGeneration.current += 1
       setProviderEpoch((epoch) => epoch + 1)
       setDetails({})
       retirePendingReview()
       setReturnOrigin(null)
-      const capturedReads = (query: { queryKey: readonly unknown[] }) =>
-        query.queryKey[0]?.toString().startsWith('inspection-') === true ||
-        query.queryKey[0] === 'workbench-attention'
-      void client.cancelQueries({ predicate: capturedReads })
-      client.removeQueries({ predicate: capturedReads })
+      void client.cancelQueries({ predicate: providerReadQuery })
+      client.removeQueries({ predicate: providerReadQuery })
       // Account-owned text and journals survive; a review target is not transferred to another principal.
       setSurface((value) => (value === 'review' ? 'branches' : value))
       setMemory((previous) => {
@@ -458,25 +565,36 @@ function App() {
           next[id] = {
             ...saved,
             pullRequestId: null,
+            pullRequestCursor: null,
+            pullRequestPage: 0,
+            pullRequestScroll: 0,
             reviewOrigin: null,
             surface: saved.surface === 'review' ? 'branches' : saved.surface,
           }
         saveWorkbenchMemory(next)
         return next
       })
-    }
-    const stopStatus = desktop.onGitHubCliStatus?.((value) => {
-      statusVersion += 1
-      acceptStatus(value)
     })
+    const adoptOpened = async (value: RepositorySnapshot | null | undefined) => {
+      if (!value) return
+      const refreshed = await inventory.refetch()
+      const repo = refreshed.data?.repositories.find((repo) =>
+        repo.registeredPaths.includes(value.path),
+      )
+      if (!repo)
+        throw new Error('The opened repository was not confirmed by the registered inventory.')
+      setRepositoryId(repo.identity.id)
+      setSurface('branches')
+      retirePendingReview()
+    }
     const stopDrop = desktop.onRepositoryDropped?.((paths) => {
-      for (const path of paths)
-        void desktop
-          .addRepository?.(path)
-          .then(() => {
-            void inventory.refetch()
-          })
-          .catch((value) => setError(String(value)))
+      void paths
+        .reduce(async (previous, path) => {
+          await previous
+          if (!desktop.addRepository) throw new Error('Folder-drop opening is unavailable.')
+          await adoptOpened(await desktop.addRepository(path))
+        }, Promise.resolve())
+        .catch((value) => setError(String(value)))
     })
     const report = () =>
       void desktop.reportActivity?.({
@@ -488,7 +606,6 @@ function App() {
     document.addEventListener('visibilitychange', report)
     report()
     return () => {
-      retired = true
       stopStatus?.()
       stopDrop?.()
       window.removeEventListener('focus', report)
@@ -501,6 +618,9 @@ function App() {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const apply = () => {
       document.documentElement.dataset.gsTheme = settings.appearance.theme
+      document.documentElement.dataset.motion = settings.appearance.reduceMotion
+        ? 'reduced'
+        : 'system'
       document.documentElement.classList.toggle(
         'dark',
         settings.appearance.theme === 'dark' ||
@@ -523,6 +643,7 @@ function App() {
   React.useEffect(() => {
     if (!desktop || !notificationOpen) return
     let retired = false
+    notificationGeneration.current += 1
     setNotificationInbox(null)
     const accept = (value: NotificationInbox) => {
       if (!retired && value.host === settings?.github.host) setNotificationInbox(value)
@@ -540,6 +661,7 @@ function App() {
     const stop = desktop.onNotifications?.(accept)
     return () => {
       retired = true
+      notificationGeneration.current += 1
       stop?.()
     }
   }, [desktop, notificationOpen, settings?.github.host])
@@ -654,7 +776,12 @@ function App() {
     })
   }
   React.useEffect(() => {
-    if (!pendingReview) return
+    if (
+      !pendingReview ||
+      pendingReview.error ||
+      (pendingReview.remoteId !== undefined && pendingReview.remoteId !== repository?.remote?.id)
+    )
+      return
     if (
       pendingReview.generation !== navigationGeneration.current ||
       pendingReview.repositoryId !== repositoryId ||
@@ -673,11 +800,14 @@ function App() {
     })
     setSurface('review')
     setPendingReview(null)
-  }, [pendingReview, snapshot.branches, updateMemory, repositoryId, surface])
-  React.useLayoutEffect(() => {
-    if (surface === 'pull-requests' && pullRequestScroll.current)
-      pullRequestScroll.current.scrollTop = current.pullRequestScroll
-  }, [repositoryId, surface])
+  }, [
+    pendingReview,
+    snapshot.branches,
+    updateMemory,
+    repositoryId,
+    repository?.remote?.id,
+    surface,
+  ])
   /** Explicit operational adoption only; navigation never activates a checkout or recovers journals. */
   const captureOperationalTarget = async (target: InspectionContext = context) => {
     if (!desktop || operationBusy)
@@ -707,7 +837,13 @@ function App() {
       const tree = owner.worktrees.find((tree) => tree.path === scope.repositoryPath)
       operationContext.current = {
         ...target,
-        worktreeId: tree?.kind === 'bare' ? undefined : tree?.id,
+        worktreeId:
+          target.worktreeId ??
+          (!target.refId || tree?.refId === target.refId
+            ? tree?.kind === 'bare'
+              ? undefined
+              : tree?.id
+            : undefined),
       }
       setOperationSnapshot(value)
       return value
@@ -715,12 +851,53 @@ function App() {
       setOperationBusy(false)
     }
   }
-  const prepareWorkflow = async (request: WorkflowRequest, target: InspectionContext = context) => {
+  const prepareWorkflow = async (
+    request: WorkflowRequest,
+    target: InspectionContext = context,
+    expectedScope?: OperationScope,
+  ) => {
+    if (!desktop || actionLock.current || workflowAdmissionLock.current || operationBusy)
+      return false
+    if (workflow?.kind === 'pr') {
+      setError(
+        'Close the captured PR form before opening another source. Authored input remains in that form.',
+      )
+      return false
+    }
+    workflowAdmissionLock.current = true
+    setOperationBusy(true)
     try {
-      await captureOperationalTarget(target)
+      if (
+        expectedScope &&
+        !sameOperationScope(
+          expectedScope,
+          await inspectionAPI(desktop, target).repositoryOperationScope(),
+        )
+      )
+        throw new Error(
+          'The original form authority changed; reopen its captured source explicitly.',
+        )
+      if (request.kind === 'pr') {
+        const generation = providerGeneration.current
+        const api = inspectionAPI(desktop, target, () => providerGeneration.current === generation)
+        const scope = await api.repositoryOperationScope()
+        const value = await api.refresh()
+        if (!sameOperationScope(scope, await api.repositoryOperationScope()))
+          throw new Error('The captured provider changed while opening this form.')
+        setProviderWorkflow({ api, scope, target, generation })
+        setOperationSnapshot(value)
+      } else {
+        setProviderWorkflow(null)
+        await captureOperationalTarget(target)
+      }
       setWorkflow(request)
+      return true
     } catch (value) {
       setError(String(value))
+      return false
+    } finally {
+      workflowAdmissionLock.current = false
+      setOperationBusy(false)
     }
   }
   const dispatch = (action: WorkbenchAction, captured: WorkbenchActionContext) => {
@@ -737,10 +914,11 @@ function App() {
       inspectionNavigation.current += 1
       setReturnOrigin(captureOrigin())
       setSurface(action)
+      setRepositoryId('')
       return
     }
     if (action === 'branches' || action === 'pull-requests') {
-      navigate(captured.repositoryId, action)
+      navigate(captured.repositoryId || snapshot.repositories[0]?.id || '', action)
       return
     }
     if (action === 'discover') {
@@ -822,12 +1000,68 @@ function App() {
     else setError('Choose a qualified operational preview before changing repository state.')
   }
   const runCapturedAction = async (action: Parameters<DesktopAPI['runAction']>[0]) => {
+    if (actionLock.current) return false
+    if (providerWorkflow) {
+      if (!['updatePr', 'closePr', 'reopenPr', 'linkIssue', 'unlinkIssue'].includes(action.type)) {
+        setError('This form addresses provider PR management, not a local Git operation.')
+        return false
+      }
+      actionLock.current = true
+      setOperationBusy(true)
+      try {
+        if (!providerWorkflow.api.pullRequestAction)
+          throw new Error('Captured PR management is unavailable.')
+        const providerAction = action as PullRequestAction
+        const result = await providerWorkflow.api.pullRequestAction(
+          providerAction,
+          providerWorkflow.scope,
+        )
+        const observedAt = new Date().toISOString()
+        const number = 'number' in providerAction ? providerAction.number : providerAction.prNumber
+        setEvents((events) =>
+          [
+            {
+              id: crypto.randomUUID(),
+              repository: operationSnapshot?.name ?? providerWorkflow.target.repositoryId,
+              target: {
+                repositoryId: providerWorkflow.target.repositoryId,
+                pullRequestId: providerWorkflow.target.pullRequestId,
+                number,
+              },
+              label: result.message,
+              observedAt,
+              eventAt: observedAt,
+            },
+            ...events,
+          ].slice(0, LIST_PAGE_SIZE),
+        )
+        try {
+          const refreshed = await providerWorkflow.api.refresh()
+          setDetails((previous) => ({
+            ...previous,
+            [providerWorkflow.target.repositoryId]: refreshed,
+          }))
+          setOperationSnapshot(refreshed)
+          await inventory.refetch()
+        } catch (value) {
+          setError(`The provider action completed, but its follow-up read failed: ${String(value)}`)
+        }
+        return true
+      } catch (value) {
+        setError(String(value))
+        return false
+      } finally {
+        actionLock.current = false
+        setOperationBusy(false)
+      }
+    }
     const expected = operationScope.current
     const captured = operationContext.current
     if (!desktop || !operationSnapshot || !expected || !captured) {
       setError('Choose a captured operational repository first.')
       return false
     }
+    actionLock.current = true
     setOperationBusy(true)
     try {
       const scope = await desktop.repositoryOperationScope()
@@ -836,7 +1070,25 @@ function App() {
         throw new Error(
           'The captured directory, provider or principal changed; this action was not sent.',
         )
-      await desktop.runAction(action)
+      const result = await desktop.runAction(action)
+      const observedAt = new Date().toISOString()
+      setEvents((events) =>
+        [
+          {
+            id: crypto.randomUUID(),
+            repository: operationSnapshot.name,
+            target: {
+              repositoryId: captured.repositoryId,
+              branchId: captured.refId,
+              worktreeId: captured.worktreeId,
+            },
+            label: result.message,
+            observedAt,
+            eventAt: observedAt,
+          },
+          ...events,
+        ].slice(0, LIST_PAGE_SIZE),
+      )
       try {
         const snapshot = await inspectionAPI(desktop, captured).refresh()
         if (operationScope.current && sameOperationScope(operationScope.current, expected))
@@ -851,6 +1103,7 @@ function App() {
       setError(String(value))
       return false
     } finally {
+      actionLock.current = false
       setOperationBusy(false)
     }
   }
@@ -1067,35 +1320,96 @@ function App() {
       }
     }
   }
-  const secondaryRows = React.useMemo(() => {
-    if (surface !== 'pull-requests')
-      return snapshot.branches.filter((branch) => branch.worktrees.length || branch.pullRequest)
-    const byPr = new Map<string, WorkbenchBranch>()
-    for (const branch of snapshot.branches)
-      if (
-        branch.repositoryId === repositoryId &&
-        branch.pullRequest &&
-        !byPr.has(branch.pullRequest.id)
+  const openCollaborationTarget = (target: CollaborationTarget) => {
+    const origin = captureOrigin()
+    setReturnOrigin(origin)
+    if (target.number !== undefined) {
+      const row = snapshot.branches.find(
+        (branch) =>
+          branch.repositoryId === target.repositoryId &&
+          (target.pullRequestId
+            ? branch.pullRequest?.id === target.pullRequestId
+            : branch.pullRequest?.number === target.number),
       )
-        byPr.set(branch.pullRequest.id, branch)
-    return (repository?.pullRequests ?? []).flatMap((pr) => {
-      const branch = byPr.get(pr.id)
-      return branch ? [branch] : []
-    })
-  }, [surface, snapshot.branches, repository, repositoryId])
-  const secondaryPages = Math.max(1, Math.ceil(secondaryRows.length / LIST_PAGE_SIZE))
-  const secondaryPage = Math.min(
-    surface === 'pull-requests' ? current.pullRequestPage : activityPage,
-    secondaryPages - 1,
+      navigate(target.repositoryId, 'review', row?.id)
+      updateMemory(target.repositoryId, {
+        surface: 'review',
+        selectedId: row?.id ?? null,
+        pullRequestId: row?.pullRequest?.id ?? null,
+        reviewOrigin: origin,
+      })
+      if (!row)
+        setPendingReview({
+          repositoryId: target.repositoryId,
+          number: target.number,
+          generation: navigationGeneration.current,
+        })
+    } else {
+      navigate(target.repositoryId, 'branches', target.branchId, target.worktreeId)
+    }
+  }
+  const attention = React.useMemo(
+    () => attentionItems(inventory.data, snapshot, inbox.data),
+    [inventory.data, snapshot, inbox.data],
   )
-  const changeSecondaryPage = (page: number) =>
-    surface === 'pull-requests'
-      ? updateMemory(repositoryId, { pullRequestPage: page })
-      : setActivityPage(page)
-  React.useLayoutEffect(() => {
-    if (surface === 'pull-requests' && pullRequestScroll.current)
-      pullRequestScroll.current.scrollTop = current.pullRequestScroll
-  }, [repositoryId, surface, secondaryPage])
+  const attentionStatus = [
+    inbox.data?.refresh.detail ?? 'Viewer-relative provider attention has not been confirmed',
+    inventory.data?.state === 'complete'
+      ? 'Local inventory complete'
+      : 'Local inventory incomplete',
+    ...(inventory.data?.failures.map((failure) => failure.error) ?? []),
+    ...(inventory.data?.repositories
+      .filter((repo) => repo.remote && repo.remoteFreshness?.state !== 'fresh')
+      .map(
+        (repo) =>
+          `${repo.remote!.fullName}: ${repo.remoteFreshness?.detail ?? 'remote facts not current'}`,
+      ) ?? []),
+    ...(inventory.data?.repositories
+      .filter((repo) => repo.dependenciesRead?.state !== 'complete')
+      .map(
+        (repo) =>
+          `${repo.remote?.fullName ?? 'Local repository'}: ${repo.dependenciesRead?.error ?? 'dependency observations incomplete'}`,
+      ) ?? []),
+    ...(inbox.data?.refresh.repositories
+      .filter((repo) => repo.status !== 'ok')
+      .map((repo) => `${repo.repository}: ${repo.detail}`) ?? []),
+    ...(inbox.data?.items.some((item) => item.reviewBaselineState === 'unavailable')
+      ? ['Confirmed review baseline unavailable; changed-head attention is unknown']
+      : []),
+  ].join(' · ')
+  const attentionComplete =
+    inventory.data?.state === 'complete' &&
+    inbox.data?.refresh.state === 'fresh' &&
+    inbox.data.refresh.repositories.every((repo) => repo.status === 'ok' && Boolean(repo.viewer)) &&
+    inbox.data.items.every(
+      (item) =>
+        item.state !== 'OPEN' ||
+        (item.metadata === 'full' &&
+          Boolean(item.headOid) &&
+          Boolean(item.author) &&
+          item.reviewRequestsComplete !== false &&
+          item.checksKnown !== false &&
+          item.reviewKnown !== false &&
+          item.reviewBaselineState !== 'unavailable'),
+    ) &&
+    inventory.data.repositories.every(
+      (repo) =>
+        repo.dependenciesRead?.state === 'complete' &&
+        repo.worktrees.every((tree) => tree.kind === 'bare' || tree.read.state === 'complete'),
+    )
+  const collaborationSnapshot = {
+    ...snapshot,
+    globalCounts: {
+      readyToMerge: snapshot.globalCounts?.readyToMerge ?? null,
+      attention: attentionComplete ? attention.length : null,
+    },
+    repositories: snapshot.repositories.map((repo) => ({
+      ...repo,
+      attentionCount: attentionComplete
+        ? attention.filter((item) => item.target.repositoryId === repo.id).length
+        : null,
+    })),
+  }
   const mainPanel = (
     <WorkbenchPane
       className="bw-main wb-secondary"
@@ -1140,13 +1454,52 @@ function App() {
                 (branch) =>
                   branch.repositoryId === repositoryId && branch.pullRequest?.number === number,
               )
-              if (row)
+              if (row) {
                 updateMemory(repositoryId, {
                   selectedId: row.id,
                   pullRequestId: row.pullRequest!.id,
                   view: { ...current.view, worktreeId: null },
                 })
-              else setError('This PR has no current qualified inventory association.')
+                return
+              }
+              const sourceNumber = selected?.pullRequest?.number
+              if (!desktop || !sourceNumber) {
+                setError('Captured native-layer reading is unavailable.')
+                return
+              }
+              const generation = providerGeneration.current
+              const api = inspectionAPI(
+                desktop,
+                publishedContext,
+                () => providerGeneration.current === generation,
+              )
+              if (!api.pullRequestLayer) {
+                setError('Captured native-layer reading is unavailable.')
+                return
+              }
+              updateMemory(repositoryId, {
+                selectedId: null,
+                pullRequestId: null,
+                view: { ...current.view, worktreeId: null },
+              })
+              const navigation = navigationGeneration.current
+              setPendingReview({
+                repositoryId,
+                number,
+                generation: navigation,
+                remoteId: repository.remote?.id,
+              })
+              void api.pullRequestLayer(sourceNumber, number).catch((cause) => {
+                if (
+                  providerGeneration.current !== generation ||
+                  navigationGeneration.current !== navigation
+                )
+                  return
+                const message = cause instanceof Error ? cause.message : String(cause)
+                setPendingReview((pending) =>
+                  pending?.generation === navigation ? { ...pending, error: message } : pending,
+                )
+              })
             }}
             onManageNumber={(number) => {
               const target = repository.pullRequests.find((pr) => pr.number === number)
@@ -1167,119 +1520,104 @@ function App() {
         ) : surface === 'review' ? (
           <p>
             {pendingReview
-              ? `Loading qualified PR #${pendingReview.number} in the selected repository…`
+              ? pendingReview.error
+                ? `Could not open qualified PR #${pendingReview.number}: ${pendingReview.error}`
+                : `Loading qualified PR #${pendingReview.number} in the selected repository…`
               : 'Choose a qualified pull request.'}{' '}
             {repoRead.error?.message}
           </p>
         ) : null}
       </div>
-      {surface !== 'review' && surface === 'attention' ? (
-        <PullRequestInboxView
-          report={inbox.data ?? null}
-          loading={inbox.isFetching}
-          refreshing={inbox.isFetching}
-          activating={false}
-          error={inboxError}
-          savedFilters={inboxFilters.isFetching ? [] : (inboxFilters.data ?? [])}
-          savingFilters={savingInboxFilters}
-          filtersReady={inboxFilters.isSuccess && !inboxFilters.isFetching}
-          initialFilter={attentionFilter}
-          onFilterChange={setAttentionFilter}
-          searchInputRef={attentionSearch}
-          onDismissError={() => setInboxError(null)}
-          onRefresh={() => void loadInbox()}
-          onOpen={(item) => {
-            const repo = inventory.data?.repositories.find(
-              (repo) =>
-                repo.registeredPaths.includes(item.repositoryPath) &&
-                repo.remote?.host === item.host &&
-                repo.remote?.fullName.toLowerCase() === item.repository.toLowerCase(),
-            )
-            if (!repo) {
-              setError('The queue item no longer has a matching registered local authority.')
-              return
+      {surface !== 'review' &&
+        (surface === 'attention' ? (
+          <AttentionView
+            items={attention}
+            repositories={[
+              ...new Set(
+                inventory.data?.repositories.map((repo) =>
+                  repo.remote
+                    ? `${repo.remote.host}/${repo.remote.fullName}`
+                    : repo.registeredPaths[0],
+                ) ?? [],
+              ),
+            ].sort()}
+            sourceStatus={attentionStatus}
+            loading={inbox.isFetching}
+            error={inbox.error?.message ?? error}
+            filter={attentionFilter}
+            onFilterChange={setAttentionFilter}
+            state={attentionState}
+            onStateChange={setAttentionState}
+            savedFilters={inboxFilters.isFetching ? [] : (inboxFilters.data ?? [])}
+            saving={savingInboxFilters || !inboxFilters.isSuccess || inboxFilters.isFetching}
+            searchInputRef={attentionSearch}
+            onRefresh={() => void inbox.refetch()}
+            onOpen={openCollaborationTarget}
+            onSaveFilters={async (drafts) => {
+              if (!desktop?.savePullRequestInboxFilters)
+                throw new Error('Saved attention filters are unavailable.')
+              if (inboxFilterLock.current)
+                throw new Error('A saved-filter write is already in progress.')
+              inboxFilterLock.current = true
+              setSavingInboxFilters(true)
+              try {
+                const confirmed = await desktop.savePullRequestInboxFilters(drafts)
+                client.setQueryData(['workbench-attention-filters'], confirmed)
+                return confirmed
+              } finally {
+                inboxFilterLock.current = false
+                setSavingInboxFilters(false)
+              }
+            }}
+          />
+        ) : surface === 'activity' ? (
+          <ActivityView
+            events={events}
+            repositories={snapshot.repositories}
+            onOpen={openCollaborationTarget}
+            state={activityState}
+            onStateChange={setActivityState}
+          />
+        ) : (
+          <PullRequestList
+            repository={repository}
+            source={prPage.data}
+            pending={prPage.isFetching}
+            state={{
+              query: current.pullRequestQuery,
+              lifecycle: current.pullRequestLifecycle,
+              page: current.pullRequestPage,
+              scroll: current.pullRequestScroll,
+              cursor: current.pullRequestCursor,
+            }}
+            onChange={(state) =>
+              updateMemory(repositoryId, {
+                pullRequestQuery: state.query,
+                pullRequestLifecycle: state.lifecycle,
+                pullRequestPage: state.page,
+                pullRequestScroll: state.scroll,
+                pullRequestCursor: state.cursor,
+              })
             }
-            setReturnOrigin({ ...captureOrigin(), surface: 'attention' })
-            navigate(repo.identity.id, 'review')
-            setPendingReview({
-              repositoryId: repo.identity.id,
-              number: item.number,
-              generation: navigationGeneration.current,
-            })
-          }}
-          onSaveFilters={async (drafts) => {
-            if (!desktop?.savePullRequestInboxFilters)
-              throw new Error('Saved attention filters are unavailable.')
-            setSavingInboxFilters(true)
-            try {
-              client.setQueryData(
-                ['workbench-attention-filters'],
-                await desktop.savePullRequestInboxFilters(drafts),
-              )
-            } catch (value) {
-              setInboxError(value instanceof Error ? value.message : String(value))
-            } finally {
-              setSavingInboxFilters(false)
-            }
-          }}
-        />
-      ) : surface !== 'review' ? (
-        <div
-          className="wb-secondary-list"
-          ref={pullRequestScroll}
-          onScroll={(event) => {
-            if (surface === 'pull-requests')
-              updateMemory(repositoryId, { pullRequestScroll: event.currentTarget.scrollTop })
-          }}
-        >
-          {secondaryRows
-            .slice(secondaryPage * LIST_PAGE_SIZE, (secondaryPage + 1) * LIST_PAGE_SIZE)
-            .map((branch) => (
-              <Button
-                key={branch.id}
-                variant="ghost"
-                onClick={() => {
-                  if (surface === 'pull-requests' && branch.pullRequest) {
-                    const origin = { ...captureOrigin(), surface: 'pull-requests' as const }
-                    setReturnOrigin(origin)
-                    navigate(branch.repositoryId, 'review', branch.id)
-                    updateMemory(branch.repositoryId, {
-                      selectedId: branch.id,
-                      pullRequestId: branch.pullRequest.id,
-                      reviewOrigin: origin,
-                      surface: 'review',
-                    })
-                  } else navigate(branch.repositoryId, 'branches', branch.id)
-                }}
-              >
-                <span>
-                  {snapshot.repositories.find((repo) => repo.id === branch.repositoryId)?.name} ·{' '}
-                  {branch.ref}
-                </span>
-                <small>
-                  {surface === 'activity'
-                    ? 'Observed inventory facts, not external-tool liveness'
-                    : branch.pullRequest
-                      ? `#${branch.pullRequest.number} · ${branch.pullRequest.checks.label}`
-                      : branch.local.label}
-                </small>
-              </Button>
-            ))}
-          <p>Unavailable and partial sources are not an empty queue. {snapshot.remoteFreshness}</p>
-          <Button disabled={!secondaryPage} onClick={() => changeSecondaryPage(secondaryPage - 1)}>
-            Previous page
-          </Button>
-          <span>
-            Page {secondaryPage + 1} / {secondaryPages}
-          </span>
-          <Button
-            disabled={secondaryPage + 1 >= secondaryPages}
-            onClick={() => changeSecondaryPage(secondaryPage + 1)}
-          >
-            Next page
-          </Button>
-        </div>
-      ) : null}
+            onOpen={openCollaborationTarget}
+            onCreate={() => {
+              if (!repository) return
+              const openPullRequests = new Set<string>()
+              for (const pr of repository.pullRequests)
+                if (pr.facts.state === 'OPEN') openPullRequests.add(pr.id)
+              const branches: { id: string; name: string }[] = []
+              for (const ref of repository.refs)
+                if (
+                  ref.kind === 'local' &&
+                  !ref.pullRequestIds.some((id) => openPullRequests.has(id))
+                )
+                  branches.push({ id: ref.id, name: ref.name.replace(/^refs\/heads\//, '') })
+              setCreatePrTarget({ repositoryId, branches })
+              setCreatePrRef(branches[0]?.id ?? '')
+            }}
+            error={prPage.error?.message ?? repoRead.error?.message ?? null}
+          />
+        ))}
     </WorkbenchPane>
   )
   if (!desktop)
@@ -1296,7 +1634,16 @@ function App() {
     <>
       <BranchWorkbench
         key={repositoryId}
-        snapshot={snapshot}
+        density={settings?.appearance.density ?? 'compact'}
+        densityDisabled={
+          densityWrite.isPending ||
+          !settingsRead.isSuccess ||
+          settingsRead.data?.locks.some((lock) => lock.key === 'appearance.density')
+        }
+        onDensityChange={(density) =>
+          void densityWrite.mutateAsync(density).catch((value) => setError(String(value)))
+        }
+        snapshot={collaborationSnapshot}
         repositoryId={repositoryId}
         selectedBranchId={current.selectedId}
         viewState={current.view}
@@ -1352,34 +1699,7 @@ function App() {
         onAction={dispatch}
         sidebarUtilities={
           <>
-            <Button
-              variant="ghost"
-              disabled={repositoryOpening}
-              onClick={() => {
-                if (repositoryOpening) return
-                setRepositoryOpening(true)
-                const generation = inspectionNavigation.current
-                void desktop
-                  .openRepository()
-                  .then(async (opened) => {
-                    if (!opened) return
-                    const refreshed = await inventory.refetch()
-                    if (generation !== inspectionNavigation.current) return
-                    const owner = refreshed.data?.repositories.find((repo) =>
-                      repo.registeredPaths.includes(opened.path),
-                    )
-                    if (!owner) return
-                    const ref = owner.refs.find(
-                      (ref) => ref.name === `refs/heads/${opened.currentBranch}`,
-                    )
-                    const tree = owner.worktrees.find((tree) => tree.path === opened.path)
-                    setDetails((previous) => ({ ...previous, [owner.identity.id]: opened }))
-                    navigate(owner.identity.id, 'branches', ref?.id ?? tree?.id, tree?.id)
-                  })
-                  .catch((value) => setError(String(value)))
-                  .finally(() => setRepositoryOpening(false))
-              }}
-            >
+            <Button variant="ghost" onClick={() => setLocalRepositoryOpen(true)}>
               Add repository
             </Button>
             <Button variant="ghost" onClick={() => setDiscoveryOpen(true)}>
@@ -1693,6 +2013,77 @@ function App() {
           )}
         </DialogContent>
       </Dialog>
+      <LocalRepositoryDialog
+        desktop={desktop}
+        open={localRepositoryOpen}
+        onOpenChange={setLocalRepositoryOpen}
+        onClone={() => setDiscoveryOpen(true)}
+        onOpened={(value) => {
+          void inventory
+            .refetch()
+            .then((result) => {
+              const repo = result.data?.repositories.find((repo) =>
+                repo.registeredPaths.includes(value.path),
+              )
+              if (!repo) {
+                setError('The opened repository was not confirmed in the inventory.')
+                return
+              }
+              navigate(repo.identity.id, 'branches')
+            })
+            .catch((value) => setError(String(value)))
+        }}
+      />
+      <Dialog
+        open={createPrTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !operationBusy) setCreatePrTarget(null)
+        }}
+      >
+        <DialogContent className="wb-local-repository-dialog">
+          <DialogHeader>
+            <DialogTitle>Create a pull request</DialogTitle>
+            <DialogDescription>
+              Choose an existing unpublished branch. The next preview captures its exact head,
+              dependencies and published destination; it never checks out or creates a worktree.
+            </DialogDescription>
+          </DialogHeader>
+          <Select
+            disabled={operationBusy}
+            aria-label="Unpublished branch"
+            value={createPrRef}
+            onValueChange={setCreatePrRef}
+            options={
+              createPrTarget?.branches.map((branch) => ({
+                value: branch.id,
+                label: branch.name,
+              })) ?? []
+            }
+          />
+          {!createPrTarget?.branches.length ? (
+            <p>
+              No observed unpublished local branch is available. Create your development branch in
+              an external tool, then refresh the inventory.
+            </p>
+          ) : null}
+          {error ? <p role="alert">{error}</p> : null}
+          <Button
+            loading={operationBusy}
+            disabled={!createPrRef || operationBusy}
+            onClick={async () => {
+              const branch = createPrTarget?.branches.find((branch) => branch.id === createPrRef)
+              if (!branch || !createPrTarget) return
+              const opened = await prepareWorkflow(
+                { kind: 'stack', branch: branch.name, operation: 'publish' },
+                { repositoryId: createPrTarget.repositoryId, refId: branch.id },
+              )
+              if (opened) setCreatePrTarget(null)
+            }}
+          >
+            Preview publication
+          </Button>
+        </DialogContent>
+      </Dialog>
       <SettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
@@ -1764,22 +2155,6 @@ function App() {
               })
             }
           />
-          <NotificationCredentialDialog
-            open={credentialOpen}
-            onOpenChange={setCredentialOpen}
-            busy={notificationBusy}
-            error={credentialError}
-            host={settings?.github.host ?? cliStatus?.host ?? 'github.com'}
-            login={notificationInbox?.login ?? null}
-            onSubmit={(token, consent, host) =>
-              void notify(async (current) => {
-                await desktop.updateSettings?.({ notifications: { enabled: true } })
-                if (!current()) return
-                await desktop.saveNotificationCredential?.(token, consent, host)
-                if (current()) return desktop.notifications?.()
-              }, true)
-            }
-          />
         </DialogContent>
       </Dialog>
       <Dialog open={recoveryOpen} onOpenChange={setRecoveryOpen}>
@@ -1838,17 +2213,60 @@ function App() {
           ) : null}
         </DialogContent>
       </Dialog>
+      <NotificationCredentialDialog
+        key={settings?.github.host ?? 'github.com'}
+        open={credentialOpen}
+        onOpenChange={setCredentialOpen}
+        busy={notificationBusy}
+        error={credentialError}
+        host={settings?.github.host ?? cliStatus?.host ?? 'github.com'}
+        login={notificationInbox?.login ?? null}
+        onSubmit={(token, consent, host) => {
+          void notify(async (current) => {
+            if (
+              !desktop.updateSettings ||
+              !desktop.saveNotificationCredential ||
+              !desktop.notifications
+            )
+              throw new Error('Notifications credential storage is unavailable.')
+            await desktop.updateSettings({ notifications: { enabled: true } })
+            if (!current()) return
+            await desktop.saveNotificationCredential(token, consent, host)
+            if (current()) return desktop.notifications()
+          }, true)
+        }}
+      />
       {workflow && operationSnapshot ? (
         <WorkflowDialog
+          key={JSON.stringify([
+            operationSnapshot.path,
+            providerWorkflow?.scope ?? operationScope.current,
+            workflow.kind,
+            workflow.kind === 'pr' ? workflow.number : null,
+          ])}
           request={workflow}
           snapshot={operationSnapshot}
-          authority={operationAuthority}
+          authority={providerWorkflow?.scope.authority ?? operationAuthority}
           busy={operationBusy}
+          stackApi={providerWorkflow?.api ?? desktop}
+          providerManagement={Boolean(providerWorkflow)}
+          providerSourceCurrent={
+            !providerWorkflow || providerWorkflow.generation === providerGeneration.current
+          }
           actionError={error}
           onClearActionError={() => setError(null)}
           defaults={settings}
-          onClose={() => setWorkflow(null)}
-          onRequest={setWorkflow}
+          onClose={() => {
+            setWorkflow(null)
+            setProviderWorkflow(null)
+          }}
+          onRequest={(request) =>
+            void prepareWorkflow(
+              request,
+              providerWorkflow?.target ?? operationContext.current ?? context,
+              providerWorkflow?.scope ?? operationScope.current ?? undefined,
+            )
+          }
           runAction={runCapturedAction}
         />
       ) : null}

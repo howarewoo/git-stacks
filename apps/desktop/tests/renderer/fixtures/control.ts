@@ -1,6 +1,11 @@
 import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
 import { inventoryFixture, snapshotInventory } from './inventory'
-import type { InspectionResult } from '@git-stacks/shared/inspection'
+import type {
+  InspectionResult,
+  InspectionOperation,
+  InspectionContext,
+  InspectionArgs,
+} from '@git-stacks/shared/inspection'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import {
   parseGraphPreferences,
@@ -9,7 +14,7 @@ import {
 } from '@git-stacks/shared/graph-preferences'
 import { changeGraphIndex, graphDetail } from './graph'
 import type { UpdateStatus } from '@git-stacks/shared/update'
-import { REVIEW_STACK_METADATA_LIMIT } from '@git-stacks/shared/performance'
+import { REVIEW_STACK_METADATA_LIMIT, LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 import { cliAuthority } from '@git-stacks/shared/operation-scope'
 import type {
   ActionResult,
@@ -23,6 +28,7 @@ import type {
   HistoryPage,
   PushPreview,
   RemoteFreshness,
+  PullRequestLayerRead,
   RepositorySnapshot,
   SyncActivity,
   StackKind,
@@ -71,6 +77,7 @@ import {
 import type { ReviewFile, ReviewLine, ReviewSide } from '@git-stacks/shared/review'
 import type {
   ReviewDraftRecord,
+  ReviewMutationResult,
   ReviewDraftResolution,
   ReviewEvent,
   ReviewOwner,
@@ -714,7 +721,11 @@ export function installFixtureControl(options: {
     return { ...before, ...after, reference, state, message }
   }
   const desktop: DesktopAPI = {
-    inspect: async (context, operation, args) => {
+    inspect: async <K extends InspectionOperation>(
+      context: InspectionContext,
+      operation: K,
+      args: InspectionArgs<K>,
+    ): Promise<InspectionResult<K>> => {
       record('inspect', [context, operation, args])
       const repo = servedInventory.repositories.find(
         (item) => item.identity.id === context.repositoryId,
@@ -731,7 +742,16 @@ export function installFixtureControl(options: {
         ...structuredClone(source),
         path: tree?.path ?? repo.registeredPaths[0],
         headOid: tree?.headOid ?? source.headOid,
-        pullRequests: repo.pullRequests.map((pr) => pr.facts),
+        pullRequests:
+          operation === 'pullRequestLayer'
+            ? source.pullRequests
+            : repo.pullRequests.map((pr) => pr.facts),
+      }
+      const capturedActor = statusForHost(repo.remote?.host ?? 'github.com')?.identity
+      if (operation === 'pullRequestLayer') {
+        const selected = repo.pullRequests.find((pr) => pr.id === context.pullRequestId)
+        if (!selected || args[0] !== selected.number)
+          throw new Error('The request does not address the captured pull request.')
       }
       if (operation === 'refresh') {
         record('refresh', [])
@@ -763,7 +783,62 @@ export function installFixtureControl(options: {
           ...args: unknown[]
         ) => Promise<InspectionResult<typeof operation>>
         if (!method) throw new Error('Selected fixture operation is unavailable')
-        return method(...args)
+        const response = method(...args)
+        if (operation !== 'pullRequestLayer') return response
+        return response.then((value) => {
+          const current = servedInventory.repositories.find(
+            (item) => item.identity.id === context.repositoryId,
+          )
+          if (
+            !current?.remote ||
+            current.remote.id !== repo.remote?.id ||
+            statusForHost(current.remote.host)?.identity !== capturedActor
+          )
+            throw new Error(
+              'The captured provider actor or origin changed; this result was retired.',
+            )
+          const layer = value as PullRequestLayerRead
+          const existing = new Map(current.pullRequests.map((pr) => [pr.number, pr]))
+          const observed = new Map(
+            [layer.pullRequest, layer.sourcePullRequest].map((pr) => [pr.number, pr]),
+          )
+          for (const pr of current.pullRequests)
+            if (!observed.has(pr.number)) observed.set(pr.number, pr.facts)
+          const pullRequests = [...observed.values()].slice(0, LIST_PAGE_SIZE).map((facts) => ({
+            id:
+              existing.get(facts.number)?.id ??
+              JSON.stringify([current.remote!.id, 'pr', String(facts.number)]),
+            remoteId: current.remote!.id,
+            number: facts.number,
+            headRef: facts.head,
+            headOid: facts.headOid ?? null,
+            refIds: existing.get(facts.number)?.refIds ?? [],
+            facts,
+          }))
+          servedInventory = {
+            ...servedInventory,
+            generation: servedInventory.generation + 1,
+            repositories: servedInventory.repositories.map((item) =>
+              item === current
+                ? {
+                    ...current,
+                    pullRequests,
+                    remoteFreshness: {
+                      state: 'stale',
+                      fetchedAt: layer.observedAt,
+                      checkedAt: layer.observedAt,
+                      detail:
+                        'A bounded exact member observation is not a complete repository readiness read.',
+                      rateLimitReset: null,
+                      pendingMutations: current.remoteFreshness?.pendingMutations ?? [],
+                    },
+                  }
+                : item,
+            ),
+          }
+          for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+          return value
+        })
       } finally {
         active = previous
       }
@@ -1290,13 +1365,72 @@ export function installFixtureControl(options: {
       const scope = captureOperationScope()
       return admittedAnswer('repositoryOperationScope', () => scope)
     },
+    pullRequestAction: async (action, expectedScope) => {
+      record('pullRequestAction', [action, expectedScope])
+      return admittedAnswer('pullRequestAction', () => {
+        const current = captureOperationScope()
+        if (
+          current.repositoryPath !== expectedScope.repositoryPath ||
+          current.remoteUrl !== expectedScope.remoteUrl ||
+          current.authority !== expectedScope.authority
+        )
+          throw new Error('Captured provider scope changed.')
+        if (action.type === 'updatePr' && action.expectedBody !== undefined) {
+          const pr = active?.pullRequests.find((pr) => pr.number === action.number)
+          if (
+            !pr ||
+            `${pr.title}\n\nDeterministic fixture body for pull request #${pr.number}.` !==
+              action.expectedBody
+          )
+            throw new Error('Pull request body changed.')
+        }
+        return desktop.runAction(action)
+      })
+    },
+    pullRequestPage: (state, cursor) => {
+      record('pullRequestPage', [state, cursor])
+      return admittedAnswer('pullRequestPage', () => {
+        const offset = cursor === null ? 0 : Number(cursor)
+        if (!Number.isSafeInteger(offset) || offset < 0)
+          throw new Error('Invalid fixture PR cursor.')
+        const rows = (active?.pullRequests ?? []).filter(
+          (pr) => state === 'ALL' || pr.state === state,
+        )
+        return {
+          pullRequests: structuredClone(rows.slice(offset, offset + 50)),
+          next: offset + 50 < rows.length ? String(offset + 50) : null,
+          observedAt: new Date().toISOString(),
+        }
+      })
+    },
+    pullRequestLayer: (sourceNumber, memberNumber) => {
+      record('pullRequestLayer', [sourceNumber, memberNumber])
+      return admittedAnswer('pullRequestLayer', () => {
+        const source = active?.pullRequests.find((pr) => pr.number === sourceNumber)
+        const member = active?.pullRequests.find((pr) => pr.number === memberNumber)
+        const stack = active?.nativeStacks?.find((entry) =>
+          entry.pullRequests.some((pr) => pr.number === sourceNumber),
+        )
+        if (!source || !member || !stack?.pullRequests.some((pr) => pr.number === memberNumber))
+          throw new Error(
+            'GitHub has not confirmed this pull request as a member of the selected native stack.',
+          )
+        return {
+          sourcePullRequest: source,
+          pullRequest: member,
+          observedAt: new Date().toISOString(),
+        }
+      })
+    },
     pullRequest: (number) => {
       record('pullRequest', [number])
-      const found = active?.pullRequests.find((pr) => pr.number === number)
-      return answer('pullRequest', () => {
+      return admittedAnswer('pullRequest', () => {
+        const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         return {
           ...found,
+          canUpdate: found.canUpdate ?? true,
+          repositoryDefaultBranch: active?.defaultBranch ?? null,
           body: `${found.title}\n\nDeterministic fixture body for pull request #${number}.`,
         }
       })
@@ -1338,7 +1472,9 @@ export function installFixtureControl(options: {
         // from every pull request in the snapshot that names the same stack.
         const membership =
           found.stack && !scenario.reviewStackUnavailable
-            ? (active?.pullRequests
+            ? (active?.nativeStacks?.find((stack) => stack.number === found.stack?.stackNumber)
+                ?.pullRequests ??
+              active?.pullRequests
                 .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
                 .map((pr) => ({
                   ...stackMember(pr.stack?.position ?? 1, pr.number, found.stack?.size ?? 1),
@@ -1347,7 +1483,8 @@ export function installFixtureControl(options: {
                   base: pr.base,
                   state: pr.state,
                   draft: pr.draft,
-                })) ?? null)
+                })) ??
+              null)
             : scenario.reviewStackUnavailable
               ? null
               : []
@@ -1422,13 +1559,14 @@ export function installFixtureControl(options: {
     },
     reviewFiles: (number) => {
       record('reviewFiles', [number])
-      return answer('reviewFiles', () => {
+      return admittedAnswer('reviewFiles', () => {
         const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         return reviewFileSet(
           number,
           scenario.reviewHeadOid ?? found.headOid ?? `head-${number}`,
           found.base,
+          found.baseOid,
         )
       })
     },
@@ -1459,7 +1597,9 @@ export function installFixtureControl(options: {
         const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         return {
           owner: fixtureReviewOwner(number),
-          threads: reviewThreadSet(number, headOid, found?.base ?? null),
+          threads: reviewThreadSet(number, headOid, found?.base ?? null, {
+            baseOid: found?.baseOid,
+          }),
           permissions: {
             ...reviewPermissions(number, scenario.reviewPermissions),
             viewer: fixtureReviewOwner(number).viewer,
@@ -1508,22 +1648,39 @@ export function installFixtureControl(options: {
       record('reviewSubmit', [number, submission])
       assertFixtureReviewOwner(number, submission)
       const ownerKey = fixtureReviewKey(number)
-      const result = await answer('reviewSubmit', () => ({
+      const result: ReviewMutationResult = await answer('reviewSubmit', () => ({
         id: `review-${number}`,
         state: REVIEW_SUBMIT_STATES[submission.event],
         url: `https://github.com/acme/widgets/pull/${number}#pullrequestreview-1`,
         delivered: submission.drafts.map((draft) => draft.id),
+        ...(submission.compositionId
+          ? {
+              deliveredComposition: {
+                id: submission.compositionId,
+                summary: submission.body,
+                event: submission.event,
+              },
+            }
+          : {}),
       }))
       // Main retires the delivered identities even if the view has unmounted.
-      const delivered = new Set(result.delivered)
+      const delivered = new Set(result.delivered ?? [])
       const record_ = heldDrafts.get(ownerKey)
       if (record_ && sameReviewComparison(record_.comparison, submission.comparison)) {
         const confirmed = (draft: ReviewDraftRecord['drafts'][number]) =>
           delivered.has(draft.id) && submission.drafts.some((sent) => sameReviewDraft(draft, sent))
-        if (record_.drafts.some(confirmed)) {
+        const compositionDelivered =
+          result.deliveredComposition &&
+          record_.composer?.id === result.deliveredComposition.id &&
+          record_.composer.summary === result.deliveredComposition.summary &&
+          record_.composer.event === result.deliveredComposition.event
+        if (record_.drafts.some(confirmed) || compositionDelivered) {
           heldDrafts.set(ownerKey, {
             ...record_,
             drafts: record_.drafts.filter((draft) => !confirmed(draft)),
+            ...(compositionDelivered
+              ? { composer: { ...record_.composer!, summary: '', event: 'COMMENT' as const } }
+              : {}),
             updatedAt: new Date(
               Math.max(Date.now(), Date.parse(record_.updatedAt) + 1),
             ).toISOString(),
@@ -1725,7 +1882,7 @@ export function installFixtureControl(options: {
         const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
-        const files = reviewFileSet(number, headOid, found.base)
+        const files = reviewFileSet(number, headOid, found.base, found.baseOid)
         // The main process re-resolves each anchor against a freshly read file
         // set; the double answers for the set it already serves, so a draft the
         // reviewer just wrote is exact and a draft naming a line the fixture does
@@ -2170,8 +2327,66 @@ export function installFixtureControl(options: {
               })),
             }
           : scenario.inbox
+      const admittedHost = settings.github.host
+      const admittedAuthority = cliAuthority(admittedHost, served)
       return answer('pullRequestInbox', () => {
         if (!admitted) throw new Error('This fixture has no PR Inbox read behind it.')
+        if (
+          admitted.refresh.confirmedAt &&
+          settings.github.host === admittedHost &&
+          cliAuthority(admittedHost, statusForHost(admittedHost)) === admittedAuthority
+        ) {
+          const next = structuredClone(servedInventory)
+          for (const item of admitted.items) {
+            const repo = next.repositories.find(
+              (repo) =>
+                repo.registeredPaths.includes(item.repositoryPath) &&
+                repo.remote?.host.toLowerCase() === item.host.toLowerCase() &&
+                repo.remote.fullName.toLowerCase() === item.repository.toLowerCase(),
+            )
+            if (!repo?.remote) continue
+            const existing = repo.pullRequests.find((pr) => pr.number === item.number)
+            const id = existing?.id ?? JSON.stringify([repo.remote.id, 'pr', String(item.number)])
+            const refIds =
+              item.headRepository?.toLowerCase() === repo.remote.fullName.toLowerCase()
+                ? (existing?.refIds.filter(
+                    (id) => repo.refs.find((ref) => ref.id === id)?.oid === item.headOid,
+                  ) ?? [])
+                : []
+            const pr = {
+              id,
+              remoteId: repo.remote.id,
+              number: item.number,
+              headRef: item.head,
+              headOid: item.headOid ?? null,
+              refIds,
+              facts: structuredClone(item),
+            }
+            if (existing) Object.assign(existing, pr)
+            else repo.pullRequests.push(pr)
+            repo.remoteFreshness = {
+              state: 'stale',
+              fetchedAt: admitted.refresh.confirmedAt,
+              checkedAt: admitted.refresh.checkedAt,
+              detail: 'Bounded fixture provider rows are not a complete readiness read.',
+              rateLimitReset: null,
+              pendingMutations: repo.remoteFreshness?.pendingMutations ?? [],
+            }
+          }
+          for (const repo of next.repositories) {
+            const byRef = new Map<string, string[]>()
+            for (const pr of repo.pullRequests)
+              for (const id of pr.refIds) {
+                const ids = byRef.get(id) ?? []
+                ids.push(pr.id)
+                byRef.set(id, ids)
+              }
+            for (const ref of repo.refs) ref.pullRequestIds = byRef.get(ref.id) ?? []
+          }
+          next.generation += 1
+          servedInventory = next
+          for (const listener of inventoryListeners) listener(structuredClone(next))
+        }
         return admitted
       })
     },

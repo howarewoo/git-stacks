@@ -13,7 +13,11 @@ const globalServices: Record<string, true> = {
 }
 
 /** Existing review consumers receive captured methods, never the active checkout's API. */
-export function inspectionAPI(api: DesktopAPI, context: InspectionContext): DesktopAPI {
+export function inspectionAPI(
+  api: DesktopAPI,
+  context: InspectionContext,
+  isCurrent?: () => boolean,
+): DesktopAPI {
   const scoped = { ...api }
   for (const [name, value] of Object.entries(scoped)) {
     if (
@@ -40,11 +44,15 @@ export function inspectionAPI(api: DesktopAPI, context: InspectionContext): Desk
     if (operation === 'cancel') continue
     Object.defineProperty(scoped, operation, {
       value: async (...args: InspectionArgs<typeof operation>) => {
+        if (isCurrent && !isCurrent())
+          throw new Error('The captured provider session changed; reopen this source explicitly.')
         if (!api.inspect)
           throw new Error('Selected-context inspection is unavailable in this runtime.')
         const id = `inspection-${crypto.randomUUID()}`
         const explicitId =
-          operation === 'history' || operation === 'reviewHistoryDiff'
+          operation === 'history' ||
+          operation === 'reviewHistoryDiff' ||
+          operation === 'pullRequestLayer'
             ? args[2]
             : operation === 'commitDiff' ||
                 [
@@ -68,7 +76,10 @@ export function inspectionAPI(api: DesktopAPI, context: InspectionContext): Desk
         pending.add(id)
         requests.set(key, pending)
         try {
-          return await api.inspect(context, operation, args, id)
+          const result = await api.inspect(context, operation, args, id)
+          if (isCurrent && !isCurrent())
+            throw new Error('The captured provider session changed; this response was retired.')
+          return result
         } finally {
           pending.delete(id)
           if (!pending.size) requests.delete(key)

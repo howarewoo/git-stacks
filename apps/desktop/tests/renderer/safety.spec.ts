@@ -152,7 +152,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await page
         .locator('.wb-secondary-list')
         .getByRole('button')
-        .filter({ hasText: '#42 ·' })
+        .filter({ hasText: '#42 Migrate changes' })
         .click()
       await expect(page.locator('.review-headline')).toContainText('#42 Migrate changes')
       await expect(page.getByRole('dialog')).toHaveCount(0)

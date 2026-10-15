@@ -31,7 +31,7 @@ function prFacts(pr: PullRequest, id: string): NonNullable<WorkbenchBranch['pull
     author: pr.author ?? null,
     state: pr.state === 'OPEN' ? 'open' : pr.state === 'MERGED' ? 'merged' : 'closed',
     lifecycle: {
-      label: pr.draft ? 'Draft' : pr.state,
+      label: pr.state === 'OPEN' && pr.draft ? 'Draft' : pr.state,
       tone: pr.state === 'MERGED' ? 'merged' : pr.state === 'CLOSED' ? 'error' : 'info',
     },
     review: {
@@ -56,9 +56,10 @@ function prFacts(pr: PullRequest, id: string): NonNullable<WorkbenchBranch['pull
 }
 /** Observed collaboration state, never the current viewer's mutation permission. */
 function publishedReady(pr: PullRequest, fresh: boolean) {
-  if (!fresh || pr.metadata !== 'full' || !pr.mergeState || !pr.reviewDecision) return null
+  if (pr.state !== 'OPEN') return false
+  if (!fresh || !pr.headOid || pr.metadata !== 'full' || !pr.mergeState || !pr.reviewDecision)
+    return null
   return (
-    pr.state === 'OPEN' &&
     !pr.draft &&
     pr.checks === 'passing' &&
     pr.reviewDecision === 'APPROVED' &&
@@ -93,6 +94,7 @@ export function projectWorkbenchInventory(
     const representedPrIds = new Set<string>()
     const publishedBases = new Map<string, InventoryRef[]>()
     const readyByPr = new Map<string, boolean | null>()
+    let openPullRequestCount = 0
     for (const ref of repo.refs) {
       if (ref.kind !== 'remote' || !ref.remoteId || !ref.remoteName) continue
       const prefix = `refs/remotes/${ref.remoteName}/`
@@ -103,6 +105,7 @@ export function projectWorkbenchInventory(
       publishedBases.set(key, matches)
     }
     for (const pr of repo.pullRequests) {
+      if (pr.facts.state === 'OPEN') openPullRequestCount += 1
       const ready = publishedReady(pr.facts, remoteKnown)
       readyByPr.set(pr.id, ready)
       const previous = globalReady.get(pr.id)
@@ -224,7 +227,7 @@ export function projectWorkbenchInventory(
           trees.some((tree) => tree.status === 'conflicted' || tree.operation) ||
           pr?.facts.checks === 'failing' ||
           pr?.facts.reviewDecision === 'CHANGES_REQUESTED',
-        needsRestack: branch?.needsRestack ?? false,
+        needsRestack: ref.needsRestack ?? branch?.needsRestack ?? false,
         conflicted:
           !directoriesKnown || trees.some((tree) => tree.status === 'unknown')
             ? null
@@ -348,7 +351,7 @@ export function projectWorkbenchInventory(
       worktreeCount: directoriesKnown
         ? repo.worktrees.filter((tree) => tree.kind !== 'bare').length
         : null,
-      pullRequestCount: remoteKnown ? repo.pullRequests.length : null,
+      pullRequestCount: remoteKnown ? openPullRequestCount : null,
       attentionCount,
       unpublishedCount:
         repo.refsRead.state === 'complete' &&

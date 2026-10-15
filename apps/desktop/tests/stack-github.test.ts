@@ -32,6 +32,11 @@ const { retireConfirmedGitHubPayloads } = await import('../src/main/git')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 // Load after github-harness patches child_process; a static import captures native execution.
 const { gitCommandEnvironment, platformKey } = await import('../src/main/git-runtime')
+const { GitHubCliStatusService } = await import('../src/main/github-cli')
+const { githubHostContext, hostTransport, withGitHubCredentialSession } = await import(
+  '../src/main/github-host'
+)
+const { cliAuthority } = await import('@git-stacks/shared/operation-scope')
 
 function git(harness: GitHubHarness, args: string[]): string {
   return harness.runGit(['-C', harness.repo, ...args])
@@ -790,6 +795,143 @@ test('PR title, body, draft, close, and reopen actions use canonical fixture sta
     assert.equal(prFor(state, 'topic').body, '')
     assert.equal((await getPullRequest(harness.repo, pr.number)).body, '')
   })
+})
+
+for (const [management, switchAt] of [
+  ['updatePr', 'before-pin'],
+  ['updatePr', 'before-mutation'],
+  ['updatePr', 'after-metadata'],
+  ['linkIssue', 'before-pin'],
+  ['linkIssue', 'before-mutation'],
+  ['unlinkIssue', 'before-pin'],
+  ['unlinkIssue', 'before-mutation'],
+] as const) {
+  test(`captured PR management ${management} pins its proven actor when credentials switch ${switchAt}`, {
+    concurrency: false,
+  }, async () => {
+    await withHarness(async (harness) => {
+      await runAction(harness.repo, { type: 'createBranch', name: 'topic', parent: 'main' })
+      await commitFile(harness, 'topic.txt', 'topic\n', 'Topic work')
+      await runAction(harness.repo, { type: 'push' })
+      await runAction(harness.repo, {
+        type: 'createPr',
+        title: 'Original title',
+        body: management === 'unlinkIssue' ? 'Original body\n\nCloses #5\n' : 'Original body',
+        base: 'main',
+        draft: true,
+      })
+      const api = createGitHubApiDouble()
+      const writes: Array<{ method: string; body: string; actor: string | null }> = []
+      let armed = false
+      const options = {
+        token: 'fixture-token',
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const method = init?.method ?? 'GET'
+          const body = String(init?.body ?? '')
+          const mutation = method === 'PATCH' || (method === 'POST' && body.includes('mutation'))
+          if (mutation)
+            writes.push({ method, body, actor: new Headers(init?.headers).get('authorization') })
+          const response = await api(input, init)
+          if (
+            armed &&
+            ((switchAt === 'before-mutation' && body.includes('viewerCanUpdate')) ||
+              (switchAt === 'after-metadata' && method === 'PATCH'))
+          ) {
+            options.token = 'fixture-reviewer-token'
+            armed = false
+          }
+          return response
+        }) as typeof globalThis.fetch,
+      }
+      const transport = new DirectGitHubTransport(options)
+      await withHarnessTransport(harness, transport, async () => {
+        const host = githubHostContext('github.com')
+        const service = new GitHubCliStatusService(host.host, { transport })
+        const status = await service.read()
+        assert.equal(status.state, 'authenticated')
+        const captured = cliAuthority(host.host, status)
+        armed = true
+        if (switchAt === 'before-pin') options.token = 'fixture-reviewer-token'
+        const execute = async () => {
+          const session = await service.pinCredential(captured)
+          return withGitHubCredentialSession(host, session, () =>
+            runAction(
+              harness.repo,
+              management === 'updatePr'
+                ? {
+                    type: 'updatePr',
+                    number: 1,
+                    title: 'Pinned title',
+                    body: 'Pinned body',
+                    draft: false,
+                  }
+                : {
+                    type: management,
+                    prNumber: 1,
+                    issueNumber: 5,
+                    relation: 'closing',
+                    expectedBody:
+                      management === 'unlinkIssue'
+                        ? 'Original body\n\nCloses #5\n'
+                        : 'Original body',
+                  },
+            ),
+          )
+        }
+        try {
+          if (switchAt === 'before-pin') {
+            await assert.rejects(execute(), /captured provider or account changed/u)
+            assert.deepEqual(writes, [])
+            const state = await harness.readState()
+            assert.equal(prFor(state, 'topic').title, 'Original title')
+            assert.equal(prFor(state, 'topic').draft, true)
+          } else {
+            await execute()
+            assert.equal(options.token, 'fixture-reviewer-token', 'the race actually ran')
+            assert.equal(writes.filter((entry) => entry.method === 'PATCH').length, 1)
+            if (management === 'updatePr')
+              assert.ok(
+                writes.some((entry) => entry.body.includes('markPullRequestReadyForReview')),
+              )
+            assert.ok(writes.every((entry) => entry.actor === 'Bearer fixture-token'))
+            const state = await harness.readState()
+            if (management === 'updatePr') {
+              assert.equal(prFor(state, 'topic').title, 'Pinned title')
+              assert.equal(prFor(state, 'topic').draft, false)
+            } else {
+              assert.equal(
+                prFor(state, 'topic').body.includes('Closes #5'),
+                management === 'linkIssue',
+              )
+            }
+          }
+        } finally {
+          service.retire()
+        }
+      })
+    })
+  })
+}
+
+test('management credential scope fences other hosts and does not leak into concurrent work', async () => {
+  const transport = new DirectGitHubTransport({ token: 'fixture-token' })
+  const session = await transport.pinCredential()
+  const host = githubHostContext('github.com')
+  const ordinary = hostTransport(host)
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const scoped = withGitHubCredentialSession(host, session, async () => {
+    assert.equal(await hostTransport(host).credentialAuthority(), session.authority)
+    assert.throws(() => hostTransport(githubHostContext('ghe.example.com')), /host changed/u)
+    await held
+    assert.equal(await hostTransport(host).pinCredential?.(), session)
+  })
+  assert.equal(hostTransport(host), ordinary, 'concurrent work keeps its own transport')
+  release()
+  await scoped
+  assert.equal(hostTransport(host), ordinary)
 })
 
 /** Marks every pull request in a published stack as ready for a direct merge. */

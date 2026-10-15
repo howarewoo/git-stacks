@@ -24,7 +24,12 @@ import {
   reviewLineContent,
   sameReviewComparison,
 } from '@git-stacks/shared/review'
-import type { DiffHunk, DiffHunkLine, NativeStack } from '@git-stacks/shared/types'
+import type {
+  DiffHunk,
+  DiffHunkLine,
+  NativeStack,
+  PullRequestLayerRead,
+} from '@git-stacks/shared/types'
 import { getConfigValue, parseRemote, type ParsedRemote } from './git-core'
 import { isRecord } from '@git-stacks/shared/guards'
 import { hostTransport, remoteHostContext } from './github-host'
@@ -32,6 +37,7 @@ import { GitHubTransportError, type GitHubTransport } from './github-transport'
 import { getPullRequest } from './github'
 import { listPullRequestStacks } from './native-stacks'
 import { parseHunkBlock } from './hunks'
+import { validateInspectionDispatch } from './inspection-context'
 
 export function reviewRepositoryIdentity(remote: ParsedRemote): string {
   const context = remoteHostContext(remote)
@@ -578,6 +584,36 @@ export async function readReviewHeadline(
         message: `${position}: ${errorDetail(error)}`,
       },
     }
+  }
+}
+
+/** Membership is read under the selected PR's captured authority before the exact target. */
+export async function readNativeStackLayer(
+  repoPath: string,
+  sourceNumber: number,
+  memberNumber: number,
+  signal?: AbortSignal,
+): Promise<PullRequestLayerRead> {
+  const source = await readReviewHeadline(repoPath, sourceNumber, signal)
+  if (
+    source.rail.state !== 'member' ||
+    !source.rail.stack?.pullRequests.some((member) => member.number === memberNumber)
+  )
+    throw new Error(
+      'GitHub has not confirmed this pull request as a member of the selected native stack.',
+    )
+  await validateInspectionDispatch()
+  signal?.throwIfAborted()
+  const pullRequest =
+    memberNumber === sourceNumber
+      ? source.pullRequest
+      : await getPullRequest(repoPath, memberNumber, signal)
+  await validateInspectionDispatch()
+  signal?.throwIfAborted()
+  return {
+    sourcePullRequest: source.pullRequest,
+    pullRequest,
+    observedAt: new Date().toISOString(),
   }
 }
 

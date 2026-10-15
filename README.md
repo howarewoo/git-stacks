@@ -594,8 +594,100 @@ revisit and 120-row scenarios. Run its behavior checks with
 Real Git authority/sparse-watch coverage is in `tests/worktree-inventory.test.ts`;
 provider clone reuse is in `tests/remote-payload.test.ts` under the desktop package.
 Gallery dispatch does not prove native IPC or adoption: use the packaged desktop
-smoke for the trusted preload/sender boundary and real registration. The downstream
-shell group owns inventory projection into the complete v5 workbench.
+smoke for the trusted preload/sender boundary and real registration. The production
+v5 shell projects this inventory without changing checkout.
+
+## Collaboration surfaces and desktop entry
+
+**Pull requests** is a dedicated provider-qualified list, not another branch graph.
+Lifecycle and draft state remain independent. Author, fork/head/base, checks,
+review decision, native membership and published revision state are shown only
+when observed. The provider listing is bounded to 50 rows per cursor page; search
+and filters describe the observed page, not an unobserved repository-wide result.
+Listing a page does not establish complete readiness for that repository.
+
+Open full **Review** from Pull requests, a published branch inspector or global
+Attention, including a PR with no local branch or worktree. This reads the captured
+provider source without checkout, cloning or creating a worktree. Code, description,
+checks, commits and conversation reuse the existing review engine. Diff, viewed
+files and authored anchors are comparison-bound, including same-head base movement.
+Inline text, overall review decisions/summaries and per-thread replies share the
+existing host/repository/account-owned private draft journal and versioned full-set
+write queue. Each overall summary/decision version has a minted durable composition
+identity. Confirmed receipts retire only that original version; recovered earlier
+inline reviews leave a newer summary/decision visibly unsent. A zero-inline review
+reconciles its original provider boundary, author, head, event and exact body, not
+an arbitrary similar historical review. Missing review identity or an unexpected
+provider decision leaves the outcome unknown, with text and its guard retained.
+Reply editors open only after the owned journal is admitted. Saved replies remain
+copyable, editable and explicitly discardable under their original thread,
+comparison and account even when the thread is absent, truncated or unreadable.
+Such absence disables sending rather than hiding text or moving its anchor.
+Incomplete conversation reads never establish an empty conversation.
+Native-member navigation outside the bounded inventory performs a captured exact
+provider read after confirming current submitted membership, then adopts qualified
+facts and routes without checkout. Retired actor/origin reads cannot adopt or route.
+Failed exact reads name the captured-source refusal rather than remaining in a
+loading state; later facts from a different remote namespace cannot satisfy that
+pending route. The canonical `review-uncached-native-layer` gallery scenario
+declares complete 201-member source order and a 200-PR inventory.
+
+PR management captures its original source and operation authority. Provider edit
+permission is read from that source rather than inferred from a cached local
+snapshot. Title/body/draft and close/reopen use their real validators and confirmed
+readback. Body saves carry the original expected body; a changed published body is
+compared in-app while authored input stays intact. Related issue links are local
+context, separate from provider-body closing keywords, which require a confirmed
+default branch and permission. Each contextual config mutation rechecks the captured
+directory/ref/origin after awaits, including each unlink rewrite; cancellation and
+refusal propagate rather than being treated as an already-unset success.
+
+**Needs attention** works across registered repositories with none selected.
+One qualified provider PR counts once even with several reasons; clone-local
+conflicts, interrupted Git operations and restack obligations retain their own
+directory/ref identity. Requests/response rules reuse the existing viewer-aware
+Inbox model; team requests do not become direct requests. New-head reasons require
+an actual last-confirmed-review receipt, not a runtime baseline. Incomplete reads,
+unknown viewers or unavailable journals mean incomplete counts, never zero work.
+Existing settings own saved filters. Attention reuses the existing bounded,
+cancelled, account-retired Inbox reader while visible/focused; no second poller,
+authentication flow or queue database exists. Browsing never acknowledges
+Notifications or dismisses a Git safety blocker.
+Saved provider repository criteria retain the Inbox model's case-insensitive
+matching for both `owner/repository` and `host/owner/repository` identities.
+
+**Activity** retains bounded observed transitions and confirmed app outcomes in
+the current app session. The first observation is a baseline, not historic activity;
+older cached observations cannot rewind it. Rows distinguish actual event time
+when known from observation time. Unobserved past activity and external-agent
+liveness are unavailable. Private provider observations retire on principal/host
+replacement without retiring another account's authored recovery evidence.
+
+**Add repository** accepts an existing path, native folder picker or recent entry;
+folder drop uses the same main-process registration boundary. Missing/moved paths,
+cancellation and failures remain explicit, with input retained. Local entry does
+not require GitHub or convert a directory/write Git configuration. Find and clone
+remains secondary and uses the existing GitHub discovery/clone preview, destination,
+collision and cancellation machinery.
+
+Settings remain authoritative for Git/runtime/host/tools, workflow defaults,
+refresh, appearance, reduced motion, shared display density and shortcut remaps,
+including policy locks, validation, concurrent writes and reset recovery. Per-repo
+view memory stores navigation, not settings. Supported privacy/redacted support
+preview/export and platform-specific signed-update controls remain available.
+Graph-only/demo/Design/reset-scenario controls are not production destinations;
+the obsolete duplicate PR Inbox presentation is removed, not its source rules.
+Optional Notifications remains a secondary entry with separate consent, host,
+credential and removal policy; it never borrows the primary `gh` session.
+
+For focused source checks, run `pnpm run typecheck` and
+`pnpm --filter git-stacks exec tsx --test tests/collaboration.test.ts`.
+The storage cases in `tests/review.test.ts` cover composer reopening, receipt-owned
+retirement, newer edits, account/base separation and corrupt-journal preservation.
+Use the production `#/app` gallery consumer for navigation/form intent, not as proof
+of Git/provider/native success. Native IPC/titlebar/drag, manual assistive technology,
+live-provider and performance acceptance require their documented dedicated checks;
+a fixture roundtrip is not their substitute.
 
 ## GitHub sign-in
 
@@ -2043,6 +2135,8 @@ Held CLI reads cannot replace newer provider status. Notifications keep their
 independent credential ownership, fence late host-scoped answers, and complete
 enable → credential save → inbox read before dismissing authorization. Captured
 operation progress is checked against its provider authority, not an inspection key.
+Workflow dialogs use that same captured authority unchanged, so reopening merge
+or publication recovery shares the shell's journal and progress-event cache.
 
 ### v5 workbench foundation and matched visual evidence
 

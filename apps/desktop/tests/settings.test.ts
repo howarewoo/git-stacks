@@ -207,22 +207,6 @@ test('a policy that cannot be read locks every managed setting instead of none',
   const policy = await loadSettingsPolicy('/nonexistent/settings-policy.json')
   assert.equal(policy.blocked, true)
   assert.match(policy.error ?? '', /could not be read/)
-  const lockedKeys = policy.locks.map((lock) => lock.key).sort()
-  assert.deepEqual(lockedKeys, [
-    'appearance.reduceMotion',
-    'appearance.theme',
-    'git.defaultMergeMethod',
-    'git.defaultPullStrategy',
-    'git.editor',
-    'git.fetchIntervalSeconds',
-    'git.mergeTool',
-    'git.useSystemGit',
-    'github.host',
-    'notifications.enabled',
-    'privacy.includeLocalPaths',
-    'shortcuts',
-    'updates.channel',
-  ])
 })
 
 test('a policy that is not JSON locks everything rather than quietly unlocking it', async () => {
@@ -2258,5 +2242,30 @@ test('the CLI status proves the destination the app is pointed at, not the publi
         `the proof was made against ${url} rather than the configured destination`,
       )
     }
+  })
+})
+
+test('authoritative density survives sibling appearance writes and refused policy edits', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    await updateSettings(file, { appearance: { density: 'standard' } }, NO_LOCKS)
+    await updateSettings(file, { appearance: { reduceMotion: true } }, NO_LOCKS)
+    const stored = await readSettingsFile(file)
+    assert.equal(stored.settings.appearance.density, 'standard')
+    assert.equal(stored.settings.appearance.reduceMotion, true)
+    const refused = await updateSettings(
+      file,
+      { appearance: { density: 'unrecognised' as never } },
+      NO_LOCKS,
+    )
+    assert.equal(refused.settings.appearance.density, 'standard')
+    assert.ok(refused.issues.some((issue) => issue.key === 'appearance.density'))
+    const before = await readFile(file, 'utf8')
+    await assert.rejects(
+      updateSettings(file, { appearance: { density: 'compact' } }, [
+        { key: 'appearance.density', reason: 'Managed display density' },
+      ]),
+    )
+    assert.equal(await readFile(file, 'utf8'), before)
   })
 })

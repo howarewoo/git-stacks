@@ -158,8 +158,8 @@ export function isPullRequestInboxGroupId(value: unknown): value is PullRequestI
   return typeof value === 'string' && (GROUP_IDS as readonly string[]).includes(value)
 }
 
-export function pullRequestInboxGroupLabel(id: PullRequestInboxGroupId): string {
-  return GROUP_LABEL[id]
+export function pullRequestInboxGroupLabel(id: PullRequestInboxGroupId | 'all'): string {
+  return id === 'all' ? 'All attention' : GROUP_LABEL[id]
 }
 
 export function inboxGroupOverlapsAllowed(
@@ -236,6 +236,9 @@ export interface PullRequestInboxItem extends Omit<PullRequest, 'reviewDecision'
   changeSize?: PullRequestInboxCount
   unresolvedThreads?: PullRequestInboxCount
   groups: PullRequestInboxGroupId[]
+  /** Last confirmed review in this account's existing durable journal, never an inferred baseline. */
+  reviewBaseline?: { headOid: string; reviewedAt: string }
+  reviewBaselineState?: 'known' | 'none-recorded' | 'unavailable'
 }
 
 export interface PullRequestInboxMembershipOptions {
@@ -322,7 +325,7 @@ export interface PullRequestInboxCriteria {
 }
 
 export interface PullRequestInboxFilter {
-  group: PullRequestInboxGroupId
+  group: PullRequestInboxGroupId | 'all'
   search: string
   criteria: PullRequestInboxCriteria
   sort: PullRequestInboxSort
@@ -374,12 +377,19 @@ export function evaluatePullRequestInbox(
   item: PullRequestInboxItem,
   filter: PullRequestInboxFilter,
 ): 'match' | 'excluded' | 'unknown' {
-  if (!item.groups.includes(filter.group) || !matchesPullRequestInboxSearch(item, filter.search))
+  if (
+    (filter.group !== 'all' && !item.groups.includes(filter.group)) ||
+    !matchesPullRequestInboxSearch(item, filter.search)
+  )
     return 'excluded'
   const c = filter.criteria
   const matches = (values: readonly string[] | undefined, value: string) =>
     !values?.length || values.some((candidate) => candidate.toLowerCase() === value.toLowerCase())
-  if (!matches(c.repositories, item.repository)) return 'excluded'
+  if (
+    !matches(c.repositories, item.repository) &&
+    !matches(c.repositories, `${item.host}/${item.repository}`)
+  )
+    return 'excluded'
   const lifecycle =
     item.state === 'MERGED'
       ? 'merged'
@@ -952,7 +962,7 @@ export function parsePullRequestInboxFilterDraft(
   const record = value as Record<string, unknown>
   const name = record.name
   if (typeof name !== 'string' || !name.trim() || name.length > MAX_NAME_LENGTH) return null
-  if (!isPullRequestInboxGroupId(record.group)) return null
+  if (record.group !== 'all' && !isPullRequestInboxGroupId(record.group)) return null
   const search = record.search ?? ''
   if (typeof search !== 'string' || search.length > MAX_SEARCH_LENGTH) return null
   const criteria = parseInboxCriteria(record.criteria)

@@ -12,6 +12,7 @@ import type {
 } from '@git-stacks/shared/worktree-inventory'
 import type { RepositorySnapshot } from '@git-stacks/shared/types'
 import {
+  LIST_PAGE_SIZE,
   WORKTREE_READ_CONCURRENCY,
   WORKTREE_REFRESH_SETTLE_MS,
   MAX_COMMAND_BYTES,
@@ -527,6 +528,10 @@ export class WorktreeInventoryService {
     private publish: (value: WorktreeInventory) => void,
     private onLocalChange?: (registeredPaths: readonly string[]) => void,
     private watcherOptions: Pick<RepositoryWatcherOptions, 'recursiveWatch'> = {},
+    private readDependencies?: (
+      root: string,
+      signal: AbortSignal,
+    ) => Promise<Pick<RepositorySnapshot, 'branches' | 'limits'>>,
   ) {}
 
   current(): WorktreeInventory {
@@ -600,11 +605,26 @@ export class WorktreeInventoryService {
     snapshot: Pick<RepositorySnapshot, 'path' | 'remoteUrl' | 'pullRequests' | 'remote'>,
   ): void {
     const origin = parseRemote(snapshot.remoteUrl)
-    if (origin)
-      this.remote.set(
-        inventoryId('remote', origin.host.toLowerCase(), origin.fullName.toLowerCase()),
-        { path: snapshot.path, pullRequests: snapshot.pullRequests, remote: snapshot.remote },
-      )
+    if (origin) {
+      const id = inventoryId('remote', origin.host.toLowerCase(), origin.fullName.toLowerCase())
+      const previous = this.remote.get(id)
+      const previousAt = previous?.remote?.fetchedAt
+      const incomingAt = snapshot.remote?.fetchedAt
+      // A live list/Attention read may be newer than a reused repository snapshot.
+      if (!previousAt || (incomingAt && Date.parse(incomingAt) >= Date.parse(previousAt))) {
+        const known = new Set(snapshot.pullRequests.map((pr) => pr.number))
+        const historical = (previous?.pullRequests ?? [])
+          .filter((pr) => pr.state !== 'OPEN' && !known.has(pr.number))
+          .slice(0, LIST_PAGE_SIZE)
+        this.remote.set(id, {
+          path: snapshot.path,
+          pullRequests: [...snapshot.pullRequests, ...historical],
+          remote: snapshot.remote,
+        })
+      } else if (snapshot.remote && snapshot.remote.state !== 'fresh') {
+        this.remote.set(id, { ...previous!, remote: { ...snapshot.remote, fetchedAt: previousAt } })
+      }
+    }
     this.state = {
       ...this.state,
       generation: ++this.publication,
@@ -615,6 +635,32 @@ export class WorktreeInventoryService {
       }),
     }
     this.publish(this.state)
+  }
+  adoptPullRequestPage(
+    repositoryId: string,
+    pullRequests: RepositorySnapshot['pullRequests'],
+    originUrl: string,
+    observedAt: string,
+  ): void {
+    const repository = this.state.repositories.find((repo) => repo.identity.id === repositoryId)
+    if (!repository?.remote) return
+    const existing = this.remote.get(repository.remote.id)
+    const merged = new Map(pullRequests.map((pr) => [pr.number, pr]))
+    for (const pr of existing?.pullRequests ?? [])
+      if (!merged.has(pr.number)) merged.set(pr.number, pr)
+    this.adoptRemote({
+      path: repository.registeredPaths[0],
+      remoteUrl: originUrl,
+      pullRequests: [...merged.values()].slice(0, LIST_PAGE_SIZE),
+      remote: {
+        state: 'stale',
+        fetchedAt: observedAt,
+        checkedAt: observedAt,
+        detail: 'A bounded PR page is observed, not a complete repository readiness read.',
+        rateLimitReset: null,
+        pendingMutations: existing?.remote?.pendingMutations ?? [],
+      },
+    })
   }
   private joinRemote(repository: RepositoryInventory): void {
     repository.pullRequests = []
@@ -717,7 +763,33 @@ export class WorktreeInventoryService {
                   return null
                 }
               }
-              return discoverWorktrees(root, signal)
+              const discovered = await discoverWorktrees(root, signal)
+              if (this.readDependencies) {
+                try {
+                  const snapshot = await this.readDependencies(root, signal)
+                  const byRef = new Map(snapshot.branches.map((branch) => [branch.ref, branch]))
+                  for (const ref of discovered.refs) {
+                    const branch = byRef.get(ref.name)
+                    ref.needsRestack =
+                      branch?.needsRestack === true
+                        ? true
+                        : branch && !snapshot.limits.branchesSkipped
+                          ? false
+                          : null
+                  }
+                  discovered.dependenciesRead = {
+                    state: snapshot.limits.branchesSkipped ? 'partial' : 'complete',
+                    observedAt: new Date().toISOString(),
+                    error: snapshot.limits.branchesSkipped
+                      ? 'Dependency analysis bounded; omitted branches remain unknown.'
+                      : null,
+                  }
+                } catch (error) {
+                  if (isCancelled(error)) throw error
+                  discovered.dependenciesRead = failure(error)
+                }
+              }
+              return discovered
             },
             combined,
           )

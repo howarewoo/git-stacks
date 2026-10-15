@@ -80,6 +80,71 @@ export function sameReviewDraft(left: ReviewDraft, right: ReviewDraft): boolean 
   )
 }
 
+/** A minted overall decision/summary version, stable across reopen and receipt recovery. */
+export interface ReviewComposition {
+  id: string
+  summary: string
+  event: ReviewEvent
+}
+
+export interface ReviewComposerDraft extends ReviewComposition {
+  replies: Array<{ threadId: string; body: string }>
+}
+
+export function parseReviewComposerDraft(value: unknown): ReviewComposerDraft | null {
+  if (typeof value !== 'object' || value === null) return null
+  const input = value as Record<string, unknown>
+  if (
+    typeof input.id !== 'string' ||
+    !input.id ||
+    input.id.length > 128 ||
+    typeof input.summary !== 'string' ||
+    input.summary.length > 65536 ||
+    !REVIEW_EVENTS.includes(input.event as ReviewEvent) ||
+    !Array.isArray(input.replies) ||
+    input.replies.length > 200
+  )
+    return null
+  const replies: ReviewComposerDraft['replies'] = []
+  const ids = new Set<string>()
+  for (const row of input.replies) {
+    if (
+      typeof row !== 'object' ||
+      row === null ||
+      typeof row.threadId !== 'string' ||
+      !row.threadId ||
+      row.threadId.length > 512 ||
+      ids.has(row.threadId) ||
+      typeof row.body !== 'string' ||
+      row.body.length > 65536
+    )
+      return null
+    ids.add(row.threadId)
+    replies.push({ threadId: row.threadId, body: row.body })
+  }
+  return { id: input.id, summary: input.summary, event: input.event as ReviewEvent, replies }
+}
+
+export function sameReviewComposerDraft(
+  a: ReviewComposerDraft | undefined,
+  b: ReviewComposerDraft | undefined,
+): boolean {
+  if (a === b) return true
+  if (
+    !a ||
+    !b ||
+    a.id !== b.id ||
+    a.summary !== b.summary ||
+    a.event !== b.event ||
+    a.replies.length !== b.replies.length
+  )
+    return false
+  return a.replies.every(
+    (reply, index) =>
+      reply.threadId === b.replies[index].threadId && reply.body === b.replies[index].body,
+  )
+}
+
 /**
  * The pending drafts of one pull request, recorded beside the repository.
  *
@@ -107,6 +172,7 @@ export interface ReviewDraftRecord {
   /** The comparison the drafts' line numbers were read at. */
   comparison: ReviewComparison
   drafts: ReviewDraft[]
+  composer?: ReviewComposerDraft
   updatedAt: string
 }
 
@@ -233,6 +299,8 @@ export interface ReviewMutationResult {
    * reviewer's own unsent work is not thrown away by a recovery.
    */
   delivered?: string[]
+  /** Recovery certifies original words, never a newer edited composition. */
+  deliveredComposition?: ReviewComposition
 }
 
 const SIDE_NAMES: Record<ReviewSide, string> = { base: 'base', head: 'head' }
@@ -301,6 +369,8 @@ export interface ReviewThreadRead {
 export interface ReviewSubmission extends ReviewOwner {
   event: ReviewEvent
   body: string
+  /** Mandatory for non-inline intent; inline draft identities retain their overlap rules. */
+  compositionId?: string
   drafts: ReviewDraft[]
   /** The comparison the diff on screen was read at. */
   comparison: ReviewComparison
@@ -325,6 +395,7 @@ export interface ReviewUncertainWrite {
   kind: 'review' | 'reply' | 'resolve'
   /** The words of the write, so a reconciliation can recognise it on GitHub. */
   summary: string
+  compositionId?: string
   /** Exact reply payload; absent historical evidence cannot certify reply delivery. */
   authoredReplyBody?: string
   /** A reply's thread, or a review's head commit — where to look for it. */
@@ -510,6 +581,7 @@ export function withReviewDraft(
     viewer: record?.viewer ?? '',
     comparison,
     drafts: drafts.length > REVIEW_DRAFTS_MAX ? drafts.slice(0, REVIEW_DRAFTS_MAX) : drafts,
+    ...(record?.composer ? { composer: record.composer } : {}),
     updatedAt: now,
   }
 }

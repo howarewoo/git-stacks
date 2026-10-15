@@ -92,6 +92,12 @@ const desktop: DesktopAPI = {
   reconciliationPreview: (stackKey) =>
     ipcRenderer.invoke('repository:reconciliation-preview', stackKey),
   pullRequest: (number) => ipcRenderer.invoke('repository:pull-request', number),
+  pullRequestPage: (state, cursor) =>
+    ipcRenderer.invoke('repository:pull-request-page', state, cursor),
+  pullRequestLayer: (sourceNumber, memberNumber, requestId) =>
+    ipcRenderer.invoke('repository:pull-request-layer', sourceNumber, memberNumber, requestId),
+  pullRequestAction: (action, expectedScope) =>
+    ipcRenderer.invoke('repository:pull-request-action', action, expectedScope),
   searchIssues: (query, requestId) =>
     ipcRenderer.invoke('repository:search-issues', query, requestId),
   pullRequestIssueLinks: (number) =>

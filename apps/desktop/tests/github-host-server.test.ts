@@ -529,7 +529,12 @@ test('every review read and write reaches the host the origin names, not the pub
     async pinCredential() {
       // This provider double has one immutable viewer and credential. Binding
       // its own methods retains the host-routing observations for both legs.
-      return { rest: this.rest.bind(this), graphql: this.graphql.bind(this) }
+      return {
+        authority: await this.credentialAuthority(),
+        rest: this.rest.bind(this),
+        graphql: this.graphql.bind(this),
+        paginate: this.paginate.bind(this),
+      }
     },
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
       calls.push(`${label}:${request.path ?? ''}`)
