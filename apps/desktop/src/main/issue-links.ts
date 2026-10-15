@@ -268,14 +268,16 @@ export async function removeLocalContextualIssueLink(
   if (!current.includes(issueNumber)) {
     return false
   }
-  const remaining = current.filter((n) => n !== issueNumber)
   const key = `${CONFIG_PREFIX}${prNumber}.relatedissue`
   await validateInspectionDispatch()
-  await runGit(repoPath, ['config', '--local', '--unset-all', key])
-  for (const num of remaining) {
-    await validateInspectionDispatch()
-    await runGit(repoPath, ['config', '--local', '--add', key, String(num)])
-  }
+  await runGit(repoPath, [
+    'config',
+    '--local',
+    '--fixed-value',
+    '--unset-all',
+    key,
+    String(issueNumber),
+  ])
   return true
 }
 

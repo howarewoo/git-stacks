@@ -191,6 +191,7 @@ import {
   GITHUB_DOTCOM_HOST,
   githubHostContext,
   hostTransport,
+  withGitHubCredentialSession,
   probeGitHubHost,
   remoteHostContext,
   type GitHubHostContext,
@@ -1006,6 +1007,7 @@ async function repositoryOperationScope(
   const status = service ? await service.read() : null
   if (
     signal?.aborted ||
+    (inspectionAuthority.getStore()?.root ?? activeRepository) !== root ||
     generation !== hostGeneration ||
     (host && service !== gitHubCliStatusService(host.host))
   )
@@ -1827,151 +1829,155 @@ function installHandlers() {
       )
     // Claim synchronously before awaiting a lane; a duplicate event cannot spend this approval twice.
     operationCaptures.delete(token)
-    return scheduler.mutate(captured.repositoryId, () =>
-      withCapturedOperationLock(captured, () =>
-        inGitRuntime(async () => {
-          if (
-            !inventory
-              .current()
-              .repositories.some(
-                (repo) =>
-                  repo.identity.id === captured.repositoryId &&
-                  repo.registeredPaths.some((path) =>
-                    recents.some((recent) => recent.path === path),
-                  ),
-              )
-          )
-            throw new Error('The original repository registration was retired.')
-          const scope = await repositoryOperationScope(captured.worktreePath)
-          await revalidateOperation(captured, scope)
-          if (action.type === 'operationSkip' && !captured.operationCommitOid)
-            throw new Error('The exact paused commit is unavailable; no Skip was dispatched.')
-          await validateRecordedRecovery(captured, action)
-          const selectedRef = captured.refs.find((ref) => ref.id === captured.context.refId)?.ref
-          if (isStackAction(action))
-            assertStackActionTarget(
-              action,
-              selectedRef,
-              inventory
-                .current()
-                .repositories.find((repo) => repo.identity.id === captured.repositoryId)
-                ?.pullRequests.find((pr) => pr.id === captured.context.pullRequestId)?.number,
-            )
-          else if (
-            ['renameBranch', 'setUpstream', 'deleteBranch', 'deleteRemoteBranch'].includes(
-              action.type,
-            ) &&
-            'ref' in action &&
-            action.ref !== selectedRef
-          )
-            throw new Error('This action does not address the captured qualified ref.')
-          if (action.type === 'push' || action.type === 'forcePush') {
-            const tree = (await discoverWorktrees(captured.worktreePath)).worktrees.find(
-              (tree) => tree.id === captured.worktreeId,
-            )
-            if (!selectedRef || tree?.refId !== captured.context.refId)
-              throw new Error(
-                'Ordinary publication must address the explicit owning checkout; use Publish for other selected layers.',
-              )
-          }
-          if (action.type === 'deleteBranches' || action.type === 'deleteRemoteBranches') {
+    return inspectionReads.mutate(captured.repositoryId, () =>
+      scheduler.mutate(captured.repositoryId, () =>
+        withCapturedOperationLock(captured, () =>
+          inGitRuntime(async () => {
             if (
-              !Array.isArray(action.branches) ||
-              !action.branches.length ||
-              action.branches.some(
-                (target) =>
-                  !captured.refs.some(
-                    (ref) => ref.ref === target.ref && ref.oid === target.expectedOid,
-                  ),
-              )
+              !inventory
+                .current()
+                .repositories.some(
+                  (repo) =>
+                    repo.identity.id === captured.repositoryId &&
+                    repo.registeredPaths.some((path) =>
+                      recents.some((recent) => recent.path === path),
+                    ),
+                )
             )
-              throw new Error(
-                'Every batch target and tip must belong to this captured common repository.',
+              throw new Error('The original repository registration was retired.')
+            const scope = await repositoryOperationScope(captured.worktreePath)
+            await revalidateOperation(captured, scope)
+            if (action.type === 'operationSkip' && !captured.operationCommitOid)
+              throw new Error('The exact paused commit is unavailable; no Skip was dispatched.')
+            await validateRecordedRecovery(captured, action)
+            const selectedRef = captured.refs.find((ref) => ref.id === captured.context.refId)?.ref
+            if (isStackAction(action))
+              assertStackActionTarget(
+                action,
+                selectedRef,
+                inventory
+                  .current()
+                  .repositories.find((repo) => repo.identity.id === captured.repositoryId)
+                  ?.pullRequests.find((pr) => pr.id === captured.context.pullRequestId)?.number,
               )
-          }
-          const origin = await getConfigValue(captured.worktreePath, 'remote.origin.url')
-          const capturedGeneration = hostGeneration
-          const capturedHost = remoteHostContext(parseRemote(scope.remoteUrl))
-          const capturedService = capturedHost ? gitHubCliStatusService(capturedHost.host) : null
-          const privateCredential = capturedHost
-            ? await hostCredentialAuthority(capturedHost.host)
-            : null
-          const validate = createOperationEffectValidator(
-            captured,
-            scope,
-            createOperationProviderValidator(captured.worktreePath, async (currentOrigin) => {
-              const currentCredential = capturedHost
-                ? await hostCredentialAuthority(capturedHost.host)
-                : null
+            else if (
+              ['renameBranch', 'setUpstream', 'deleteBranch', 'deleteRemoteBranch'].includes(
+                action.type,
+              ) &&
+              'ref' in action &&
+              action.ref !== selectedRef
+            )
+              throw new Error('This action does not address the captured qualified ref.')
+            if (action.type === 'push' || action.type === 'forcePush') {
+              const tree = (await discoverWorktrees(captured.worktreePath)).worktrees.find(
+                (tree) => tree.id === captured.worktreeId,
+              )
+              if (!selectedRef || tree?.refId !== captured.context.refId)
+                throw new Error(
+                  'Ordinary publication must address the explicit owning checkout; use Publish for other selected layers.',
+                )
+            }
+            if (action.type === 'deleteBranches' || action.type === 'deleteRemoteBranches') {
               if (
-                capturedGeneration !== hostGeneration ||
-                (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host)) ||
-                !sameOperationScope(scope, {
-                  repositoryPath: captured.worktreePath,
-                  remoteUrl: currentOrigin,
-                  authority: cliAuthority(
-                    capturedHost?.host ?? null,
-                    capturedService?.current() ?? null,
-                  ),
-                }) ||
-                privateCredential !== currentCredential
+                !Array.isArray(action.branches) ||
+                !action.branches.length ||
+                action.branches.some(
+                  (target) =>
+                    !captured.refs.some(
+                      (ref) => ref.ref === target.ref && ref.oid === target.expectedOid,
+                    ),
+                )
               )
                 throw new Error(
-                  'Original origin or private provider authority changed at the effect boundary; no further step is authorized.',
+                  'Every batch target and tip must belong to this captured common repository.',
                 )
-            }),
-          )
-          const settings = (await readSettingsFile(settingsFile())).settings
-          return progressOwner.run(scope, () =>
-            runRecordedOperation(captured, action, () =>
-              inspectionAuthority.run(
-                {
-                  root: captured.worktreePath,
-                  context: captured.context,
-                  signal: new AbortController().signal,
-                  origin,
-                  originUrl: scope.remoteUrl,
-                  validate,
-                  validateEffect: validate,
-                },
-                async () => {
-                  if (action.type !== 'unregisterWorktrees')
-                    return runAction(captured.worktreePath, action, settings.git.mergeTool)
-                  if (
-                    !Array.isArray(action.worktreeIds) ||
-                    !action.worktreeIds.length ||
-                    new Set(action.worktreeIds).size !== action.worktreeIds.length
+            }
+            const origin = await getConfigValue(captured.worktreePath, 'remote.origin.url')
+            const capturedGeneration = hostGeneration
+            const capturedHost = remoteHostContext(parseRemote(scope.remoteUrl))
+            const capturedService = capturedHost ? gitHubCliStatusService(capturedHost.host) : null
+            const privateCredential = capturedHost
+              ? await hostCredentialAuthority(capturedHost.host)
+              : null
+            const validate = createOperationEffectValidator(
+              captured,
+              scope,
+              createOperationProviderValidator(captured.worktreePath, async (currentOrigin) => {
+                const currentCredential = capturedHost
+                  ? await hostCredentialAuthority(capturedHost.host)
+                  : null
+                if (
+                  capturedGeneration !== hostGeneration ||
+                  (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host)) ||
+                  !sameOperationScope(scope, {
+                    repositoryPath: captured.worktreePath,
+                    remoteUrl: currentOrigin,
+                    authority: cliAuthority(
+                      capturedHost?.host ?? null,
+                      capturedService?.current() ?? null,
+                    ),
+                  }) ||
+                  privateCredential !== currentCredential
+                )
+                  throw new Error(
+                    'Original origin or private provider authority changed at the effect boundary; no further step is authorized.',
                   )
-                    throw new Error(
-                      'Choose the exact registered worktree subset without duplicates.',
+              }),
+            )
+            const settings = (await readSettingsFile(settingsFile())).settings
+            return progressOwner.run(scope, () =>
+              runRecordedOperation(captured, action, () =>
+                inspectionAuthority.run(
+                  {
+                    root: captured.worktreePath,
+                    context: captured.context,
+                    signal: new AbortController().signal,
+                    origin,
+                    originUrl: scope.remoteUrl,
+                    validate,
+                    validateEffect: validate,
+                  },
+                  async () => {
+                    if (action.type !== 'unregisterWorktrees')
+                      return runAction(captured.worktreePath, action, settings.git.mergeTool)
+                    if (
+                      !Array.isArray(action.worktreeIds) ||
+                      !action.worktreeIds.length ||
+                      new Set(action.worktreeIds).size !== action.worktreeIds.length
                     )
-                  const fresh = await discoverWorktrees(captured.worktreePath)
-                  const paths = action.worktreeIds.map((id) => {
-                    const tree = fresh.worktrees.find((tree) => tree.id === id)
-                    if (!tree || !recents.some((recent) => recent.path === tree.path))
                       throw new Error(
-                        'A selected registration is unavailable; no subset was silently trimmed.',
+                        'Choose the exact registered worktree subset without duplicates.',
                       )
-                    return tree.path
-                  })
-                  const write = registrationWrite.then(async () => {
-                    const next = recents.filter((recent) => !paths.includes(recent.path))
-                    await validate()
-                    await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), { mode: 0o600 })
-                    await validate()
-                    await rename(`${settingsPath()}.tmp`, settingsPath())
-                    setRecents(next)
-                  })
-                  registrationWrite = write.catch(() => {})
-                  await write
-                  return {
-                    message: `Removed only ${paths.join(', ')} from app registration. Files, worktree administration, branches and PRs remain unchanged.`,
-                  }
-                },
+                    const fresh = await discoverWorktrees(captured.worktreePath)
+                    const paths = action.worktreeIds.map((id) => {
+                      const tree = fresh.worktrees.find((tree) => tree.id === id)
+                      if (!tree || !recents.some((recent) => recent.path === tree.path))
+                        throw new Error(
+                          'A selected registration is unavailable; no subset was silently trimmed.',
+                        )
+                      return tree.path
+                    })
+                    const write = registrationWrite.then(async () => {
+                      const next = recents.filter((recent) => !paths.includes(recent.path))
+                      await validate()
+                      await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), {
+                        mode: 0o600,
+                      })
+                      await validate()
+                      await rename(`${settingsPath()}.tmp`, settingsPath())
+                      setRecents(next)
+                    })
+                    registrationWrite = write.catch(() => {})
+                    await write
+                    return {
+                      message: `Removed only ${paths.join(', ')} from app registration. Files, worktree administration, branches and PRs remain unchanged.`,
+                    }
+                  },
+                ),
               ),
-            ),
-          )
-        }),
+            )
+          }),
+        ),
       ),
     )
   })
@@ -2051,17 +2057,7 @@ function installHandlers() {
           ? 'github'
           : 'local'
       const controller = readKeys.claim(context.repositoryId, requestId, purpose)
-      return (
-        [
-          'pullRequestAction',
-          'reviewSubmit',
-          'reviewReply',
-          'reviewSetResolved',
-          'rerunPullRequestCheck',
-        ].includes(operation)
-          ? inspectionReads
-          : scheduler
-      )
+      return inspectionReads
         .read(
           context.repositoryId,
           async (signal) => {
@@ -2081,8 +2077,13 @@ function installHandlers() {
             if (context.worktreeId && (!known || known.missing || known.kind === 'bare'))
               throw new Error('Choose an existing worktree for local inspection.')
             const root = known?.path ?? registered.registeredPaths[0]
-            if (known && (await realpath(known.path)) !== known.path)
-              throw new Error('The selected physical worktree path changed.')
+            if (known) {
+              if ((await realpath(known.path)) !== known.path)
+                throw new Error('The selected physical worktree path changed.')
+              await inGitRuntime(() =>
+                adoptionPaths(inventory.current(), [known.id], scheduler, signal),
+              )
+            }
             const fresh = await inGitRuntime(() => discoverWorktrees(root, signal))
             if (
               fresh.identity.id !== context.repositoryId ||
@@ -2520,8 +2521,11 @@ function installHandlers() {
               throw new Error(
                 'The captured provider or account changed; no pull request management was sent.',
               )
+            const host = remoteHostContext(parseRemote(current.remoteUrl))
+            if (!host) throw new Error('A captured GitHub host is required.')
+            const session = await gitHubCliStatusService(host.host).pinCredential(current.authority)
             await validateInspectionDispatch()
-            return runAction(root, action)
+            return withGitHubCredentialSession(host, session, () => runAction(root, action))
           }),
         )
       } catch (error) {
@@ -2530,10 +2534,54 @@ function installHandlers() {
       }
     },
   )
-  ipcMain.handle('repository:action', () => {
-    throw new Error(
-      'Ambient selection is not mutation authority. Capture an explicit worktree and execute its approved operation.',
-    )
+  ipcMain.handle('repository:action', async (event, action: GitAction) => {
+    const root = repository()
+    const generation = hostGeneration
+    try {
+      const authority = inventory
+        .current()
+        .repositories.find(
+          (repo) =>
+            repo.registeredPaths.includes(root) ||
+            repo.worktrees.some((tree) => tree.path === root),
+        )?.identity.id
+      // A mutation claims the repository lane: background reads end first, so a
+      // stage or a commit never waits on a network that is not answering.
+      // Claim inspection first: its adoption checks still need the background lane
+      // while unwinding, so taking that lane first would deadlock nested reads.
+      return await inspectionReads.mutate(authority ?? root, () =>
+        scheduler.mutate(root, () =>
+          // Naming the repository is the admission check: a switch can complete
+          // while this action waited for the background reads it ends, and an
+          // action must never apply to the repository the window already left.
+          operations.write(
+            () =>
+              inGitRuntime(async () => {
+                // The merge tool configured in Settings wins over Git's own
+                // configuration for the one action that consults it.
+                const settings = (await readSettingsFile(settingsFile())).settings
+                if (
+                  action.type === 'submitStack' ||
+                  action.type === 'submitStackRetry' ||
+                  action.type === 'submitStackDismiss' ||
+                  action.type === 'executeStack'
+                ) {
+                  const scope = await repositoryOperationScope(root)
+                  if (generation !== hostGeneration) throw new CommandCancelled()
+                  return progressOwner.run(scope, () =>
+                    runAction(root, action, settings.git.mergeTool),
+                  )
+                }
+                return runAction(root, action, settings.git.mergeTool)
+              }),
+            root,
+          ),
+        ),
+      )
+    } catch (error) {
+      sync.recordMutationFailure(action, error)
+      throw error
+    }
   })
   ipcMain.handle('repository:worktree-lifecycle-preview', (_event, request: unknown) => {
     const context = inspectionAuthority.getStore()?.context

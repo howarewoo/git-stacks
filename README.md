@@ -639,8 +639,9 @@ readback. Body saves carry the original expected body; a changed published body 
 compared in-app while authored input stays intact. Related issue links are local
 context, separate from provider-body closing keywords, which require a confirmed
 default branch and permission. Each contextual config mutation rechecks the captured
-directory/ref/origin after awaits, including each unlink rewrite; cancellation and
-refusal propagate rather than being treated as an already-unset success.
+directory/ref/origin after awaits. Unlink removes only the selected issue value in
+one atomic config mutation; cancellation and refusal propagate rather than being
+treated as an already-unset success.
 
 **Needs attention** works across registered repositories with none selected.
 One qualified provider PR counts once even with several reasons; clone-local
@@ -653,6 +654,8 @@ Existing settings own saved filters. Attention reuses the existing bounded,
 cancelled, account-retired Inbox reader while visible/focused; no second poller,
 authentication flow or queue database exists. Browsing never acknowledges
 Notifications or dismisses a Git safety blocker.
+Saved provider repository criteria retain the Inbox model's case-insensitive
+matching for both `owner/repository` and `host/owner/repository` identities.
 
 **Activity** retains bounded observed transitions and confirmed app outcomes in
 the current app session. The first observation is a baseline, not historic activity;
@@ -1880,9 +1883,11 @@ failure is an unmet runtime prerequisite, not permission to use `--no-sandbox`
 or `ELECTRON_DISABLE_SANDBOX` to report passing startup/interaction budgets.
 
 It writes `benchmarks/latest.json` and appends one line per run to
-`benchmarks/trend.jsonl` (capped at the last 200 runs). The `Performance budgets`
-workflow runs the harness on every push and pull request, uploads `benchmarks/`
-as an artifact, and fails the job when any measurement exceeds its budget.
+`benchmarks/trend.jsonl` (capped at the last 200 runs). The `budgets` job in the
+`Accessibility checks` workflow runs the full harness on main pushes and manual
+dispatches, and on PRs affecting desktop production code or shared dependencies. It uploads `benchmarks/`
+as an artifact and fails when any measurement exceeds its budget. See
+[Selective CI](#selective-ci) for the conservative selection policy.
 
 ### What the hot paths no longer do
 
@@ -2021,9 +2026,118 @@ These are the extreme cases the app states rather than hanging or crashing on.
   suite stays a deferred development gate whose evidence is the owner's manual run;
   it is not an authentication-policy waiver.
 
+## Selective CI
+
+The `Accessibility checks` workflow uses one selection job for the stable
+`automated`, `design`, and `budgets` checks. Pull requests select affected workloads;
+every `main` push and `workflow_dispatch` runs the full existing nonvisual renderer,
+catalog, typecheck, keyboard/component unit, and performance workloads. Visual
+baselines remain a separate macOS-only local check.
+
+`scripts/ci/select-checks.mjs` is the single dependency-free Node 24/Git policy.
+The workflow runs its permanent regression suite once before dependency installation,
+browser/display setup, or builds; `pnpm test` also runs those regressions.
+The PR comparison is `merge-base(event base SHA, event head SHA)..event head SHA`,
+not the merge checkout's parent diff. Selection fetches complete checkout history
+and explicitly requests both event commits. Checks test the normal Actions checkout
+(usually GitHub's PR merge revision); the job summary records that checkout and
+the PR head used for selection. Missing history/commits, unknown paths, and common
+workspace/build/test tooling conservatively select all relevant checks.
+NUL-delimited Git status parsing includes both rename/copy paths and deleted paths;
+a selected spec absent from the tested checkout expands to the full renderer.
+
+Node bootstrap explicitly disables `setup-node`'s automatic package-manager cache:
+the selector and skip-validation jobs need Node before pnpm is installed.
+Enabled workloads install the pinned pnpm afterward; no package-manager or
+dependency setup runs solely to validate an intentional skip.
+
+- Root documentation and `.agents/skills/` standalone skills skip expensive checks.
+- `apps/design/` selects catalog validation, tokens, build and tests plus the
+  design workspace typecheck, without desktop browser/performance work.
+- `packages/ui/` and `packages/shared/` select both consumers, desktop performance,
+  full typechecking and the existing keyboard/component units. Contracts including
+  `types.ts` are intentionally broad.
+- Audited renderer boundaries are Notification Center (including Settings, CLI and
+  form consumers), inventory query hook, review conversation/diff (including sibling
+  workspace/navigation/snapshot consumers and conversation's CLI surface), and PR
+  Inbox (including Review entry).
+  They select existing feature specs plus accessibility, keyboard, safety and
+  motion/zoom suites. The maps follow bounded production imports and cross-feature
+  behavior; changing their consumers requires reviewing these maps.
+- Shell/global styles, shared controls, unknown renderer modules and common
+  fixture/helper infrastructure select the full nonvisual renderer. Changed/new
+  nonvisual specs select themselves; visual/other fixture paths expand broadly.
+- All desktop production code and shared dependencies retain performance coverage:
+  the benchmark measures actual startup/interaction and imports renderer diff/list
+  code. Runtime/main/preload/native/build/performance tooling is never excluded.
+  Desktop source/config/test changes independently retain desktop typechecking;
+  `build:gallery` alone does not typecheck desktop. Renderer and shared UI changes
+  conservatively retain both existing tree-navigation and component unit suites.
+
+Mixed changes form a union; broad rules override narrow files. Plans distinguish
+`skip`, `files`, and `full`, with reasons shown in logs and summaries. Stable jobs
+fail on failed/cancelled/missing selection, malformed/inconsistent outputs or any
+selected step failure; only a validated intentional skip succeeds. File arguments
+are passed directly to Playwright (escaped as native file expressions, never shell
+interpolation), with `@visual` excluded and the root Turbo gallery prerequisite
+preserved. Discovery and a nonempty execution reporter reject zero runnable tests
+or a selected file that unexpectedly executes none, including runtime skips of
+tests that were runnable at discovery. Intentional static skips remain excluded.
+Existing timeouts, assertions, retry policy, Electron sandbox and failure/budget
+artifacts are unchanged.
+
+Reproduce selection and checks from the repository root:
+
+```sh
+node --test scripts/ci/select-checks.test.mjs
+CI_BASE_SHA=<base-commit> CI_HEAD_SHA=<head-commit> node scripts/ci/select-checks.mjs
+# Inspect the JSON plan, then pass that JSON as CHECK_PLAN:
+SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs typecheck
+SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs unit
+GALLERY_PORT=5327 SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs desktop
+SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs catalog
+pnpm run build
+# With a supported display and Electron sandbox, for selected performance:
+pnpm run bench:performance
+```
+
+The selector regressions run before the root `pnpm test` workspace suites. Pure
+policy/parser/file-expression checks and disposable Git/CLI checks are portable;
+Git fixtures use Windows-valid filenames while pure parsing retains newline cases.
+Only the runner's extensionless shebang stand-in is skipped on Windows, where
+direct executable lookup cannot run that POSIX fixture. Disposable CLI environments
+clear inherited Actions event/output variables; a separate payload regression proves
+that real PR payload commits take precedence over explicit fallback SHAs.
+
+Selective coverage does not establish that full suites fit runner deadlines.
+Linux x64 local evidence is not proof for the Ubuntu ARM Actions worker; actual
+hosted-runner completion remains a separate gate. Do not raise timeouts, add
+retries, drop assertions or disable the sandbox to conceal stalls.
+
 ## Renderer verification
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
+
+The application fixtures exercise the current workbench shell: Branches & worktrees,
+Pull requests, Needs attention, and Activity. Full Review starts from a qualified PR;
+committed history and Notifications open in dialogs. Renderer helpers wait for the
+restored surface's heading, not the retired repository toolbar. Legacy graph-camera
+and removed mutation-control assertions are not contracts for this shell.
+
+Review return preserves the originating filter, selection, scroll and keyboard focus.
+Readonly navigation keeps the qualified Review mounted, preserving its pane and
+verified draft baseline; a retired provider owner cannot retain private metadata.
+Branch filters accept displayed PR numbers with or without the `#` prefix.
+Explicitly captured operations keep their scoped publication and merge journal
+subscriptions alive when recovery is closed or another inspection surface is active.
+Saved-filter full-list writes wait while their store read is pending, even when
+a previous list is cached.
+Held CLI reads cannot replace newer provider status. Notifications keep their
+independent credential ownership, fence late host-scoped answers, and complete
+enable → credential save → inbox read before dismissing authorization. Captured
+operation progress is checked against its provider authority, not an inspection key.
+Workflow dialogs use that same captured authority unchanged, so reopening merge
+or publication recovery shares the shell's journal and progress-event cache.
 
 ### v5 workbench foundation and matched visual evidence
 
@@ -2663,7 +2777,7 @@ catalog controls and desktop Git workflows are not globally restyled.
 
 The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, Typeset and the owned Iconography foundation, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing.
  
-Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
+Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×1600, device scale 1, en-US, UTC, system fonts and reduced motion. The taller viewport contains the Git composition and Button specimens, avoiding Chromium's beyond-viewport capture and its transient 1×1 responsive reflow. Behavioral tests retain 1280×900 unless a scenario explicitly exercises another size. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
 When verifying the Card specimen, inspect both cards against the catalog canvas
 in light and dark themes, then follow Inspect composition to the local Git

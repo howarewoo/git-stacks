@@ -2133,6 +2133,7 @@ test('direct credential sessions retain supplied material for validation and dis
   const options = { token: 'fixture-a', fetch: fetchDouble }
   const transport = new DirectGitHubTransport(options)
   const credential = await transport.pinCredential()
+  assert.equal(credential.authority, await transport.credentialAuthority())
   const checked = await credential.graphql<{ viewer: { login: string } }>(
     'query { viewer { login } }',
   )
@@ -2378,6 +2379,26 @@ test('a 304 is replayed for a conditional read and refused for a mutation that d
     'the conditional read was answered from the stored body without a second download',
   )
   assert.equal(captured.length, 3, 'each of the three refused or accepted answers was one request')
+})
+
+test('pinned CLI pagination retains the session authority across every page', async () => {
+  const env = { GH_TOKEN: 'fixture-a' }
+  let page = 0
+  const transport = new GhGitHubTransport({
+    env,
+    run: async () => {
+      page += 1
+      env.GH_TOKEN = 'fixture-b'
+      return page === 1
+        ? 'HTTP/1.1 200 OK\r\nLink: <https://api.github.com/items?page=2>; rel="next"\r\n\r\n[1]'
+        : 'HTTP/1.1 200 OK\r\n\r\n[2]'
+    },
+  })
+  const session = await transport.pinCredential()
+  assert.deepEqual(await session.paginate({ path: 'items' }), [1, 2])
+  assert.equal(page, 2)
+  assert.equal(lastGitHubRateLimitFor('github.com').authority, session.authority)
+  assert.notEqual(await transport.credentialAuthority(), session.authority)
 })
 
 test('pinned Gh review REST refuses 304 delivery and preserves conditional read replay', async () => {

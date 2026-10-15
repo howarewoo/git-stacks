@@ -339,12 +339,22 @@ function graphPullRequest(
   state: GitHubFixtureState,
   pr: GitHubFixtureState['prs'][number],
   withBody: boolean,
+  viewer: string,
 ) {
   const merged = pr.state === 'MERGED'
   const value: Record<string, unknown> = {
     id: `PR_${pr.number}`,
     number: pr.number,
     title: pr.title,
+    viewerCanUpdate:
+      viewer === (pr.author ?? state.currentUser) ||
+      ['ADMIN', 'MAINTAIN', 'WRITE'].includes(
+        viewerPermissionOf(
+          state,
+          repositoryEntry(state, `${state.repository.owner}/${state.repository.name}`),
+          viewer,
+        ),
+      ),
     url: pr.url,
     headRefName: pr.head,
     headRefOid: currentHead(state, pr),
@@ -2145,6 +2155,9 @@ function handleGraphql(
 ): RestResult {
   const query = String(body.query || '')
   const variables = (body.variables ?? {}) as Record<string, unknown>
+  if (query === 'query UserCurrent { viewer { login } }') {
+    return { status: 200, body: { data: { viewer: { login: viewer } } } }
+  }
   // A document that names a repository is served by that repository: its own pull
   // requests, its own threads, and the role this account actually holds there. Answering
   // from the fixture's own repository would make a fork, or a repository this account
@@ -2326,14 +2339,14 @@ function handleGraphql(
     const pr = findPr(state, Number(variables.number))
     return {
       status: 200,
-      body: { data: { repository: { pullRequest: graphPullRequest(state, pr, true) } } },
+      body: { data: { repository: { pullRequest: graphPullRequest(state, pr, true, viewer) } } },
     }
   }
   const after = typeof variables.endCursor === 'string' ? variables.endCursor : null
   const open = state.prs.filter((pr) => pr.state === 'OPEN')
   // One PR per page so a second request with a cursor proves the loop advanced.
   const start = after ? Number(after.replace('cursor:', '')) : 0
-  const nodes = open.slice(start, start + 1).map((pr) => graphPullRequest(state, pr, false))
+  const nodes = open.slice(start, start + 1).map((pr) => graphPullRequest(state, pr, false, viewer))
   const next = start + 1
   return {
     status: 200,

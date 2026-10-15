@@ -4,7 +4,6 @@ import { WorktreeLifecycleDialog } from './components/worktree-lifecycle-dialog'
 import { ReconciliationPanel } from './components/reconciliation-view'
 import * as React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { subscribeOperationProgress } from './lib/operation-progress'
 import {
   Button,
   Command,
@@ -104,6 +103,7 @@ import {
   type OperationScope,
   type OperationCapture,
 } from '@git-stacks/shared/operation-scope'
+import { useOperationProgressProjection } from './lib/operation-progress'
 import './components/workbench-shell.css'
 
 const providerReadQuery = (query: { queryKey: readonly unknown[] }) =>
@@ -150,8 +150,14 @@ function App() {
   const [credentialOpen, setCredentialOpen] = React.useState(false)
   const [notificationInbox, setNotificationInbox] = React.useState<NotificationInbox | null>(null)
   const [notificationBusy, setNotificationBusy] = React.useState(false)
-  const notificationLock = React.useRef(false)
+  const [notificationError, setNotificationError] = React.useState<string | null>(null)
+  const [credentialError, setCredentialError] = React.useState<string | null>(null)
   const notificationGeneration = React.useRef(0)
+  const notificationLock = React.useRef(false)
+  const cliReadGeneration = React.useRef(0)
+  const [cliRefreshing, setCliRefreshing] = React.useState(false)
+  const originFocus = React.useRef<string | null>(null)
+  const restoreOriginFocus = React.useRef(false)
   const [attentionFilter, setAttentionFilter] = React.useState<PullRequestInboxFilter>({
     group: 'all',
     search: '',
@@ -198,10 +204,6 @@ function App() {
   const operationCapture = React.useRef<OperationCapture | null>(null)
   const [approvedCapture, setApprovedCapture] = React.useState<OperationCapture | null>(null)
   const approvedScope = approvedCapture?.scope
-  React.useEffect(() => {
-    if (!approvedScope) return
-    return subscribeOperationProgress(desktop, client, approvedScope)
-  }, [desktop, client, approvedScope])
   const [lifecycle, setLifecycle] = React.useState<{
     repositoryId: string
     mode: 'create' | 'remove'
@@ -227,6 +229,7 @@ function App() {
     error?: string
   } | null>(null)
   const navigationGeneration = React.useRef(0)
+  const inspectionNavigation = React.useRef(0)
   const retirePendingReview = React.useCallback(() => {
     navigationGeneration.current += 1
     setPendingReview(null)
@@ -298,6 +301,24 @@ function App() {
   const publishedContext: InspectionContext = React.useMemo(
     () => ({ repositoryId, refId: context.refId, pullRequestId: selected?.pullRequest?.id }),
     [repositoryId, context.refId, selected?.pullRequest?.id],
+  )
+  const reviewBranch = snapshot.branches.find(
+    (branch) =>
+      branch.repositoryId === repositoryId && branch.pullRequest?.id === current.pullRequestId,
+  )
+  const reviewContext: InspectionContext = React.useMemo(
+    () => ({
+      repositoryId,
+      refId: repository?.refs.some((ref) => ref.id === reviewBranch?.id)
+        ? reviewBranch?.id
+        : undefined,
+      pullRequestId: reviewBranch?.pullRequest?.id,
+    }),
+    [repositoryId, reviewBranch?.id, reviewBranch?.pullRequest?.id],
+  )
+  const reviewAPI = React.useMemo(
+    () => (desktop ? inspectionAPI(desktop, reviewContext) : null),
+    [desktop, reviewContext],
   )
   const published = React.useMemo(
     () => (desktop ? inspectionAPI(desktop, publishedContext) : null),
@@ -393,10 +414,15 @@ function App() {
     JSON.stringify(operationContext.current),
     operationScope.current?.authority,
   ])
+  useOperationProgressProjection(operationApi ?? null, approvedScope ?? null)
   const refRevision = repository?.refs.map((ref) => `${ref.id}:${ref.oid}`).join('\0')
-  const repoRead = useQuery({
+  const repoRead = useQuery<RepositorySnapshot>({
     queryKey: ['inspection-repository', repositoryId, refRevision, providerEpoch],
     enabled: Boolean(desktop?.inspect && repositoryId),
+    placeholderData: (previous, query) =>
+      query?.queryKey[1] === repositoryId && query.queryKey[3] === providerEpoch
+        ? previous
+        : undefined,
     queryFn: async ({ signal }) => {
       const id = `repository-inspection-${crypto.randomUUID()}`
       const cancel = () => void desktop!.inspect!({ repositoryId }, 'cancel', [id])
@@ -516,8 +542,10 @@ function App() {
         patch.selectedId !== undefined ||
         patch.surface !== undefined ||
         patch.pullRequestId !== undefined
-      )
+      ) {
+        inspectionNavigation.current += 1
         retirePendingReview()
+      }
       setMemory((previous) => {
         const next = { ...previous, [id]: { ...(previous[id] ?? emptyRepositoryMemory), ...patch } }
         const refusal = saveWorkbenchMemory(next)
@@ -579,7 +607,11 @@ function App() {
       const next = value.identity ?? ''
       const previous = principalIdentities.current.get(value.host)
       principalIdentities.current.set(value.host, next)
-      if (value.host === configuredHost.current) setCliStatus(value)
+      if (value.host === configuredHost.current) {
+        cliReadGeneration.current += 1
+        setCliRefreshing(false)
+        setCliStatus(value)
+      }
       if (previous === undefined || previous === next) return
       providerGeneration.current += 1
       setProviderEpoch((epoch) => epoch + 1)
@@ -643,7 +675,7 @@ function App() {
       window.removeEventListener('blur', report)
       document.removeEventListener('visibilitychange', report)
     }
-  }, [desktop, client])
+  }, [desktop, client, settings?.github.host])
   React.useEffect(() => {
     if (!settings) return
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -663,6 +695,15 @@ function App() {
     return () => media.removeEventListener('change', apply)
   }, [settings])
   React.useEffect(() => {
+    notificationGeneration.current += 1
+    notificationLock.current = false
+    setNotificationBusy(false)
+    setNotificationInbox(null)
+    setNotificationError(null)
+    setCredentialError(null)
+    setCredentialOpen(false)
+  }, [settings?.github.host])
+  React.useEffect(() => {
     if (!desktop || !notificationOpen) return
     let retired = false
     notificationGeneration.current += 1
@@ -671,14 +712,14 @@ function App() {
       if (!retired && value.host === settings?.github.host) setNotificationInbox(value)
     }
     if (!desktop.notifications) {
-      setError('The Notifications service is unavailable in this runtime.')
+      setNotificationError('The Notifications service is unavailable in this runtime.')
       return
     }
     void desktop
       .notifications()
       .then(accept)
       .catch((value) => {
-        if (!retired) setError(String(value))
+        if (!retired) setNotificationError(String(value))
       })
     const stop = desktop.onNotifications?.(accept)
     return () => {
@@ -697,6 +738,7 @@ function App() {
   }, [globalQuery, paletteOpen])
   const navigate = React.useCallback(
     (id: string, nextSurface?: WorkbenchSurface, selectedId?: string, worktreeId?: string) => {
+      inspectionNavigation.current += 1
       setRepositoryId(id)
       const saved = memoryRef.current[id] ?? emptyRepositoryMemory
       const next = nextSurface ?? saved.surface
@@ -729,6 +771,12 @@ function App() {
       const origin = current.reviewOrigin ?? returnOrigin
       if (origin) return origin
     }
+    originFocus.current =
+      surface !== 'branches' && document.activeElement instanceof HTMLElement
+        ? (document.activeElement.getAttribute('aria-label') ??
+          document.activeElement.textContent?.trim() ??
+          null)
+        : null
     return {
       repositoryId,
       surface: surface === 'review' ? 'branches' : surface,
@@ -740,6 +788,7 @@ function App() {
   }
   const returnToOrigin = () => {
     const origin = surface === 'review' ? (current.reviewOrigin ?? returnOrigin) : returnOrigin
+    restoreOriginFocus.current = true
     if (origin) {
       navigate(origin.repositoryId, origin.surface)
       const saved = memoryRef.current[origin.repositoryId] ?? emptyRepositoryMemory
@@ -755,10 +804,26 @@ function App() {
       })
     } else {
       retirePendingReview()
+      inspectionNavigation.current += 1
       setSurface('branches')
     }
     setReturnOrigin(null)
   }
+  React.useLayoutEffect(() => {
+    if (!restoreOriginFocus.current || surface === 'review') return
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('[role="main"] button')]
+    const target =
+      buttons.find(
+        (button) =>
+          originFocus.current !== null &&
+          (button.getAttribute('aria-label') === originFocus.current ||
+            button.textContent?.trim() === originFocus.current),
+      ) ?? document.querySelector<HTMLButtonElement>('.bw-branch-name[aria-pressed="true"]')
+    if (target) {
+      target.focus({ preventScroll: true })
+      restoreOriginFocus.current = false
+    }
+  }, [surface, current.selectedId, inbox.data])
   const reviewSelected = () => {
     if (!selected?.pullRequest) {
       setError('Select a source-qualified pull request to review.')
@@ -905,6 +970,7 @@ function App() {
     }
     if (action === 'attention' || action === 'activity') {
       retirePendingReview()
+      inspectionNavigation.current += 1
       setReturnOrigin(captureOrigin())
       setSurface(action)
       setRepositoryId('')
@@ -1442,9 +1508,13 @@ function App() {
       }
       if (id === 'search.focus') {
         event.preventDefault()
-        document
-          .querySelector<HTMLInputElement>('[aria-label="Filter branches by branch, PR, or path"]')
-          ?.focus()
+        if (surface === 'attention') attentionSearch.current?.focus()
+        else
+          document
+            .querySelector<HTMLInputElement>(
+              '[aria-label="Filter branches by branch, PR, or path"]',
+            )
+            ?.focus()
       }
     }
     window.addEventListener('keydown', keydown)
@@ -1522,22 +1592,34 @@ function App() {
       (item) => !query || `${item.label} ${item.context}`.toLowerCase().includes(query),
     )
   }, [snapshot, globalQuery, inventory.data])
-  const notify = async (operation: () => Promise<NotificationInbox> | undefined) => {
+  const notify = async (
+    operation: (current: () => boolean) => Promise<NotificationInbox | undefined> | undefined,
+    credential = false,
+  ) => {
     if (notificationLock.current) return
-    notificationLock.current = true
-    const generation = notificationGeneration.current
+    const generation = ++notificationGeneration.current
     const host = configuredHost.current
+    const current = () =>
+      generation === notificationGeneration.current && host === configuredHost.current
+    notificationLock.current = true
     setNotificationBusy(true)
+    const setFailure = credential ? setCredentialError : setNotificationError
+    setFailure(null)
     try {
-      const value = await operation()
+      const value = await operation(current)
+      if (!current()) return
       if (!value) throw new Error('This Notifications action is unavailable in this runtime.')
-      if (generation === notificationGeneration.current && value.host === host)
+      if (value.host === host) {
         setNotificationInbox(value)
+        if (credential) setCredentialOpen(false)
+      }
     } catch (value) {
-      if (generation === notificationGeneration.current) setError(String(value))
+      if (current()) setFailure(String(value))
     } finally {
-      notificationLock.current = false
-      setNotificationBusy(false)
+      if (current()) {
+        notificationLock.current = false
+        setNotificationBusy(false)
+      }
     }
   }
   const openCollaborationTarget = (target: CollaborationTarget) => {
@@ -1630,49 +1712,45 @@ function App() {
         : null,
     })),
   }
-  const mainPanel =
-    surface === 'branches' ? undefined : (
-      <WorkbenchPane
-        className="bw-main wb-secondary"
-        aria-label={surface}
-        header={
-          surface === 'review' &&
-          selected?.pullRequest?.id === current.pullRequestId &&
-          selected?.pullRequest &&
-          published &&
-          repository &&
-          repoRead.data ? undefined : (
-            <div className="bw-panel-head">
-              <h1>
-                {surface === 'pull-requests'
-                  ? 'Pull requests'
-                  : surface === 'attention'
-                    ? 'Needs attention'
-                    : surface === 'activity'
-                      ? 'Activity'
-                      : 'Review'}
-              </h1>
-              {returnOrigin || current.reviewOrigin ? (
-                <Button size="sm" variant="ghost" onClick={returnToOrigin}>
-                  Return to origin
-                </Button>
-              ) : null}
-            </div>
-          )
-        }
+  const mainPanel = (
+    <WorkbenchPane
+      className="bw-main wb-secondary"
+      style={surface === 'branches' ? { display: 'none' } : undefined}
+      role="main"
+      aria-label={surface}
+      header={
+        surface === 'review' || surface === 'branches' ? null : (
+          <div className="bw-panel-head">
+            <h1>
+              {surface === 'pull-requests'
+                ? 'Pull requests'
+                : surface === 'attention'
+                  ? 'Needs attention'
+                  : 'Activity'}
+            </h1>
+            {returnOrigin || current.reviewOrigin ? (
+              <Button size="sm" variant="ghost" onClick={returnToOrigin}>
+                Return to origin
+              </Button>
+            ) : null}
+          </div>
+        )
+      }
+    >
+      <div
+        className="h-full min-h-0 min-w-0 flex-1"
+        style={surface === 'review' ? undefined : { display: 'none' }}
       >
-        {surface === 'review' &&
-        selected?.pullRequest?.id === current.pullRequestId &&
-        selected?.pullRequest &&
-        published &&
+        {(surface === 'review' || current.pullRequestId !== null) &&
+        reviewAPI &&
         repository &&
         repoRead.data ? (
           <ReviewView
             authority={authority}
-            desktop={published}
+            desktop={reviewAPI}
             pullRequests={repository.pullRequests.map((pr) => pr.facts)}
             stackContext={repoRead.data}
-            number={selected.pullRequest.number}
+            number={reviewBranch?.pullRequest?.number ?? null}
             onSelectNumber={(number) => {
               const row = snapshot.branches.find(
                 (branch) =>
@@ -1686,7 +1764,7 @@ function App() {
                 })
                 return
               }
-              const sourceNumber = selected.pullRequest?.number
+              const sourceNumber = reviewBranch?.pullRequest?.number
               if (!desktop || !sourceNumber) {
                 setError('Captured native-layer reading is unavailable.')
                 return
@@ -1694,7 +1772,7 @@ function App() {
               const generation = providerGeneration.current
               const api = inspectionAPI(
                 desktop,
-                publishedContext,
+                reviewContext,
                 () => providerGeneration.current === generation,
               )
               if (!api.pullRequestLayer) {
@@ -1750,12 +1828,11 @@ function App() {
                 )
             }}
             commands={reviewCommands}
-            busy={false}
+            busy={operationBusy}
             observedPullRequest={
-              repository.pullRequests.find((pr) => pr.id === selected.pullRequest?.id)?.facts ??
-              null
+              repository.pullRequests.find((pr) => pr.id === current.pullRequestId)?.facts ?? null
             }
-            returnContext={{ label: 'Return to original context', onReturn: returnToOrigin }}
+            returnContext={{ label: 'Return to origin', onReturn: returnToOrigin }}
           />
         ) : surface === 'review' ? (
           <p>
@@ -1766,7 +1843,10 @@ function App() {
               : 'Choose a qualified pull request.'}{' '}
             {repoRead.error?.message}
           </p>
-        ) : surface === 'attention' ? (
+        ) : null}
+      </div>
+      {surface !== 'review' &&
+        (surface === 'attention' ? (
           <AttentionView
             items={attention}
             repositories={[
@@ -1785,8 +1865,8 @@ function App() {
             onFilterChange={setAttentionFilter}
             state={attentionState}
             onStateChange={setAttentionState}
-            savedFilters={inboxFilters.data ?? []}
-            saving={savingInboxFilters || !inboxFilters.isSuccess}
+            savedFilters={inboxFilters.isFetching ? [] : (inboxFilters.data ?? [])}
+            saving={savingInboxFilters || !inboxFilters.isSuccess || inboxFilters.isFetching}
             searchInputRef={attentionSearch}
             onRefresh={() => void inbox.refetch()}
             onOpen={openCollaborationTarget}
@@ -1868,9 +1948,9 @@ function App() {
             }}
             error={prPage.error?.message ?? repoRead.error?.message ?? null}
           />
-        )}
-      </WorkbenchPane>
-    )
+        ))}
+    </WorkbenchPane>
+  )
   if (!desktop)
     return (
       <main>
@@ -1915,6 +1995,11 @@ function App() {
         }}
         surface={surface}
         mainPanel={mainPanel}
+        topUtilities={
+          <Button variant="ghost" onClick={() => setNotificationOpen(true)}>
+            Notifications
+          </Button>
+        }
         capabilities={{
           search: {},
           settings: {},
@@ -1972,9 +2057,6 @@ function App() {
             </Button>
             <Button variant="ghost" onClick={() => setDiscoveryOpen(true)}>
               Find and clone
-            </Button>
-            <Button variant="ghost" onClick={() => setNotificationOpen(true)}>
-              Notifications
             </Button>
             <Button variant="ghost" onClick={() => setRecoveryOpen(true)}>
               Operations and recovery
@@ -2403,12 +2485,25 @@ function App() {
         onOpenChange={setSettingsOpen}
         desktop={desktop}
         cliStatus={cliStatus}
-        onReadCliStatus={() =>
+        cliRefreshing={cliRefreshing}
+        onReadCliStatus={() => {
+          const generation = ++cliReadGeneration.current
+          const host = configuredHost.current
+          setCliRefreshing(true)
           void desktop
             .githubCliStatus?.()
-            .then(setCliStatus)
-            .catch((value) => setError(String(value)))
-        }
+            .then((value) => {
+              if (generation === cliReadGeneration.current && host === configuredHost.current)
+                setCliStatus(value)
+            })
+            .catch((value) => {
+              if (generation === cliReadGeneration.current && host === configuredHost.current)
+                setError(String(value))
+            })
+            .finally(() => {
+              if (generation === cliReadGeneration.current) setCliRefreshing(false)
+            })
+        }}
         onSettingsChange={setSettings}
         shortcutBindings={bindings}
         onShortcutBindingsChange={setBindings}
@@ -2431,9 +2526,9 @@ function App() {
           <DialogTitle>Optional Notifications</DialogTitle>
           <NotificationCenterView
             busy={notificationBusy}
-            error={error}
+            error={notificationError}
             inbox={notificationInbox}
-            onDismissError={() => setError(null)}
+            onDismissError={() => setNotificationError(null)}
             onRefresh={() => void notify(() => desktop.refreshNotifications?.())}
             onMarkAllRead={() => void notify(() => desktop.markNotificationRead?.('all'))}
             onMarkRead={(id) => void notify(() => desktop.markNotificationRead?.(id))}
@@ -2445,13 +2540,14 @@ function App() {
               if (thread.url)
                 void desktop.openExternal(thread.url).catch((value) => setError(String(value)))
             }}
-            onOpenCredential={() => setCredentialOpen(true)}
+            onOpenCredential={() => {
+              setCredentialError(null)
+              setCredentialOpen(true)
+            }}
             onRemoveCredential={() =>
-              void notify(async () => {
-                if (!desktop.removeNotificationCredential || !desktop.notifications)
-                  throw new Error('Notifications credential removal is unavailable.')
-                await desktop.removeNotificationCredential()
-                return desktop.notifications()
+              void notify(async (current) => {
+                await desktop.removeNotificationCredential?.()
+                if (current()) return desktop.notifications?.()
               })
             }
           />
@@ -2651,17 +2747,22 @@ function App() {
         open={credentialOpen}
         onOpenChange={setCredentialOpen}
         busy={notificationBusy}
-        error={error}
+        error={credentialError}
         host={settings?.github.host ?? cliStatus?.host ?? 'github.com'}
         login={notificationInbox?.login ?? null}
         onSubmit={(token, consent, host) => {
-          void notify(async () => {
-            if (!desktop.saveNotificationCredential || !desktop.notifications)
+          void notify(async (current) => {
+            if (
+              !desktop.updateSettings ||
+              !desktop.saveNotificationCredential ||
+              !desktop.notifications
+            )
               throw new Error('Notifications credential storage is unavailable.')
+            await desktop.updateSettings({ notifications: { enabled: true } })
+            if (!current()) return
             await desktop.saveNotificationCredential(token, consent, host)
-            if (host === configuredHost.current) setCredentialOpen(false)
-            return desktop.notifications()
-          })
+            if (current()) return desktop.notifications()
+          }, true)
         }}
       />
       {nativeManagement &&

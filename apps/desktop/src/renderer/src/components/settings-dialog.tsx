@@ -80,6 +80,7 @@ export interface SettingsDialogProps {
     onUpdateStatus?: (listener: (status: UpdateStatus) => void) => () => void
   } | null
   cliStatus: GitHubCliStatus | null
+  cliRefreshing?: boolean
   /**
    * The one fenced read every surface asks for. Settings does not read the CLI
    * for itself: a second read would be a second answer, taken at a different
@@ -121,6 +122,7 @@ export function SettingsDialog({
   onOpenChange,
   desktop,
   cliStatus,
+  cliRefreshing = false,
   onReadCliStatus,
   onSettingsChange,
   shortcutBindings,
@@ -453,7 +455,7 @@ export function SettingsDialog({
             {section === 'cli' && settings ? (
               <GitHubCliStatusSection
                 onRefresh={() => void refreshCliStatus()}
-                refreshing={busy}
+                refreshing={cliRefreshing || busy}
                 status={cliStatus}
               />
             ) : null}

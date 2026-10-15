@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { canonicalHostName } from '@git-stacks/shared/host'
 import { isCancelled, type ParsedRemote } from './git-core'
 import { isRecord } from '@git-stacks/shared/guards'
@@ -10,6 +11,7 @@ import {
   githubApiVersion,
   githubTransportForHost,
   type GitHubTransport,
+  type GitHubCredentialSession,
 } from './github-transport'
 import type { GitHubCliStatus } from '@git-stacks/shared/types'
 import {
@@ -129,11 +131,45 @@ export function validateGitHubHostInput(value: unknown): GitHubHostInput {
   return { ok: true, host: port && port !== '443' ? `${host}:${port}` : host }
 }
 
+const credentialScope = new AsyncLocalStorage<{ host: string; transport: GitHubTransport }>()
+
+/** All provider calls in one management operation share the proven credential. */
+export function withGitHubCredentialSession<T>(
+  context: GitHubHostContext,
+  session: GitHubCredentialSession,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const base = hostTransport(context)
+  const transport: GitHubTransport = {
+    kind: base.kind,
+    destinationHost: base.destinationHost,
+    rest: session.rest,
+    graphql: session.graphql,
+    paginate: session.paginate,
+    credentialAuthority: async () => session.authority,
+    pinCredential: async () => session,
+    graphqlWithAuthority: async (query, variables, options) => ({
+      data: await session.graphql(query, variables, options),
+      authority: session.authority,
+    }),
+  }
+  return credentialScope.run({ host: canonicalHostName(context.host), transport }, operation)
+}
+
 /** The transport that speaks for one host, and for no other. */
 export function hostTransport(
   context: GitHubHostContext,
   env: NodeJS.ProcessEnv = process.env,
 ): GitHubTransport {
+  const scoped = credentialScope.getStore()
+  if (scoped) {
+    if (canonicalHostName(context.host) !== scoped.host)
+      throw new GitHubTransportError({
+        kind: 'unauthorized',
+        detail: 'The captured provider host changed; no request was sent.',
+      })
+    return scoped.transport
+  }
   // A host whose GraphQL endpoint is its REST base plus `/graphql` — github.com
   // is the only one — is left to the transports' own default, so nothing about
   // that host's requests changes. Only a host that serves GraphQL from a path

@@ -1981,7 +1981,12 @@ function threadDouble(options: DoubleOptions = {}): {
         // This provider's viewer is immutable. Bind the installed wrapper, not
         // the base fixture, so authority/origin and post-dispatch race hooks
         // still execute on the exact requests the consumer sends.
-        return { rest: this.rest.bind(this), graphql: this.graphql.bind(this) }
+        return {
+          authority: await this.credentialAuthority(),
+          rest: this.rest.bind(this),
+          graphql: this.graphql.bind(this),
+          paginate: this.paginate.bind(this),
+        }
       },
       async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
         if (request.signal?.aborted)
@@ -2979,7 +2984,12 @@ test('a write whose outcome GitHub never confirms is not replayed into a duplica
     },
     async pinCredential() {
       // This fixture always serves ada and counts the actual dispatched POST.
-      return { rest: this.rest.bind(this), graphql: this.graphql.bind(this) }
+      return {
+        authority: await this.credentialAuthority(),
+        rest: this.rest.bind(this),
+        graphql: this.graphql.bind(this),
+        paginate: this.paginate.bind(this),
+      }
     },
     async rest<T>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
       const path = request.path ?? ''

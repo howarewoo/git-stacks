@@ -432,7 +432,9 @@ export interface GitHubGraphqlOptions {
 }
 
 /** The only GitHub capability domain services may use; it never exposes a token or raw fetch. */
-export type GitHubCredentialSession = Pick<GitHubTransport, 'rest' | 'graphql'>
+export type GitHubCredentialSession = Pick<GitHubTransport, 'rest' | 'graphql' | 'paginate'> & {
+  readonly authority: string
+}
 
 export interface GitHubTransport {
   readonly kind: 'direct' | 'gh'
@@ -1025,8 +1027,10 @@ export class DirectGitHubTransport implements GitHubTransport {
       })
     const pinned = new DirectGitHubTransport({ ...this.options, token: access.token })
     return {
+      authority: pinned.requestAuthority,
       rest: pinned.rest.bind(pinned),
       graphql: pinned.graphql.bind(pinned),
+      paginate: pinned.paginate.bind(pinned),
     }
   }
 
@@ -1768,11 +1772,18 @@ export class GhGitHubTransport implements GitHubTransport {
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
+    return this.paginateRequest<T>(request)
+  }
+
+  private async paginateRequest<T>(
+    request: GitHubRestRequest,
+    snapshot?: GitHubCliSnapshot,
+  ): Promise<T[]> {
     const items: T[] = []
     let path: string | null = request.path
     const origin = new URL(this.apiUrl).origin
     for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
-      const response = await this.request<unknown>({ ...request, path })
+      const response = await this.request<unknown>({ ...request, path }, snapshot)
       // The response has already been recorded against this host. A publication
       // naming no host is process-wide: it would replace what another host, or
       // another account of this one, last reported.
@@ -1864,7 +1875,10 @@ export class GhGitHubTransport implements GitHubTransport {
         detail: `no GitHub CLI credential for ${this.destinationHost} could be pinned`,
       })
     return {
+      authority: snapshot.authority,
       rest: <T = unknown>(request: GitHubRestRequest) => this.restRequest<T>(request, snapshot),
+      paginate: <T = unknown>(request: GitHubRestRequest) =>
+        this.paginateRequest<T>(request, snapshot),
       graphql: async <T = Record<string, unknown>>(
         query: string,
         variables: Record<string, unknown> = {},

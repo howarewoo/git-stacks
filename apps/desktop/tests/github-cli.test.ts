@@ -25,11 +25,59 @@ import type {
   GitHubRestResponse,
 } from '../src/main/github-transport'
 import { GitHubTransportError } from '../src/main/github-transport'
+import { GhGitHubTransport } from '../src/main/github-transport'
+import { cliAuthority } from '@git-stacks/shared/operation-scope'
 import type { GitHubCliStatus } from '@git-stacks/shared/types'
 import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 
 const ENTERPRISE = 'ghe.example.com'
 const CONCURRENT = 'ghe.concurrent.example.com'
+
+test('guarded management pin compares the CLI snapshot with the private proof, not the login', async () => {
+  await withTempDir(async (dir) => {
+    const cli = await installControlledGh(
+      `const args = process.argv.slice(2)
+if (args[0] === '--version') process.stdout.write('gh version 2.62.0\\n')
+else process.stdout.write(${JSON.stringify(authJson(ENTERPRISE, [{ active: true, login: 'ada' }]))})`,
+      dir,
+    )
+    let token = 'fixture-a'
+    let providerCalls = 0
+    const transport = new GhGitHubTransport({
+      host: ENTERPRISE,
+      env: {},
+      run: async (args) => {
+        if (args[0] === 'auth') return token
+        providerCalls += 1
+        return 'HTTP/1.1 200 OK\r\n\r\n{"data":{"viewer":{"login":"ada"}}}'
+      },
+    })
+    const service = new GitHubCliStatusService(ENTERPRISE, {
+      env: { PATH: cli.path },
+      transport,
+    })
+    try {
+      const status = await service.read()
+      assert.equal(status.state, 'authenticated')
+      const captured = cliAuthority(ENTERPRISE, status)
+      const pinned = await service.pinCredential(captured)
+      assert.equal(pinned.authority, await transport.credentialAuthority())
+      const before = providerCalls
+      token = 'fixture-b'
+      await assert.rejects(service.pinCredential(captured), /captured provider or account changed/u)
+      assert.equal(providerCalls, before, 'replacement pin makes no provider request')
+      const replacement = await service.read()
+      assert.equal(replacement.login, status.login)
+      assert.notEqual(replacement.identity, status.identity)
+      await assert.rejects(service.pinCredential(captured), /captured provider or account changed/u)
+      await service.pinCredential(cliAuthority(ENTERPRISE, replacement))
+      service.retire()
+      await assert.rejects(service.pinCredential(cliAuthority(ENTERPRISE, replacement)))
+    } finally {
+      service.retire()
+    }
+  })
+})
 
 async function withTempDir<T>(body: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'git-stacks-cli-'))

@@ -8,14 +8,17 @@ test.beforeEach(async ({ page }) => {
 
 test('qualified chain/fork selection changes inspection without dispatch', async ({ page }) => {
   const refs = await page.locator('.bw-branch-name').allTextContents()
-  expect(refs.slice(0, 5)).toEqual([
-    'docs/worktree-workflows',
-    'feat/worktree-switcher',
-    'feat/stack-order',
-    'experiment/diff-layout',
-    'feat/worktree-registry',
-  ])
-  expect(refs[refs.length - 1]).toBe('main')
+  for (const [child, parent] of [
+    ['docs/worktree-workflows', 'feat/worktree-switcher'],
+    ['feat/worktree-switcher', 'feat/worktree-registry'],
+    ['feat/stack-order', 'feat/worktree-registry'],
+    ['experiment/diff-layout', 'feat/worktree-registry'],
+    ['feat/worktree-registry', 'main'],
+  ]) {
+    expect(refs).toContain(child)
+    expect(refs).toContain(parent)
+    expect(refs.indexOf(child)).toBeLessThan(refs.indexOf(parent))
+  }
   await page.getByRole('button', { name: 'feat/worktree-switcher', exact: true }).click()
   await expect(page.locator('.bw-inspector h2')).toHaveText('Keep context when switching worktrees')
   await expect(page.getByRole('dialog')).toHaveCount(0)
@@ -63,7 +66,9 @@ test('degraded local and provider facts remain unknown rather than clean or pass
   await expect(page.getByRole('button', { name: /All branches.*Unknown/ })).toBeVisible()
   await page.getByRole('button', { name: 'docs/worktree-workflows', exact: true }).click()
   await expect(page.locator('.bw-inspector')).toContainText('PR metadata unknown')
-  await expect(page.locator('.bw-pr-status').first()).toContainText('PR association unknown')
+  await expect(page.locator('.bw-lane-row.bw-selected .bw-pr-status')).toContainText(
+    'PR association unknown',
+  )
 })
 
 test('narrow inspector uses shared focus-managed sheet and Escape only dismisses inspection', async ({
@@ -88,26 +93,32 @@ test('filtered outline has ordinary Tab entry and moves focus without retargetin
   const filter = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
   await filter.fill('fix/parallel-refresh')
   const rows = page.locator('.bw-lane-row')
-  await expect(rows).toHaveCount(2)
+  await expect(rows).toHaveCount(3)
+  await expect(page.locator('.bw-lane-row.bw-selected')).toHaveAttribute(
+    'aria-label',
+    /Context: does not match current filter/,
+  )
   for (let attempt = 0; attempt < 12; attempt++) {
     await page.keyboard.press('Tab')
     if (await rows.first().evaluate((row) => row === document.activeElement)) break
   }
   await expect(rows.first()).toBeFocused()
   await page.keyboard.press('ArrowDown')
-  await expect(rows.last()).toBeFocused()
+  await expect(rows.nth(1)).toBeFocused()
   await expect(page.locator('.bw-inspector .bw-ref')).toHaveText('feat/worktree-registry')
   await page.keyboard.press('Home')
   await expect(rows.first()).toBeFocused()
   await page.keyboard.press('Tab')
-  await page.keyboard.press('Tab')
   await expect(
-    page.getByRole('button', { name: 'fix/parallel-refresh', exact: true }),
+    page.getByRole('button', { name: 'feat/worktree-registry', exact: true }),
   ).toBeFocused()
   await page.keyboard.press('ArrowDown')
-  await expect(rows.last()).toBeFocused()
+  await expect(rows.nth(1)).toBeFocused()
   await expect(page.locator('.bw-inspector .bw-ref')).toHaveText('feat/worktree-registry')
+  await page.keyboard.press('End')
+  await expect(rows.last()).toBeFocused()
   await page.keyboard.press('Home')
+  await page.keyboard.press('ArrowDown')
   await page.keyboard.press('Enter')
   await expect(page.locator('.bw-inspector .bw-ref')).toHaveText('fix/parallel-refresh')
   await expect(page.getByRole('dialog')).toHaveCount(0)

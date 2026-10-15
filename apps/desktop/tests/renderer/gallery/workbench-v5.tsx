@@ -13,6 +13,10 @@ import type {
   WorkbenchActionContext,
   WorkbenchCapabilities,
 } from '../../../src/renderer/src/components/branch-workbench-model'
+import {
+  initialWorkbenchView,
+  type WorkbenchViewState,
+} from '../../../src/renderer/src/components/branch-workbench-model'
 import { V5_REGISTRY_ID, V5_REPOSITORY_ID, workbenchV5Fixture } from '../fixtures/workbench-v5'
 
 const capabilities: WorkbenchCapabilities = Object.fromEntries(
@@ -44,12 +48,18 @@ export function WorkbenchV5Gallery() {
     context: WorkbenchActionContext
   } | null>(null)
   const [selectionMemory] = useState<Record<string, string | null>>({})
+  const [viewMemory, setViewMemory] = useState<Record<string, WorkbenchViewState>>({})
   return (
     <>
       <BranchWorkbench
+        key={repositoryId}
         snapshot={snapshot}
         repositoryId={repositoryId}
         selectedBranchId={selectedId}
+        viewState={viewMemory[repositoryId] ?? initialWorkbenchView}
+        onViewStateChange={(view) =>
+          setViewMemory((previous) => ({ ...previous, [repositoryId]: view }))
+        }
         capabilities={capabilities}
         onRepositoryChange={(id) => {
           selectionMemory[repositoryId] = selectedId
@@ -60,7 +70,17 @@ export function WorkbenchV5Gallery() {
               null,
           )
         }}
-        onSelectionChange={setSelectedId}
+        onSelectionChange={(id) => {
+          setSelectedId(id)
+          setViewMemory((previous) => ({
+            ...previous,
+            [repositoryId]: {
+              ...(previous[repositoryId] ?? initialWorkbenchView),
+              tab: 'overview',
+              worktreeId: null,
+            },
+          }))
+        }}
         onAction={(action, context) => setIntent({ action, context })}
       />
       <Dialog

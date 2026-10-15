@@ -39,6 +39,7 @@ const requestedScenario =
 // the same way the preload script provides it in the packaged application.
 const control = installFixtureControl({
   scenario: requestedScenario,
+  inventoryConsumer: () => routeFromHash(window.location.hash) === 'inventory',
   onScenarioChange: (name) => {
     const search = new URLSearchParams(window.location.search)
     search.set('scenario', name)

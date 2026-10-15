@@ -16,6 +16,7 @@ export function useWorktreeInventory(
   const query = useQuery<WorktreeInventory, Error, WorktreeInventory | undefined>({
     queryKey: key,
     enabled: Boolean(api.worktreeInventory) && subscribed === api,
+    placeholderData: (previous) => previous,
     // A remounted observer must hear main before exposing cached credential-owned facts.
     select: (value) =>
       subscribed !== api || generation.current < 0 || value.generation < generation.current
