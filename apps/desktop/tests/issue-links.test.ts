@@ -312,6 +312,20 @@ test('local contextual links are stored and removed idempotently in local git co
   })
 })
 
+test('local contextual unlinking removes all exact matches without rewriting unrelated values', async () => {
+  await withHarness(async (harness) => {
+    const key = 'gitstacks.pr.7.relatedissue'
+    for (const value of ['10', '101', '110', '101', '0102', 'invalid']) {
+      git(harness, ['config', '--local', '--add', key, value])
+    }
+
+    assert.equal(await removeLocalContextualIssueLink(harness.repo, 7, 101), true)
+    assert.equal(git(harness, ['config', '--local', '--get-all', key]), '10\n110\n0102\ninvalid')
+    assert.equal(await removeLocalContextualIssueLink(harness.repo, 7, 101), false)
+    assert.equal(git(harness, ['config', '--local', '--get-all', key]), '10\n110\n0102\ninvalid')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Integration tests: Issue search (open and closed issues, offline fallback)
 // ---------------------------------------------------------------------------
@@ -797,14 +811,13 @@ test('captured contextual unlinking propagates cancellation before its unset ins
   })
 })
 
-test('captured contextual unlinking fences each rewrite after a head retirement between mutation steps', async () => {
+test('captured contextual unlinking preserves all links when the head retires before removal', async () => {
   await withHarness(async (harness) => {
     await addLocalContextualIssueLink(harness.repo, 7, 101)
     await addLocalContextualIssueLink(harness.repo, 7, 102)
     await addLocalContextualIssueLink(harness.repo, 7, 103)
     const head = git(harness, ['rev-parse', 'HEAD'])
     const controller = new AbortController()
-    let calls = 0
     let enter!: () => void
     let release!: () => void
     const entered = new Promise<void>((resolve) => {
@@ -821,11 +834,8 @@ test('captured contextual unlinking fences each rewrite after a head retirement 
         origin: null,
         originUrl: null,
         validate: async () => {
-          calls += 1
-          if (calls === 2) {
-            enter()
-            await paused
-          }
+          enter()
+          await paused
           if (git(harness, ['rev-parse', 'HEAD']) !== head)
             throw new Error('The captured head was retired.')
         },
@@ -840,8 +850,8 @@ test('captured contextual unlinking fences each rewrite after a head retirement 
     assert.equal(await readFile(join(harness.repo, '.git', 'config'), 'utf8'), afterRetirement)
     assert.deepEqual(
       await readLocalContextualIssueLinks(harness.repo, 7),
-      [],
-      'the already completed unset is not followed by writes under a retired capture',
+      [101, 102, 103],
+      'retirement prevents removal and leaves unrelated links intact',
     )
   })
 })

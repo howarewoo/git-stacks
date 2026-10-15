@@ -174,6 +174,7 @@ import {
   GITHUB_DOTCOM_HOST,
   githubHostContext,
   hostTransport,
+  withGitHubCredentialSession,
   probeGitHubHost,
   remoteHostContext,
   type GitHubHostContext,
@@ -2175,8 +2176,11 @@ function installHandlers() {
               throw new Error(
                 'The captured provider or account changed; no pull request management was sent.',
               )
+            const host = remoteHostContext(parseRemote(current.remoteUrl))
+            if (!host) throw new Error('A captured GitHub host is required.')
+            const session = await gitHubCliStatusService(host.host).pinCredential(current.authority)
             await validateInspectionDispatch()
-            return runAction(root, action)
+            return withGitHubCredentialSession(host, session, () => runAction(root, action))
           }),
         )
       } catch (error) {
