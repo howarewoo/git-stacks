@@ -9,7 +9,6 @@ import {
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { scenarios } from './fixtures/scenarios'
-import { restackPreview } from '../fixtures/workflow-scenarios'
 import {
   openManagePullRequestDialog,
   openRestackDialog,
@@ -41,7 +40,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
     expect(await getDispatchedActions(page)).toEqual([
       {
         type: 'executeStack',
-        token: restackPreview.token,
+        token: expect.any(String),
         allowForce: false,
         mergeMethod: 'squash',
       },
@@ -63,7 +62,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
     expect(await getDispatchedActions(page)).toEqual([
       {
         type: 'executeStack',
-        token: restackPreview.token,
+        token: expect.any(String),
         allowForce: false,
         mergeMethod: 'squash',
       },

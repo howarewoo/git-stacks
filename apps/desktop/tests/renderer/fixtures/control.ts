@@ -1441,7 +1441,7 @@ export function installFixtureControl(options: {
       record('stackPreview', [kind, branch])
       return answer<StackPreview>('stackPreview', () => {
         const preview = scenario.stackPreviews?.[kind] ?? stackPreviewsByKind[kind]
-        return preview.kind === kind ? preview : { ...preview, kind }
+        return { ...preview, kind, token: crypto.randomUUID() }
       })
     },
     surgeryPreview: (request) => {

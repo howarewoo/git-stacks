@@ -2132,6 +2132,10 @@ Explicitly captured operations keep their scoped publication and merge journal
 subscriptions alive when recovery is closed or another inspection surface is active.
 Saved-filter full-list writes wait while their store read is pending, even when
 a previous list is cached.
+Stack-preview fixtures issue fresh tokens on each read, matching production's
+single-use plans so explicit reloads cannot reuse a rejected preview.
+Cross-repository Review tests wait for the destination's qualified headline request
+before releasing it; old-repository reads stay held until the destination is verified.
 Held CLI reads cannot replace newer provider status. Notifications keep their
 independent credential ownership, fence late host-scoped answers, and complete
 enable → credential save → inbox read before dismissing authorization. Captured
