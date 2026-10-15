@@ -1,11 +1,11 @@
 import { expect, test, type Page } from '@playwright/test'
 import { openGallery, publishCliStatus, releaseDoubleCalls, settle } from './helpers/gallery'
-import { openManagePullRequestDialog, selectBranchInList } from './helpers/dialogs'
+import { selectBranchInList } from './helpers/dialogs'
 import { switchDestination } from './helpers/destinations'
 
 /**
- * The merge dialog, driven as a person drives it: open the merge preview, send the
- * merge, and read what GitHub reports afterwards.
+ * The merge dialog, driven as a person drives it: open the captured merge outcomes, send
+ * the merge, and read what GitHub reports afterwards.
  *
  * A run that GitHub is still running speaks through the progress channel and then
  * returns. What the dialog shows from then on has to be the read-back, because a read
@@ -16,9 +16,7 @@ import { switchDestination } from './helpers/destinations'
 test.describe('Merge reads after a run', () => {
   test('a finished run is replaced by what GitHub reports', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-lifecycle' })
-    await openManagePullRequestDialog(page, 'feature/lifecycle-open')
-    await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeOutcomes(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
 
@@ -48,9 +46,7 @@ test.describe('Merge reads after a run', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
-    await openManagePullRequestDialog(page)
-    await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeOutcomes(page)
     await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
     await publishCliStatus(page, {
       state: 'authenticated',
@@ -71,9 +67,7 @@ test.describe('Merge reads after a run', () => {
 
   test('a refused merge stays failed on reopen, with the reason GitHub gave', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-merge-refused' })
-    await openManagePullRequestDialog(page, 'feature/lifecycle-open')
-    await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeOutcomes(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
     // A terminal `failed` result never changes, so a reopened dialog has to present the
@@ -96,9 +90,7 @@ test('a merge that landed one captured target stays partial when a later target 
   page,
 }) => {
   await openGallery(page, { scenario: 'github-cli-authenticated' })
-  await openManagePullRequestDialog(page)
-  await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+  const dialog = await openMergeOutcomes(page)
   await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
   await page.evaluate(() => window.fixture.hold('runAction'))
   await dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last().click()
@@ -142,8 +134,8 @@ test('a merge that landed one captured target stays partial when a later target 
   expect(await page.evaluate(() => window.fixture.actions)).toHaveLength(1)
 })
 
-async function openCapturedRecovery(page: Page) {
-  await selectBranchInList(page, 'feature/checkout')
+async function openCapturedRecovery(page: Page, branchName = 'feature/checkout') {
+  await selectBranchInList(page, branchName)
   await page.getByRole('button', { name: 'Operations and recovery', exact: true }).click()
   const dialog = page.getByRole('dialog', {
     name: 'Repository-qualified operations and recovery',
@@ -154,6 +146,16 @@ async function openCapturedRecovery(page: Page) {
   const recovery = dialog.getByRole('region', { name: 'Remote operation recovery' })
   await expect(recovery).toBeVisible()
   return { dialog, recovery }
+}
+
+/**
+ * The merge dialog is reached from the recovery region of an explicitly captured
+ * directory, through the merge outcomes that directory's journal reports.
+ */
+async function openMergeOutcomes(page: Page, branchName = 'feature/checkout') {
+  const { recovery } = await openCapturedRecovery(page, branchName)
+  await recovery.getByRole('button', { name: 'Review merge outcomes' }).click()
+  return page.getByRole('dialog', { name: 'Merge pull request' })
 }
 
 test('recovery reads only an explicitly captured directory and browsing never replays a mutation', async ({

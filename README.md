@@ -653,6 +653,8 @@ Existing settings own saved filters. Attention reuses the existing bounded,
 cancelled, account-retired Inbox reader while visible/focused; no second poller,
 authentication flow or queue database exists. Browsing never acknowledges
 Notifications or dismisses a Git safety blocker.
+Saved provider repository criteria retain the Inbox model's case-insensitive
+matching for both `owner/repository` and `host/owner/repository` identities.
 
 **Activity** retains bounded observed transitions and confirmed app outcomes in
 the current app session. The first observation is a baseline, not historic activity;
@@ -2133,6 +2135,8 @@ Held CLI reads cannot replace newer provider status. Notifications keep their
 independent credential ownership, fence late host-scoped answers, and complete
 enable → credential save → inbox read before dismissing authorization. Captured
 operation progress is checked against its provider authority, not an inspection key.
+Workflow dialogs use that same captured authority unchanged, so reopening merge
+or publication recovery shares the shell's journal and progress-event cache.
 
 ### v5 workbench foundation and matched visual evidence
 

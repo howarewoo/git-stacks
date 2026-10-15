@@ -217,12 +217,12 @@ test('a queued repository preparation retains reading and composition while comp
     element.scrollTop = 200
   })
   const scroll = await region.evaluate((element) => element.scrollTop)
-  // Preparing a qualified operation adopts its directory asynchronously.
-  // Inspection remains usable while that captured repository open is pending.
-  await holdDoubleCall(page, 'openRepository')
+  // Preparing a qualified operation checks its provider baseline asynchronously.
+  // Inspection remains usable while that captured operation preparation is pending.
+  await holdDoubleCall(page, 'refresh')
   await page.getByRole('button', { name: 'Manage pull request', exact: true }).click()
   await expect
-    .poll(() => page.evaluate(() => window.fixture.pending.includes('openRepository')))
+    .poll(() => page.evaluate(() => window.fixture.pending.includes('refresh')))
     .toBe(true)
   await answerNextDoubleCall(page, 'reviewFiles', {
     ...reviewFileSet(42, 'new-head-observed-while-busy'),
@@ -260,8 +260,8 @@ test('a queued repository preparation retains reading and composition while comp
     page.locator('.review-submit').getByRole('button', { name: /Submit/ }),
   ).toBeDisabled()
   expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSubmit')).toEqual([])
-  await page.evaluate(() => window.fixture.unhold('openRepository'))
-  await releaseDoubleCalls(page, 'openRepository')
+  await page.evaluate(() => window.fixture.unhold('refresh'))
+  await releaseDoubleCalls(page, 'refresh')
 })
 
 test('a refreshed comparison never launders a saved comment onto the new head', async ({

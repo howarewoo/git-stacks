@@ -1548,8 +1548,8 @@ function App() {
             onFilterChange={setAttentionFilter}
             state={attentionState}
             onStateChange={setAttentionState}
-            savedFilters={inboxFilters.data ?? []}
-            saving={savingInboxFilters || !inboxFilters.isSuccess}
+            savedFilters={inboxFilters.isFetching ? [] : (inboxFilters.data ?? [])}
+            saving={savingInboxFilters || !inboxFilters.isSuccess || inboxFilters.isFetching}
             searchInputRef={attentionSearch}
             onRefresh={() => void inbox.refetch()}
             onOpen={openCollaborationTarget}
@@ -2223,10 +2223,15 @@ function App() {
         login={notificationInbox?.login ?? null}
         onSubmit={(token, consent, host) => {
           void notify(async (current) => {
-            if (!desktop.saveNotificationCredential || !desktop.notifications)
+            if (
+              !desktop.updateSettings ||
+              !desktop.saveNotificationCredential ||
+              !desktop.notifications
+            )
               throw new Error('Notifications credential storage is unavailable.')
+            await desktop.updateSettings({ notifications: { enabled: true } })
+            if (!current()) return
             await desktop.saveNotificationCredential(token, consent, host)
-            if (current() && host === configuredHost.current) setCredentialOpen(false)
             if (current()) return desktop.notifications()
           }, true)
         }}
@@ -2241,9 +2246,7 @@ function App() {
           ])}
           request={workflow}
           snapshot={operationSnapshot}
-          authority={JSON.stringify(
-            providerWorkflow?.scope ?? [operationSnapshot.path, operationSnapshot.remoteUrl],
-          )}
+          authority={providerWorkflow?.scope.authority ?? operationAuthority}
           busy={operationBusy}
           stackApi={providerWorkflow?.api ?? desktop}
           providerManagement={Boolean(providerWorkflow)}
