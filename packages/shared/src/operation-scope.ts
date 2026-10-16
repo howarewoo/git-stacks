@@ -1,7 +1,13 @@
 import { canonicalHostName } from './host'
 import type { GitHubCliStatus } from './types'
 import type { InspectionContext } from './inspection'
-import type { GitAction, ActionResult, StackProgress, PublishProgress } from './types'
+import type {
+  GitAction,
+  ActionResult,
+  StackProgress,
+  PublishProgress,
+  MergeLayerResult,
+} from './types'
 import type { StackPreview, SurgeryPlanPreview } from './types'
 import type { NativeOperationPreview } from './native-operation'
 import type { WorktreeLifecyclePreview } from './worktree-lifecycle'
@@ -76,6 +82,8 @@ export interface OperationRecord {
   /** Read-only projection of a later explicit action on this exact recovery identity. */
   resolution?: 'completed' | 'aborted' | 'dismissed'
   publication?: PublishProgress | null
+  /** Independent terminal provider receipts, without rewriting the original result. */
+  mergeConfirmations?: Record<number, MergeLayerResult>
 }
 
 export function sameOperationScope(left: OperationScope, right: OperationScope): boolean {
