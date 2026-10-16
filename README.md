@@ -49,9 +49,10 @@ services; do not interrupt jobs or delete retained runner data during the cutove
 
 ## Install the agent skills
 
-The repository's `.agents/skills/` directory contains two standalone skills:
-`flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack, and
-`submit-stack-for-review` submits an existing full stack for review, strictly bottom-up.
+The repository's `.agents/skills/` directory contains three standalone skills:
+`flatten-pr-graph` arranges GitHub PRs into a dependency-respecting stack,
+`split-pr` breaks one large PR into a reviewable stack without changing its final code,
+and `submit-stack-for-review` submits an existing full stack for review, strictly bottom-up.
 Install them with the [Skills CLI](https://github.com/vercel-labs/skills) using
 Node.js and `npx`; cloning this repository, installing pnpm dependencies, or
 building the desktop app is not required.
@@ -71,11 +72,11 @@ cd /path/to/your/repository
 npx skills add howarewoo/git-stacks
 ```
 
-The CLI prompts for skills and host agents. To select both skills and a specific
+The CLI prompts for skills and host agents. To select all three skills and a specific
 host non-interactively (Codex in this example):
 
 ```sh
-npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --yes
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph split-pr submit-stack-for-review --agent codex --yes
 ```
 
 Replace `codex` with your host's Skills CLI agent identifier, or omit both `--agent`
@@ -84,7 +85,7 @@ projects, add `--global`; this writes to the selected agent's user-level skill
 location rather than the current project:
 
 ```sh
-npx skills add howarewoo/git-stacks --skill flatten-pr-graph submit-stack-for-review --agent codex --global --yes
+npx skills add howarewoo/git-stacks --skill flatten-pr-graph split-pr submit-stack-for-review --agent codex --global --yes
 ```
 
 Each skill is a self-contained `SKILL.md`. Using these GitHub workflows requires
@@ -95,8 +96,8 @@ Installation alone does not authorize PR mutations.
 When changing skill packaging or these commands, verify discovery and actual
 project/global installation from outside this repository with the current Skills
 CLI. Use disposable project directories and an isolated `HOME` and XDG directories
-for the global check; compare both installed `SKILL.md` files byte-for-byte with
-source and confirm only the current two skills are discovered and installed.
+for the global check; compare all three installed `SKILL.md` files byte-for-byte with
+source and confirm only the current three skills are discovered and installed.
 For an unpushed candidate, substitute the absolute local checkout path for
 `howarewoo/git-stacks`; this proves local packaging, not remote availability.
 Record CLI version, exact commands, outcomes, source hashes, and limits in the PR.
@@ -630,8 +631,9 @@ readback. Body saves carry the original expected body; a changed published body 
 compared in-app while authored input stays intact. Related issue links are local
 context, separate from provider-body closing keywords, which require a confirmed
 default branch and permission. Each contextual config mutation rechecks the captured
-directory/ref/origin after awaits, including each unlink rewrite; cancellation and
-refusal propagate rather than being treated as an already-unset success.
+directory/ref/origin after awaits. Unlink removes only the selected issue value in
+one atomic config mutation; cancellation and refusal propagate rather than being
+treated as an already-unset success.
 
 **Needs attention** works across registered repositories with none selected.
 One qualified provider PR counts once even with several reasons; clone-local
@@ -644,6 +646,8 @@ Existing settings own saved filters. Attention reuses the existing bounded,
 cancelled, account-retired Inbox reader while visible/focused; no second poller,
 authentication flow or queue database exists. Browsing never acknowledges
 Notifications or dismisses a Git safety blocker.
+Saved provider repository criteria retain the Inbox model's case-insensitive
+matching for both `owner/repository` and `host/owner/repository` identities.
 
 **Activity** retains bounded observed transitions and confirmed app outcomes in
 the current app session. The first observation is a baseline, not historic activity;
@@ -1915,9 +1919,11 @@ Do not compare older graph/card/camera definitions or other runner classes as if
 they were the same series. Do not fabricate an unrun packet or relax a budget.
 
 It writes `benchmarks/latest.json` and appends one line per run to
-`benchmarks/trend.jsonl` (capped at the last 200 runs). The `Performance budgets`
-workflow runs the harness on every push and pull request, uploads `benchmarks/`
-as an artifact, and fails the job when any measurement exceeds its budget.
+`benchmarks/trend.jsonl` (capped at the last 200 runs). The `budgets` job in the
+`Accessibility checks` workflow runs the full harness on main pushes and manual
+dispatches, and on PRs affecting desktop production code or shared dependencies. It uploads `benchmarks/`
+as an artifact and fails when any measurement exceeds its budget. See
+[Selective CI](#selective-ci) for the conservative selection policy.
 
 ### What the hot paths no longer do
 
@@ -2054,6 +2060,94 @@ These are the extreme cases the app states rather than hanging or crashing on.
   check is never pointed at a personal or default session. The live end-to-end
   suite stays a deferred development gate whose evidence is the owner's manual run;
   it is not an authentication-policy waiver.
+
+## Selective CI
+
+The `Accessibility checks` workflow uses one selection job for the stable
+`automated`, `design`, and `budgets` checks. Pull requests select affected workloads;
+every `main` push and `workflow_dispatch` runs the full existing nonvisual renderer,
+catalog, typecheck, keyboard/component unit, and performance workloads. Visual
+baselines remain a separate macOS-only local check.
+
+`scripts/ci/select-checks.mjs` is the single dependency-free Node 24/Git policy.
+The workflow runs its permanent regression suite once before dependency installation,
+browser/display setup, or builds; `pnpm test` also runs those regressions.
+The PR comparison is `merge-base(event base SHA, event head SHA)..event head SHA`,
+not the merge checkout's parent diff. Selection fetches complete checkout history
+and explicitly requests both event commits. Checks test the normal Actions checkout
+(usually GitHub's PR merge revision); the job summary records that checkout and
+the PR head used for selection. Missing history/commits, unknown paths, and common
+workspace/build/test tooling conservatively select all relevant checks.
+NUL-delimited Git status parsing includes both rename/copy paths and deleted paths;
+a selected spec absent from the tested checkout expands to the full renderer.
+
+Node bootstrap explicitly disables `setup-node`'s automatic package-manager cache:
+the selector and skip-validation jobs need Node before pnpm is installed.
+Enabled workloads install the pinned pnpm afterward; no package-manager or
+dependency setup runs solely to validate an intentional skip.
+
+- Root documentation and `.agents/skills/` standalone skills skip expensive checks.
+- `apps/design/` selects catalog validation, tokens, build and tests plus the
+  design workspace typecheck, without desktop browser/performance work.
+- `packages/ui/` and `packages/shared/` select both consumers, desktop performance,
+  full typechecking and the existing keyboard/component units. Contracts including
+  `types.ts` are intentionally broad.
+- Audited renderer boundaries are Notification Center (including Settings, CLI and
+  form consumers), inventory query hook, review conversation/diff (including sibling
+  workspace/navigation/snapshot consumers and conversation's CLI surface), and PR
+  Inbox (including Review entry).
+  They select existing feature specs plus accessibility, keyboard, safety and
+  motion/zoom suites. The maps follow bounded production imports and cross-feature
+  behavior; changing their consumers requires reviewing these maps.
+- Shell/global styles, shared controls, unknown renderer modules and common
+  fixture/helper infrastructure select the full nonvisual renderer. Changed/new
+  nonvisual specs select themselves; visual/other fixture paths expand broadly.
+- All desktop production code and shared dependencies retain performance coverage:
+  the benchmark measures actual startup/interaction and imports renderer diff/list
+  code. Runtime/main/preload/native/build/performance tooling is never excluded.
+  Desktop source/config/test changes independently retain desktop typechecking;
+  `build:gallery` alone does not typecheck desktop. Renderer and shared UI changes
+  conservatively retain both existing tree-navigation and component unit suites.
+
+Mixed changes form a union; broad rules override narrow files. Plans distinguish
+`skip`, `files`, and `full`, with reasons shown in logs and summaries. Stable jobs
+fail on failed/cancelled/missing selection, malformed/inconsistent outputs or any
+selected step failure; only a validated intentional skip succeeds. File arguments
+are passed directly to Playwright (escaped as native file expressions, never shell
+interpolation), with `@visual` excluded and the root Turbo gallery prerequisite
+preserved. Discovery and a nonempty execution reporter reject zero runnable tests
+or a selected file that unexpectedly executes none, including runtime skips of
+tests that were runnable at discovery. Intentional static skips remain excluded.
+Existing timeouts, assertions, retry policy, Electron sandbox and failure/budget
+artifacts are unchanged.
+
+Reproduce selection and checks from the repository root:
+
+```sh
+node --test scripts/ci/select-checks.test.mjs
+CI_BASE_SHA=<base-commit> CI_HEAD_SHA=<head-commit> node scripts/ci/select-checks.mjs
+# Inspect the JSON plan, then pass that JSON as CHECK_PLAN:
+SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs typecheck
+SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs unit
+GALLERY_PORT=5327 SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs desktop
+SELECTION_RESULT=success CHECK_PLAN='<plan-json>' node scripts/ci/run-checks.mjs catalog
+pnpm run build
+# With a supported display and Electron sandbox, for selected performance:
+pnpm run bench:performance
+```
+
+The selector regressions run before the root `pnpm test` workspace suites. Pure
+policy/parser/file-expression checks and disposable Git/CLI checks are portable;
+Git fixtures use Windows-valid filenames while pure parsing retains newline cases.
+Only the runner's extensionless shebang stand-in is skipped on Windows, where
+direct executable lookup cannot run that POSIX fixture. Disposable CLI environments
+clear inherited Actions event/output variables; a separate payload regression proves
+that real PR payload commits take precedence over explicit fallback SHAs.
+
+Selective coverage does not establish that full suites fit runner deadlines.
+Linux x64 local evidence is not proof for the Ubuntu ARM Actions worker; actual
+hosted-runner completion remains a separate gate. Do not raise timeouts, add
+retries, drop assertions or disable the sandbox to conceal stalls.
 
 ## Renderer verification
 
@@ -2307,7 +2401,6 @@ inspection and its durable status remain available.
 Strict merge authorization distinguishes missing secondary history from malformed or
 unreadable history and also consults retained original durable merge intents. A bad
 history is neither empty nor repaired by inspection and cannot authorize another write.
-
 Worktree creation qualifies an absent normalized destination and an explicit local
 branch or new branch from a captured base. It never switches an existing checkout
 or falsely adopts a failed/partial creation. Cleanup preflights the exact whole
@@ -2772,7 +2865,7 @@ catalog controls and desktop Git workflows are not globally restyled.
 
 The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, Typeset and the owned Iconography foundation, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing.
  
-Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×900, device scale 1, en-US, UTC, system fonts and reduced motion. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
+Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×1600, device scale 1, en-US, UTC, system fonts and reduced motion. The taller viewport contains the Git composition and Button specimens, avoiding Chromium's beyond-viewport capture and its transient 1×1 responsive reflow. Behavioral tests retain 1280×900 unless a scenario explicitly exercises another size. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
 When verifying the Card specimen, inspect both cards against the catalog canvas
 in light and dark themes, then follow Inspect composition to the local Git

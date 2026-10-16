@@ -362,6 +362,68 @@ test('cleanup refuses ignored unpublished data, including contents introduced af
   }
 })
 
+test('captured Abort admits its owned journal transition through production effect validation', async () => {
+  const { root, repo, scope } = await fixture()
+  try {
+    const base = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'switch', '-c', 'layer')
+    await writeFile(join(repo, 'tracked.txt'), 'layer conflict\n')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'Layer')
+    const tip = git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'config', 'branch.layer.parent', 'main')
+    git(repo, 'config', 'branch.layer.parentTip', base)
+    git(repo, 'switch', 'main')
+    await writeFile(join(repo, 'tracked.txt'), 'trunk conflict\n')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'Trunk')
+    git(repo, 'switch', 'layer')
+    const inventory = await discoverWorktrees(repo)
+    const owner = inventory.worktrees.find((tree) => tree.path === repo)!
+    const context = { repositoryId: inventory.identity.id, worktreeId: owner.id }
+    const preview = await previewStack(repo, await getSnapshot(repo), 'restack', 'layer')
+    const execute = {
+      type: 'executeStack' as const,
+      token: preview.token,
+      allowForce: false,
+      mergeMethod: 'squash' as const,
+    }
+    await assert.rejects(
+      runRecordedOperation(await captureOperation(repo, context, scope), execute, () =>
+        runAction(repo, execute),
+      ),
+      /Restack paused/,
+    )
+    const capture = await captureOperation(repo, context, scope)
+    await validateRecordedRecovery(capture, { type: 'stackAbort' })
+    const validate = createOperationEffectValidator(capture, scope, async () => {})
+    await inspectionAuthority.run(
+      {
+        root: repo,
+        context,
+        signal: new AbortController().signal,
+        origin: scope.remoteUrl,
+        originUrl: scope.remoteUrl,
+        validate,
+        validateEffect: validate,
+      },
+      () =>
+        runRecordedOperation(capture, { type: 'stackAbort' }, () =>
+          runAction(repo, { type: 'stackAbort' }),
+        ),
+    )
+    assert.equal(await getStackProgress(repo), null)
+    assert.equal(git(repo, 'rev-parse', 'layer'), tip)
+    assert.equal(git(repo, 'status', '--porcelain'), '')
+    assert.equal(
+      (await readOperationRecords(repo)).find((record) => record.action.type === 'executeStack')
+        ?.resolution,
+      'aborted',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 test('owned Skip drops only the conflicted commit, keeps the later commit and resolves the original durable recovery identity', async () => {
   const { root, repo, scope } = await fixture()
   try {

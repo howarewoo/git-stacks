@@ -2731,11 +2731,14 @@ function App() {
                 ) : null}
                 {record.result?.merge ? (
                   <ol>
-                    {record.result.merge.layers.map((layer) => (
-                      <li key={layer.pullRequest}>
-                        #{layer.pullRequest} {layer.branch}: {layer.status} · {layer.detail}
-                      </li>
-                    ))}
+                    {record.result.merge.layers.map((original) => {
+                      const layer = record.mergeConfirmations?.[original.pullRequest] ?? original
+                      return (
+                        <li key={layer.pullRequest}>
+                          #{layer.pullRequest} {layer.branch}: {layer.status} · {layer.detail}
+                        </li>
+                      )
+                    })}
                   </ol>
                 ) : null}
                 <Accordion>

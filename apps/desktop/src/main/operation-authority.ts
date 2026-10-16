@@ -13,12 +13,13 @@ import type {
   OperationRecord,
 } from '@git-stacks/shared/operation-scope'
 import { sameOperationScope } from '@git-stacks/shared/operation-scope'
-import type { GitAction, ActionResult } from '@git-stacks/shared/types'
+import type { GitAction, ActionResult, MergeLayerResult } from '@git-stacks/shared/types'
 import { discoverWorktrees, inspectWorktree } from './worktree-inventory'
 import { runGit, tryGit, getOriginUrl, commandEnvironment, MAX_BUFFER } from './git-core'
 import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
 import { readJournal, writeJournal, withJournalLock } from './review-journal'
 import { isRecord } from '@git-stacks/shared/guards'
+import type { MergeQueueObservation } from './merge-async'
 
 const directoryStatOptions = { bigint: true } as const
 function directoryIncarnation(value: BigIntStats): string {
@@ -254,7 +255,8 @@ export async function captureOperation(
         },
         refs,
         worktrees,
-        stack,
+        // Display text can change when the engine journals its next owned step.
+        stack: stack ? { ...stack, message: undefined } : null,
         publication,
         operationCommitOid,
       }),
@@ -449,6 +451,44 @@ export async function unresolvedOperationRecords(root: string): Promise<Operatio
   )
 }
 
+/** Retain source-confirmed outcomes separately from the immutable approval and result. */
+export async function confirmRecordedMerge(
+  root: string,
+  observation: MergeQueueObservation,
+  layer: MergeLayerResult,
+): Promise<void> {
+  const request = observation.request
+  if (!['merged', 'failed', 'not-merged'].includes(layer.status) || !request) return
+  if (layer.status === 'not-merged' && observation.outcome !== 'enqueued') return
+  const origin = await getOriginUrl(root)
+  const repository = await discoverWorktrees(root)
+  const commonIdentity = await incarnation(repository.identity.commonDirectory)
+  for (const record of await readOperationRecords(root)) {
+    if (
+      activeRecords.has(record.id) ||
+      record.scope.remoteUrl !== origin ||
+      record.capture.commonIdentity !== commonIdentity ||
+      !record.preview ||
+      !('merge' in record.preview) ||
+      !record.preview.merge?.layers.some(
+        (entry) =>
+          entry.pullRequest === observation.pullRequest &&
+          entry.headOid === observation.headOid &&
+          entry.base === observation.base,
+      ) ||
+      !record.result?.merge?.layers.some(
+        (entry) =>
+          entry.pullRequest === observation.pullRequest && entry.requestUuid === request.uuid,
+      )
+    )
+      continue
+    record.mergeConfirmations = {
+      ...record.mergeConfirmations,
+      [observation.pullRequest]: structuredClone(layer),
+    }
+    await saveRecord(record.capture, record)
+  }
+}
 /** No replay, repair, journal retirement or account substitution on a status read. */
 export async function readOperationRecords(root: string): Promise<OperationRecord[]> {
   const repository = await discoverWorktrees(root)
@@ -517,6 +557,14 @@ export async function readOperationRecords(root: string): Promise<OperationRecor
     )
     if (!value) throw new Error('The operation journal has no readable original authority.')
     if (value.repositoryId !== repository.identity.id) continue
+    if (value.mergeConfirmations && value.result?.merge) {
+      const layers = value.result.merge.layers.map(
+        (layer) => value.mergeConfirmations?.[layer.pullRequest] ?? layer,
+      )
+      if (layers.every((layer) => !['pending', 'enqueued', 'unconfirmed'].includes(layer.status))) {
+        value.state = layers.some((layer) => layer.status === 'failed') ? 'failed' : 'completed'
+      }
+    }
     const owner = repository.worktrees.find(
       (tree) =>
         tree.id === value.context?.worktreeId && tree.path === value.worktreePath && !tree.missing,

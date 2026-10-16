@@ -212,7 +212,14 @@ export async function measureDesktop(repoRoot, fixture, options = {}) {
   let client
   let mainClient
   try {
-    client = await connect(await pageTarget(port, child, () => errors, 'app://git-stacks'))
+    client = await connect(
+      await pageTarget(
+        port,
+        child,
+        () => errors,
+        process.env.ELECTRON_RENDERER_URL || 'app://git-stacks',
+      ),
+    )
     await until(
       client,
       `document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('${branchCount} matches · 0 context · ${Math.max(0, branchCount - rowLimit)} unmounted') && document.querySelectorAll('.bw-lane-row').length === ${Math.min(branchCount, rowLimit)}`,

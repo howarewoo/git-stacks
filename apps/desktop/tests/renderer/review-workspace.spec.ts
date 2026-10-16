@@ -100,10 +100,20 @@ test('viewed and unviewed records survive same-head return but not a moved head 
     pullRequests: snapshot.pullRequests.map((pr) => ({
       ...pr,
       url: `https://github.com/other/widgets/pull/${pr.number}`,
+      headRepository: 'other/widgets',
     })),
   })
   await settle(page)
   expect(await page.evaluate(() => window.desktop.reviewViewed!(42))).toBeNull()
+  // A replacement repository has a different qualified PR identity. Re-enter
+  // through its current association rather than retaining the previous owner.
+  await switchDestination(page, 'branches')
+  await page
+    .getByRole('complementary', { name: 'Workspace navigation' })
+    .getByRole('button', { name: `other/widgets · ${snapshot.path}-other`, exact: true })
+    .click()
+  await page.getByRole('button', { name: snapshot.currentBranch!, exact: true }).click()
+  await switchDestination(page, 'review')
   await expect(page.locator('.review-headline')).toContainText('#42')
   await expect(page.getByRole('button', { name: 'Mark file as viewed', exact: true })).toBeVisible()
   await expect(row).not.toHaveAttribute('aria-label', /, viewed$/)
@@ -198,6 +208,10 @@ test('a refreshed head/base retains reading and composition while comparison saf
   await editor.fill('Keep this sentence while the displayed comparison becomes stale.')
   await page.getByRole('textbox', { name: 'Review summary' }).fill('Keep the decision summary too.')
   await page.getByRole('button', { name: 'Code', exact: true }).click()
+  await page
+    .locator('.review-actions summary')
+    .filter({ hasText: /^PR actions$/ })
+    .click()
   const region = page.locator('.review-unified')
   await region.evaluate((element) => {
     element.scrollTop = 200

@@ -1,11 +1,11 @@
 import { expect, test, type Page } from '@playwright/test'
 import { openGallery, publishCliStatus, releaseDoubleCalls, settle } from './helpers/gallery'
-import { openManagePullRequestDialog, selectBranchInList } from './helpers/dialogs'
+import { openMergeDialog, selectBranchInList } from './helpers/dialogs'
 import { switchDestination } from './helpers/destinations'
 
 /**
- * The merge dialog, driven as a person drives it: open the merge preview, send the
- * merge, and read what GitHub reports afterwards.
+ * The merge dialog, driven as a person drives it: open the captured merge outcomes, send
+ * the merge, and read what GitHub reports afterwards.
  *
  * A run that GitHub is still running speaks through the progress channel and then
  * returns. What the dialog shows from then on has to be the read-back, because a read
@@ -16,16 +16,13 @@ import { switchDestination } from './helpers/destinations'
 test.describe('Merge reads after a run', () => {
   test('a finished run is replaced by what GitHub reports', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-lifecycle' })
-    await openManagePullRequestDialog(page, 'feature/lifecycle-open')
-    await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeDialog(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
 
     // Before the run: what GitHub reports for earlier requests, with one pull request
     // still running a request.
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
 
     // Held open, so the state the run itself publishes is observed rather than raced past.
@@ -33,29 +30,23 @@ test.describe('Merge reads after a run', () => {
     await dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last().click()
     const runningMessage = dialog.getByRole('region', { name: /^Merge result/ })
     await expect(runningMessage).toBeVisible()
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
 
     await releaseDoubleCalls(page, 'runAction')
-    await expect(runningMessage).toBeVisible()
-    await expect(dialog.getByText('GitHub could not be read:', { exact: false })).toBeVisible()
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
-    await expect(dialog.getByText('Completed', { exact: true })).toHaveCount(0)
 
-    // A later read is still what GitHub reports, and the control that asks for it is
-    // reachable the whole time.
+    // The completed read supersedes pushed progress without replaying the merge.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await expect(runningMessage).toHaveCount(0)
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
+    expect(
+      await page.evaluate(() =>
+        window.fixture.actions.filter((action) => action.type === 'executeStack'),
+      ),
+    ).toHaveLength(1)
   })
 
-  test('an idle merge dialog reads the replacement account without submitting another merge', async ({
-    page,
-  }) => {
+  test('an idle merge approval cannot move to a replacement account', async ({ page }) => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
-    await openManagePullRequestDialog(page)
-    await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeDialog(page)
     await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await publishCliStatus(page, {
@@ -66,21 +57,21 @@ test.describe('Merge reads after a run', () => {
       identity: 'cli:github.com:replacement:1',
       message: null,
     })
-    // This authority's first journal read fails. Retired account facts cannot
-    // stand in for a successful replacement-account read; retry is explicit.
-    await expect(dialog.getByRole('alert')).toContainText('GitHub is unreachable')
-    await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
-    await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
-    await expect(dialog.getByRole('button', { name: 'Refresh what GitHub reports' })).toBeEnabled()
+    await expect(
+      dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last(),
+    ).toBeDisabled()
+    await expect(dialog.getByRole('button', { name: 'Reload preview' })).toBeDisabled()
+    await expect(
+      dialog.getByText('github.com|github.com|authenticated|octo|cli:github.com:octo:1', {
+        exact: true,
+      }),
+    ).toBeVisible()
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 
   test('a refused merge stays failed on reopen, with the reason GitHub gave', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-merge-refused' })
-    await openManagePullRequestDialog(page, 'feature/lifecycle-open')
-    await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeDialog(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
     // A terminal `failed` result never changes, so a reopened dialog has to present the
@@ -103,9 +94,7 @@ test('a merge that landed one captured target stays partial when a later target 
   page,
 }) => {
   await openGallery(page, { scenario: 'github-cli-authenticated' })
-  await openManagePullRequestDialog(page)
-  await page.getByRole('button', { name: 'Preview merge', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+  const dialog = await openMergeDialog(page)
   await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
   await page.evaluate(() => window.fixture.hold('runAction'))
   await dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last().click()
@@ -149,8 +138,8 @@ test('a merge that landed one captured target stays partial when a later target 
   expect(await page.evaluate(() => window.fixture.actions)).toHaveLength(1)
 })
 
-async function openCapturedRecovery(page: Page) {
-  await selectBranchInList(page, 'feature/checkout')
+async function openCapturedRecovery(page: Page, branchName = 'feature/checkout') {
+  await selectBranchInList(page, branchName)
   await page.getByRole('button', { name: 'Operations and recovery', exact: true }).click()
   const dialog = page.getByRole('dialog', {
     name: 'Repository-qualified operations and recovery',

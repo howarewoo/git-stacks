@@ -278,6 +278,7 @@ export function AttentionView({
     if (!`${item.repository} ${item.title} ${item.reasons.join(' ')}`.toLowerCase().includes(query))
       return false
     if (
+      !item.source &&
       filter.criteria.repositories?.length &&
       !filter.criteria.repositories.some(
         (repository) => repository === item.repository || repository === item.source?.repository,

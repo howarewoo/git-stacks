@@ -120,6 +120,9 @@ export class FaultInjectingTransport implements GitHubTransport {
     }
     const credential = await this.inner.pinCredential(options)
     return {
+      authority: credential.authority,
+      paginate: <T = unknown>(request: GitHubRestRequest) =>
+        this.paginateWith<T>(credential, request),
       rest: <T = unknown>(request: GitHubRestRequest) => this.restWith<T>(credential, request),
       graphql: <T = Record<string, unknown>>(
         query: string,
@@ -181,7 +184,7 @@ export class FaultInjectingTransport implements GitHubTransport {
   }
 
   private async restWith<T>(
-    transport: GitHubCredentialSession,
+    transport: Pick<GitHubCredentialSession, 'rest'>,
     request: GitHubRestRequest,
   ): Promise<GitHubRestResponse<T>> {
     const method = request.method ?? 'GET'
@@ -225,9 +228,16 @@ export class FaultInjectingTransport implements GitHubTransport {
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
+    return this.paginateWith<T>(this.inner, request)
+  }
+
+  private async paginateWith<T>(
+    transport: Pick<GitHubCredentialSession, 'paginate'>,
+    request: GitHubRestRequest,
+  ): Promise<T[]> {
     const method = request.method ?? 'GET'
     try {
-      const send = (): Promise<T[]> => this.inner.paginate<T>(request)
+      const send = (): Promise<T[]> => transport.paginate<T>(request)
       const items = await (this.pacing ? this.pacing.run(method !== 'GET', send) : send())
       this.record(method, request.path, 200)
       return items
@@ -250,7 +260,7 @@ export class FaultInjectingTransport implements GitHubTransport {
   }
 
   private async graphqlWith<T>(
-    transport: GitHubCredentialSession,
+    transport: Pick<GitHubCredentialSession, 'graphql'>,
     query: string,
     variables: Record<string, unknown>,
     options: GitHubGraphqlOptions,

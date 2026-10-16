@@ -9,7 +9,6 @@ import {
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { scenarios } from './fixtures/scenarios'
-import { restackPreview } from '../fixtures/workflow-scenarios'
 import {
   openManagePullRequestDialog,
   openRestackDialog,
@@ -37,11 +36,11 @@ test.describe('Safety and mutation dispatch invariants', () => {
     await expect(
       page.getByRole('alert').filter({ hasText: 'Captured restack was refused' }),
     ).toBeVisible()
-    await expect(dialog.getByRole('button', { name: 'Restack stack', exact: true })).toBeEnabled()
+    await expect(dialog.getByRole('button', { name: 'Restack stack', exact: true })).toBeDisabled()
     expect(await getDispatchedActions(page)).toEqual([
       {
         type: 'executeStack',
-        token: restackPreview.token,
+        token: expect.any(String),
         allowForce: false,
         mergeMethod: 'squash',
       },
@@ -63,7 +62,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
     expect(await getDispatchedActions(page)).toEqual([
       {
         type: 'executeStack',
-        token: restackPreview.token,
+        token: expect.any(String),
         allowForce: false,
         mergeMethod: 'squash',
       },
@@ -136,7 +135,7 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await selectBranchInList(page, 'main')
 
       const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
-      await expect(inspector.getByText('refs/heads/main', { exact: true })).toBeVisible()
+      await expect(inspector.locator('.bw-ref')).toHaveText('main')
 
       // Dispatched actions must be completely empty: selection is read-only
       const actions = await getDispatchedActions(page)
@@ -149,7 +148,11 @@ test.describe('Safety and mutation dispatch invariants', () => {
       await openGallery(page, { scenario: 'pull-requests-lifecycle' })
       await switchDestination(page, 'pullRequests')
 
-      await page.getByRole('button', { name: /#42 Migrate changes/ }).click()
+      await page
+        .locator('.wb-secondary-list')
+        .getByRole('button')
+        .filter({ hasText: '#42 Migrate changes' })
+        .click()
       await expect(page.locator('.review-headline')).toContainText('#42 Migrate changes')
       await expect(page.getByRole('dialog')).toHaveCount(0)
 

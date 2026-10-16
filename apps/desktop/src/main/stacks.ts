@@ -5,6 +5,7 @@ import {
   recordOperationPreview,
   recordOperationRecovery,
   unresolvedOperationRecords,
+  confirmRecordedMerge,
 } from './operation-authority'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
@@ -6603,7 +6604,7 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
       queueRead,
       live === null ? null : { headOid: live.headOid ?? null, base: live.base ?? null },
     )
-    layers.push({
+    const layer: MergeLayerResult = {
       branch: observation.branch,
       pullRequest: observation.pullRequest,
       status:
@@ -6622,7 +6623,9 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
       mergedOid: result?.mergeOid ?? live?.mergeOid ?? null,
       queue,
       requestUuid: observation.request?.uuid ?? null,
-    })
+    }
+    await confirmRecordedMerge(root, effective, layer)
+    layers.push(layer)
   }
   return { layers, message: mergeStatusMessage(layers) }
 }
@@ -6912,7 +6915,9 @@ async function mergeStack(
           record.result?.merge?.layers.some(
             (entry) =>
               entry.pullRequest === layer.pullRequest &&
-              ['pending', 'enqueued', 'unconfirmed'].includes(entry.status),
+              ['pending', 'enqueued', 'unconfirmed'].includes(
+                record.mergeConfirmations?.[entry.pullRequest]?.status ?? entry.status,
+              ),
           ),
       )
     )
@@ -6922,7 +6927,8 @@ async function mergeStack(
     if (
       prior &&
       prior.headOid === layer.headOid &&
-      (prior.outcome === 'pending' || prior.outcome === 'enqueued')
+      (prior.outcome === 'pending' || prior.outcome === 'enqueued') &&
+      !(prior.outcome === 'enqueued' && mergeQueueState(prior, '')?.outcome === 'dropped')
     )
       throw new Error(
         `Pull request #${layer.pullRequest} already has a pending or accepted-but-unconfirmed request for this head. Read its status; no merge replay is authorized.`,
@@ -7854,7 +7860,9 @@ export async function previewReviewedMerge(
           record.result?.merge?.layers.some(
             (entry) =>
               entry.pullRequest === pr.number &&
-              ['pending', 'enqueued', 'unconfirmed'].includes(entry.status),
+              ['pending', 'enqueued', 'unconfirmed'].includes(
+                record.mergeConfirmations?.[entry.pullRequest]?.status ?? entry.status,
+              ),
           ),
       )
     )
@@ -7865,7 +7873,8 @@ export async function previewReviewedMerge(
     if (
       prior &&
       prior.headOid === pr.headOid &&
-      (prior.outcome === 'pending' || prior.outcome === 'enqueued')
+      (prior.outcome === 'pending' || prior.outcome === 'enqueued') &&
+      !(prior.outcome === 'enqueued' && mergeQueueState(prior, '')?.outcome === 'dropped')
     )
       blockers.push(
         `#${pr.number} already has a pending or accepted-but-unconfirmed request for this head. Read its status; no replay is authorized.`,

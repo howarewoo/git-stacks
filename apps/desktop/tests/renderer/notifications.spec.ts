@@ -472,7 +472,12 @@ test.describe('Notification Center states and transitions', () => {
   // and revoking its credential are both possible before a repository is open.
   test('the inbox is reachable with no repository open', async ({ page }) => {
     await openGallery(page, { scenario: 'notifications-no-repository' })
-    await expect(page.getByText('Start with a repository')).toBeVisible()
+    await expect(
+      page.getByRole('heading', { name: 'Branches & worktrees', level: 1 }),
+    ).toBeVisible()
+    expect(
+      (await getDoubleCalls(page)).filter((entry) => entry.call === 'openRepository'),
+    ).toHaveLength(0)
 
     await switchDestination(page, 'notifications')
 

@@ -241,6 +241,7 @@ test.describe('Required GitHub CLI status', () => {
     await expect(local).toBeVisible()
     await releaseDoubleCalls(page, 'worktreeInventory')
     await settle(page)
+    await expect(local).toHaveCount(0)
 
     const opened = scenarios['shell-long-content'].snapshot!
     await expect(page.locator('.bw-sidebar button[aria-pressed="true"]')).toHaveAttribute(
