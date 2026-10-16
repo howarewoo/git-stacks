@@ -27,7 +27,7 @@ export async function switchDestination(page: Page, id: DestinationId): Promise<
   }
   const sidebar = page.locator('.bw-sidebar')
   if (id === 'notifications') {
-    await sidebar.getByRole('button', { name: 'Notifications', exact: true }).click()
+    await page.getByRole('button', { name: 'Notifications', exact: true }).click()
     await expect(notifications).toBeVisible()
   } else {
     const destination = DESTINATIONS.find((entry) => entry.id === id)!

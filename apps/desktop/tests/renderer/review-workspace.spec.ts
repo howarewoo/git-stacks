@@ -219,7 +219,6 @@ test('a refreshed head/base retains reading and composition while comparison saf
   const scroll = await region.evaluate((element) => element.scrollTop)
   const refreshes = (await getDoubleCalls(page)).filter((call) => call.call === 'refresh').length
   await holdDoubleCall(page, 'refresh')
-  await page.locator('.review-actions > summary').click()
   await page.getByRole('button', { name: 'Manage pull request', exact: true }).click()
   await expect
     .poll(async () => (await getDoubleCalls(page)).filter((call) => call.call === 'refresh').length)

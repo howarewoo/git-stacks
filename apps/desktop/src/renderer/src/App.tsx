@@ -2084,6 +2084,11 @@ function App() {
         }}
         surface={surface}
         mainPanel={mainPanel}
+        topUtilities={
+          <Button variant="ghost" onClick={() => setNotificationOpen(true)}>
+            Notifications
+          </Button>
+        }
         capabilities={{
           search: {},
           settings: {},
@@ -2141,9 +2146,6 @@ function App() {
             </Button>
             <Button variant="ghost" onClick={() => setDiscoveryOpen(true)}>
               Find and clone
-            </Button>
-            <Button variant="ghost" onClick={() => setNotificationOpen(true)}>
-              Notifications
             </Button>
             <Button variant="ghost" onClick={() => setRecoveryOpen(true)}>
               Operations and recovery

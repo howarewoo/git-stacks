@@ -670,8 +670,9 @@ view memory stores navigation, not settings. Supported privacy/redacted support
 preview/export and platform-specific signed-update controls remain available.
 Graph-only/demo/Design/reset-scenario controls are not production destinations;
 the obsolete duplicate PR Inbox presentation is removed, not its source rules.
-Optional Notifications remains a secondary entry with separate consent, host,
-credential and removal policy; it never borrows the primary `gh` session.
+Optional Notifications opens from the top-bar **Notifications** button, including
+at narrow/zoomed viewport sizes. It remains a secondary entry with separate consent,
+host, credential and removal policy; it never borrows the primary `gh` session.
 
 For focused source checks, run `pnpm run typecheck` and
 `pnpm --filter git-stacks exec tsx --test tests/collaboration.test.ts`.

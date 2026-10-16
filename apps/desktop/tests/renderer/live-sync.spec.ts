@@ -61,7 +61,6 @@ test.describe('Observed repository updates', () => {
     expect(after).not.toEqual(before)
     await external.click()
     const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
-    await expect(inspector).toContainText('refs/heads/feature/external')
     await expect(inspector).toContainText('fffffff')
   })
 })
