@@ -1,9 +1,13 @@
 import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
+import type { NativeOperationPreview } from '@git-stacks/shared/native-operation'
+import type { WorktreeLifecyclePreview } from '@git-stacks/shared/worktree-lifecycle'
+import type { OperationRecord } from '@git-stacks/shared/operation-scope'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import type { GraphPreferences } from '@git-stacks/shared/graph-preferences'
 import type { GraphChange } from './graph'
 import type {
   FileView,
+  ActionResult,
   DesktopAPI,
   GitAction,
   HistoryPage,
@@ -36,6 +40,13 @@ import type { NotificationInbox } from '@git-stacks/shared/notifications'
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
   | 'inspect'
+  | 'captureOperation'
+  | 'operationSafety'
+  | 'executeOperation'
+  | 'operationRecords'
+  | 'worktreeLifecyclePreview'
+  | 'nativeOperationPreview'
+  | 'reviewedMergePreview'
   | 'pullRequestAction'
   | 'pullRequestPage'
   | 'pullRequestLayer'
@@ -193,6 +204,11 @@ export interface FixtureScenario {
     | ReviewHistoryDiff
     | ((number: number, fromOid: string) => ReviewHistoryDiff)
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
+  readonly reviewedMergePreview?: StackPreview
+  readonly worktreeLifecyclePreview?: WorktreeLifecyclePreview
+  readonly nativeOperationPreview?: NativeOperationPreview
+  readonly operationRecords?: readonly OperationRecord[]
+  readonly actionResults?: Readonly<Partial<Record<GitAction['type'], ActionResult>>>
   /** The surgery preview a scenario answers; insert between two layers by default. */
   readonly surgeryPreview?: SurgeryPreview
   /** What the read-only merge-status read reports; nothing is submitted. */

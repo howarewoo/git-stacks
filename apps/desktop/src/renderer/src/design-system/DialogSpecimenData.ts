@@ -15,6 +15,7 @@ export const restackPreview: StackPreview = {
       branch: 'feature/checkout',
       parent: 'main',
       oid: '2222222222222222222222222222222222222222',
+      baseOid: '1111111111111111111111111111111111111111',
       commits: 2,
       title: 'Add checkout validation',
       pr: null,
@@ -24,6 +25,7 @@ export const restackPreview: StackPreview = {
       branch: 'feature/checkout-tests',
       parent: 'feature/checkout',
       oid: '3333333333333333333333333333333333333333',
+      baseOid: '2222222222222222222222222222222222222222',
       commits: 1,
       title: 'Cover checkout validation',
       pr: {
@@ -87,6 +89,8 @@ export const publishPreview: StackPreview = {
     branch: 'feature/checkout',
     stackNumber: null,
     stackAction: 'create',
+    originalMembership: [],
+    resultingOrder: ['feature/checkout'],
     baseChanges: [],
     capturedAt: '2026-01-01T00:00:00.000Z',
     steps: [
@@ -122,6 +126,10 @@ export const publishPreview: StackPreview = {
       {
         branch: 'feature/checkout',
         base: 'main',
+        oid: 'a'.repeat(40),
+        baseOid: 'b'.repeat(40),
+        remoteOid: 'c'.repeat(40),
+        push: 'force',
         title: 'Add checkout validation',
         body: 'Fixture layer for the guarded publish specimen.',
         draft: true,
@@ -154,6 +162,8 @@ export const leasePreview: PushPreview = {
 }
 
 export const pausedRestackProgress: StackProgress = {
+  operationId: 'specimen-owned-restack',
+  allowForce: null,
   kind: 'restack',
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',
@@ -163,6 +173,8 @@ export const pausedRestackProgress: StackProgress = {
 }
 
 export const unstartedRestackProgress: StackProgress = {
+  operationId: 'specimen-owned-restack',
+  allowForce: null,
   kind: 'restack',
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout',
@@ -172,6 +184,8 @@ export const unstartedRestackProgress: StackProgress = {
 }
 
 export const completedRestackProgress: StackProgress = {
+  operationId: 'specimen-owned-restack',
+  allowForce: null,
   kind: 'restack',
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',

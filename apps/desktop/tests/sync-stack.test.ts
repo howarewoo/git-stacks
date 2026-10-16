@@ -142,6 +142,7 @@ test('Sync Stack detects squash/rebase merged parent with proven merge head and 
     git(harness, ['switch', 'child'])
 
     // 3. Preview Sync Stack from child
+    await runAction(harness.repo, { type: 'fetch' })
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'sync', 'child')
     assert.equal(preview.kind, 'sync')
@@ -227,6 +228,7 @@ test('Sync Stack detects diverged trunk (upstream force update)', async () => {
     await runAction(harness.repo, { type: 'createBranch', name: 'feature-1', parent: 'main' })
     await commitFile(harness, 'feature.txt', 'feat\n', 'Feature work')
 
+    await runAction(harness.repo, { type: 'fetch' })
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'sync', 'feature-1')
     assert.equal(preview.kind, 'sync')
@@ -302,6 +304,7 @@ test('Sync Stack shows remote-ahead layer blockers and rejects execution', async
     ])
     bareGit(harness, ['update-ref', 'refs/heads/feature-remote', advanced])
 
+    await runAction(harness.repo, { type: 'fetch' })
     const preview = await previewStack(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -386,6 +389,7 @@ test('Sync Stack conflict recovery: pauses rebase, journals sync state, and abor
     git(harness, ['switch', 'feat-conflict'])
 
     // 3. Preview sync
+    await runAction(harness.repo, { type: 'fetch' })
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'sync', 'feat-conflict')
     assert.equal(preview.kind, 'sync')
@@ -432,6 +436,7 @@ test('Sync Stack conflict recovery: continue resumes rebase and executes sync pu
     git(harness, ['switch', 'feat-continue'])
 
     // 3. Preview sync
+    await runAction(harness.repo, { type: 'fetch' })
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'sync', 'feat-continue')
     assert.equal(preview.kind, 'sync')
@@ -516,6 +521,7 @@ test('Sync Stack 3+ layer stack syncs cleanly after lower PR merge and trunk adv
     git(harness, ['switch', 'layer3'])
 
     // 3. Preview Sync Stack from top layer (layer3)
+    await runAction(harness.repo, { type: 'fetch' })
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'sync', 'layer3')
     assert.equal(preview.kind, 'sync')
@@ -577,7 +583,7 @@ test('Sync Stack 3+ layer stack syncs cleanly after lower PR merge and trunk adv
     assert.equal(git(harness, ['branch', '--show-current']), 'layer3')
   })
 })
-test('Sync Stack partial push retry: completed push is checkpointed and continuation does not fail on spent lease when later push is retried', async () => {
+test('Sync preserves a completed push and refuses replay of a later unconfirmed dispatch', async () => {
   await withHarness(async (harness) => {
     // 1. Create a 2-layer stack: p1 -> p2
     await runAction(harness.repo, { type: 'createBranch', name: 'push-p1', parent: 'main' })
@@ -596,6 +602,7 @@ test('Sync Stack partial push retry: completed push is checkpointed and continua
     git(harness, ['push', harness.bare, 'main:refs/heads/main'])
 
     git(harness, ['switch', 'push-p2'])
+    await runAction(harness.repo, { type: 'fetch' })
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'sync', 'push-p2')
     assert.equal(preview.kind, 'sync')
@@ -640,25 +647,24 @@ test('Sync Stack partial push retry: completed push is checkpointed and continua
     assert.equal(p1Push.status, 'completed')
     assert.equal(p1Push.publishedOid, intermediateRemoteP1)
 
-    // 6. Disarm failure and continue. It must NOT fail on p1's spent lease!
+    // Disarming the fixture does not authorize replay of an unconfirmed request.
     failP2 = false
-    const result = await runAction(harness.repo, { type: 'stackContinue' })
-    assert.match(result.message, /Synced/i)
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
 
-    // 7. Verify both branches are now rebased and pushed
+    // Completed remote effects remain; the unconfirmed second push is not sent again.
     const finalRemoteP1 = bareGit(harness, ['rev-parse', 'refs/heads/push-p1'])
     const finalRemoteP2 = bareGit(harness, ['rev-parse', 'refs/heads/push-p2'])
     const finalLocalP1 = git(harness, ['rev-parse', 'refs/heads/push-p1'])
     const finalLocalP2 = git(harness, ['rev-parse', 'refs/heads/push-p2'])
 
     assert.equal(finalRemoteP1, finalLocalP1)
-    assert.equal(finalRemoteP2, finalLocalP2)
+    assert.equal(finalRemoteP2, initialRemoteP2)
     assert.equal(finalRemoteP1, intermediateRemoteP1)
-    assert.notEqual(finalRemoteP2, initialRemoteP2)
+    assert.notEqual(finalRemoteP2, finalLocalP2)
   })
 })
 
-test('Sync Stack continues when a push succeeded before its checkpoint was written', async () => {
+test('Sync adopts a confirmed push with a lost checkpoint but does not replay a later unknown write', async () => {
   await withHarness(async (harness) => {
     await runAction(harness.repo, { type: 'createBranch', name: 'first', parent: 'main' })
     await commitFile(harness, 'first.txt', 'first\n', 'First layer')
@@ -670,6 +676,7 @@ test('Sync Stack continues when a push succeeded before its checkpoint was writt
     git(harness, ['push', harness.bare, 'main:refs/heads/main'])
     git(harness, ['switch', 'second'])
 
+    await runAction(harness.repo, { type: 'fetch' })
     const preview = await previewStack(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -708,16 +715,19 @@ test('Sync Stack continues when a push succeeded before its checkpoint was writt
     delete first.publishedOid
     await writeFile(journalPath, JSON.stringify(journal), 'utf8')
 
+    const secondBeforeRecovery = bareGit(harness, ['rev-parse', 'refs/heads/second'])
     failSecond = false
-    const result = await runAction(harness.repo, { type: 'stackContinue' })
-    assert.match(result.message, /Synced/i)
+    await assert.rejects(runAction(harness.repo, { type: 'stackContinue' }))
     assert.equal(
       bareGit(harness, ['rev-parse', 'refs/heads/first']),
       git(harness, ['rev-parse', 'first']),
     )
+    assert.equal(bareGit(harness, ['rev-parse', 'refs/heads/second']), secondBeforeRecovery)
+    const recovered = JSON.parse(await readFile(journalPath, 'utf8'))
     assert.equal(
-      bareGit(harness, ['rev-parse', 'refs/heads/second']),
-      git(harness, ['rev-parse', 'second']),
+      recovered.syncPushes.branches.find((item: { branch: string }) => item.branch === 'first')
+        ?.publishedOid,
+      bareGit(harness, ['rev-parse', 'refs/heads/first']),
     )
   })
 })
@@ -741,6 +751,7 @@ test('Sync Stack changed origin during paused conflict is rejected before any mu
     git(harness, ['switch', 'feat-origin-check'])
 
     // 3. Preview and run sync, causing a conflict
+    await runAction(harness.repo, { type: 'fetch' })
     const snapshot = await getSnapshot(harness.repo)
     const preview = await previewStack(harness.repo, snapshot, 'sync', 'feat-origin-check')
     assert.equal(preview.kind, 'sync')
@@ -824,6 +835,7 @@ test('Sync Stack drops a merge-commit merged parent and reparents its descendant
     const gitDir = git(harness, ['rev-parse', '--absolute-git-dir'])
     assert.equal(existsSync(join(gitDir, 'git-stacks-merged-heads.json')), false)
 
+    await runAction(harness.repo, { type: 'fetch' })
     const preview = await previewStack(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -932,6 +944,7 @@ test('Sync Stack refuses a sync whose merge-committed parent is proved different
     await harness.writeState(state)
     git(harness, ['switch', 'child'])
 
+    await runAction(harness.repo, { type: 'fetch' })
     const preview = await previewStack(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -1063,5 +1076,58 @@ test('Sync Stack reports a published, current stack as up to date and changes no
     assert.equal(git(harness, ['for-each-ref', '--format=%(refname)', 'refs/git-stacks']), '')
     assert.equal(git(harness, ['status', '--porcelain']), '')
     assert.equal(git(harness, ['branch', '--show-current']), 'child')
+  })
+})
+
+test('Sync inspection leaves fetched authority unchanged until a separate Fetch and then replays the reviewed layer', async () => {
+  await withHarness(async (harness) => {
+    await runAction(harness.repo, { type: 'createBranch', name: 'read-only-sync', parent: 'main' })
+    await commitFile(harness, 'feature.txt', 'feature\n', 'Feature')
+    git(harness, ['push', harness.bare, 'read-only-sync:refs/heads/read-only-sync'])
+    git(harness, ['switch', 'main'])
+    const advanced = await commitFile(harness, 'advance.txt', 'advance\n', 'Advance trunk')
+    git(harness, ['push', harness.bare, 'main:refs/heads/main'])
+    git(harness, ['switch', 'read-only-sync'])
+    const fetchedBefore = git(harness, ['rev-parse', 'refs/remotes/origin/main'])
+    const selectedBefore = git(harness, ['rev-parse', 'HEAD'])
+    const inspection = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'sync',
+      'read-only-sync',
+    )
+    await assert.rejects(
+      runAction(harness.repo, {
+        type: 'executeStack',
+        token: inspection.token,
+        allowForce: true,
+        mergeMethod: 'squash',
+      }),
+    )
+    assert.equal(git(harness, ['rev-parse', 'refs/remotes/origin/main']), fetchedBefore)
+    assert.equal(git(harness, ['rev-parse', 'HEAD']), selectedBefore)
+    await runAction(harness.repo, { type: 'fetch' })
+    assert.equal(git(harness, ['rev-parse', 'refs/remotes/origin/main']), advanced)
+    const reviewed = await previewStack(
+      harness.repo,
+      await getSnapshot(harness.repo),
+      'sync',
+      'read-only-sync',
+    )
+    assert.deepEqual(reviewed.blockers, [])
+    await runAction(harness.repo, {
+      type: 'executeStack',
+      token: reviewed.token,
+      allowForce: true,
+      mergeMethod: 'squash',
+    })
+    assert.equal(git(harness, ['rev-parse', 'read-only-sync~1']), advanced)
+    assert.equal(
+      bareGit(harness, ['rev-parse', 'refs/heads/read-only-sync']),
+      git(harness, ['rev-parse', 'HEAD']),
+    )
+    assert.equal(git(harness, ['symbolic-ref', 'HEAD']), 'refs/heads/read-only-sync')
+    assert.equal(git(harness, ['status', '--porcelain']), '')
+    assert.equal(git(harness, ['stash', 'list']), '')
   })
 })

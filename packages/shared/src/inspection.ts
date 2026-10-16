@@ -6,6 +6,8 @@ export interface InspectionContext {
   worktreeId?: string
   refId?: string
   pullRequestId?: string
+  /** Binds a prepared read to a main-minted authority; never authorizes a mutation. */
+  operationToken?: string
 }
 
 /** Bounded directory status, without dependency/remote/stash/history assembly. */
@@ -28,8 +30,11 @@ export const INSPECTION_CHANNELS = {
   submitStackProgress: 'repository:submit-stack-progress',
   mergeStatus: 'repository:merge-status',
   stackPreview: 'repository:stack-preview',
+  reviewedMergePreview: 'repository:reviewed-merge-preview',
   surgeryPreview: 'repository:surgery-preview',
   pushPreview: 'repository:push-preview',
+  worktreeLifecyclePreview: 'repository:worktree-lifecycle-preview',
+  nativeOperationPreview: 'repository:native-operation-preview',
   reconciliationPreview: 'repository:reconciliation-preview',
   fileView: 'repository:file',
   conflictView: 'repository:conflict',

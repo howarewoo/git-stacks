@@ -818,6 +818,7 @@ test('captured contextual unlinking preserves all links when the head retires be
     await addLocalContextualIssueLink(harness.repo, 7, 103)
     const head = git(harness, ['rev-parse', 'HEAD'])
     const controller = new AbortController()
+
     let enter!: () => void
     let release!: () => void
     const entered = new Promise<void>((resolve) => {

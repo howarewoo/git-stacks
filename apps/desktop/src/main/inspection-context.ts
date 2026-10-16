@@ -9,8 +9,12 @@ export const inspectionAuthority = new AsyncLocalStorage<{
   origin: string | null
   originUrl: string | null
   validate: () => Promise<void>
+  /** Management-only final effect fence; ordinary inspections never install it. */
+  validateEffect?: () => Promise<void>
 }>()
 
+/** An engine can add evolved target facts without replacing original owner authority. */
+export const operationEffectGuard = new AsyncLocalStorage<() => Promise<void>>()
 export function assertInspectionOrigin(origin: string | null, resolved = false): void {
   const captured = inspectionAuthority.getStore()
   if (!captured) return
@@ -26,4 +30,17 @@ export async function validateInspectionDispatch(): Promise<void> {
   captured.signal.throwIfAborted()
   await captured.validate()
   captured.signal.throwIfAborted()
+}
+
+export async function validateOperationEffect(): Promise<void> {
+  const captured = inspectionAuthority.getStore()
+  captured?.signal.throwIfAborted()
+  // Evolved target checks may await Git/filesystem/journal reads. They must
+  // finish before the original owner's final physical/provider dispatch fence.
+  await operationEffectGuard.getStore()?.()
+  if (captured?.validateEffect) {
+    captured.signal.throwIfAborted()
+    await captured.validateEffect()
+    captured.signal.throwIfAborted()
+  }
 }

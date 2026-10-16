@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
-import { writeFile } from 'node:fs/promises'
+import { writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { createGitHubHarness } from './fixtures/github-harness'
@@ -13,14 +13,18 @@ import type { GitHubFixtureState, GitHubHarness } from './fixtures/github-harnes
 // above would hand Git Stacks the unpatched `execFile`.
 const { getSnapshot, runAction } = await import('../src/main/git')
 const { getMergeStatus, previewStack } = await import('../src/main/stacks')
-const { setGitHubTransport } = await import('../src/main/github-transport')
+const { DirectGitHubTransport, setGitHubTransport } = await import('../src/main/github-transport')
 const { createGitHubApiDouble } = await import('./fixtures/github-api-double')
 const { GITHUB_API_URL_ENV } = await import('../src/main/github-transport')
+const { previewReviewedMerge } = await import('../src/main/stacks')
+const { captureOperation, runRecordedOperation, readOperationRecords, unresolvedOperationRecords } =
+  await import('../src/main/operation-authority')
+const { discoverWorktrees } = await import('../src/main/worktree-inventory')
 
 /**
  * The asynchronous merge flow, end to end through the production read path: a real
- * disposable repository, the real `DirectGitHubTransport` the main process builds,
- * real HTTP over a socket, and the real API double answering as a server.
+ * disposable repository, the real `DirectGitHubTransport` with an explicit
+ * fixture-only credential, real HTTP over a socket, and the API double as a server.
  *
  * The point is the layer a stubbed `fetch` cannot reach. A throw injected into a
  * fixture answers a different question than a 500 or a dropped connection does: the
@@ -67,8 +71,7 @@ async function serveGitHub(): Promise<LiveGitHub> {
 }
 
 /**
- * Runs `body` with Git Stacks' own transport built from the environment, pointed at
- * the local server, so nothing about the request path is injected.
+ * Runs `body` with the real socket transport authenticated only to this fixture.
  */
 async function withLiveGitHub(
   run: (harness: GitHubHarness, live: LiveGitHub) => Promise<void>,
@@ -83,7 +86,9 @@ async function withLiveGitHub(
       else process.env[key] = value
     }
     process.env[GITHUB_API_URL_ENV] = live.url
-    process.env.GH_TOKEN = 'fixture-token'
+    setGitHubTransport(
+      new DirectGitHubTransport({ host: 'github.com', token: 'fixture-token', apiUrl: live.url }),
+    )
     await run(harness, live)
   } finally {
     setGitHubTransport(null)
@@ -287,3 +292,128 @@ test('a later refresh that cannot read the pull request keeps what a read confir
     assert.equal(recovered?.layers[0]?.status, 'merged')
   })
 })
+
+test('retained merge intent plus unreadable secondary history cannot authorize a second provider request', {
+  concurrency: false,
+}, async () => {
+  await withLiveGitHub(async (harness) => {
+    const ready = await publishedStack(harness)
+    ready.asyncMergeStaysPending = true
+    await harness.writeState(ready)
+    const preview = await mergePreviewFor(harness, 'parent')
+    const inventory = await discoverWorktrees(harness.repo)
+    const owner = inventory.worktrees.find((tree) => tree.path === harness.repo)!
+    const capture = await captureOperation(
+      harness.repo,
+      { repositoryId: inventory.identity.id, worktreeId: owner.id },
+      {
+        repositoryPath: harness.repo,
+        remoteUrl: 'https://github.com/acme/widgets.git',
+        authority: 'fixture-provider',
+      },
+    )
+    await runRecordedOperation(
+      capture,
+      {
+        type: 'executeStack',
+        token: preview.token,
+        allowForce: false,
+        mergeMethod: 'squash',
+        mergeAction: 'direct_merge',
+      },
+      () => dispatchMerge(harness, preview.token),
+    )
+    assert.equal((await readOperationRecords(harness.repo))[0].state, 'unconfirmed')
+    const number = prFor(ready, 'parent').number
+    const journal = join(harness.repo, '.git', 'git-stacks-merge-queue.json')
+    const original = await readFile(journal, 'utf8')
+    const requestsBefore = (await harness.readState()).requests?.filter((request) =>
+      request.argv.includes('PUT'),
+    ).length
+    await writeFile(journal, '{truncated accepted history')
+    await assert.rejects(previewReviewedMerge(harness.repo, number))
+    assert.equal(await readFile(journal, 'utf8'), '{truncated accepted history')
+    await writeFile(journal, original)
+    const retained = await previewReviewedMerge(harness.repo, number)
+    assert.ok(
+      retained.blockers.some(
+        (reason) => reason.includes('unresolved merge intent') || reason.includes('pending'),
+      ),
+    )
+    assert.equal(
+      (await harness.readState()).requests?.filter((request) => request.argv.includes('PUT'))
+        .length,
+      requestsBefore,
+    )
+  })
+})
+
+for (const terminal of ['failed', 'dropped'] as const) {
+  test(`confirmed ${terminal} releases only the original merge intent for a fresh reviewed request`, {
+    concurrency: false,
+  }, async () => {
+    await withLiveGitHub(async (harness) => {
+      const ready = await publishedStack(harness)
+      ready.asyncMergeStaysPending = true
+      await harness.writeState(ready)
+      const number = prFor(ready, 'parent').number
+      const preview = await previewReviewedMerge(harness.repo, number)
+      assert.deepEqual(preview.blockers, [])
+      const inventory = await discoverWorktrees(harness.repo)
+      const owner = inventory.worktrees.find((tree) => tree.path === harness.repo)!
+      const capture = await captureOperation(
+        harness.repo,
+        { repositoryId: inventory.identity.id, worktreeId: owner.id },
+        {
+          repositoryPath: harness.repo,
+          remoteUrl: 'https://github.com/acme/widgets.git',
+          authority: 'fixture-provider',
+        },
+      )
+      const action = {
+        type: 'executeStack' as const,
+        token: preview.token,
+        allowForce: false,
+        mergeMethod: 'squash' as const,
+        mergeAction: 'direct_merge' as const,
+      }
+      await runRecordedOperation(capture, action, () => runAction(harness.repo, action))
+      const original = (await readOperationRecords(harness.repo))[0]
+      assert.equal(original.state, 'unconfirmed')
+      await getMergeStatus(harness.repo)
+      assert.equal((await readOperationRecords(harness.repo))[0].state, 'unconfirmed')
+      assert.ok((await previewReviewedMerge(harness.repo, number)).blockers.length)
+
+      const finished = await harness.readState()
+      finished.asyncMergeStaysPending = false
+      finished.asyncMergeResult = { status: terminal === 'failed' ? 'failed' : 'enqueued' }
+      await harness.writeState(finished)
+      if (terminal === 'dropped') {
+        assert.equal((await getMergeStatus(harness.repo))?.layers[0].status, 'enqueued')
+        assert.equal((await readOperationRecords(harness.repo))[0].state, 'unconfirmed')
+        assert.ok((await previewReviewedMerge(harness.repo, number)).blockers.length)
+        const dropped = await harness.readState()
+        dropped.mergeQueueMembers = {}
+        delete dropped.asyncMerge
+        await harness.writeState(dropped)
+      }
+      const status = await getMergeStatus(harness.repo)
+      assert.equal(status?.layers[0].status, terminal === 'failed' ? 'failed' : 'not-merged')
+      const resolved = (await readOperationRecords(harness.repo))[0]
+      assert.deepEqual(resolved.action, original.action)
+      assert.deepEqual(resolved.preview, original.preview)
+      assert.deepEqual(resolved.result, original.result)
+      assert.equal((await unresolvedOperationRecords(harness.repo)).length, 0)
+      const fresh = await previewReviewedMerge(harness.repo, number)
+      assert.deepEqual(fresh.blockers, [])
+      // A new explicit attempt may run, but its own pending receipt still blocks replay.
+      const next = await harness.readState()
+      next.asyncMergeStaysPending = true
+      delete next.asyncMergeResult
+      await harness.writeState(next)
+      await dispatchMerge(harness, fresh.token)
+      assert.ok((await previewReviewedMerge(harness.repo, number)).blockers.length)
+      assert.equal((await unresolvedOperationRecords(harness.repo)).length, 0)
+    })
+  })
+}

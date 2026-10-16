@@ -176,17 +176,19 @@ export function projectWorkbenchInventory(
         refKind: ref.kind,
         worktreesKnown: directoriesKnown,
         bulkEligible:
-          ref.kind === 'local' &&
-          directoriesKnown &&
           repo.refsRead.state === 'complete' &&
-          trees.every(
-            (tree) =>
-              tree.read.state === 'complete' &&
-              tree.status === 'clean' &&
-              !tree.missing &&
-              !tree.locked &&
-              !tree.operation,
-          ),
+          (ref.kind === 'remote'
+            ? Boolean(detail)
+            : ref.kind === 'local' &&
+              directoriesKnown &&
+              trees.every(
+                (tree) =>
+                  tree.read.state === 'complete' &&
+                  tree.status === 'clean' &&
+                  !tree.missing &&
+                  !tree.locked &&
+                  !tree.operation,
+              )),
         trunk: Boolean(
           detail &&
             (ref.name === `refs/heads/${detail.defaultBranch}` ||

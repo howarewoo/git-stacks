@@ -893,6 +893,10 @@ test('Review retains pane, file comparison and unsent composition across readonl
 test('same-number cross-repository Inbox navigation retires held old Review reads', async ({
   page,
 }) => {
+  const targetRepositoryId = snapshotInventory(
+    Object.values(scenarios['pr-inbox-same-number'].snapshotsByPath!),
+  ).repositories.find((repo) => repo.remote?.fullName === 'howarewoo/design-system-specimens')!
+    .identity.id
   await openGallery(page, { scenario: 'pr-inbox-same-number' })
   await switchDestination(page, 'attention')
   await page.getByRole('textbox', { name: 'Search needs attention', exact: true }).fill('#81')
@@ -908,13 +912,30 @@ test('same-number cross-repository Inbox navigation retires held old Review read
     .filter({ hasText: 'Charge every native-stack page' })
   await entry.focus()
   await entry.press('Enter')
+  // Selection can enqueue more than one old-repository read; "newest" alone
+  // does not prove the destination request has arrived.
+  await expect
+    .poll(async () =>
+      (await getDoubleCalls(page)).some((call) => {
+        const context = call.args[0]
+        return (
+          call.call === 'inspect' &&
+          call.args[1] === 'reviewHeadline' &&
+          context !== null &&
+          typeof context === 'object' &&
+          'repositoryId' in context &&
+          context.repositoryId === targetRepositoryId
+        )
+      }),
+    )
+    .toBe(true)
   await releaseDoubleCalls(page, 'reviewHeadline', 'newest')
   await settle(page)
   const review = page.locator('.review-view')
   await expect(review).toContainText('#81 Charge every native-stack page to the refresh budget')
   await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')
   await expect(review).toContainText('checks failing')
-  await releaseDoubleCalls(page, 'reviewHeadline', 'oldest')
+  await releaseDoubleCalls(page, 'reviewHeadline')
   await settle(page)
   await expect(review).toContainText('#81 Charge every native-stack page to the refresh budget')
   await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')

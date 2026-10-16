@@ -100,6 +100,8 @@ async function handlers(
     CommandCancelled,
     AbortSignal,
     Error,
+    realpath: async (path: string) => path,
+    operationCaptures: new Map(),
   })
   inspectionHandlers.set('repository:file', output['repository:file'])
   return {

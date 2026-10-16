@@ -146,6 +146,8 @@ export const activeCherryPickSnapshot = withSnapshot({
 /** A restack that paused after finishing some branches. */
 export const pausedRestackProgress: StackProgress = {
   kind: 'restack',
+  operationId: 'fixture-paused-restack',
+  allowForce: null,
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',
   completed: ['feature/checkout'],
@@ -163,6 +165,8 @@ export const pausedRestackSnapshot = withSnapshot({
 /** A restack whose steps have all been applied. */
 export const completedRestackProgress: StackProgress = {
   kind: 'restack',
+  operationId: 'fixture-completed-restack',
+  allowForce: null,
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout-tests',
   completed: ['feature/checkout', 'feature/checkout-tests'],
@@ -177,6 +181,8 @@ export const completedRestackSnapshot = withSnapshot({
 /** A restack that has not applied a single step yet. */
 export const unstartedRestackProgress: StackProgress = {
   kind: 'restack',
+  operationId: 'fixture-unstarted-restack',
+  allowForce: null,
   originalBranch: 'feature/checkout',
   currentBranch: 'feature/checkout',
   completed: [],
@@ -217,6 +223,7 @@ export const restackPreview: StackPreview = {
       branch: 'feature/checkout',
       parent: 'main',
       oid: '2222222222222222222222222222222222222222',
+      baseOid: '1111111111111111111111111111111111111111',
       commits: 2,
       title: 'Add checkout validation',
       pr: null,
@@ -226,6 +233,7 @@ export const restackPreview: StackPreview = {
       branch: 'feature/checkout-tests',
       parent: 'feature/checkout',
       oid: '3333333333333333333333333333333333333333',
+      baseOid: '2222222222222222222222222222222222222222',
       commits: 1,
       title: 'Cover checkout validation',
       pr: followUpBranch.pr,
@@ -259,6 +267,8 @@ export const publishPreview: StackPreview = {
     branch: 'feature/checkout',
     stackNumber: null,
     stackAction: 'create',
+    originalMembership: [],
+    resultingOrder: ['feature/checkout'],
     baseChanges: [],
     capturedAt: '2026-01-01T00:00:00.000Z',
     steps: [
@@ -285,6 +295,10 @@ export const publishPreview: StackPreview = {
       {
         branch: 'feature/checkout',
         base: 'main',
+        oid: 'a'.repeat(40),
+        baseOid: 'b'.repeat(40),
+        remoteOid: null,
+        push: 'create',
         title: 'Add checkout validation',
         body: '',
         draft: true,

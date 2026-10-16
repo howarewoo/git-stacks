@@ -1,5 +1,9 @@
+import { NativeOperationDialog } from './components/native-operation-dialog'
+import { operationInspectionAPI } from './lib/operation-api'
+import { WorktreeLifecycleDialog } from './components/worktree-lifecycle-dialog'
+import { ReconciliationPanel } from './components/reconciliation-view'
 import * as React from 'react'
-import { CancelledError, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Button,
   Command,
@@ -14,6 +18,10 @@ import {
   DialogDescription,
   WorkbenchPane,
   Select,
+  Accordion,
+  AccordionItem,
+  AccordionTrigger,
+  AccordionContent,
 } from '@git-stacks/ui'
 import { BranchWorkbench } from './components/branch-workbench'
 import {
@@ -91,9 +99,9 @@ import type { InspectionContext } from '@git-stacks/shared/inspection'
 import type { NotificationInbox, NotificationThread } from '@git-stacks/shared/notifications'
 import { LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 import {
-  cliAuthority,
   sameOperationScope,
   type OperationScope,
+  type OperationCapture,
 } from '@git-stacks/shared/operation-scope'
 import { useOperationProgressProjection } from './lib/operation-progress'
 import './components/workbench-shell.css'
@@ -125,6 +133,7 @@ function App() {
   const [details, setDetails] = React.useState<Record<string, RepositorySnapshot>>({})
   const [error, setError] = React.useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [reconciliationOpen, setReconciliationOpen] = React.useState(false)
   const [globalQuery, setGlobalQuery] = React.useState('')
   const [globalPage, setGlobalPage] = React.useState(0)
   const [searchReady, setSearchReady] = React.useState(true)
@@ -132,8 +141,8 @@ function App() {
   const [localRepositoryOpen, setLocalRepositoryOpen] = React.useState(false)
   const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
   const [recoveryOpen, setRecoveryOpen] = React.useState(false)
-  const [operationBusy, setOperationBusy] = React.useState(false)
-  const [repositoryOpening, setRepositoryOpening] = React.useState(false)
+  const [preparingOperation, setOperationBusy] = React.useState(false)
+  const [, updateRunningOperations] = React.useReducer((value: number) => value + 1, 0)
   const [discoveryWorktrees, setDiscoveryWorktrees] = React.useState(false)
   const [discoveryPage, setDiscoveryPage] = React.useState(0)
   const [historyOpen, setHistoryOpen] = React.useState(false)
@@ -169,7 +178,6 @@ function App() {
   const inboxFilterLock = React.useRef(false)
   const [events, setEvents] = React.useState<ObservedActivity[]>([])
   const previousObservations = React.useRef(new Map<string, CollaborationObservation>())
-  const [operationAuthority, setOperationAuthority] = React.useState('')
   const [workflow, setWorkflow] = React.useState<WorkflowRequest | null>(null)
   const [operationSnapshot, setOperationSnapshot] = React.useState<RepositorySnapshot | null>(null)
   const [providerWorkflow, setProviderWorkflow] = React.useState<{
@@ -178,7 +186,7 @@ function App() {
     target: InspectionContext
     generation: number
   } | null>(null)
-  const actionLock = React.useRef(false)
+  const actionLock = React.useRef(new Set<string>())
   const workflowAdmissionLock = React.useRef(false)
   const [createPrTarget, setCreatePrTarget] = React.useState<{
     repositoryId: string
@@ -186,19 +194,31 @@ function App() {
   } | null>(null)
   const [createPrRef, setCreatePrRef] = React.useState('')
   const operationScope = React.useRef<OperationScope | null>(null)
+  const operationCaptureGeneration = React.useRef<number | null>(null)
   const operationContext = React.useRef<InspectionContext | null>(null)
-  const journalScope = React.useMemo(
-    () =>
-      operationSnapshot
-        ? {
-            repositoryPath: operationSnapshot.path,
-            remoteUrl: operationSnapshot.remoteUrl,
-            authority: operationAuthority,
-          }
-        : null,
-    [operationSnapshot?.path, operationSnapshot?.remoteUrl, operationAuthority],
-  )
-  useOperationProgressProjection(desktop, journalScope)
+  const operationBusy =
+    preparingOperation ||
+    actionLock.current.has(
+      providerWorkflow?.target.repositoryId ?? operationContext.current?.repositoryId ?? '',
+    )
+  const operationCapture = React.useRef<OperationCapture | null>(null)
+  const [approvedCapture, setApprovedCapture] = React.useState<OperationCapture | null>(null)
+  const approvedScope = approvedCapture?.scope
+  const [lifecycle, setLifecycle] = React.useState<{
+    repositoryId: string
+    mode: 'create' | 'remove'
+    sourceRefId?: string
+    worktreeIds: string[]
+  } | null>(null)
+  const [nativeManagement, setNativeManagement] = React.useState<{
+    repositoryId: string
+    number?: number
+  } | null>(null)
+  const [executionChoice, setExecutionChoice] = React.useState<{
+    action: WorkbenchAction
+    context: WorkbenchActionContext
+  } | null>(null)
+  const [executionChoiceId, setExecutionChoiceId] = React.useState('')
   const [returnOrigin, setReturnOrigin] = React.useState<RepositoryViewMemory['reviewOrigin']>(null)
   const [settings, setSettings] = React.useState<AppSettings | null>(null)
   const [pendingReview, setPendingReview] = React.useState<{
@@ -233,7 +253,6 @@ function App() {
     setBindings(settingsRead.data.settings.shortcuts)
   }, [settingsRead.data, settingsRead.error])
   const [cliStatus, setCliStatus] = React.useState<GitHubCliStatus | null>(null)
-  const principals = React.useRef(new Map<string, string>())
   const [providerEpoch, setProviderEpoch] = React.useState(0)
   const providerGeneration = React.useRef(0)
   const principalIdentities = React.useRef(new Map<string, string>())
@@ -351,6 +370,51 @@ function App() {
     },
     gcTime: 0,
   })
+  const operationRecords = useQuery({
+    queryKey: ['workbench-operation-records', providerEpoch],
+    enabled: Boolean(desktop?.operationRecords),
+    queryFn: () => desktop!.operationRecords!(),
+    refetchInterval: actionLock.current.size || recoveryOpen ? 2000 : PULL_REQUEST_INBOX_REFRESH_MS,
+  })
+  const retainedOperationCount = (operationRecords.data ?? []).reduce(
+    (count, record) => count + (record.state !== 'completed' && !record.resolution ? 1 : 0),
+    0,
+  )
+  const operationApi = React.useMemo(() => {
+    const target = operationContext.current
+    const expected = operationScope.current
+    const original = approvedCapture
+    const generation = operationCaptureGeneration.current
+    if (!desktop || !target || !expected || !original) return undefined
+    return operationInspectionAPI(
+      desktop,
+      target,
+      expected,
+      original,
+      () => providerGeneration.current === generation,
+      (value) => {
+        if (
+          JSON.stringify(operationContext.current) !== JSON.stringify(target) ||
+          !operationScope.current ||
+          !sameOperationScope(operationScope.current, expected)
+        )
+          throw new Error(
+            'The original preview was retired; its approval cannot replace a newer target.',
+          )
+        operationCapture.current = value
+        operationCaptureGeneration.current = providerGeneration.current
+        setApprovedCapture(value)
+      },
+    )
+  }, [
+    desktop,
+    workflow,
+    operationSnapshot?.path,
+    operationSnapshot?.remoteUrl,
+    JSON.stringify(operationContext.current),
+    operationScope.current?.authority,
+  ])
+  useOperationProgressProjection(operationApi ?? null, approvedScope ?? null)
   const refRevision = repository?.refs.map((ref) => `${ref.id}:${ref.oid}`).join('\0')
   const repoRead = useQuery<RepositorySnapshot>({
     queryKey: ['inspection-repository', repositoryId, refRevision, providerEpoch],
@@ -373,8 +437,9 @@ function App() {
     },
     gcTime: 0,
   })
+  const publishedIdentity = JSON.stringify(publishedContext)
   const authorityRead = useQuery({
-    queryKey: ['inspection-authority', repositoryId, repository?.remote?.id, providerEpoch],
+    queryKey: ['inspection-authority', publishedIdentity, providerEpoch],
     enabled: Boolean(published && repositoryId),
     queryFn: async ({ signal }) => {
       const cancel = () => void published!.cancel('repository-operation-scope')
@@ -547,8 +612,6 @@ function App() {
         setCliRefreshing(false)
         setCliStatus(value)
       }
-      if (operationScope.current?.authority.split('|')[0] === value.host)
-        setOperationAuthority(cliAuthority(value.host, value))
       if (previous === undefined || previous === next) return
       providerGeneration.current += 1
       setProviderEpoch((epoch) => epoch + 1)
@@ -808,55 +871,51 @@ function App() {
     repository?.remote?.id,
     surface,
   ])
-  /** Explicit operational adoption only; navigation never activates a checkout or recovers journals. */
-  const captureOperationalTarget = async (target: InspectionContext = context) => {
-    if (!desktop || operationBusy)
-      throw new Error(
-        'Another captured operation is running; browsing and inspection remain available.',
-      )
-    const owner = inventory.data?.repositories.find(
-      (repo) => repo.identity.id === target.repositoryId,
+  /** Preparation reads exact selected context; it never opens or switches an ambient repository. */
+  const captureOperationalTarget = async (
+    target: InspectionContext = context,
+    original?: OperationCapture,
+  ) => {
+    if (!desktop?.captureOperation || !target.worktreeId)
+      throw new Error('Choose an explicit discovered execution worktree.')
+    const capture = await desktop.captureOperation(target)
+    if (
+      original &&
+      (!sameOperationScope(original.scope, capture.scope) ||
+        original.directoryIdentity !== capture.directoryIdentity ||
+        original.commonIdentity !== capture.commonIdentity ||
+        original.gitDirectoryIdentity !== capture.gitDirectoryIdentity)
     )
-    const scopedTarget = inspectionAPI(desktop, target)
-    setOperationBusy(true)
-    try {
-      const scope = await scopedTarget.repositoryOperationScope()
-      if (!owner?.registeredPaths.includes(scope.repositoryPath))
-        throw new Error('Adopt this existing directory before preparing an operation.')
-      const value = await desktop.openRepository(scope.repositoryPath)
-      if (!value || value.path !== scope.repositoryPath)
-        throw new Error('The operational directory changed; no action was sent.')
-      const confirmed = await scopedTarget.repositoryOperationScope()
-      const active = await desktop.repositoryOperationScope()
-      if (!sameOperationScope(scope, confirmed) || !sameOperationScope(scope, active))
-        throw new Error(
-          'The directory, provider or principal changed while preparing the operation.',
-        )
-      operationScope.current = scope
-      setOperationAuthority(scope.authority)
-      const tree = owner.worktrees.find((tree) => tree.path === scope.repositoryPath)
-      operationContext.current = {
-        ...target,
-        worktreeId:
-          target.worktreeId ??
-          (!target.refId || tree?.refId === target.refId
-            ? tree?.kind === 'bare'
-              ? undefined
-              : tree?.id
-            : undefined),
-      }
-      setOperationSnapshot(value)
-      return value
-    } finally {
-      setOperationBusy(false)
-    }
+      throw new Error(
+        'The original physical directory or provider authority is unavailable; saved approval cannot be requalified.',
+      )
+    const generation = providerGeneration.current
+    const api = inspectionAPI(
+      desktop,
+      {
+        repositoryId: target.repositoryId,
+        worktreeId: target.worktreeId,
+        operationToken: capture.token,
+      },
+      () => providerGeneration.current === generation,
+    )
+    const value = await api.refresh()
+    if (!sameOperationScope(capture.scope, await api.repositoryOperationScope()))
+      throw new Error('The captured provider changed while preparing this workflow.')
+    operationCapture.current = capture
+    setApprovedCapture(capture)
+    operationCaptureGeneration.current = generation
+    operationScope.current = capture.scope
+    operationContext.current = { ...target }
+    setOperationSnapshot(value)
+    return value
   }
   const prepareWorkflow = async (
     request: WorkflowRequest,
     target: InspectionContext = context,
     expectedScope?: OperationScope,
   ) => {
-    if (!desktop || actionLock.current || workflowAdmissionLock.current || operationBusy)
+    if (!desktop || workflowAdmissionLock.current || actionLock.current.has(target.repositoryId))
       return false
     if (workflow?.kind === 'pr') {
       setError(
@@ -926,6 +985,99 @@ function App() {
       setDiscoveryWorktrees(true)
       return
     }
+    if (action === 'refresh-metadata') {
+      if (!desktop || !captured.repositoryId) return
+      const generation = providerGeneration.current
+      const current = () => providerGeneration.current === generation
+      void inspectionAPI(desktop, { repositoryId: captured.repositoryId }, current)
+        .refresh()
+        .then(async (value) => {
+          if (!current()) return
+          setDetails((previous) =>
+            current() ? { ...previous, [captured.repositoryId]: value } : previous,
+          )
+          if (current()) await inventory.refetch()
+        })
+        .catch((value) => {
+          if (current()) setError(String(value))
+        })
+      return
+    }
+    if (action === 'reconcile') {
+      if (!captured.worktreeId) {
+        setExecutionChoice({ action, context: captured })
+        setExecutionChoiceId('')
+        return
+      }
+      void captureOperationalTarget({
+        repositoryId: captured.repositoryId,
+        worktreeId: captured.worktreeId,
+      })
+        .then(() => setReconciliationOpen(true))
+        .catch((value) => setError(String(value)))
+      return
+    }
+    if (captured.branchIds) {
+      const repo = inventory.data?.repositories.find(
+        (repo) => repo.identity.id === captured.repositoryId,
+      )
+      const ids = captured.branchIds
+      if (!repo || !ids.length || new Set(ids).size !== ids.length) {
+        setError('Choose an exact nonempty page-only branch subset without duplicates.')
+        return
+      }
+      if (action === 'remove-worktree') {
+        const targets = ids.map((id) => repo.worktrees.filter((tree) => tree.refId === id))
+        if (targets.some((trees) => trees.length !== 1)) {
+          setError(
+            'Each selected branch must name exactly one worktree; ambiguous or branch-only targets require explicit directory selection.',
+          )
+          return
+        }
+        setLifecycle({
+          repositoryId: repo.identity.id,
+          mode: 'remove',
+          worktreeIds: targets.map((trees) => trees[0].id),
+        })
+        return
+      }
+      if (action === 'delete-local' || action === 'delete-remote') {
+        const refs = ids.map((id) => repo.refs.find((ref) => ref.id === id))
+        const remote = action === 'delete-remote'
+        if (refs.some((ref) => !ref || ref.kind !== (remote ? 'remote' : 'local'))) {
+          setError(
+            `Every selected target must be a qualified ${remote ? 'remote tracking' : 'local'} branch; no rejected target is dropped.`,
+          )
+          return
+        }
+        if (!captured.worktreeId) {
+          setExecutionChoice({ action, context: { ...captured } })
+          setExecutionChoiceId('')
+          return
+        }
+        const branches = refs.map((ref) => ({ ref: ref!.name, expectedOid: ref!.oid }))
+        void prepareWorkflow(
+          {
+            kind: 'confirm',
+            action: remote
+              ? { type: 'deleteRemoteBranches', branches }
+              : { type: 'deleteBranches', branches, force: false },
+            title: `Delete exact selected ${remote ? 'remote' : 'local'} branches`,
+            description: `${branches.map((ref) => `${ref.ref} @ ${ref.expectedOid}`).join('; ')}. ${
+              remote
+                ? 'Every target must use the same configured remote and captured lease. Atomic multi-ref support is required; there is no non-atomic fallback or replay after an unknown outcome. Open collaborator PRs may close; local branches and directories remain.'
+                : 'The entire batch is preflighted and deleted atomically or refused. Default/current/checked-out-in-any-worktree protections apply. Remote branches, directories and PRs remain.'
+            }`,
+            label: `Delete reviewed ${remote ? 'remote' : 'local'} branch subset`,
+            destructive: true,
+          },
+          { repositoryId: repo.identity.id, worktreeId: captured.worktreeId },
+        )
+        return
+      }
+      setError('This batch action is not supported; no visible subset is substituted.')
+      return
+    }
     if (action === 'review') {
       const target = snapshot.branches.find(
         (branch) =>
@@ -976,6 +1128,45 @@ function App() {
         .catch((value) => setError(String(value)))
       return
     }
+    if (action === 'native-stack') {
+      const pr = inventory.data?.repositories
+        .find((repo) => repo.identity.id === captured.repositoryId)
+        ?.pullRequests.find((pr) => pr.id === captured.pullRequestId)
+      setNativeManagement({ repositoryId: captured.repositoryId, number: pr?.number })
+      return
+    }
+    if (action === 'create-worktree' || action === 'remove-worktree') {
+      if (!captured.repositoryId || (action === 'remove-worktree' && !captured.worktreeId)) {
+        setError('Choose the exact qualified worktree directory subset.')
+        return
+      }
+      setLifecycle({
+        repositoryId: captured.repositoryId,
+        mode: action === 'create-worktree' ? 'create' : 'remove',
+        sourceRefId: captured.branchId,
+        worktreeIds: captured.worktreeId ? [captured.worktreeId] : [],
+      })
+      return
+    }
+    if (action === 'unregister-worktree') {
+      if (!captured.worktreeId) {
+        setError('Choose the exact registered directory.')
+        return
+      }
+      void prepareWorkflow(
+        {
+          kind: 'confirm',
+          action: { type: 'unregisterWorktrees', worktreeIds: [captured.worktreeId] },
+          title: 'Remove app registration only',
+          description:
+            'Remove only this captured directory from the recent repository registry. Its files, Git worktree administration, local branches and PRs remain unchanged.',
+          label: 'Remove captured registration',
+          destructive: true,
+        },
+        { repositoryId: captured.repositoryId, worktreeId: captured.worktreeId },
+      )
+      return
+    }
     const branch = snapshot.branches.find(
       (row) =>
         row.repositoryId === captured.repositoryId &&
@@ -983,31 +1174,126 @@ function App() {
     )
     const worktreeId =
       captured.worktreeId ?? (branch?.id === selected?.id ? context.worktreeId : undefined)
-    if (!branch || branch.refKind !== 'local' || !worktreeId) {
-      setError('Choose an exact existing local worktree before preparing a Git operation.')
+    if (
+      !branch ||
+      (branch.refKind !== 'local' &&
+        action !== 'delete-remote' &&
+        action !== 'merge' &&
+        action !== 'fetch')
+    ) {
+      setError('Choose an exact qualified target branch.')
       return
     }
-    if (action === 'restack' || action === 'sync' || action === 'publish')
+    if (!worktreeId) {
+      setExecutionChoice({ action, context: { ...captured, branchId: branch.id } })
+      setExecutionChoiceId('')
+      return
+    }
+    const target = {
+      repositoryId: captured.repositoryId,
+      refId: action === 'merge' ? undefined : branch.id,
+      worktreeId,
+      pullRequestId: branch.pullRequest?.id,
+    }
+    if (action === 'restack' || action === 'sync' || action === 'publish' || action === 'merge') {
+      if (action === 'merge' && !branch.pullRequest) {
+        setError('Choose the exact qualified reviewed PR.')
+        return
+      }
       void prepareWorkflow(
-        { kind: 'stack', branch: branch.ref, operation: action },
         {
-          repositoryId: captured.repositoryId,
-          refId: branch.id,
-          worktreeId,
-          pullRequestId: branch.pullRequest?.id,
+          kind: 'stack',
+          branch: branch.ref,
+          operation: action,
+          ...(action === 'merge' ? { pullRequest: branch.pullRequest!.number } : {}),
         },
+        target,
+      )
+    } else if (action === 'fetch')
+      void prepareWorkflow(
+        {
+          kind: 'confirm',
+          action: { type: 'fetch' },
+          title: 'Fetch Git refs',
+          description:
+            'Fetch all configured remotes and prune tracking refs in this explicit common repository. No checkout, pull, stash or restack.',
+          label: 'Fetch Git refs',
+        },
+        target,
+      )
+    else if (action === 'rename' || action === 'parent' || action === 'upstream') {
+      void (async () => {
+        const value = await captureOperationalTarget(target)
+        const selected = value.branches.find((item) => !item.remote && item.name === branch.ref)
+        if (!selected) throw new Error('The captured qualified branch is unavailable.')
+        setWorkflow({ kind: action, branch: selected })
+      })().catch((value) => setError(String(value)))
+    } else if (action === 'delete-local') {
+      const ref = inventory.data?.repositories
+        .find((repo) => repo.identity.id === captured.repositoryId)
+        ?.refs.find((ref) => ref.id === branch.id)
+      if (!ref) {
+        setError('Captured branch tip is unavailable.')
+        return
+      }
+      void prepareWorkflow(
+        {
+          kind: 'confirm',
+          action: { type: 'deleteBranch', ref: ref.name, expectedOid: ref.oid, force: false },
+          title: 'Delete local branch',
+          description: `Delete only ${ref.name} at ${ref.oid}. Default/current/checked-out-in-any-worktree protections remain enforced; branch configuration cleanup is reported separately. No worktree or remote branch is deleted.`,
+          label: 'Delete captured local branch',
+          destructive: true,
+        },
+        target,
+      )
+    } else if (action === 'delete-remote') {
+      const ref = inventory.data?.repositories
+        .find((repo) => repo.identity.id === captured.repositoryId)
+        ?.refs.find((ref) => ref.id === branch.id)
+      if (!ref || ref.kind !== 'remote') {
+        setError('Choose a qualified remote tracking ref.')
+        return
+      }
+      void prepareWorkflow(
+        {
+          kind: 'confirm',
+          action: { type: 'deleteRemoteBranch', ref: ref.name, expectedOid: ref.oid },
+          title: 'Delete remote branch',
+          description: `Delete ${ref.name} only under captured lease ${ref.oid}. Open collaborator PRs may close; local branches and directories remain. No automatic replay after an unknown response.`,
+          label: 'Delete captured remote branch',
+          destructive: true,
+        },
+        target,
+      )
+    } else if (action === 'insert-layer')
+      void prepareWorkflow(
+        { kind: 'surgery', request: { kind: 'insert', branch: branch.ref, name: '' } },
+        target,
+      )
+    else if (action === 'move-layer')
+      void prepareWorkflow(
+        { kind: 'surgery', request: { kind: 'move', branch: branch.ref, target: '' } },
+        target,
+      )
+    else if (action === 'remove-layer')
+      void prepareWorkflow(
+        { kind: 'surgery', request: { kind: 'remove', branch: branch.ref } },
+        target,
       )
     else setError('Choose a qualified operational preview before changing repository state.')
   }
   const runCapturedAction = async (action: Parameters<DesktopAPI['runAction']>[0]) => {
-    if (actionLock.current) return false
+    const localDomain =
+      providerWorkflow?.target.repositoryId ?? operationContext.current?.repositoryId
+    if (!localDomain || actionLock.current.has(localDomain)) return false
     if (providerWorkflow) {
       if (!['updatePr', 'closePr', 'reopenPr', 'linkIssue', 'unlinkIssue'].includes(action.type)) {
         setError('This form addresses provider PR management, not a local Git operation.')
         return false
       }
-      actionLock.current = true
-      setOperationBusy(true)
+      actionLock.current.add(localDomain)
+      updateRunningOperations()
       try {
         if (!providerWorkflow.api.pullRequestAction)
           throw new Error('Captured PR management is unavailable.')
@@ -1016,6 +1302,7 @@ function App() {
           providerAction,
           providerWorkflow.scope,
         )
+        if (providerGeneration.current !== providerWorkflow.generation) return true
         const observedAt = new Date().toISOString()
         const number = 'number' in providerAction ? providerAction.number : providerAction.prNumber
         setEvents((events) =>
@@ -1037,11 +1324,21 @@ function App() {
         )
         try {
           const refreshed = await providerWorkflow.api.refresh()
+          if (
+            providerGeneration.current !== providerWorkflow.generation ||
+            !sameOperationScope(
+              await providerWorkflow.api.repositoryOperationScope(),
+              providerWorkflow.scope,
+            )
+          )
+            return true
           setDetails((previous) => ({
             ...previous,
             [providerWorkflow.target.repositoryId]: refreshed,
           }))
-          setOperationSnapshot(refreshed)
+          setOperationSnapshot((previous) =>
+            previous === operationSnapshot ? refreshed : previous,
+          )
           await inventory.refetch()
         } catch (value) {
           setError(`The provider action completed, but its follow-up read failed: ${String(value)}`)
@@ -1051,8 +1348,8 @@ function App() {
         setError(String(value))
         return false
       } finally {
-        actionLock.current = false
-        setOperationBusy(false)
+        actionLock.current.delete(localDomain)
+        updateRunningOperations()
       }
     }
     const expected = operationScope.current
@@ -1061,38 +1358,41 @@ function App() {
       setError('Choose a captured operational repository first.')
       return false
     }
-    actionLock.current = true
-    setOperationBusy(true)
+    actionLock.current.add(localDomain)
+    updateRunningOperations()
     try {
-      const scope = await desktop.repositoryOperationScope()
-      const confirmed = await inspectionAPI(desktop, captured).repositoryOperationScope()
-      if (!sameOperationScope(scope, expected) || !sameOperationScope(confirmed, expected))
+      const approval = operationCapture.current
+      if (!approval || !desktop.executeOperation)
         throw new Error(
-          'The captured directory, provider or principal changed; this action was not sent.',
+          'This operation approval has already been spent. Review a fresh preview; uncertain writes are never replayed.',
         )
-      const result = await desktop.runAction(action)
-      const observedAt = new Date().toISOString()
-      setEvents((events) =>
-        [
-          {
-            id: crypto.randomUUID(),
-            repository: operationSnapshot.name,
-            target: {
-              repositoryId: captured.repositoryId,
-              branchId: captured.refId,
-              worktreeId: captured.worktreeId,
-            },
-            label: result.message,
-            observedAt,
-            eventAt: observedAt,
-          },
-          ...events,
-        ].slice(0, LIST_PAGE_SIZE),
-      )
+      const confirmed = await inspectionAPI(desktop, {
+        repositoryId: captured.repositoryId,
+        worktreeId: captured.worktreeId,
+      }).repositoryOperationScope()
+      if (!sameOperationScope(confirmed, expected))
+        throw new Error('The captured provider changed; nothing was sent.')
+      operationCapture.current = null
+      const result = await desktop.executeOperation(approval.token, action)
       try {
-        const snapshot = await inspectionAPI(desktop, captured).refresh()
-        if (operationScope.current && sameOperationScope(operationScope.current, expected))
-          setOperationSnapshot(snapshot)
+        const snapshot = await inspectionAPI(desktop, {
+          repositoryId: captured.repositoryId,
+          worktreeId: captured.worktreeId,
+        }).refresh()
+        if (
+          operationScope.current &&
+          sameOperationScope(operationScope.current, expected) &&
+          sameOperationScope(
+            await inspectionAPI(desktop, {
+              repositoryId: captured.repositoryId,
+              worktreeId: captured.worktreeId,
+            }).repositoryOperationScope(),
+            expected,
+          )
+        )
+          setOperationSnapshot((previous) =>
+            previous?.path === expected.repositoryPath ? snapshot : previous,
+          )
       } catch (value) {
         setError(
           `Action completed; the captured directory could not be refreshed: ${String(value)}`,
@@ -1103,8 +1403,10 @@ function App() {
       setError(String(value))
       return false
     } finally {
-      actionLock.current = false
-      setOperationBusy(false)
+      actionLock.current.delete(localDomain)
+      updateRunningOperations()
+      void operationRecords.refetch()
+      void inventory.refetch()
     }
   }
   const dispatchRef = React.useRef(dispatch)
@@ -1462,7 +1764,7 @@ function App() {
                 })
                 return
               }
-              const sourceNumber = selected?.pullRequest?.number
+              const sourceNumber = reviewBranch?.pullRequest?.number
               if (!desktop || !sourceNumber) {
                 setError('Captured native-layer reading is unavailable.')
                 return
@@ -1470,7 +1772,7 @@ function App() {
               const generation = providerGeneration.current
               const api = inspectionAPI(
                 desktop,
-                publishedContext,
+                reviewContext,
                 () => providerGeneration.current === generation,
               )
               if (!api.pullRequestLayer) {
@@ -1509,6 +1811,21 @@ function App() {
                   { repositoryId, pullRequestId: target.id },
                 )
               else setError('Choose a currently registered source-qualified pull request.')
+            }}
+            onMergeNumber={(number) => {
+              const row = snapshot.branches.find(
+                (row) => row.repositoryId === repositoryId && row.pullRequest?.number === number,
+              )
+              if (row)
+                dispatch('merge', {
+                  repositoryId,
+                  branchId: row.id,
+                  pullRequestId: row.pullRequest!.id,
+                })
+              else
+                setError(
+                  'The exact reviewed provider PR is no longer available in this source repository.',
+                )
             }}
             commands={reviewCommands}
             busy={operationBusy}
@@ -1572,7 +1889,21 @@ function App() {
           />
         ) : surface === 'activity' ? (
           <ActivityView
-            events={events}
+            events={[
+              ...(operationRecords.data ?? []).map((record) => ({
+                id: `operation:${record.id}`,
+                repository: record.worktreePath,
+                target: {
+                  repositoryId: record.repositoryId,
+                  branchId: record.context.refId,
+                  worktreeId: record.context.worktreeId,
+                },
+                label: `${record.resolution ?? record.state}: ${record.message}`,
+                observedAt: record.updatedAt,
+                eventAt: record.startedAt,
+              })),
+              ...events,
+            ]}
             repositories={snapshot.repositories}
             onOpen={openCollaborationTarget}
             state={activityState}
@@ -1690,9 +2021,31 @@ function App() {
                     ? 'Selected directory is missing'
                     : 'Choose an existing worktree',
                 },
-          ...(selected?.refKind === 'local' && selectedTree && !selectedLocalFact?.missing
-            ? { restack: {}, sync: {}, publish: {} }
+          ...(repository
+            ? {
+                restack: {},
+                sync: {},
+                publish: {},
+                'native-stack': {},
+                'delete-remote': {},
+                'move-layer': {},
+              }
             : {}),
+          'create-worktree': repository ? {} : { reason: 'Choose a repository' },
+          'remove-worktree': selectedTree ? {} : { reason: 'Choose an exact worktree directory' },
+          fetch: repository ? {} : { reason: 'Choose a repository' },
+          'refresh-metadata': repository ? {} : { reason: 'Choose a repository' },
+          reconcile: repository ? {} : { reason: 'Choose a repository' },
+          rename: repository ? {} : { reason: 'Choose a qualified local branch' },
+          parent: repository ? {} : { reason: 'Choose a qualified local branch' },
+          upstream: repository ? {} : { reason: 'Choose a qualified local branch' },
+          merge: repository ? {} : { reason: 'Choose a qualified reviewed PR' },
+          'delete-local': repository ? {} : { reason: 'Choose a qualified local branch' },
+          'insert-layer': repository ? {} : { reason: 'Choose a qualified local branch' },
+          'remove-layer': repository ? {} : { reason: 'Choose a qualified local branch' },
+          'unregister-worktree': selectedTree
+            ? {}
+            : { reason: 'Choose an exact registered directory' },
         }}
         onRepositoryChange={(id) => navigate(id)}
         onSelectionChange={select}
@@ -1707,6 +2060,7 @@ function App() {
             </Button>
             <Button variant="ghost" onClick={() => setRecoveryOpen(true)}>
               Operations and recovery
+              {retainedOperationCount ? ` · ${retainedOperationCount} retained` : ''}
             </Button>
             {repository?.worktrees
               .filter((tree) => tree.operation)
@@ -1914,6 +2268,47 @@ function App() {
             ) : null}
             {inventory.error ? <p role="alert">{inventory.error.message}</p> : null}
             <CommandList className="wb-search-results">
+              {selected
+                ? (
+                    [
+                      ['refresh-metadata', 'Refresh selected repository metadata'],
+                      ['fetch', 'Preview Git Fetch'],
+                      ['restack', 'Preview selected Restack'],
+                      ['sync', 'Preview selected Sync'],
+                      ['publish', 'Preview selected Publish / Submit'],
+                      ['merge', 'Preview reviewed downstack merge'],
+                      ['reconcile', 'Inspect source discrepancies and repairs'],
+                      ['delete-local', 'Preview protected local branch deletion'],
+                      ['delete-remote', 'Preview leased remote branch deletion'],
+                    ] as const
+                  )
+                    .filter(([action]) =>
+                      action === 'delete-local'
+                        ? selected.refKind === 'local'
+                        : action === 'delete-remote'
+                          ? selected.refKind === 'remote'
+                          : true,
+                    )
+                    .filter(([, label]) => label.toLowerCase().includes(globalQuery.toLowerCase()))
+                    .map(([action, label]) => (
+                      <CommandItem
+                        key={action}
+                        value={action}
+                        onSelect={() => {
+                          const target = {
+                            repositoryId,
+                            branchId: selected.id,
+                            worktreeId: context.worktreeId,
+                            pullRequestId: selected.pullRequest?.id,
+                          }
+                          setPaletteOpen(false)
+                          dispatch(action, target)
+                        }}
+                      >
+                        {label} · {selected.ref}
+                      </CommandItem>
+                    ))
+                : null}
               {searchReady && !inventory.isPending ? (
                 <CommandEmpty>No matching observed objects.</CommandEmpty>
               ) : null}
@@ -2073,11 +2468,12 @@ function App() {
             onClick={async () => {
               const branch = createPrTarget?.branches.find((branch) => branch.id === createPrRef)
               if (!branch || !createPrTarget) return
-              const opened = await prepareWorkflow(
-                { kind: 'stack', branch: branch.name, operation: 'publish' },
-                { repositoryId: createPrTarget.repositoryId, refId: branch.id },
-              )
-              if (opened) setCreatePrTarget(null)
+              setCreatePrTarget(null)
+              setExecutionChoice({
+                action: 'publish',
+                context: { repositoryId: createPrTarget.repositoryId, branchId: branch.id },
+              })
+              setExecutionChoiceId('')
             }}
           >
             Preview publication
@@ -2157,6 +2553,28 @@ function App() {
           />
         </DialogContent>
       </Dialog>
+      <Dialog open={reconciliationOpen} onOpenChange={setReconciliationOpen}>
+        <DialogContent className="wb-history-dialog">
+          <DialogHeader>
+            <DialogTitle>Source discrepancies and explicit repairs</DialogTitle>
+            <DialogDescription>
+              Refresh reports facts without repairing refs, PR bases or native membership. Choose
+              exact repair IDs and review their real backend effects.
+            </DialogDescription>
+          </DialogHeader>
+          {operationSnapshot && operationApi ? (
+            <ReconciliationPanel
+              snapshot={operationSnapshot}
+              desktop={operationApi}
+              authority={operationScope.current?.authority ?? ''}
+              busy={operationBusy}
+              runAction={runCapturedAction}
+              actionError={error}
+              onClearActionError={() => setError(null)}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
       <Dialog open={recoveryOpen} onOpenChange={setRecoveryOpen}>
         <DialogContent className="wb-history-dialog">
           <DialogHeader>
@@ -2165,18 +2583,132 @@ function App() {
               Browsing does not abort, replay or retarget an operation.
             </DialogDescription>
           </DialogHeader>
-          {recovery.data &&
-          scoped &&
-          operationSnapshot?.path === recovery.data.path &&
-          operationScope.current?.repositoryPath === recovery.data.path ? (
+          {operationRecords.error ? (
+            <p role="alert">
+              Persistent operation status unavailable: {operationRecords.error.message}
+            </p>
+          ) : null}
+          {operationRecords.isPending ? (
+            <p role="status">Loading original operation status…</p>
+          ) : null}
+          {operationRecords.data?.length === 0 ? (
+            <p>No retained operations for currently available original authorities.</p>
+          ) : null}
+          <ol className="grid max-h-[65vh] gap-3 overflow-auto">
+            {(operationRecords.data ?? []).map((record) => (
+              <li key={record.id} className="grid min-w-0 gap-2 rounded-md border p-3">
+                <strong>
+                  {record.action.type}
+                  {record.preview && 'kind' in record.preview ? ` (${record.preview.kind})` : ''} ·{' '}
+                  {record.resolution ?? record.state}
+                </strong>
+                <code className="break-all text-xs">{record.worktreePath}</code>
+                <p>{record.message}</p>
+                {record.stackProgress ? (
+                  <p>
+                    Completed: {record.stackProgress.completed.join(', ') || 'none'}; remaining:{' '}
+                    {record.stackProgress.remaining.join(', ') || 'none'}.{' '}
+                    {record.stackProgress.message}
+                  </p>
+                ) : null}
+                {record.publication ? (
+                  <ol>
+                    {record.publication.steps.map((step, index) => (
+                      <li key={index}>
+                        {step.label}: {step.status} · {step.detail}
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
+                {record.result?.worktreeLifecycle ? (
+                  <ol>
+                    {record.result.worktreeLifecycle.targets.map((target) => (
+                      <li key={target.path}>
+                        {target.path}: {target.state} · {target.detail}
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
+                {record.result?.merge ? (
+                  <ol>
+                    {record.result.merge.layers.map((original) => {
+                      const layer = record.mergeConfirmations?.[original.pullRequest] ?? original
+                      return (
+                        <li key={layer.pullRequest}>
+                          #{layer.pullRequest} {layer.branch}: {layer.status} · {layer.detail}
+                        </li>
+                      )
+                    })}
+                  </ol>
+                ) : null}
+                <Accordion>
+                  <AccordionItem value="immutable-approval">
+                    <AccordionTrigger>
+                      Saved immutable preview and approved choices
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <pre className="whitespace-pre-wrap break-all text-xs">
+                        {JSON.stringify(
+                          { preview: record.preview ?? null, action: record.action },
+                          null,
+                          2,
+                        )}
+                      </pre>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={operationBusy}
+                  onClick={() => {
+                    void (async () => {
+                      if (!desktop) throw new Error('Captured operation authority is unavailable.')
+                      await captureOperationalTarget(
+                        {
+                          repositoryId: record.repositoryId,
+                          worktreeId: record.context.worktreeId,
+                        },
+                        record.capture,
+                      )
+                      if (record.publication && record.publication.status !== 'completed')
+                        setWorkflow({
+                          kind: 'stack',
+                          operation: 'publish',
+                          branch: record.publication.layers[0]?.branch ?? '',
+                        })
+                      else if (record.result?.merge) {
+                        const top = record.result.merge.layers.at(-1)
+                        if (top)
+                          setWorkflow({
+                            kind: 'stack',
+                            operation: 'merge',
+                            branch: top.branch,
+                            pullRequest: top.pullRequest,
+                          })
+                      } else
+                        setError(
+                          'Original directory captured. Continue/Skip/Abort remain explicit supported backend recovery decisions, not automatic replay.',
+                        )
+                    })().catch((value) => setError(String(value)))
+                  }}
+                >
+                  Inspect original authority and recovery
+                </Button>
+              </li>
+            ))}
+          </ol>
+          {operationSnapshot && operationApi && operationScope.current ? (
             <OperationBanner
-              snapshot={recovery.data}
-              authority={operationAuthority}
-              desktop={scoped}
+              snapshot={operationSnapshot}
+              authority={operationScope.current.authority}
+              desktop={operationApi}
               showingOperation={null}
               busy={operationBusy}
               runAction={runCapturedAction}
-              onRequest={(request) => void prepareWorkflow(request)}
+              onRequest={(request) =>
+                void prepareWorkflow(request, operationContext.current ?? context)
+              }
               onShowChanges={() => {
                 setView({ ...current.view, tab: 'changes' })
                 setRecoveryOpen(false)
@@ -2236,6 +2768,87 @@ function App() {
           }, true)
         }}
       />
+      {nativeManagement &&
+      desktop &&
+      inventory.data?.repositories.find(
+        (repo) => repo.identity.id === nativeManagement.repositoryId,
+      ) ? (
+        <NativeOperationDialog
+          api={desktop}
+          sourceVersion={providerEpoch}
+          repository={
+            inventory.data.repositories.find(
+              (repo) => repo.identity.id === nativeManagement.repositoryId,
+            )!
+          }
+          initialNumber={nativeManagement.number}
+          onClose={() => setNativeManagement(null)}
+          onChanged={async () => {
+            await inventory.refetch()
+            await operationRecords.refetch()
+          }}
+        />
+      ) : null}
+      <Dialog
+        open={Boolean(executionChoice)}
+        onOpenChange={(open) => {
+          if (!open) setExecutionChoice(null)
+        }}
+      >
+        <DialogContent className="workflow-dialog">
+          <DialogHeader>
+            <DialogTitle>Choose explicit execution directory</DialogTitle>
+            <DialogDescription>
+              Selection is not mutation authority. The backend preview discloses every replay and
+              refuses branches checked out elsewhere. No primary directory is borrowed or activated.
+            </DialogDescription>
+          </DialogHeader>
+          <Select
+            aria-label="Explicit execution directory"
+            value={executionChoiceId}
+            onValueChange={setExecutionChoiceId}
+            options={[
+              { value: '', label: 'Choose an existing directory' },
+              ...(inventory.data?.repositories
+                .find((repo) => repo.identity.id === executionChoice?.context.repositoryId)
+                ?.worktrees.filter((tree) => !tree.missing && tree.kind !== 'bare')
+                .map((tree) => ({ value: tree.id, label: tree.path })) ?? []),
+            ]}
+          />
+          <Button
+            disabled={!executionChoiceId}
+            onClick={() => {
+              if (!executionChoice) return
+              const chosen = executionChoice
+              setExecutionChoice(null)
+              dispatch(chosen.action, { ...chosen.context, worktreeId: executionChoiceId })
+            }}
+          >
+            Prepare exact scoped preview
+          </Button>
+          <Button variant="secondary" onClick={() => setExecutionChoice(null)}>
+            Cancel
+          </Button>
+        </DialogContent>
+      </Dialog>
+      {lifecycle &&
+      desktop &&
+      inventory.data?.repositories.find((repo) => repo.identity.id === lifecycle.repositoryId) ? (
+        <WorktreeLifecycleDialog
+          sourceVersion={providerEpoch}
+          api={desktop}
+          repository={
+            inventory.data.repositories.find((repo) => repo.identity.id === lifecycle.repositoryId)!
+          }
+          mode={lifecycle.mode}
+          sourceRefId={lifecycle.sourceRefId}
+          worktreeIds={lifecycle.worktreeIds}
+          onClose={() => setLifecycle(null)}
+          onChanged={async () => {
+            await inventory.refetch()
+          }}
+        />
+      ) : null}
       {workflow && operationSnapshot ? (
         <WorkflowDialog
           key={JSON.stringify([
@@ -2246,19 +2859,43 @@ function App() {
           ])}
           request={workflow}
           snapshot={operationSnapshot}
-          authority={providerWorkflow?.scope.authority ?? operationAuthority}
+          authority={JSON.stringify(
+            providerWorkflow?.scope ?? [operationSnapshot.path, operationSnapshot.remoteUrl],
+          )}
           busy={operationBusy}
-          stackApi={providerWorkflow?.api ?? desktop}
+          stackApi={providerWorkflow?.api ?? operationApi}
+          safetyRevision={JSON.stringify([
+            providerEpoch,
+            inventory.data?.repositories.find(
+              (repo) => repo.identity.id === approvedCapture?.repositoryId,
+            )?.refs,
+            inventory.data?.repositories
+              .find((repo) => repo.identity.id === approvedCapture?.repositoryId)
+              ?.worktrees.map((tree) => [
+                tree.id,
+                tree.path,
+                tree.headOid,
+                tree.refId,
+                tree.indexSignature,
+                tree.status,
+                tree.locked,
+                tree.missing,
+              ]),
+          ])}
+          capturedAuthority={providerWorkflow ? null : approvedCapture}
           providerManagement={Boolean(providerWorkflow)}
           providerSourceCurrent={
-            !providerWorkflow || providerWorkflow.generation === providerGeneration.current
+            providerWorkflow
+              ? providerWorkflow.generation === providerGeneration.current
+              : !approvedCapture ||
+                operationCaptureGeneration.current === providerGeneration.current
           }
           actionError={error}
           onClearActionError={() => setError(null)}
           defaults={settings}
           onClose={() => {
-            setWorkflow(null)
-            setProviderWorkflow(null)
+            setWorkflow((previous) => (previous === workflow ? null : previous))
+            setProviderWorkflow((previous) => (previous === providerWorkflow ? null : previous))
           }}
           onRequest={(request) =>
             void prepareWorkflow(

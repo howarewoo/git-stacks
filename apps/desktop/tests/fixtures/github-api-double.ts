@@ -359,6 +359,7 @@ function graphPullRequest(
     headRefName: pr.head,
     headRefOid: currentHead(state, pr),
     baseRefName: pr.base,
+    baseRefOid: hostRefSha(`refs/heads/${pr.base}`),
     isDraft: pr.draft === true,
     state: pr.state,
     reviewDecision: pr.reviewDecision || null,
@@ -395,6 +396,10 @@ function restPullRequest(state: GitHubFixtureState, pr: GitHubFixtureState['prs'
   // is derived from the same rules the merge endpoint enforces, so the read and the write
   // cannot disagree about a blocked pull request.
   const blocked = !merged && ruleSetRefusal(state, pr, currentHead(state, pr) ?? '') !== null
+  const headOid = currentHead(state, pr)
+  const baseOid = hostRefSha(`refs/heads/${pr.base}`)
+  const commits =
+    headOid && baseOid ? hostGitOrNull(['rev-list', '--count', `${baseOid}..${headOid}`]) : null
   return {
     number: pr.number,
     title: pr.title,
@@ -406,6 +411,7 @@ function restPullRequest(state: GitHubFixtureState, pr: GitHubFixtureState['prs'
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     head: { ref: pr.head, sha: currentHead(state, pr), repo: { full_name: pr.headRepository } },
+    commits: commits !== null ? Number(commits) : null,
     // Both ends carry a commit. The application pins a paginated read by comparing the
     // comparison before and after it, and a base with no sha is unreadable rather than
     // unchanged, so a double that omitted it would fail every diff read for the wrong

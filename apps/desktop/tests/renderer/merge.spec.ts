@@ -31,20 +31,19 @@ test.describe('Merge reads after a run', () => {
     await expect(runningMessage).toBeVisible()
 
     await releaseDoubleCalls(page, 'runAction')
-    await expect(runningMessage).toBeVisible()
-    await expect(dialog.getByText('GitHub could not be read:', { exact: false })).toBeVisible()
-    await expect(dialog.getByText('Completed', { exact: true })).toHaveCount(0)
 
-    // A later read is still what GitHub reports, and the control that asks for it is
-    // reachable the whole time.
+    // The completed read supersedes pushed progress without replaying the merge.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await expect(runningMessage).toHaveCount(0)
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
+    expect(
+      await page.evaluate(() =>
+        window.fixture.actions.filter((action) => action.type === 'executeStack'),
+      ),
+    ).toHaveLength(1)
   })
 
-  test('an idle merge dialog reads the replacement account without submitting another merge', async ({
-    page,
-  }) => {
+  test('an idle merge approval cannot move to a replacement account', async ({ page }) => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
     const dialog = await openMergeOutcomes(page)
     await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
@@ -56,12 +55,15 @@ test.describe('Merge reads after a run', () => {
       identity: 'cli:github.com:replacement:1',
       message: null,
     })
-    // This authority's first journal read fails. Retired account facts cannot
-    // stand in for a successful replacement-account read; retry is explicit.
-    await expect(dialog.getByRole('alert')).toContainText('GitHub is unreachable')
-    await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
-    await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
-    await expect(dialog.getByRole('button', { name: 'Refresh what GitHub reports' })).toBeEnabled()
+    await expect(
+      dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last(),
+    ).toBeDisabled()
+    await expect(dialog.getByRole('button', { name: 'Reload preview' })).toBeDisabled()
+    await expect(
+      dialog.getByText('github.com|github.com|authenticated|octo|cli:github.com:octo:1', {
+        exact: true,
+      }),
+    ).toBeVisible()
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 
@@ -233,7 +235,7 @@ test('a recovery journal read failure stays visible without retrying a mutation'
 test('captured publication survives a failed journal read without replay', async ({ page }) => {
   await openGallery(page, { scenario: 'github-cli-authenticated' })
   await page.evaluate(() => window.fixture.hold('submitStackProgress'))
-  const { dialog, recovery } = await openCapturedRecovery(page)
+  const { recovery } = await openCapturedRecovery(page)
   await page.evaluate(() => {
     window.fixture.pushPublication({
       scope: window.fixture.operationScope(),
@@ -248,6 +250,10 @@ test('captured publication survives a failed journal read without replay', async
           {
             branch: 'feature/checkout-tests',
             base: 'main',
+            oid: 'a'.repeat(40),
+            baseOid: 'b'.repeat(40),
+            remoteOid: 'c'.repeat(40),
+            push: 'force',
             create: false,
             pullRequest: 41,
             title: 'Captured title',
@@ -287,5 +293,4 @@ test('captured publication survives a failed journal read without replay', async
   await expect(publication).toContainText('Captured push feature/checkout-tests')
   await expect(publication).toContainText('Original operation authority was not recorded')
   expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
-  await expect(dialog).toBeVisible()
 })

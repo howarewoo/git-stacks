@@ -164,6 +164,7 @@ export function ReviewView({
   number,
   onSelectNumber,
   onManageNumber,
+  onMergeNumber,
   commands,
   busy,
   observedPullRequest,
@@ -186,6 +187,7 @@ export function ReviewView({
   number: number | null
   onSelectNumber: (number: number) => void
   onManageNumber: (number: number) => void
+  onMergeNumber?: (number: number) => void
   commands: React.MutableRefObject<ReviewCommands | null>
   busy: boolean
   observedPullRequest: PullRequest | null
@@ -1101,6 +1103,15 @@ export function ReviewView({
                 >
                   Manage pull request
                 </Button>
+                {onMergeNumber ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => onMergeNumber(headline.pullRequest.number)}
+                  >
+                    Preview reviewed downstack merge…
+                  </Button>
+                ) : null}
               </>
             ) : null}
             <ReviewDraftRecoveryPanel desktop={desktop} authority={authority} />
