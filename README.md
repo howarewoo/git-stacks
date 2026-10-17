@@ -1565,10 +1565,11 @@ exit, preservation of foreign siblings, and refusal of malformed evidence. The
 stand-in reads the raw request without prefix stripping and writes the same
 CRLF response fields as `build/installer.nsh`.
 
-Compile the installer hook through electron-builder's NSIS include chain to
-check its `customHeader` and `customInstall` integration. Compilation and the
-two-process fixture do not execute the Windows installer; installation of a
-real signed release on Windows remains the platform acceptance step below.
+Compile both installer and uninstaller passes through electron-builder's NSIS
+include chain. The handoff variables belong only to the installer; uninstaller
+generation must not declare unused handles. Compilation and the two-process
+fixture do not execute the Windows installer; installation of a real signed
+release on Windows remains the platform acceptance step below.
 
 ### Channels
 

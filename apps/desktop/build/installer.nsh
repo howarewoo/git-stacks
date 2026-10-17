@@ -2,9 +2,11 @@
 ; The installing instance may differ from the process the app spawned after
 ; elevation. Cleanup requires its echoed token AND proof that its PID is gone.
 !macro customHeader
+!ifndef BUILD_UNINSTALLER
   Var /GLOBAL GITSTACKS_handoffHandle
   Var /GLOBAL GITSTACKS_handoffToken
   Var /GLOBAL GITSTACKS_handoffPid
+!endif
 !macroend
 
 ; Runs after files/registry/shortcuts are installed, before launching the app.
