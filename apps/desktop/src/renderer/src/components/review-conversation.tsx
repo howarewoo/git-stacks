@@ -357,7 +357,7 @@ export function ReviewConversation({
 
       <SelectionComposer
         selection={selection}
-        disabled={sending || !canCompose}
+        disabled={sending || Boolean(frozenReason) || !canCompose}
         onAdd={addDraft}
         onClear={onClearSelection}
       />

@@ -586,6 +586,33 @@ test('ReviewConversation genuinely disables DraftList inline comment editors whe
   )
   assert.ok(pendingButtonMatch !== null)
   assert.doesNotMatch(pendingButtonMatch[0], /disabled=""/)
+
+  // 4. Regression test: stale comparison prevents adding new draft comments but permits editing existing drafts
+  const staleComparisonMarkup = renderToStaticMarkup(
+    React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      React.createElement(ReviewConversation, {
+        ...baseProps,
+        selection: { path: 'src/main.ts', side: 'head', anchor: 10, head: 10 },
+        canCompose: true,
+        frozenReason:
+          'Your unsent comments retain an earlier head or base comparison. Their original anchors cannot be moved to this diff.',
+      }),
+    ),
+  )
+
+  const addDraftButtonMatch = staleComparisonMarkup.match(
+    /<button[^>]*>Add pending comment<\/button>/,
+  )
+  assert.ok(addDraftButtonMatch !== null)
+  assert.match(addDraftButtonMatch[0], /disabled=""/)
+
+  const staleDraftTextareaMatch = staleComparisonMarkup.match(
+    /<textarea[^>]*placeholder="What should the author know about these lines\?"[^>]*>/,
+  )
+  assert.ok(staleDraftTextareaMatch !== null)
+  assert.doesNotMatch(staleDraftTextareaMatch[0], /disabled=""/)
   assert.ok(normalTextareaMatch !== null)
   assert.doesNotMatch(normalTextareaMatch[0], /disabled=""/)
 })
