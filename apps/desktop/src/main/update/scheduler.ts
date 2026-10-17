@@ -62,9 +62,7 @@ export class UpdateScheduler {
       void this.trigger()
     }, this.initialDelayMs)
 
-    this.intervalTimer = setInterval(() => {
-      void this.triggerScheduled()
-    }, this.intervalMs)
+    this.schedulePeriodicChecks()
 
     this.options.powerMonitor?.on('resume', this.onResume)
   }
@@ -80,6 +78,14 @@ export class UpdateScheduler {
       this.intervalTimer = null
     }
     this.options.powerMonitor?.removeListener?.('resume', this.onResume)
+  }
+
+  private schedulePeriodicChecks(): void {
+    if (!this.running) return
+    if (this.intervalTimer) clearInterval(this.intervalTimer)
+    this.intervalTimer = setInterval(() => {
+      void this.triggerScheduled()
+    }, this.intervalMs)
   }
 
   /**
@@ -116,6 +122,7 @@ export class UpdateScheduler {
       const result = await this.options.service.checkIfIdle()
       if (result !== null) {
         this.lastCheckTime = this.now()
+        this.schedulePeriodicChecks()
       }
       return result
     } catch {

@@ -1613,6 +1613,48 @@ test('optout in settings prevents automatic check from making any HTTP request',
   assert.ok(feed.requests.length > beforeRequests, 'manual check made HTTP requests')
 })
 
+test('scheduler periodic timer follows check completion after startup delay and request duration', async (t) => {
+  const app = harnessFor('https://updates.example.test')
+  await app.service.start('stable')
+  const intervalMs = 24 * 60 * 60 * 1000
+  const checkTimes: number[] = []
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now: 0 })
+  t.mock.method(app.service, 'checkIfIdle', async () => {
+    checkTimes.push(Date.now())
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+    return app.service.status()
+  })
+  const scheduler = new UpdateScheduler({
+    service: app.service,
+    getSettings: () => structuredClone(DEFAULT_SETTINGS),
+    intervalMs,
+  })
+  scheduler.start()
+  t.after(() => scheduler.stop())
+  const advance = async (ms: number): Promise<void> => {
+    t.mock.timers.tick(ms)
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  await advance(4999)
+  assert.deepEqual(checkTimes, [])
+  await advance(1)
+  assert.deepEqual(checkTimes, [5000])
+  await advance(2000)
+  await advance(intervalMs - 1)
+  assert.deepEqual(checkTimes, [5000], 'no check before a full interval after completion')
+  await advance(1)
+  assert.deepEqual(checkTimes, [5000, 7000 + intervalMs], 'first daily timer is not skipped')
+  await advance(2000)
+  await advance(intervalMs)
+  assert.deepEqual(checkTimes, [5000, 7000 + intervalMs, 9000 + 2 * intervalMs])
+
+  scheduler.stop()
+  await advance(2000)
+  await advance(2 * intervalMs)
+  assert.equal(checkTimes.length, 3, 'an in-flight completion does not restart a stopped timer')
+})
+
 test('scheduler cadence is due-aware, coalesces resume without duplicate timer check, and respects stop during settings read', async (t) => {
   const feed = await startFeed()
   t.after(() => feed.close())
