@@ -10,7 +10,7 @@ import {
 } from '../src/renderer/src/components/review-view'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ReviewConversation } from '../src/renderer/src/components/review-conversation'
-import type { ReviewThreadRead } from '@git-stacks/shared/review-threads'
+import type { ReviewDraftRecord, ReviewThreadRead } from '@git-stacks/shared/review-threads'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -455,11 +455,11 @@ test('coordinateSafeInstall with real UpdateService fails closed and releases fe
 })
 
 test('ReviewConversation genuinely disables DraftList inline comment editors when frozen for update admission', () => {
-  const draftRecord = {
-    owner: { viewer: 'testuser' },
+  const draftRecord: ReviewDraftRecord = {
+    viewer: 'testuser',
     repo: 'owner/repo',
     number: 42,
-    comparison: { baseOid: 'b1', headOid: 'h1', isMerged: false },
+    comparison: { baseOid: 'b1', headOid: 'h1', baseRef: 'refs/heads/main' },
     updatedAt: new Date().toISOString(),
     drafts: [
       {
@@ -467,7 +467,7 @@ test('ReviewConversation genuinely disables DraftList inline comment editors whe
         ref: {
           path: 'src/main.ts',
           line: 12,
-          side: 'RIGHT' as const,
+          side: 'head',
           hunkId: 'h1',
           anchor: 'a1',
           context: 'c1',
@@ -488,15 +488,19 @@ test('ReviewConversation genuinely disables DraftList inline comment editors whe
       permissions: {
         viewer: 'testuser',
         isAuthor: false,
-        permission: 'WRITE' as const,
+        state: 'OPEN',
+        permission: 'WRITE',
         blocked: {},
       },
       threads: {
         number: 42,
-        comparison: { baseOid: 'b1', headOid: 'h1', isMerged: false },
+        comparison: { baseOid: 'b1', headOid: 'h1', baseRef: 'refs/heads/main' },
         threads: [],
+        totalCount: 0,
+        truncated: false,
       },
     } satisfies ReviewThreadRead,
+    readState: 'ready' as const,
     readError: null,
     getDrafts: () => draftRecord,
     resolutions: [],
@@ -556,6 +560,32 @@ test('ReviewConversation genuinely disables DraftList inline comment editors whe
   const normalTextareaMatch = normalMarkup.match(
     /<textarea[^>]*placeholder="What should the author know about these lines\?"[^>]*>/,
   )
+
+  // 3. Regression test: ordinary pending write with submission-only frozenReason remains editable
+  const pendingSaveMarkup = renderToStaticMarkup(
+    React.createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      React.createElement(ReviewConversation, {
+        ...baseProps,
+        canCompose: true,
+        frozenReason:
+          'These local edits have not been saved yet. Keep editing while the write finishes, or explicitly save the retained drafts before submitting.',
+      }),
+    ),
+  )
+
+  const pendingTextareaMatch = pendingSaveMarkup.match(
+    /<textarea[^>]*placeholder="What should the author know about these lines\?"[^>]*>/,
+  )
+  assert.ok(pendingTextareaMatch !== null)
+  assert.doesNotMatch(pendingTextareaMatch[0], /disabled=""/)
+
+  const pendingButtonMatch = pendingSaveMarkup.match(
+    /<button[^>]*aria-label="Discard pending comment[^>]*>/,
+  )
+  assert.ok(pendingButtonMatch !== null)
+  assert.doesNotMatch(pendingButtonMatch[0], /disabled=""/)
   assert.ok(normalTextareaMatch !== null)
   assert.doesNotMatch(normalTextareaMatch[0], /disabled=""/)
 })

@@ -357,7 +357,7 @@ export function ReviewConversation({
 
       <SelectionComposer
         selection={selection}
-        disabled={sending || Boolean(frozenReason) || !canCompose}
+        disabled={sending || !canCompose}
         onAdd={addDraft}
         onClear={onClearSelection}
       />
@@ -366,7 +366,7 @@ export function ReviewConversation({
         drafts={draftList}
         byId={byId}
         staleCount={stale.length}
-        disabled={sending || Boolean(frozenReason) || !canCompose}
+        disabled={sending || !canCompose}
         onChangeBody={(id, body) =>
           onDraftChange(
             (getDrafts()?.drafts ?? []).map((draft) =>
