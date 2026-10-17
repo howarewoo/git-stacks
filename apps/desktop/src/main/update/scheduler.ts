@@ -59,7 +59,7 @@ export class UpdateScheduler {
 
     this.initialTimer = setTimeout(() => {
       this.initialTimer = null
-      void this.trigger({ initial: true })
+      void this.trigger()
     }, this.initialDelayMs)
 
     this.intervalTimer = setInterval(() => {
@@ -90,7 +90,7 @@ export class UpdateScheduler {
    * - the build is unconfigured (no release keys)
    * - an update operation (check/download/install) is already running or holding the boundary
    */
-  async trigger(options: { initial?: boolean } = {}): Promise<UpdateStatus | null> {
+  async trigger(): Promise<UpdateStatus | null> {
     if (!this.running) return null
     let settings: AppSettings
     try {
