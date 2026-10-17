@@ -1136,10 +1136,7 @@ async function main() {
     // A reset is a change like any other, and it carries the channel with it: the
     // Settings control a person presses, through the real IPC, on a running app
     // that is following the beta channel.
-    await ui.clickText('Open command palette')
-    await ui.waitFor('esc Dismiss')
-    await ui.type('Settings')
-    await ui.clickText('Settings…')
+    await ui.clickText('Settings')
     await ui.clickText('Updates')
     await ui.waitFor('Channel')
     await ui.clickText('Beta')
@@ -1210,10 +1207,7 @@ async function main() {
     // the past, not a claim about the app, so it is not what gets captured here.
     await ui.press('Escape', 'Escape', 27)
     await ui.waitForGone('[role="dialog"]')
-    await ui.clickText('Open command palette')
-    await ui.waitFor('esc Dismiss')
-    await ui.type('Settings')
-    await ui.clickText('Settings…')
+    await ui.clickText('Settings')
     await ui.clickText('Updates')
     await ui.waitFor('Channel')
     const visible = await evaluate(() => {

@@ -792,6 +792,7 @@ export function SettingsDialog({
             {section === 'updates' && settings ? (
               <>
                 <WorkflowSection label="Updates">
+                  <UpdateFacts status={updates} channel={settings.updates.channel} />
                   <Field
                     id="settings-update-channel"
                     label="Channel"
@@ -835,7 +836,6 @@ export function SettingsDialog({
                       }
                     />
                   </Field>
-                  <UpdateFacts status={updates} channel={settings.updates.channel} />
                 </WorkflowSection>
                 <WorkflowSection label="This build">
                   <UpdateNotice status={updates} />

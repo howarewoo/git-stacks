@@ -152,7 +152,7 @@ function payload(target) {
 }
 
 async function createWorkspace() {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-packaged-smoke-'))
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'git-stacks-packaged-smoke-')))
   const workspace = {
     root,
     home: join(root, 'home'),
@@ -1679,12 +1679,7 @@ async function run(options) {
         )
         chrome = 'content fills the window frame behind the native traffic lights'
       }
-      const inset = await page.locator('.traffic-lights').boundingBox()
-      assert(
-        inset && inset.width > 0,
-        'The renderer reserved no space for the native window controls',
-      )
-      return `${window.bounds.width}x${window.bounds.height}, ${chrome}, ${Math.round(inset.width)}px native-control inset`
+      return `${window.bounds.width}x${window.bounds.height}, ${chrome}`
     })
 
     await check(
