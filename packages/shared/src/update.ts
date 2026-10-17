@@ -196,6 +196,10 @@ export interface UpdateStatus {
   readyToInstall: boolean
   /** True once the app has handed the update to the platform installer. */
   restartRequired: boolean
+  /** Timestamp when a check was last attempted on the active channel (ISO string). */
+  lastAttemptAt?: string | null
+  /** Timestamp when an authenticated update was last successfully seen on the active channel (ISO string). */
+  lastSuccessAt?: string | null
 }
 
 /**

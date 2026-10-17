@@ -1622,6 +1622,8 @@ export interface DesktopAPI {
   installUpdate?(): Promise<UpdateStatus>
   /** Ends a check or download in progress. */
   cancelUpdate?(): Promise<UpdateStatus>
+  /** Reveals the downloaded update candidate in the platform file manager (e.g. for Linux AppImage). */
+  revealDownloadedUpdate?(): Promise<{ ok: boolean; message?: string }>
   /** Subscribes to status pushed as a download progresses. */
   onUpdateStatus?(listener: (status: UpdateStatus) => void): () => void
   /** Reports renderer draft readiness back to main for an update install attempt. */

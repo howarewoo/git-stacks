@@ -937,6 +937,8 @@ The Updates section states what this build is before it offers anything to do: t
 - **The main process's own reason:** A refusal is shown as the reason main gave, in its terms, rather than softened into a suggestion to retry, refresh, or check the connection. `not-configured`, `unsupported`, `not-newer`, `replayed`, and `bad-signature` are different answers and are never merged into one failure message, and a phase with no outcome is not dressed as success.
 - **Progress is progress:** A download in progress reports how far it has got against the size the signed manifest recorded, and stays cancellable while it does. A control that is merely disabled, or a spinner with no state behind it, is not a progress state.
 
+- **Workbench awareness without interruption:** Background discovery surfaces available or downloaded updates via a quiet, nonmodal status indicator and utility action on the workbench rather than intrusive modal prompts. Navigating through the notification opens Settings directly to Updates.
+- **Linux verified handoff:** On platforms where in-place replacement is unsupported (Linux AppImage), the UI presents a "Show downloaded file" action and clear manual update instructions instead of an in-place install button, honoring the platform's execution model without executing unverified code.
 ### Settings, theming, and privacy
 
 Settings is a sectioned dialog: a left rail names the sections (Account, Git, Appearance, Shortcuts, Privacy, Diagnostics) and the right pane shows one at a time. Every control is a two-way control, a single-value field, or a text input; there are no controls that store a value nothing reads.

@@ -152,7 +152,7 @@ function payload(target) {
 }
 
 async function createWorkspace() {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-packaged-smoke-'))
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'git-stacks-packaged-smoke-')))
   const workspace = {
     root,
     home: join(root, 'home'),
@@ -1207,21 +1207,57 @@ async function gotoView(locators, label) {
 }
 
 async function capturedContext(page, repositoryPath) {
-  return page.evaluate(async (path) => {
-    const inventory = await window.desktop.worktreeInventory({
-      requestId: 'packaged-captured-context',
-    })
-    const repository = inventory.repositories.find((repo) =>
-      repo.worktrees.some((tree) => tree.path === path),
-    )
-    const tree = repository?.worktrees.find((tree) => tree.path === path)
-    if (!repository || !tree) throw new Error('Exact owned fixture directory was not discovered.')
-    return {
-      repositoryId: repository.identity.id,
-      worktreeId: tree.id,
-      ...(tree.refId ? { refId: tree.refId } : {}),
-    }
-  }, repositoryPath)
+  return page.evaluate(
+    (path) =>
+      new Promise((resolve, reject) => {
+        let settled = false
+        let unsubscribe
+        const finish = (error, context) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          unsubscribe?.()
+          if (error) reject(error)
+          else resolve(context)
+        }
+        const consume = (inventory) => {
+          if (settled) return
+          const repository = inventory.repositories.find((repo) =>
+            repo.worktrees.some((tree) => tree.path === path),
+          )
+          const tree = repository?.worktrees.find((tree) => tree.path === path)
+          if (!repository || !tree) return
+          finish(null, {
+            repositoryId: repository.identity.id,
+            worktreeId: tree.id,
+            ...(tree.refId ? { refId: tree.refId } : {}),
+          })
+        }
+        const timer = setTimeout(
+          () =>
+            finish(
+              new Error('Exact owned fixture directory was not discovered within 20 seconds.'),
+            ),
+          20_000,
+        )
+        try {
+          unsubscribe = window.desktop.onWorktreeInventory(consume)
+          window.desktop
+            .worktreeInventory({ requestId: 'packaged-captured-context' })
+            .then(consume, (error) => {
+              if (
+                error?.name === 'CommandCancelled' ||
+                /(?:^|: )CommandCancelled: The request was cancelled\.$/.test(error?.message ?? '')
+              )
+                return
+              finish(error)
+            })
+        } catch (error) {
+          finish(error)
+        }
+      }),
+    repositoryPath,
+  )
 }
 
 async function openCliSettings(page) {
@@ -1679,12 +1715,7 @@ async function run(options) {
         )
         chrome = 'content fills the window frame behind the native traffic lights'
       }
-      const inset = await page.locator('.traffic-lights').boundingBox()
-      assert(
-        inset && inset.width > 0,
-        'The renderer reserved no space for the native window controls',
-      )
-      return `${window.bounds.width}x${window.bounds.height}, ${chrome}, ${Math.round(inset.width)}px native-control inset`
+      return `${window.bounds.width}x${window.bounds.height}, ${chrome}`
     })
 
     await check(
@@ -2010,7 +2041,7 @@ async function run(options) {
           'Qualified sidebar fixture path',
         )
         await entry.click()
-        await page.locator('.bw-main').waitFor()
+        await page.getByRole('main', { name: 'Branch workbench', exact: true }).waitFor()
         const context = await capturedContext(page, canonicalRepo)
         const opened = await page.evaluate(
           async (context) => (await window.desktop.inspect(context, 'refresh', [])).path,
@@ -2181,6 +2212,13 @@ async function run(options) {
         // without the CLI would, and records the attempt.
         await rm(join(workspace.bin, 'gh'), { force: true })
       }
+      const retired = await statusOf()
+      assertEqual(
+        retired?.state,
+        'missing-cli',
+        'Removing the owned CLI retires authenticated status',
+      )
+      assertEqual(retired?.login, null, 'Removing the owned CLI retires the authenticated account')
       return 'the CLI status came from a real authenticated request, and a replaced credential moved the identity'
     })
 

@@ -42,6 +42,7 @@ export const SETTING_KEYS = [
   'appearance.density',
   'privacy.includeLocalPaths',
   'updates.channel',
+  'updates.automaticChecks',
   'shortcuts',
   'notifications.enabled',
 ] as const
@@ -178,6 +179,10 @@ export function validateSettings(value: unknown): {
       updates.channel,
       oneOf(updates.channel, UPDATE_CHANNELS, DEFAULT_SETTINGS.updates.channel),
     ] as const,
+    'updates.automaticChecks': [
+      updates.automaticChecks,
+      booleanField(updates.automaticChecks, DEFAULT_SETTINGS.updates.automaticChecks),
+    ] as const,
     'notifications.enabled': [
       notifications.enabled,
       booleanField(notifications.enabled, DEFAULT_SETTINGS.notifications.enabled),
@@ -196,6 +201,7 @@ export function validateSettings(value: unknown): {
   const includeLocalPaths = fields['privacy.includeLocalPaths'][1].value
   const notificationsEnabled = fields['notifications.enabled'][1].value
   const updateChannel = fields['updates.channel'][1].value
+  const automaticChecks = fields['updates.automaticChecks'][1].value
 
   let fetchInterval = DEFAULT_SETTINGS.git.fetchIntervalSeconds
   if (git.fetchIntervalSeconds !== undefined) {
@@ -254,7 +260,7 @@ export function validateSettings(value: unknown): {
       notifications: { enabled: notificationsEnabled },
       appearance: { theme, reduceMotion, density },
       privacy: { includeLocalPaths },
-      updates: { channel: updateChannel },
+      updates: { channel: updateChannel, automaticChecks },
       shortcuts,
       migrated,
     },
@@ -393,6 +399,7 @@ function touchedBy(key: string, patch: SettingsPatch): boolean {
   }
   if (group === 'appearance') return isRecord(patch.appearance) && field in patch.appearance
   if (group === 'privacy') return isRecord(patch.privacy) && field in patch.privacy
+  if (group === 'updates') return isRecord(patch.updates) && field in patch.updates
   return false
 }
 
@@ -442,6 +449,9 @@ function restoreKey(target: AppSettings, current: AppSettings, key: string): voi
       return
     case 'updates.channel':
       target.updates.channel = current.updates.channel
+      return
+    case 'updates.automaticChecks':
+      target.updates.automaticChecks = current.updates.automaticChecks
       return
     case 'shortcuts':
       target.shortcuts = current.shortcuts

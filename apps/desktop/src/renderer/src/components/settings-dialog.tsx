@@ -77,6 +77,7 @@ export interface SettingsDialogProps {
     downloadUpdate?: () => Promise<UpdateStatus>
     installUpdate?: () => Promise<UpdateStatus>
     cancelUpdate?: () => Promise<UpdateStatus>
+    revealDownloadedUpdate?: () => Promise<{ ok: boolean; message?: string }>
     onUpdateStatus?: (listener: (status: UpdateStatus) => void) => () => void
   } | null
   cliStatus: GitHubCliStatus | null
@@ -92,6 +93,7 @@ export interface SettingsDialogProps {
   shortcutBindings: Record<ShortcutId, string>
   onShortcutBindingsChange: (bindings: Record<ShortcutId, string>) => void
   onError: (message: string) => void
+  initialSection?: Section
 }
 
 type Section =
@@ -120,6 +122,7 @@ const SECTIONS: { id: Section; label: string }[] = [
 export function SettingsDialog({
   open,
   onOpenChange,
+  initialSection,
   desktop,
   cliStatus,
   cliRefreshing = false,
@@ -129,7 +132,12 @@ export function SettingsDialog({
   onShortcutBindingsChange,
   onError,
 }: SettingsDialogProps) {
-  const [section, setSection] = React.useState<Section>('cli')
+  const [section, setSection] = React.useState<Section>(initialSection ?? 'cli')
+  React.useEffect(() => {
+    if (open && initialSection) {
+      setSection(initialSection)
+    }
+  }, [open, initialSection])
   const queryClient = useQueryClient()
   const settingsQuery = useQuery({
     queryKey: ['settings'],
@@ -172,10 +180,23 @@ export function SettingsDialog({
       action: 'check' | 'download' | 'install' | 'cancel'
     }) => (await step()) ?? null,
   })
+  const revealMutation = useMutation({
+    mutationFn: async () => {
+      if (!desktop?.revealDownloadedUpdate) {
+        throw new Error('File manager integration is unavailable.')
+      }
+      const result = await desktop.revealDownloadedUpdate()
+      if (!result.ok) {
+        throw new Error(result.message ?? 'Failed to reveal downloaded update.')
+      }
+      return result
+    },
+  })
   const busy =
     resetMutation.isPending ||
     saveMutation.isPending ||
     exportMutation.isPending ||
+    revealMutation.isPending ||
     (updateMutation.isPending && updateMutation.variables?.busyWhile) ||
     diagnosticsQuery.isFetching ||
     bundleQuery.isFetching
@@ -209,10 +230,10 @@ export function SettingsDialog({
   })
   const formSubmitting = useSelector(form.store, (state) => state.isSubmitting)
   const [message, setMessage] = React.useState<string | null>(null)
-  const updateQuery = useQuery({
+  const updateQuery = useQuery<UpdateStatus | null>({
     queryKey: ['update-status'],
-    queryFn: () => desktop!.updateStatus!(),
-    enabled: false,
+    queryFn: () => (desktop?.updateStatus ? desktop.updateStatus() : Promise.resolve(null)),
+    enabled: Boolean(desktop?.updateStatus),
   })
   const updates = updateQuery.data ?? null
 
@@ -244,20 +265,6 @@ export function SettingsDialog({
     },
     [onError, queryClient, updateMutation],
   )
-
-  React.useEffect(() => {
-    if (!open || section !== 'updates') return
-    if (desktop?.updateStatus)
-      void updateQuery
-        .refetch({ throwOnError: true })
-        .catch((value) => onError(value instanceof Error ? value.message : String(value)))
-    return desktop?.onUpdateStatus?.((status) => {
-      void queryClient
-        .cancelQueries({ queryKey: ['update-status'] })
-        .then(() => queryClient.setQueryData(['update-status'], status))
-    })
-  }, [desktop, open, queryClient, section])
-
   const refresh = React.useCallback(async () => {
     if (!desktop?.settings) return
     try {
@@ -785,6 +792,7 @@ export function SettingsDialog({
             {section === 'updates' && settings ? (
               <>
                 <WorkflowSection label="Updates">
+                  <UpdateFacts status={updates} channel={settings.updates.channel} />
                   <Field
                     id="settings-update-channel"
                     label="Channel"
@@ -807,7 +815,27 @@ export function SettingsDialog({
                       }
                     />
                   </Field>
-                  <UpdateFacts status={updates} channel={settings.updates.channel} />
+                  <Field
+                    id="settings-update-automatic"
+                    label="Automatic checks"
+                    description="Git Stacks checks for signed releases on startup and every 24 hours while running. Updates are never automatically downloaded or installed."
+                    error={problemFor('updates.automaticChecks')}
+                  >
+                    <Checkbox
+                      id="settings-update-automatic"
+                      label="Automatically check for updates"
+                      checked={settings.updates.automaticChecks ?? true}
+                      disabled={busy || locked('updates.automaticChecks')}
+                      onCheckedChange={(checked) =>
+                        void save(
+                          { updates: { automaticChecks: Boolean(checked) } },
+                          checked
+                            ? 'Automatic update checks enabled.'
+                            : 'Automatic update checks disabled.',
+                        )
+                      }
+                    />
+                  </Field>
                 </WorkflowSection>
                 <WorkflowSection label="This build">
                   <UpdateNotice status={updates} />
@@ -827,30 +855,49 @@ export function SettingsDialog({
                     >
                       Check for updates
                     </Button>
-                    <Button
-                      loading={
-                        updates?.phase === 'downloading' ||
-                        (updateMutation.isPending &&
-                          updateMutation.variables?.action === 'download')
-                      }
-                      disabled={busy || updates?.phase !== 'available' || !desktop?.downloadUpdate}
-                      onClick={() =>
-                        void runUpdate(() => desktop?.downloadUpdate?.(), false, 'download')
-                      }
-                    >
-                      Download update
-                    </Button>
-                    <Button
-                      loading={
-                        updateMutation.isPending && updateMutation.variables?.action === 'install'
-                      }
-                      disabled={busy || !updates?.readyToInstall || !desktop?.installUpdate}
-                      onClick={() =>
-                        void runUpdate(() => desktop?.installUpdate?.(), true, 'install')
-                      }
-                    >
-                      Install and restart
-                    </Button>
+                    {updates?.phase === 'available' || updates?.phase === 'downloading' ? (
+                      <Button
+                        loading={
+                          updates?.phase === 'downloading' ||
+                          (updateMutation.isPending &&
+                            updateMutation.variables?.action === 'download')
+                        }
+                        disabled={
+                          busy || updates?.phase !== 'available' || !desktop?.downloadUpdate
+                        }
+                        onClick={() =>
+                          void runUpdate(() => desktop?.downloadUpdate?.(), false, 'download')
+                        }
+                      >
+                        Download update
+                      </Button>
+                    ) : null}
+                    {updates?.supported && updates?.readyToInstall ? (
+                      <Button
+                        loading={
+                          updateMutation.isPending && updateMutation.variables?.action === 'install'
+                        }
+                        disabled={busy || !desktop?.installUpdate}
+                        onClick={() =>
+                          void runUpdate(() => desktop?.installUpdate?.(), true, 'install')
+                        }
+                      >
+                        Install and restart
+                      </Button>
+                    ) : updates?.phase === 'downloaded' && !updates?.supported ? (
+                      <Button
+                        variant="secondary"
+                        loading={revealMutation.isPending}
+                        disabled={busy || !desktop?.revealDownloadedUpdate}
+                        onClick={() => {
+                          void revealMutation.mutateAsync().catch((value) => {
+                            onError(value instanceof Error ? value.message : String(value))
+                          })
+                        }}
+                      >
+                        Show downloaded file
+                      </Button>
+                    ) : null}
                     {(updates?.phase === 'checking' || updates?.phase === 'downloading') &&
                     desktop?.cancelUpdate ? (
                       <Button
@@ -870,6 +917,23 @@ export function SettingsDialog({
                     <p role="status" className="text-xs text-[var(--gs-semantic-text-secondary)]">
                       Downloading {updates.progress ?? 0}%
                     </p>
+                  ) : null}
+                  {updates?.phase === 'downloaded' && !updates?.supported ? (
+                    <InlineAlert tone="info">
+                      <div className="space-y-1 text-xs">
+                        <p className="font-medium text-[var(--gs-semantic-text-primary)]">
+                          Manual installation instructions
+                        </p>
+                        <p>
+                          1. Allow executing the downloaded file as a program (in file properties or
+                          with <code>chmod +x</code>).
+                        </p>
+                        <p>
+                          2. Replace your existing AppImage or copy it to your preferred
+                          applications location.
+                        </p>
+                      </div>
+                    </InlineAlert>
                   ) : null}
                 </WorkflowSection>
               </>

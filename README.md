@@ -1159,6 +1159,7 @@ and validates; the renderer never chooses or writes that path.
 | Include local paths                  | Lets a support bundle name the Git executable path. Nothing else widens.                                                                                                                                                        |
 | Shortcuts                            | Chord editing with conflict detection.                                                                                                                                                                                          |
 | Update channel                       | The channel **Settings → Updates** follows: `stable` for signed releases for everyone, `beta` for the pre-release channel, which moves faster and changes more often. It defaults to `stable` and persists until it is changed. |
+| Automatic update checks             | Checks for signed updates in the background on startup and every 24 hours. Defaults to enabled (`true`). Disabling stops background checks while keeping manual checks available. |
 
 The GitHub host accepts a bare host name (a pasted `https://` URL is normalized
 down to its host) and refuses a path, a query, a non-HTTPS scheme, or embedded
@@ -1545,6 +1546,28 @@ disagree.
 The updater writes only to the app's own user-data directory, and on macOS to a
 staged and a moved-aside copy of the bundle beside the installed one, both
 carrying this app's own prefix. It never reads or writes a repository.
+
+### Automatic discovery and Linux updates
+
+Signed updates are checked automatically in the background shortly after startup
+and every 24 hours while the application is running. Resuming from system sleep
+runs at most one overdue check without catch-up queuing. When an update check,
+download, install, or channel switch is already in progress, background checks
+skip rather than queue. Disabling `updates.automaticChecks` in Settings or by
+administrative policy prevents scheduled background checks while leaving manual
+checks, downloads, and installations fully functional. A packaged build with no
+trusted release keys configured never issues a background update request.
+
+Check attempt and authenticated success timestamps are recorded per channel in
+`updates.json`. These advisory timestamps are isolated from the monotonic replay
+guard sequences; corrupt or missing timestamps fall back gracefully and never
+invalidate replay defense or make the updater state unusable.
+
+On Linux, automatic in-place replacement is not supported for AppImage bundles.
+When a signed Linux update is downloaded and verified against the release
+manifest and signature, the application offers **Show downloaded file** to reveal
+the verified AppImage in the desktop file manager without executing it, accompanied
+by clear manual replacement instructions.
 
 **What a fixture cannot prove.** The test suite stages an installer and runs the
 real code over it, which proves the digests, the manifest, the channel, the
