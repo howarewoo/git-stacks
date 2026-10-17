@@ -2811,6 +2811,10 @@ Screenshot tests wait for fonts and stable fixture state, use fixed data/timesta
 
 After editing `packages/ui/src/tokens/tokens.json`, run `pnpm run tokens:generate` and `pnpm run tokens:check`. Follow [DESIGN.md](DESIGN.md) for token roles and component rules.
 
+The generated `tokens.css` is checked byte-for-byte against deterministic LF
+output. Its Git attributes keep LF endings even on Windows checkouts using
+`core.autocrlf`; do not regenerate or bypass the check to conceal checkout drift.
+
 `packages/ui` owns the browser-safe shadcn `base-nova` library, backed by `@base-ui/react`. Both desktop and design import `@git-stacks/ui/components/<name>` and `@git-stacks/ui/lib/utils`. Existing desktop import paths are thin re-exports, not duplicate implementations. Keep token-based styling, CVA variants and `cn()`; all three `components.json` files direct reusable additions to the shared workspace (`rsc: false`, Lucide, neutral base).
 
 For UI work in either app, inspect the [shared exports](packages/ui/src/index.ts) and [catalog manifest](apps/design/src/manifest.ts) first. Import controls from `@git-stacks/ui` or `@git-stacks/ui/components/<name>` and compose their supported APIs; use `@git-stacks/ui/styles.css` for shared foundations. This applies to the design app's own shell and controls as well as its examples. Keep application-specific layout and domain behavior local, but extend reusable controls in `packages/ui` instead of copying their markup or interaction logic. [DESIGN.md's reuse rules](DESIGN.md#design-system-reuse) define the boundary.

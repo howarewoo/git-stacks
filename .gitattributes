@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The generated token check compares deterministic LF output byte-for-byte.
+packages/ui/src/tokens/tokens.css text eol=lf
