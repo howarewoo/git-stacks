@@ -21,15 +21,13 @@ test('actual lanes retain bottom-up parent/fork geometry and mutation-free filte
   await expect(page.locator('.bw-lane-row')).toHaveCount(19)
   await page.getByRole('button', { name: 'feat/worktree-registry', exact: true }).click()
   await settle(page)
-  const rows = await page
-    .locator('.bw-lane-row')
-    .evaluateAll((elements) =>
-      elements.map((row) => ({
-        name: row.querySelector('.bw-branch-name')!.textContent,
-        center: row.getBoundingClientRect().y + row.getBoundingClientRect().height / 2,
-        label: row.getAttribute('aria-label'),
-      })),
-    )
+  const rows = await page.locator('.bw-lane-row').evaluateAll((elements) =>
+    elements.map((row) => ({
+      name: row.querySelector('.bw-branch-name')!.textContent,
+      center: row.getBoundingClientRect().y + row.getBoundingClientRect().height / 2,
+      label: row.getAttribute('aria-label'),
+    })),
+  )
   const y = new Map(rows.map((row) => [row.name, row.center]))
   for (const row of rows) {
     const parent = row.label?.match(/Parent: ([^.]+)\./)?.[1]
@@ -177,6 +175,39 @@ test('independent repository restoration preserves search and does not borrow a 
       ),
     ),
   ).toEqual([])
+})
+
+test('filter projection cost is included in the matching layout metric', async ({ page }) => {
+  await openGallery(page, { scenario: 'cutover-reference' })
+  await settle(page)
+  // Advance only the projection clock, avoiding hardware-dependent busy waits.
+  await page.evaluate(() => {
+    const now = performance.now.bind(performance)
+    const lowerCase = String.prototype.toLowerCase
+    let cost = 0
+    let charged = false
+    performance.now = () => {
+      charged = false
+      return now() + cost
+    }
+    String.prototype.toLowerCase = function () {
+      if (!charged && String(this).includes('docs/worktree-workflows')) {
+        cost += 120
+        charged = true
+      }
+      return lowerCase.call(this)
+    }
+  })
+  await page
+    .getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
+    .fill('docs/worktree-workflows')
+  await expect(page.locator('.bw-lane-row')).toHaveCount(4)
+  await settle(page)
+  const projectionLayoutMs = await page
+    .locator('.bw-app')
+    .evaluate((root) => Number(root.getAttribute('data-lane-projection-layout-ms')))
+  expect(projectionLayoutMs).toBeGreaterThan(LANE_PROJECTION_LAYOUT_BUDGET_MS)
+  expect(projectionLayoutMs).toBeLessThan(LANE_INPUT_PAINT_BUDGET_MS)
 })
 
 test('@cutover-measure actual consumer warm input/layout and post-GC navigation packet', async ({

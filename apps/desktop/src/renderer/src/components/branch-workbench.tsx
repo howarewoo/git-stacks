@@ -444,6 +444,7 @@ export function BranchWorkbench({
     worktreeId: worktree?.id,
     pullRequestId: selected?.pullRequest?.id,
   }
+  const projectionStarted = performance.now()
   const hidden = new Set<string>()
   if (!filtering) {
     for (let index = topology.length - 1; index >= 0; index--) {
@@ -508,6 +509,7 @@ export function BranchWorkbench({
     relationshipPage,
     Math.max(0, Math.ceil(selectedChildren.length / relationshipChildPageSize) - 1),
   )
+  const projectionMs = layout.elapsed + performance.now() - projectionStarted
   const oldSelection = useRef(selectedBranchId)
   useEffect(() => {
     if (oldSelection.current === selectedBranchId) return
@@ -989,7 +991,7 @@ export function BranchWorkbench({
       </Tabs>
     ) : null
   return (
-    <div className="bw-app" data-density={displayDensity} data-lane-projection-ms={layout.elapsed}>
+    <div className="bw-app" data-density={displayDensity} data-lane-projection-ms={projectionMs}>
       <header className="bw-topbar">
         <div className="bw-brand">
           <span>
