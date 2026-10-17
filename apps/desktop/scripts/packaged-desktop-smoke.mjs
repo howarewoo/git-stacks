@@ -1207,6 +1207,7 @@ async function gotoView(locators, label) {
 }
 
 async function capturedContext(page, repositoryPath) {
+  await page.getByText('Local inventory complete', { exact: true }).waitFor()
   return page.evaluate(async (path) => {
     const inventory = await window.desktop.worktreeInventory({
       requestId: 'packaged-captured-context',
