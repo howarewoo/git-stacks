@@ -2005,7 +2005,7 @@ async function run(options) {
           'Qualified sidebar fixture path',
         )
         await entry.click()
-        await page.locator('.bw-main').waitFor()
+        await page.getByRole('main', { name: 'Branch workbench', exact: true }).waitFor()
         const context = await capturedContext(page, canonicalRepo)
         const opened = await page.evaluate(
           async (context) => (await window.desktop.inspect(context, 'refresh', [])).path,
