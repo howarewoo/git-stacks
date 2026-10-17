@@ -79,16 +79,13 @@ jobs:
           TMPDIR: ${{ runner.temp }}
       - name: Select this platform's installer
         shell: bash
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          ARCH: ${{ matrix.arch }}
         run: |
           mkdir preview-artifacts
           shopt -s nullglob
           installers=(apps/desktop/release/*.dmg apps/desktop/release/*.exe apps/desktop/release/*.AppImage)
           test "${#installers[@]}" -eq 1
           extension="${installers[0]##*.}"
-          cp "${installers[0]}" "preview-artifacts/Git-Stacks-${GITHUB_REF_NAME}-${PLATFORM}-${ARCH}.${extension}"
+          cp "${installers[0]}" "preview-artifacts/Git-Stacks-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}.${extension}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dev-preview-${{ matrix.platform }}-${{ matrix.arch }}

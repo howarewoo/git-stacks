@@ -1703,6 +1703,8 @@ also validates the full catalog against its committed Linux visual baselines.
 Only after all four jobs succeed does it publish a GitHub prerelease containing
 four installers and `SHA256SUMS.txt`. Publication uses the workflow token, so it does not trigger
 the separate release-published signed workflow. Never reuse or move a preview tag.
+Installer names use the workflow matrix's platform and architecture directly,
+not environment names that a Windows toolchain may redefine.
 
 Download the installer matching the target OS and architecture. On macOS, open the
 DMG, drag Git Stacks to Applications, and, if blocked, use System Settings →
