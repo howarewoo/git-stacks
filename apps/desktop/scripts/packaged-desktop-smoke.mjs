@@ -1234,22 +1234,24 @@ async function capturedContext(page, repositoryPath) {
           })
         }
         const timer = setTimeout(
-          () => finish(new Error('Exact owned fixture directory was not discovered within 20 seconds.')),
+          () =>
+            finish(
+              new Error('Exact owned fixture directory was not discovered within 20 seconds.'),
+            ),
           20_000,
         )
         try {
           unsubscribe = window.desktop.onWorktreeInventory(consume)
-          window.desktop.worktreeInventory({ requestId: 'packaged-captured-context' }).then(
-            consume,
-            (error) => {
+          window.desktop
+            .worktreeInventory({ requestId: 'packaged-captured-context' })
+            .then(consume, (error) => {
               if (
                 error?.name === 'CommandCancelled' ||
                 /(?:^|: )CommandCancelled: The request was cancelled\.$/.test(error?.message ?? '')
               )
                 return
               finish(error)
-            },
-          )
+            })
         } catch (error) {
           finish(error)
         }
@@ -2211,7 +2213,11 @@ async function run(options) {
         await rm(join(workspace.bin, 'gh'), { force: true })
       }
       const retired = await statusOf()
-      assertEqual(retired?.state, 'missing-cli', 'Removing the owned CLI retires authenticated status')
+      assertEqual(
+        retired?.state,
+        'missing-cli',
+        'Removing the owned CLI retires authenticated status',
+      )
       assertEqual(retired?.login, null, 'Removing the owned CLI retires the authenticated account')
       return 'the CLI status came from a real authenticated request, and a replaced credential moved the identity'
     })
