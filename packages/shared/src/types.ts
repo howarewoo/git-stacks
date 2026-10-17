@@ -1624,6 +1624,18 @@ export interface DesktopAPI {
   cancelUpdate?(): Promise<UpdateStatus>
   /** Subscribes to status pushed as a download progresses. */
   onUpdateStatus?(listener: (status: UpdateStatus) => void): () => void
+  /** Reports renderer draft readiness back to main for an update install attempt. */
+  reportUpdateReadiness?(report: {
+    nonce: string
+    ready: boolean
+    reason?: string
+  }): Promise<boolean>
+  /** Subscribes to readiness preparation requests before an update install cutover. */
+  onPrepareUpdateReadiness?(listener: (payload: { nonce: string }) => void): () => void
+  /** Subscribes to admission settlement notifications when an update install finishes or aborts. */
+  onUpdateAdmissionSettled?(
+    listener: (payload: { admitted: boolean; nonce?: string }) => void,
+  ): () => void
 
   /**
    * The GitHub-derived pull request queue across every registered repository.

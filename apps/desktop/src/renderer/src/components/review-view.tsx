@@ -124,6 +124,148 @@ function sameDraftOwner(record: ReviewDraftRecord, owner: ReviewOwner, number: n
     record.viewer.toLowerCase() === owner.viewer.toLowerCase()
   )
 }
+const draftLockListeners = new Set<() => void>()
+let activeLockNonce: string | null = null
+
+export function isDraftAdmissionLocked(): boolean {
+  return activeLockNonce !== null
+}
+
+export function useDraftAdmissionLocked(): boolean {
+  return React.useSyncExternalStore(
+    (listener) => {
+      draftLockListeners.add(listener)
+      return () => {
+        draftLockListeners.delete(listener)
+      }
+    },
+    () => activeLockNonce !== null,
+    () => activeLockNonce !== null,
+  )
+}
+
+function setDraftAdmissionLock(nonce: string | null): void {
+  if (activeLockNonce === nonce) return
+  activeLockNonce = nonce
+  for (const listener of draftLockListeners) {
+    listener()
+  }
+}
+
+export function setupReviewDraftReadinessListener(
+  desktop:
+    | Pick<
+        DesktopAPI,
+        'onPrepareUpdateReadiness' | 'reportUpdateReadiness' | 'onUpdateAdmissionSettled'
+      >
+    | undefined,
+  queryClient: {
+    getMutationCache: () => {
+      getAll: () => Array<{
+        options: { meta?: Record<string, unknown> }
+        state: { status: string }
+      }>
+      subscribe: (listener: () => void) => () => void
+    }
+  },
+): () => void {
+  if (!desktop) return () => {}
+  const { onPrepareUpdateReadiness, reportUpdateReadiness, onUpdateAdmissionSettled } = desktop
+  if (!onPrepareUpdateReadiness || !reportUpdateReadiness) {
+    return () => {}
+  }
+
+  let currentAttemptAbort: AbortController | null = null
+
+  const unsubPrepare = onPrepareUpdateReadiness(async ({ nonce }) => {
+    currentAttemptAbort?.abort()
+    const attemptAbort = new AbortController()
+    currentAttemptAbort = attemptAbort
+
+    setDraftAdmissionLock(nonce)
+
+    try {
+      const cache = queryClient.getMutationCache()
+      const getPending = () =>
+        cache
+          .getAll()
+          .filter(
+            (m) => m.options.meta?.retainedReviewDraft === true && m.state.status === 'pending',
+          )
+
+      if (getPending().length > 0) {
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            if (getPending().length === 0 || attemptAbort.signal.aborted) {
+              unsubscribe()
+              resolve()
+            }
+          }
+          const unsubscribe = cache.subscribe(check)
+          attemptAbort.signal.addEventListener('abort', () => {
+            unsubscribe()
+            resolve()
+          })
+          setTimeout(() => {
+            unsubscribe()
+            resolve()
+          }, 10_000)
+        })
+      }
+
+      if (attemptAbort.signal.aborted || activeLockNonce !== nonce) {
+        return
+      }
+
+      const failedOrRetained = cache
+        .getAll()
+        .filter(
+          (m) =>
+            m.options.meta?.retainedReviewDraft === true &&
+            (m.state.status === 'error' || m.state.status === 'pending'),
+        )
+
+      if (failedOrRetained.length > 0) {
+        if (activeLockNonce === nonce) {
+          setDraftAdmissionLock(null)
+          await reportUpdateReadiness({
+            nonce,
+            ready: false,
+            reason:
+              'Unsent review changes are retained only in this window. Return to their original repository and account to save or resolve them before updating.',
+          })
+        }
+        return
+      }
+
+      if (activeLockNonce === nonce) {
+        await reportUpdateReadiness({ nonce, ready: true })
+      }
+    } catch {
+      if (activeLockNonce === nonce) {
+        setDraftAdmissionLock(null)
+      }
+    }
+  })
+
+  const unsubSettled = onUpdateAdmissionSettled?.(({ admitted, nonce }) => {
+    if (!admitted) {
+      if (!nonce || nonce === activeLockNonce) {
+        currentAttemptAbort?.abort()
+        currentAttemptAbort = null
+        setDraftAdmissionLock(null)
+      }
+    }
+  })
+
+  return () => {
+    currentAttemptAbort?.abort()
+    currentAttemptAbort = null
+    setDraftAdmissionLock(null)
+    unsubPrepare()
+    unsubSettled?.()
+  }
+}
 
 /** Only unresolved authored writes survive their observer, never read data or camera state. */
 export function UnsentReviewChangesNotice() {
@@ -136,6 +278,9 @@ export function UnsentReviewChangesNotice() {
     select: (mutation) => mutation.state.status,
   })
   const unsaved = writes.length > 0
+  const queryClient = useQueryClient()
+  const desktop = window.desktop
+
   React.useEffect(() => {
     if (!unsaved) return
     const protectUnsentText = (event: BeforeUnloadEvent) => {
@@ -145,6 +290,10 @@ export function UnsentReviewChangesNotice() {
     window.addEventListener('beforeunload', protectUnsentText)
     return () => window.removeEventListener('beforeunload', protectUnsentText)
   }, [unsaved])
+
+  React.useEffect(() => {
+    return setupReviewDraftReadinessListener(desktop, queryClient)
+  }, [desktop, queryClient])
   if (!writes.includes('error')) return null
   return (
     <InlineAlert tone="warning" title="Local review edits are not saved" role="status">
@@ -194,6 +343,7 @@ export function ReviewView({
   returnContext: { label: string; onReturn: () => void } | null
 }) {
   const queryClient = useQueryClient()
+  const draftAdmissionLocked = useDraftAdmissionLocked()
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null)
   const [mode, setMode] = React.useState<ReviewDiffMode>('unified')
   const [selection, setSelection] = React.useState<ReviewSelection | null>(null)
@@ -660,6 +810,7 @@ export function ReviewView({
     },
   ) => {
     if (number === null || !draftOwner?.viewer) return
+    if (draftAdmissionLocked) return
     const preservesSavedComparison =
       draftRecord !== null &&
       (draftRecord.drafts.some((saved) => drafts.some((draft) => draft.id === saved.id)) ||
@@ -1002,23 +1153,27 @@ export function ReviewView({
         draftRecord.composer?.replies.length) &&
       !sameReviewComparison(draftRecord.comparison, files.comparison),
   )
-  const frozenReason = draftComparisonChanged
-    ? 'Your unsent comments retain an earlier head or base comparison. Their original anchors cannot be moved to this diff. Keep or discard those comments before composing a review of the current revision.'
-    : observedChanged
-      ? 'The pull request head or base changed since this displayed comparison. Your unsent text is retained. Reload and inspect the current diff before sending a review.'
-      : isComparing
-        ? `Viewing changes since ${activeSnapshot?.headOid.slice(0, 7) ?? 'a previous head'}. Comments and reviews are disabled in historical comparison mode; return to the current diff to comment.`
-        : !retainedLocalWrite && verifiedDraftRecord.current === undefined
-          ? 'Saved drafts have not been read for this repository and account. Wait for the local journal read or reload before composing a new comment.'
-          : threadState !== 'ready' || !threadRead?.owner.viewer
-            ? 'The current conversation permissions have not been confirmed. Your existing text is retained; wait for the permissions read or reload before composing or sending.'
-            : null
-  const submissionFrozenReason = savedDraftConflict
-    ? `${frozenReason ? `${frozenReason} ` : ''}Saved drafts changed after these unsent edits were composed. The full set cannot overwrite newer saved work; copy any text you need before explicitly discarding these local edits.`
-    : (frozenReason ??
-      (retainedWrite
-        ? 'These local edits have not been saved yet. Keep editing while the write finishes, or explicitly save the retained drafts before submitting.'
-        : null))
+  const frozenReason = draftAdmissionLocked
+    ? 'An update installation is in progress. Composing and saving comments are temporarily paused until installation finishes or is released.'
+    : draftComparisonChanged
+      ? 'Your unsent comments retain an earlier head or base comparison. Their original anchors cannot be moved to this diff. Keep or discard those comments before composing a review of the current revision.'
+      : observedChanged
+        ? 'The pull request head or base changed since this displayed comparison. Your unsent text is retained. Reload and inspect the current diff before sending a review.'
+        : isComparing
+          ? `Viewing changes since ${activeSnapshot?.headOid.slice(0, 7) ?? 'a previous head'}. Comments and reviews are disabled in historical comparison mode; return to the current diff to comment.`
+          : !retainedLocalWrite && verifiedDraftRecord.current === undefined
+            ? 'Saved drafts have not been read for this repository and account. Wait for the local journal read or reload before composing a new comment.'
+            : threadState !== 'ready' || !threadRead?.owner.viewer
+              ? 'The current conversation permissions have not been confirmed. Your existing text is retained; wait for the permissions read or reload before composing or sending.'
+              : null
+  const submissionFrozenReason = draftAdmissionLocked
+    ? 'An update installation is in progress. Composing and saving comments are temporarily paused until installation finishes or is released.'
+    : savedDraftConflict
+      ? `${frozenReason ? `${frozenReason} ` : ''}Saved drafts changed after these unsent edits were composed. The full set cannot overwrite newer saved work; copy any text you need before explicitly discarding these local edits.`
+      : (frozenReason ??
+        (retainedWrite
+          ? 'These local edits have not been saved yet. Keep editing while the write finishes, or explicitly save the retained drafts before submitting.'
+          : null))
 
   const select = (path: string) => {
     setSelectedPath(path)
@@ -1173,7 +1328,7 @@ export function ReviewView({
               size="sm"
               variant="ghost"
               loading={saveDraftsMutation.isPending}
-              disabled={!desktop?.reviewSetDrafts}
+              disabled={!desktop?.reviewSetDrafts || draftAdmissionLocked}
               onClick={() => saveDrafts(retainedDraft.drafts)}
             >
               Save local drafts
@@ -1686,7 +1841,8 @@ export function ReviewView({
                     onClearSelection={() => setSelection(null)}
                     onDraftChange={saveDrafts}
                     canCompose={Boolean(
-                      draftOwner?.viewer &&
+                      !draftAdmissionLocked &&
+                        draftOwner?.viewer &&
                         (draftRecord?.comparison || files?.comparison) &&
                         (retainedLocalWrite || verifiedDraftRecord.current !== undefined),
                     )}
