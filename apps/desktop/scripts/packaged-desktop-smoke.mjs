@@ -1207,22 +1207,55 @@ async function gotoView(locators, label) {
 }
 
 async function capturedContext(page, repositoryPath) {
-  await page.getByText('Local inventory complete', { exact: true }).waitFor()
-  return page.evaluate(async (path) => {
-    const inventory = await window.desktop.worktreeInventory({
-      requestId: 'packaged-captured-context',
-    })
-    const repository = inventory.repositories.find((repo) =>
-      repo.worktrees.some((tree) => tree.path === path),
-    )
-    const tree = repository?.worktrees.find((tree) => tree.path === path)
-    if (!repository || !tree) throw new Error('Exact owned fixture directory was not discovered.')
-    return {
-      repositoryId: repository.identity.id,
-      worktreeId: tree.id,
-      ...(tree.refId ? { refId: tree.refId } : {}),
-    }
-  }, repositoryPath)
+  return page.evaluate(
+    (path) =>
+      new Promise((resolve, reject) => {
+        let settled = false
+        let unsubscribe
+        const finish = (error, context) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          unsubscribe?.()
+          if (error) reject(error)
+          else resolve(context)
+        }
+        const consume = (inventory) => {
+          if (settled) return
+          const repository = inventory.repositories.find((repo) =>
+            repo.worktrees.some((tree) => tree.path === path),
+          )
+          const tree = repository?.worktrees.find((tree) => tree.path === path)
+          if (!repository || !tree) return
+          finish(null, {
+            repositoryId: repository.identity.id,
+            worktreeId: tree.id,
+            ...(tree.refId ? { refId: tree.refId } : {}),
+          })
+        }
+        const timer = setTimeout(
+          () => finish(new Error('Exact owned fixture directory was not discovered within 20 seconds.')),
+          20_000,
+        )
+        try {
+          unsubscribe = window.desktop.onWorktreeInventory(consume)
+          window.desktop.worktreeInventory({ requestId: 'packaged-captured-context' }).then(
+            consume,
+            (error) => {
+              if (
+                error?.name === 'CommandCancelled' ||
+                /(?:^|: )CommandCancelled: The request was cancelled\.$/.test(error?.message ?? '')
+              )
+                return
+              finish(error)
+            },
+          )
+        } catch (error) {
+          finish(error)
+        }
+      }),
+    repositoryPath,
+  )
 }
 
 async function openCliSettings(page) {
