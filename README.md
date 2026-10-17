@@ -69,9 +69,11 @@ pnpm run bench:performance  # large-repository benchmarks
 pnpm run build:promotion-helper  # build the atomic no-replace rename helper
 ```
 
-`pnpm-workspace.yaml` declares the workspaces and permits install scripts only for
-the pinned electron-winstaller and esbuild versions. Electron 44 downloads its
-binary on first use when absent; no duplicate desktop postinstall is needed.
+`pnpm-workspace.yaml` declares the workspaces and permits dependency install scripts
+only for the pinned electron-winstaller and esbuild versions. The root `postinstall`
+hook runs `pnpm --filter git-stacks exec install-electron` to download the pinned
+Electron runtime when absent, before electron-vite starts. To provision it after an
+install with scripts disabled, run `pnpm run postinstall`.
 
 `pnpm run dev`, `pnpm run build`, `pnpm test`, `pnpm run package`, and `pnpm run
 dist` all build the clone promotion helper first, so a C compiler must be

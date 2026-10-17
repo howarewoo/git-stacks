@@ -9,6 +9,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "postinstall": "pnpm --filter git-stacks exec install-electron",
     "dev": "turbo run dev --",
     "start": "turbo run start --",
     "build": "turbo run build --",
