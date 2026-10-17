@@ -383,7 +383,7 @@ test('coordinateSafeInstall fails closed and releases fence if window is invalid
   assert.equal(fence.state, 'idle')
 })
 
-test('coordinateSafeInstall with real UpdateService fails closed and releases fence on lifecycle loss during install preparation', async (t) => {
+test('coordinateSafeInstall retries the same verified candidate after lifecycle loss during preparation', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'git-stacks-test-service-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
 
@@ -406,6 +406,7 @@ test('coordinateSafeInstall with real UpdateService fails closed and releases fe
   }
 
   let nativeCutoverCalled = false
+  let preparationCalls = 0
   const service = new UpdateService({
     packaged: false,
     currentVersion: '0.1.0',
@@ -416,8 +417,9 @@ test('coordinateSafeInstall with real UpdateService fails closed and releases fe
     relaunch: () => {},
     quit: () => {},
     prepare: async (staged) => {
-      // Simulate window crashing while preparing handoff copy
-      mockWebContents.emit('render-process-gone')
+      preparationCalls += 1
+      // Simulate window crashing during the first handoff preparation only.
+      if (preparationCalls === 1) mockWebContents.emit('render-process-gone')
       return staged
     },
     install: async (_staged, options) => {
@@ -447,11 +449,24 @@ test('coordinateSafeInstall with real UpdateService fails closed and releases fe
     install: (options) => service.install(options),
   })
 
-  assert.equal(status.phase, 'cancelled')
+  assert.equal(status.phase, 'downloaded')
+  assert.equal(status.readyToInstall, true)
 
   assert.equal(nativeCutoverCalled, false)
   assert.equal(fence.isFenced, false)
   assert.equal(fence.state, 'idle')
+
+  const retry = await coordinateSafeInstall({
+    fence,
+    readiness,
+    getWebContents: () => mockWebContents,
+    install: (options) => service.install(options),
+  })
+
+  assert.equal(retry.phase, 'installing')
+  assert.equal(nativeCutoverCalled, true)
+  assert.equal(preparationCalls, 2)
+  assert.equal(fence.state, 'installing')
 })
 
 test('ReviewConversation genuinely disables DraftList inline comment editors when frozen for update admission', () => {

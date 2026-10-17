@@ -102,6 +102,8 @@ interface Candidate {
 interface Run {
   /** The one signal a stop is asked through. */
   controller: AbortController
+  installSignal?: AbortSignal
+  nativeCutoverReached?: boolean
 }
 
 /**
@@ -520,6 +522,7 @@ export class UpdateService {
       return this.publish()
     }
     const run = this.claim()
+    run.installSignal = options?.signal
     if (options?.signal) {
       if (options.signal.aborted) {
         run.controller.abort()
@@ -613,7 +616,10 @@ export class UpdateService {
             this.options.relaunch()
           },
           beforeNativeCutover: options?.beforeNativeCutover ?? this.options.beforeNativeCutover,
-          onNativeCutover: options?.onNativeCutover ?? this.options.onNativeCutover,
+          onNativeCutover: () => {
+            run.nativeCutoverReached = true
+            ;(options?.onNativeCutover ?? this.options.onNativeCutover)?.()
+          },
         })
         retains = outcome.retains !== undefined
       } finally {
@@ -731,7 +737,11 @@ export class UpdateService {
    */
   private classify(run: Run, error: unknown): UpdateStatus {
     if (run.controller.signal.aborted) {
-      this.phase = 'cancelled'
+      // Lifecycle loss retires this attempt, not its retained verified download.
+      this.phase =
+        run.installSignal?.aborted && !run.nativeCutoverReached && this.candidate
+          ? 'downloaded'
+          : 'cancelled'
       this.failure = null
       this.progress = null
       return this.publish()
