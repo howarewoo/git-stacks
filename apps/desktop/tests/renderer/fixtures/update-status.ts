@@ -14,6 +14,8 @@ const base: Omit<UpdateStatus, 'phase'> = {
   trust: 'release',
   readyToInstall: false,
   restartRequired: false,
+  lastAttemptAt: null,
+  lastSuccessAt: null,
 }
 
 const offer: NonNullable<UpdateStatus['offer']> = {
@@ -45,6 +47,19 @@ export const updateStatusFixture = {
     offer,
     progress: 100,
     readyToInstall: true,
+  } as UpdateStatus,
+  downloadedLinux: {
+    ...base,
+    phase: 'downloaded',
+    offer: {
+      ...offer,
+      platform: 'linux',
+      kind: 'AppImage',
+      fileName: 'Git-Stacks-0.2.0.AppImage',
+    },
+    supported: false,
+    readyToInstall: false,
+    progress: 100,
   } as UpdateStatus,
   cancelled: { ...base, phase: 'cancelled' } as UpdateStatus,
   notConfigured: {

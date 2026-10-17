@@ -199,6 +199,7 @@ const desktop: DesktopAPI = {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
+  revealDownloadedUpdate: () => ipcRenderer.invoke('update:reveal-downloaded'),
   onUpdateStatus: (listener: (status: UpdateStatus) => void) =>
     subscribe('update:status', listener),
   reportUpdateReadiness: (report) => ipcRenderer.invoke('update:report-readiness', report),

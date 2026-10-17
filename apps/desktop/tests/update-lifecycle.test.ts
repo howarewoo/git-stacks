@@ -18,9 +18,11 @@ import { dirname, join } from 'node:path'
 import { once } from 'node:events'
 import { test } from 'node:test'
 import { UpdateService, type UpdateServiceOptions } from '../src/main/update/service'
+import { UpdateScheduler } from '../src/main/update/scheduler'
 import { privateInstallHandoff, type StagedUpdate } from '../src/main/update/artifact'
 import { beginHandoff } from '../src/main/update/install'
 import type { UpdateChannel } from '@git-stacks/shared/update'
+import { DEFAULT_SETTINGS, type AppSettings } from '@git-stacks/shared/settings'
 
 /**
  * The real update path, over a real socket, against a real HTTPS release
@@ -72,6 +74,8 @@ interface Release {
   tamper?: boolean
   /** Held open until the test releases it, so a check can be interrupted. */
   hold?: Promise<void> | null
+  platform?: 'darwin' | 'linux' | 'win32'
+  arch?: 'arm64' | 'x64'
 }
 
 /** A response the test holds open and releases when it chooses. */
@@ -106,11 +110,18 @@ function manifestFor(release: Release, base: string): Buffer {
       rollbackOf: release.rollbackOf ?? null,
       artifacts: [
         {
-          platform: 'darwin',
-          arch: 'arm64',
-          kind: 'dmg',
-          fileName: `Git-Stacks-${release.version}-arm64.dmg`,
-          url: `${base}/${release.channel}/Git-Stacks-${release.version}-arm64.dmg`,
+          platform: release.platform ?? 'darwin',
+          arch: release.arch ?? 'arm64',
+          kind: (release.platform ?? 'darwin') === 'linux' ? 'AppImage' : 'dmg',
+          fileName:
+            (release.platform ?? 'darwin') === 'linux'
+              ? `Git-Stacks-${release.version}.AppImage`
+              : `Git-Stacks-${release.version}-arm64.dmg`,
+          url: `${base}/${release.channel}/${
+            (release.platform ?? 'darwin') === 'linux'
+              ? `Git-Stacks-${release.version}.AppImage`
+              : `Git-Stacks-${release.version}-arm64.dmg`
+          }`,
           sha256: createHash('sha256').update(release.bytes).digest('hex'),
           size: release.bytes.length,
         },
@@ -173,7 +184,10 @@ async function startFeed(): Promise<Feed> {
           .end(JSON.stringify({ schema: 1, keyId: KEY_ID, signature: release.signature }))
         return
       }
-      if (url.pathname === `/${current.channel}/Git-Stacks-${current.version}-arm64.dmg`) {
+      if (
+        url.pathname === `/${current.channel}/Git-Stacks-${current.version}-arm64.dmg` ||
+        url.pathname === `/${current.channel}/Git-Stacks-${current.version}.AppImage`
+      ) {
         response.writeHead(200, { 'content-type': 'application/octet-stream' }).end(current.bytes)
         return
       }
@@ -1428,4 +1442,230 @@ test('a change asked for after a reset is not overtaken by it', async (t) => {
     'the two changes are written in the order they were asked in',
   )
   assert.equal(app.service.status().channel, 'beta', 'the later choice is the channel in force')
+})
+
+test('damaged advisory timestamps in updates.json do not invalidate durable replay counters', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 5, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+
+  // Corrupt the advisory timestamps while keeping a valid durable replay counter
+  await writeFile(
+    join(app.userDataPath, 'updates.json'),
+    JSON.stringify({
+      seenSequences: { stable: 5 },
+      channels: { stable: 'damaged_timestamps_string_not_object' },
+    }),
+  )
+
+  // Restart service with the damaged advisory timestamps
+  const restarted = harnessFor(feed.base, {})
+  const service = new UpdateService({
+    packaged: false,
+    currentVersion: '0.1.0',
+    appPath: unsignedBundle(),
+    userDataPath: app.userDataPath,
+    platform: 'darwin',
+    arch: 'arm64',
+    env: updateEnv(feed.base),
+    relaunch: () => undefined,
+  })
+  await service.start('stable')
+  assert.notEqual(service.status().phase, 'failed', 'advisory timestamp corruption is tolerated')
+  assert.equal(service.status().failure, null)
+
+  // A feed offering sequence 4 is refused as replayed (durable counter was preserved!)
+  feed.set({ version: '0.2.0', sequence: 4, bytes: ARTIFACT, channel: 'stable' })
+  const replayed = await service.check()
+  assert.equal(replayed.phase, 'failed')
+  assert.equal(replayed.failure?.reason, 'replayed', 'durable replay counter survived')
+
+  // A feed offering sequence 6 is accepted as a new offer and sets attempt+success timestamps
+  feed.set({ version: '0.3.0', sequence: 6, bytes: ARTIFACT, channel: 'stable' })
+  const accepted = await service.check()
+  assert.equal(accepted.phase, 'available')
+  assert.ok(accepted.lastAttemptAt, 'lastAttemptAt is recorded')
+  assert.ok(accepted.lastSuccessAt, 'lastSuccessAt is recorded')
+})
+
+test('the scheduler skips (does not queue) while a channel change owns the updater', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+
+  const scheduler = new UpdateScheduler({
+    service: app.service,
+    getSettings: () => structuredClone(DEFAULT_SETTINGS),
+    initialDelayMs: 100000,
+    intervalMs: 100000,
+  })
+  scheduler.start()
+  t.after(() => scheduler.stop())
+
+  const holding = gate()
+  const changingChannel = app.service.applyChannel('beta', async () => {
+    await holding.wait
+  })
+
+  assert.equal(
+    app.service.isBusy(),
+    true,
+    'service is busy while channel commit holds exclusive queue',
+  )
+  const skipped = await scheduler.trigger()
+  assert.equal(skipped, null, 'scheduler skipped rather than queuing behind channel change')
+
+  holding.open()
+  await changingChannel
+  assert.equal(app.service.isBusy(), false, 'service is idle after channel change settles')
+})
+
+test('optout in settings prevents automatic check from making any HTTP request', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+
+  const settings = structuredClone(DEFAULT_SETTINGS)
+  settings.updates.automaticChecks = false
+
+  const scheduler = new UpdateScheduler({
+    service: app.service,
+    getSettings: () => settings,
+    initialDelayMs: 100000,
+    intervalMs: 100000,
+  })
+  scheduler.start()
+  t.after(() => scheduler.stop())
+
+  const beforeRequests = feed.requests.length
+  const result = await scheduler.trigger()
+  assert.equal(result, null, 'scheduler skipped because automaticChecks is false')
+  assert.equal(feed.requests.length, beforeRequests, 'no HTTP request was made')
+
+  // Manual check still works when opted out of automatic checks
+  const manual = await app.service.check()
+  assert.equal(manual.phase, 'available', 'manual check remains available')
+  assert.ok(feed.requests.length > beforeRequests, 'manual check made HTTP requests')
+})
+
+test('scheduler cadence is due-aware, coalesces resume without duplicate timer check, and respects stop during settings read', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+
+  let currentTime = 1000
+  const powerEmitter = new EventEmitter()
+  const scheduler = new UpdateScheduler({
+    service: app.service,
+    getSettings: () => structuredClone(DEFAULT_SETTINGS),
+    initialDelayMs: 20,
+    intervalMs: 24 * 60 * 60 * 1000,
+    now: () => currentTime,
+    powerMonitor: powerEmitter,
+  })
+
+  scheduler.start()
+  t.after(() => scheduler.stop())
+
+  // Initial delay runs the first check
+  await new Promise((r) => setTimeout(r, 40))
+  assert.equal(app.service.status().phase, 'available', 'initial check ran after initial delay')
+  const reqsAfterInitial = feed.requests.length
+
+  // Advance time by 25h and trigger resume: overdue check runs once
+  currentTime += 25 * 60 * 60 * 1000
+  powerEmitter.emit('resume')
+  await new Promise((r) => setTimeout(r, 20))
+  assert.ok(feed.requests.length > reqsAfterInitial, 'overdue check ran after resume')
+  const reqsAfterResume = feed.requests.length
+
+  // Second immediate resume without elapsed time does not check
+  powerEmitter.emit('resume')
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(feed.requests.length, reqsAfterResume, 'no second check when not overdue')
+
+  // Scheduled interval check also does not check because lastCheckTime was updated by resume
+  const scheduled = await scheduler.triggerScheduled()
+  assert.equal(scheduled, null, 'scheduled timer coalesces with recent resume check')
+  assert.equal(feed.requests.length, reqsAfterResume, 'no extra request made by timer')
+
+  // Stop during settings read halts dispatch
+  const gateHold = gate()
+  const delayedScheduler = new UpdateScheduler({
+    service: app.service,
+    getSettings: async () => {
+      await gateHold.wait
+      return structuredClone(DEFAULT_SETTINGS)
+    },
+    initialDelayMs: 1000,
+    intervalMs: 1000,
+  })
+  delayedScheduler.start()
+  const triggerPromise = delayedScheduler.trigger()
+  delayedScheduler.stop()
+  gateHold.open()
+  const result = await triggerPromise
+  assert.equal(result, null, 'trigger aborted because scheduler was stopped during settings read')
+})
+
+test('revealDownloaded on Linux validates candidate size and digest, and exposes exact path to showItemInFolder', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({
+    version: '0.2.0',
+    sequence: 1,
+    bytes: ARTIFACT,
+    channel: 'stable',
+    platform: 'linux',
+    arch: 'x64',
+  })
+
+  let revealedPath: string | null = null
+  const userDataPath = mkdtempSync(join(tmpdir(), 'git-stacks-linux-data-'))
+  const linuxService = new UpdateService({
+    packaged: false,
+    currentVersion: '0.1.0',
+    appPath: unsignedBundle(),
+    userDataPath,
+    platform: 'linux',
+    arch: 'x64',
+    env: updateEnv(feed.base),
+    showItemInFolder: (stagedPath) => {
+      revealedPath = stagedPath
+    },
+    relaunch: () => undefined,
+  })
+
+  await linuxService.start('stable')
+  const checked = await linuxService.check()
+  assert.equal(checked.phase, 'available')
+  assert.equal(checked.supported, false, 'in-place updates are not supported on Linux')
+
+  const downloaded = await linuxService.download()
+  assert.equal(downloaded.phase, 'downloaded')
+  assert.equal(downloaded.readyToInstall, false, 'Linux never reports readyToInstall')
+
+  const stagedFiles = readdirSync(join(userDataPath, 'updates'))
+  assert.equal(stagedFiles.length, 1)
+  const stagedPath = join(userDataPath, 'updates', stagedFiles[0])
+
+  // Valid reveal
+  const revealed = await linuxService.revealDownloaded()
+  assert.equal(revealed.ok, true)
+  assert.equal(revealedPath, stagedPath, 'showItemInFolder received verified candidate path')
+
+  // Tamper with candidate on disk: revealDownloaded must revalidate, discard, and fail
+  await writeFile(stagedPath, 'tampered-artifact-bytes')
+  const tamperedReveal = await linuxService.revealDownloaded()
+  assert.equal(tamperedReveal.ok, false)
+  assert.equal(linuxService.status().phase, 'failed')
+  assert.equal(existsSync(stagedPath), false, 'tampered candidate was discarded from disk')
 })

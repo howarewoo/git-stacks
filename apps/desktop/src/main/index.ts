@@ -38,11 +38,13 @@ import {
   ipcMain as electronIpcMain,
   Menu,
   net,
+  powerMonitor,
   protocol,
   session,
   shell,
 } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
+import { UpdateScheduler } from './update/scheduler'
 import { mkdir, readFile, rename, writeFile, realpath } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -633,6 +635,7 @@ function applicationVault(): CredentialVault {
  * a step and shows what happened.
  */
 let updateService: UpdateService | null = null
+let updateScheduler: UpdateScheduler | null = null
 
 /**
  * The GitHub CLI status for the configured host.
@@ -3496,6 +3499,9 @@ function installHandlers() {
   ipcMain.handle('update:cancel', (event) => {
     return requireUpdateService().cancel()
   })
+  ipcMain.handle('update:reveal-downloaded', async () => {
+    return await requireUpdateService().revealDownloaded()
+  })
 }
 
 async function createWindow() {
@@ -3630,6 +3636,9 @@ app
       userDataPath: app.getPath('userData'),
       platform: process.platform,
       arch: process.arch,
+      showItemInFolder: (stagedPath: string) => {
+        shell.showItemInFolder(stagedPath)
+      },
       relaunch: () => {
         app.relaunch()
         app.quit()
@@ -3644,6 +3653,12 @@ app
       window?.webContents.send('update:status', status)
     })
     await updateService.start(currentSettings?.updates.channel ?? 'stable')
+    updateScheduler = new UpdateScheduler({
+      service: updateService,
+      getSettings: async () => currentSettings ?? (await readSettingsFile(settingsFile())).settings,
+      powerMonitor,
+    })
+    updateScheduler.start()
     const preference = await readGitRuntimePreference(settingsFile()).catch(() => false)
     configureGitRuntime({
       appVersion: app.getVersion(),

@@ -131,6 +131,11 @@ export interface UpdateSettings {
    * selected for anyone else.
    */
   channel: UpdateChannel
+  /**
+   * Whether Git Stacks automatically checks for signed releases in the
+   * background on startup and every 24 hours. Defaults to true.
+   */
+  automaticChecks: boolean
 }
 
 export interface NotificationSettings {
@@ -180,7 +185,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notifications: { enabled: false },
   appearance: { theme: 'system', reduceMotion: false, density: 'compact' },
   privacy: { includeLocalPaths: false },
-  updates: { channel: 'stable' },
+  updates: { channel: 'stable', automaticChecks: true },
   shortcuts: { ...DEFAULT_SHORTCUTS },
   migrated: { legacyShortcutStorage: false },
 }

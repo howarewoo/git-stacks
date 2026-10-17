@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, open, readFile, rename, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rename, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   compareVersions,
@@ -71,6 +71,12 @@ export interface UpdateServiceOptions {
   beforeNativeCutover?: () => void
   /** Called immediately upon successful native handoff/replacement. */
   onNativeCutover?: () => void
+  /**
+   * Reveals a staged installer in the platform's file manager. Parameterized
+   * so the reveal path can be exercised on CI and in test environments where
+   * native Electron shell is unavailable.
+   */
+  showItemInFolder?: (fullPath: string) => void
 }
 
 export interface ServiceInstallOptions {
@@ -79,13 +85,20 @@ export interface ServiceInstallOptions {
   signal?: AbortSignal
 }
 
+export interface ChannelScheduleTimestamps {
+  lastAttemptAt: string | null
+  lastSuccessAt: string | null
+}
+
 interface UpdateState {
   /** The highest manifest sequence already offered, per channel. */
   seenSequences: Partial<Record<UpdateChannel, number>>
+  /** Advisory check attempt and success timestamps, qualified per channel. */
+  channels?: Partial<Record<UpdateChannel, ChannelScheduleTimestamps>>
 }
 
 function emptyState(): UpdateState {
-  return { seenSequences: {} }
+  return { seenSequences: {}, channels: {} }
 }
 
 /** What a staged installer is, so it can never be installed as something else. */
@@ -137,6 +150,7 @@ export class UpdateService {
    */
   private running: Run | null = null
   private queue: Promise<void> = Promise.resolve()
+  private pendingOperations = 0
   /** Counts durable writes, so two temporary files never share a name. */
   private writes = 0
   /** True once the platform installer owns the files this app runs from. */
@@ -288,10 +302,117 @@ export class UpdateService {
       trust: trustedUpdateKeys(this.options.env, this.options.packaged).trust,
       // Only the build this run just verified, for the release on offer, may be
       // installed. An installer left over from an earlier offer is not this.
+      // Linux never supports in-place replacement, so readyToInstall is never true there.
       readyToInstall:
-        this.phase === 'downloaded' && this.candidate !== null && this.stateFailure === null,
+        this.phase === 'downloaded' &&
+        this.candidate !== null &&
+        this.stateFailure === null &&
+        installSupportFor(this.options.platform) !== null,
       restartRequired: this.restartRequired,
+      lastAttemptAt: this.state.channels?.[this.channel]?.lastAttemptAt ?? null,
+      lastSuccessAt: this.state.channels?.[this.channel]?.lastSuccessAt ?? null,
     }
+  }
+
+  isBusy(): boolean {
+    return (
+      this.pendingOperations > 0 ||
+      this.running !== null ||
+      this.phase === 'checking' ||
+      this.phase === 'downloading' ||
+      this.phase === 'installing'
+    )
+  }
+
+  isConfigured(): boolean {
+    return trustedUpdateKeys(this.options.env, this.options.packaged).keys.length > 0
+  }
+
+  /**
+   * Attempts an update check atomically only when no operation is queued or running.
+   * If an operation owns or is waiting for the updater, skips rather than queues.
+   */
+  async checkIfIdle(): Promise<UpdateStatus | null> {
+    if (this.isBusy()) return null
+    return this.exclusive(() => this.runCheck())
+  }
+
+  /**
+   * Reveals the verified downloaded update candidate in the operating system's
+   * file manager without executing it or replacing running files. Revalidates
+   * digest and size against the authenticated candidate.
+   */
+  async revealDownloaded(): Promise<{ ok: boolean; message?: string }> {
+    return this.exclusive(() => this.runRevealDownloaded())
+  }
+
+  private async runRevealDownloaded(): Promise<{ ok: boolean; message?: string }> {
+    if (this.stateFailure) {
+      return { ok: false, message: this.stateFailure.message }
+    }
+    const candidate = this.candidate
+    if (!candidate || this.phase !== 'downloaded') {
+      return { ok: false, message: 'There is no downloaded update to reveal.' }
+    }
+    const run = this.claim()
+    try {
+      const fileStat = await stat(candidate.staged.path)
+      if (fileStat.size !== candidate.staged.size) {
+        await this.discardCandidate()
+        this.phase = 'failed'
+        this.failure = {
+          reason: 'malformed',
+          message: 'The downloaded installer no longer matches the signed release.',
+        }
+        this.publish()
+        return { ok: false, message: this.failure.message }
+      }
+      const digest = await hashStagedUpdate(candidate.staged)
+      if (digest !== candidate.sha256) {
+        await this.discardCandidate()
+        this.phase = 'failed'
+        this.failure = {
+          reason: 'bad-signature',
+          message: 'The downloaded installer no longer matches the signed release.',
+        }
+        this.publish()
+        return { ok: false, message: this.failure.message }
+      }
+      if (run.controller.signal.aborted) {
+        return { ok: false, message: 'The update reveal was cancelled.' }
+      }
+      if (!this.options.showItemInFolder) {
+        return { ok: false, message: 'File manager integration is unavailable on this platform.' }
+      }
+      this.options.showItemInFolder(candidate.staged.path)
+      return { ok: true }
+    } catch {
+      if (run.controller.signal.aborted) {
+        return { ok: false, message: 'The update reveal was cancelled.' }
+      }
+      await this.discardCandidate()
+      this.phase = 'failed'
+      this.failure = {
+        reason: 'unreachable',
+        message: 'The downloaded update file is no longer present on disk.',
+      }
+      this.publish()
+      return { ok: false, message: this.failure.message }
+    } finally {
+      this.release(run)
+    }
+  }
+
+  private recordAttempt(channel: UpdateChannel, at: string): void {
+    if (!this.state.channels) this.state.channels = {}
+    const current = this.state.channels[channel] ?? { lastAttemptAt: null, lastSuccessAt: null }
+    this.state.channels[channel] = { ...current, lastAttemptAt: at }
+  }
+
+  private recordSuccess(channel: UpdateChannel, at: string): void {
+    if (!this.state.channels) this.state.channels = {}
+    const current = this.state.channels[channel] ?? { lastAttemptAt: null, lastSuccessAt: null }
+    this.state.channels[channel] = { ...current, lastSuccessAt: at }
   }
 
   onChange(listener: (status: UpdateStatus) => void): () => void {
@@ -321,6 +442,8 @@ export class UpdateService {
       return this.publish()
     }
     const run = this.claim()
+    const attemptTime = new Date().toISOString()
+    this.recordAttempt(this.channel, attemptTime)
     this.phase = 'checking'
     this.failure = null
     this.publish()
@@ -353,9 +476,18 @@ export class UpdateService {
           result.failure.reason === 'not-newer' &&
           this.manifestIsCurrent(result.failure.message)
         ) {
+          this.recordSuccess(this.channel, attemptTime)
+          await this.writeState().catch(() => undefined)
+          if (run.controller.signal.aborted) {
+            return this.classify(run, new Error('The update check was cancelled.'))
+          }
           this.phase = 'current'
           this.failure = null
           return this.publish()
+        }
+        await this.writeState().catch(() => undefined)
+        if (run.controller.signal.aborted) {
+          return this.classify(run, new Error('The update check was cancelled.'))
         }
         this.phase = 'failed'
         this.failure = result.failure
@@ -376,6 +508,7 @@ export class UpdateService {
       const channel = offered.channel
       const before = this.state.seenSequences[channel]
       this.state.seenSequences[channel] = Math.max(offered.sequence, before ?? 0)
+      this.recordSuccess(channel, attemptTime)
       try {
         await this.writeState()
         if (run.controller.signal.aborted) {
@@ -513,6 +646,14 @@ export class UpdateService {
     if (this.stateFailure) {
       this.phase = 'failed'
       this.failure = this.stateFailure
+      return this.publish()
+    }
+    if (!installSupportFor(this.options.platform)) {
+      this.phase = 'failed'
+      this.failure = {
+        reason: 'platform',
+        message: 'In-place updates are not supported on this platform.',
+      }
       return this.publish()
     }
     const candidate = this.candidate
@@ -710,10 +851,17 @@ export class UpdateService {
    * from a stopped operation cannot be applied to a newer one.
    */
   private exclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(operation)
+    this.pendingOperations += 1
+    const result = this.queue.then(async () => {
+      return await operation()
+    })
     this.queue = result.then(
-      () => undefined,
-      () => undefined,
+      () => {
+        this.pendingOperations -= 1
+      },
+      () => {
+        this.pendingOperations -= 1
+      },
     )
     return result
   }
@@ -825,7 +973,24 @@ export class UpdateService {
         }
         seenSequences[channel] = value
       }
-      return { seenSequences }
+      const channels: Partial<Record<UpdateChannel, ChannelScheduleTimestamps>> = {}
+      if (isRecord(parsed.channels)) {
+        for (const channel of UPDATE_CHANNELS) {
+          const entry = parsed.channels[channel]
+          if (isRecord(entry)) {
+            const attempt =
+              typeof entry.lastAttemptAt === 'string' && !isNaN(Date.parse(entry.lastAttemptAt))
+                ? entry.lastAttemptAt
+                : null
+            const success =
+              typeof entry.lastSuccessAt === 'string' && !isNaN(Date.parse(entry.lastSuccessAt))
+                ? entry.lastSuccessAt
+                : null
+            channels[channel] = { lastAttemptAt: attempt, lastSuccessAt: success }
+          }
+        }
+      }
+      return { seenSequences, channels }
     } catch (error) {
       this.stateFailure = {
         reason: 'unreachable',

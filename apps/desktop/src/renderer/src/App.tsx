@@ -51,6 +51,7 @@ import {
 } from './components/notification-center-view'
 import { WorkflowDialog, type WorkflowRequest } from './components/workflow-dialog'
 import { OperationBanner } from './components/repository-views'
+import { useUpdateStatus } from './lib/update-status'
 import {
   AttentionView,
   ActivityView,
@@ -118,6 +119,8 @@ const providerReadQuery = (query: { queryKey: readonly unknown[] }) =>
 function App() {
   const desktop: DesktopAPI | null = window.desktop ?? null
   const client = useQueryClient()
+  const updateStatusQuery = useUpdateStatus(desktop)
+  const updateStatus = updateStatusQuery.data ?? null
   React.useEffect(() => {
     if (/Electron/.test(navigator.userAgent) && /Mac/.test(navigator.platform))
       document.documentElement.dataset.nativeMac = 'true'
@@ -138,6 +141,17 @@ function App() {
   const [globalPage, setGlobalPage] = React.useState(0)
   const [searchReady, setSearchReady] = React.useState(true)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  const [settingsSection, setSettingsSection] = React.useState<
+    | 'cli'
+    | 'github'
+    | 'notifications'
+    | 'git'
+    | 'appearance'
+    | 'updates'
+    | 'shortcuts'
+    | 'privacy'
+    | 'diagnostics'
+  >('cli')
   const [localRepositoryOpen, setLocalRepositoryOpen] = React.useState(false)
   const [discoveryOpen, setDiscoveryOpen] = React.useState(false)
   const [recoveryOpen, setRecoveryOpen] = React.useState(false)
@@ -1035,6 +1049,7 @@ function App() {
       return
     }
     if (action === 'settings') {
+      setSettingsSection('cli')
       setSettingsOpen(true)
       return
     }
@@ -2085,9 +2100,35 @@ function App() {
         surface={surface}
         mainPanel={mainPanel}
         topUtilities={
-          <Button variant="ghost" onClick={() => setNotificationOpen(true)}>
-            Notifications
-          </Button>
+          <>
+            {updateStatus &&
+            (updateStatus.phase === 'available' || updateStatus.phase === 'downloaded') ? (
+              <div className="flex items-center gap-2" role="status">
+                <span className="text-xs text-[var(--gs-semantic-text-secondary)] whitespace-nowrap">
+                  {updateStatus.phase === 'downloaded'
+                    ? updateStatus.supported
+                      ? 'Update downloaded'
+                      : 'Update verified'
+                    : 'Update available'}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setSettingsSection('updates')
+                    setSettingsOpen(true)
+                  }}
+                >
+                  {updateStatus.phase === 'downloaded' && updateStatus.supported
+                    ? 'Install in Settings'
+                    : 'Review update'}
+                </Button>
+              </div>
+            ) : null}
+            <Button variant="ghost" onClick={() => setNotificationOpen(true)}>
+              Notifications
+            </Button>
+          </>
         }
         capabilities={{
           search: {},
@@ -2567,6 +2608,7 @@ function App() {
       <SettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
+        initialSection={settingsSection}
         desktop={desktop}
         cliStatus={cliStatus}
         cliRefreshing={cliRefreshing}
