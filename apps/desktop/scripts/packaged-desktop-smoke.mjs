@@ -2210,6 +2210,9 @@ async function run(options) {
         // without the CLI would, and records the attempt.
         await rm(join(workspace.bin, 'gh'), { force: true })
       }
+      const retired = await statusOf()
+      assertEqual(retired?.state, 'missing-cli', 'Removing the owned CLI retires authenticated status')
+      assertEqual(retired?.login, null, 'Removing the owned CLI retires the authenticated account')
       return 'the CLI status came from a real authenticated request, and a replaced credential moved the identity'
     })
 
