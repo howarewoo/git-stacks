@@ -10,11 +10,13 @@ import type {
   ReviewMutationResult,
   ReviewPermissions,
   ReviewSubmission,
+  ReviewComposition,
   ReviewThread,
   ReviewThreadComment,
   ReviewThreadRead,
   ReviewUncertainWrite,
   UncertainComment,
+  ReviewOwner,
   ReviewThreadSet,
 } from '@git-stacks/shared/review-threads'
 import {
@@ -23,6 +25,7 @@ import {
   REVIEW_EVENTS,
   UNKNOWN_REVIEW_BOUNDARY,
   UNKNOWN_REVIEW_COMPARISON,
+  sameReviewDraft,
 } from '@git-stacks/shared/review-threads'
 import { type ParsedRemote } from './git-core'
 import { isRecord } from '@git-stacks/shared/guards'
@@ -30,17 +33,22 @@ import {
   clearUncertainWrite,
   readUncertainWrites,
   recordUncertainWrite,
+  reserveUncertainWrite,
   removeDeliveredReviewDrafts,
+  retireDeliveredComposerText,
+  assertReviewDraftOwner,
+  assertReviewCompositionOwner,
   retireSettledWrites,
 } from './review-drafts'
 import { markReviewSnapshotReviewed } from './review-snapshots'
-import { GitHubTransportError } from './github-transport'
+import { GitHubTransportError, type GitHubCredentialSession } from './github-transport'
 import {
   originRemote,
   readReviewIdentity,
   readReviewFilesFrom,
   resolveReviewAnchor,
   reviewTransport,
+  reviewRepositoryIdentity,
   ReviewRevisionMovedError,
 } from './review'
 
@@ -115,6 +123,7 @@ const THREAD_FIELDS = `id
         }`
 
 const THREADS_QUERY = `query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     viewerPermission
     pullRequest(number: $number) {
@@ -142,7 +151,7 @@ const PERMISSIONS_QUERY = `query ReviewPermissions($owner: String!, $name: Strin
   viewer { login }
   repository(owner: $owner, name: $name) {
     viewerPermission
-    pullRequest(number: $number) { state viewerDidAuthor }
+    pullRequest(number: $number) { state viewerDidAuthor headRefOid baseRefOid baseRefName }
   }
 }`
 
@@ -277,7 +286,7 @@ async function readRestReviews(
         line: comment.line,
         startLine: comment.startLine,
         startSide: comment.startSide,
-        body: comment.body.trim(),
+        body: comment.body,
         // A comment GitHub holds names no composition: the draft it was written
         // from is the app's, and it is compared against the attempt's own.
         draftId: null,
@@ -581,6 +590,7 @@ export async function readReviewThreads(
   signal?: AbortSignal,
 ): Promise<ReviewThreadRead> {
   const remote = await originRemote(repoPath, signal)
+  let viewer = ''
   const { comparison: before } = await readReviewIdentity(remote, number, signal)
   const threads: ReviewThread[] = []
   // Threads whose own comment connection still had another page, followed once
@@ -598,6 +608,13 @@ export async function readReviewThreads(
     const data: Record<string, unknown> = await reviewTransport(remote).graphql<
       Record<string, unknown>
     >(THREADS_QUERY, { owner: remote.owner, name: remote.name, number, after }, { signal })
+    const login = isRecord(data.viewer) ? data.viewer.login : null
+    if (typeof login === 'string' && login) {
+      if (viewer && viewer.toLowerCase() !== login.toLowerCase()) {
+        throw new Error('The account changed while reading the review conversation.')
+      }
+      viewer = login
+    }
     const repository: Record<string, unknown> | null = isRecord(data.repository)
       ? data.repository
       : null
@@ -677,6 +694,7 @@ export async function readReviewThreads(
   }
 
   return {
+    owner: { repo: reviewRepositoryIdentity(remote), viewer },
     threads: {
       number,
       // A thread's line numbers are addresses in a comparison, so the set
@@ -688,7 +706,7 @@ export async function readReviewThreads(
       totalCount,
       truncated: stoppedAtPageLimit || threads.length < totalCount,
     },
-    permissions: reviewPermissions(permission, isAuthor, state),
+    permissions: { ...reviewPermissions(permission, isAuthor, state), viewer },
   }
 }
 
@@ -830,7 +848,7 @@ export async function resolveReviewDraftsAt(
  */
 function recordableComment(
   comment: Record<string, unknown>,
-  draftId: string | null = null,
+  draft?: ReviewDraft,
 ): UncertainComment {
   const side = sideOf(comment.side) ?? 'head'
   return {
@@ -841,10 +859,9 @@ function recordableComment(
     // GitHub defaults `start_side` to RIGHT but sends null when there is no
     // range, and a one-line comment is stored here as the null it arrived as.
     startSide: typeof comment.start_line === 'number' ? (sideOf(comment.start_side) ?? side) : null,
-    body: String(comment.body ?? '').trim(),
-    // Which composition this comment is, so a later submission can deliver it by
-    // identity rather than by where it sits.
-    draftId,
+    body: String(comment.body ?? ''),
+    draftId: draft?.id ?? null,
+    authoredDraft: draft,
   }
 }
 
@@ -868,6 +885,57 @@ function wireComment(
   return comment
 }
 
+function requireReviewOwner(owner: ReviewOwner, repo: string, viewer: string): void {
+  if (
+    !owner.repo ||
+    !owner.viewer ||
+    owner.repo.toLowerCase() !== repo.toLowerCase() ||
+    owner.viewer.toLowerCase() !== viewer.toLowerCase()
+  ) {
+    throw new Error(
+      'The review host, repository or account changed. Your text is retained; reopen this pull request under its original authority before sending.',
+    )
+  }
+}
+
+export async function revalidateReviewOwner(
+  repoPath: string,
+  number: number,
+  owner: ReviewOwner,
+  expectedComparison: ReviewComparison | null,
+  signal?: AbortSignal,
+  credential?: GitHubCredentialSession,
+): Promise<ReviewPermissions> {
+  const remote = await originRemote(repoPath, signal)
+  const repo = reviewRepositoryIdentity(remote)
+  if (owner.repo !== repo) throw new Error('The captured review repository or host changed.')
+  const { permissions, comparison } = await readReviewAuthorityFrom(
+    remote,
+    number,
+    signal,
+    credential,
+  )
+  requireReviewOwner(owner, repo, permissions.viewer)
+  const currentRemote = await originRemote(repoPath, signal)
+  if (reviewRepositoryIdentity(currentRemote) !== owner.repo)
+    throw new Error('The captured review repository or host changed.')
+  if (expectedComparison !== null && !sameReviewComparison(expectedComparison, comparison))
+    throw new ReviewComparisonMovedError(number, expectedComparison, comparison)
+  return permissions
+}
+
+async function reviewDispatchCredential(
+  remote: ParsedRemote,
+  signal?: AbortSignal,
+): Promise<GitHubCredentialSession> {
+  const transport = reviewTransport(remote)
+  if (!transport.pinCredential)
+    throw new Error(
+      'This GitHub transport cannot bind review validation and dispatch to one credential.',
+    )
+  return transport.pinCredential({ signal })
+}
+
 /**
  * Writes every pending draft as one review.
  *
@@ -884,20 +952,54 @@ export async function submitReview(
   signal?: AbortSignal,
 ): Promise<ReviewMutationResult> {
   const remote = await originRemote(repoPath, signal)
-  const repo = `${remote.owner}/${remote.name}`
+  const repo = reviewRepositoryIdentity(remote)
+  if (submission.repo !== repo)
+    throw new Error(
+      'The captured review repository or host changed. Reopen the original pull request before sending.',
+    )
+  await assertReviewDraftOwner(
+    repoPath,
+    repo,
+    submission.viewer,
+    number,
+    submission.drafts.map((draft) => draft.id),
+    submission.comparison,
+    signal,
+  )
   const permissions = await readReviewPermissionsFrom(remote, number, signal)
+  requireReviewOwner(submission, repo, permissions.viewer)
   const blocked = permissions.blocked[submission.event]
   if (blocked) throw new Error(blocked)
+  // Outcome bookkeeping belongs to this main-validated captured operation.
+  // A later active account cannot revoke A's durable receipt or move it to B.
+  const authorizeCapturedAttempt = async (): Promise<void> => {
+    requireReviewOwner(submission, repo, permissions.viewer)
+  }
 
   // A previous attempt whose result never arrived blocks this one. The check
   // needs the identity of the write, so it runs once the comments are resolved —
   // and before the request is journalled or sent, not after.
 
   const sendable = submission.drafts.filter((draft) => draft.body.trim() !== '')
-  if (sendable.length === 0) throw new Error('Write at least one comment before submitting.')
+  if (sendable.length === 0 && submission.event === 'COMMENT' && submission.body.trim() === '')
+    throw new Error('Write a review summary or pending comment before submitting.')
   if (submission.event === 'REQUEST_CHANGES' && submission.body.trim() === '') {
     throw new Error('Requesting changes needs a summary saying what must change.')
   }
+  if (sendable.length === 0 && !submission.compositionId)
+    throw new Error('Save the original overall review composition before submitting.')
+  if (submission.compositionId)
+    await assertReviewCompositionOwner(
+      repoPath,
+      repo,
+      submission.viewer,
+      number,
+      submission.comparison,
+      submission.compositionId,
+      submission.body,
+      submission.event,
+      signal,
+    )
 
   const files = await readReviewFilesFrom(remote, number, signal)
   if (files.comparison.headOid === null) {
@@ -925,7 +1027,7 @@ export async function submitReview(
   const comments = sendable.map((draft) =>
     wireComment(byId.get(draft.id)!, draft, reviewDraftStart(draft).path),
   )
-  // The attempt is identified by the comments it would post, the comparison it
+  // An inline attempt is identified by the comments it would post, the comparison it
   // would post them on, and the drafts they came from — not by the summary. A
   // reviewer who edits only the summary has not written a different review, and
   // keying on the summary would let them post the same comments twice by
@@ -933,16 +1035,17 @@ export async function submitReview(
   // alone cannot say which composition they are: the same line carrying the same
   // words twice is two pieces of work, and a recovery has to be able to tell
   // them apart.
+  // With no inline identities, the minted durable overall composition identifies
+  // the attempt; a deliberate new decision at the same comparison is distinct.
   const attempt = reviewAttemptId(
     comments,
     files.comparison,
     sendable.map((d) => d.id),
+    submission.compositionId,
   )
   // Each comment is recorded with the draft it came from. `comments` is built
   // from `sendable` in order, so the two are index for index.
-  const recorded = comments.map((comment, index) =>
-    recordableComment(comment, sendable[index]?.id ?? null),
-  )
+  const recorded = comments.map((comment, index) => recordableComment(comment, sendable[index]))
   const draftIds = sendable.map((draft) => draft.id)
 
   // A settled record the view has finished with is retired here, before this
@@ -958,7 +1061,11 @@ export async function submitReview(
     permissions.viewer,
     files.comparison,
     draftIds,
+    async () => {
+      await revalidateReviewOwner(repoPath, number, submission, submission.comparison, signal)
+    },
     signal,
+    submission.compositionId,
   )
 
   // Re-sending because the network looked idle is how a review gets posted
@@ -977,6 +1084,7 @@ export async function submitReview(
     files.comparison,
     draftIds,
     signal,
+    submission.compositionId,
   )
   if (guard.unsettled) throw new ReviewWriteUncertainError(guard.unsettled)
   // Comments GitHub already holds are left out of what is sent now, so a
@@ -986,14 +1094,18 @@ export async function submitReview(
   // payload composes afresh is not among them however much it resembles one
   // that landed, and is sent.
   const delivered = new Set<string>()
-  const undelivered: Array<{ comment: Record<string, unknown>; draftId: string | null }> = []
+  const undelivered: Array<{
+    comment: Record<string, unknown>
+    draftId: string | null
+    authoredDraft: ReviewDraft
+  }> = []
   comments.forEach((comment, index) => {
     const draftId = sendable[index]?.id ?? null
     if (draftId !== null && guard.delivered.has(draftId)) {
       delivered.add(draftId)
       return
     }
-    undelivered.push({ comment, draftId })
+    undelivered.push({ comment, draftId, authoredDraft: sendable[index]! })
   })
   const postedIds = undelivered
     .map((entry) => entry.draftId)
@@ -1001,12 +1113,16 @@ export async function submitReview(
   // The comments as GitHub is asked for them, and the same comments as the
   // journal records them, each carrying the identity it was composed under.
   const toSend = undelivered.map((entry) => entry.comment)
-  const toRecord = undelivered.map((entry) => recordableComment(entry.comment, entry.draftId))
+  const toRecord = undelivered.map((entry) => recordableComment(entry.comment, entry.authoredDraft))
   // Everything in this payload is already on GitHub, so the outcome GitHub
   // recorded for the review that carried them is what is reported.
   // Settled evidence stays until a later payload acknowledges retirement.
-  if (undelivered.length === 0) {
-    const settledReview = guard.settled[0]
+  if (undelivered.length === 0 && (sendable.length > 0 || guard.settled.length > 0)) {
+    const settledReview =
+      guard.settled.find((receipt) => receipt.composition?.id === submission.compositionId) ??
+      guard.settled[0]
+    if (!settledReview)
+      throw new ReviewOutcomeUnknownError('No confirmed original review receipt is available.')
     if (files.comparison.headOid) {
       await markReviewSnapshotReviewed(
         repoPath,
@@ -1017,12 +1133,36 @@ export async function submitReview(
         settledReview?.id ?? null,
       ).catch(() => {})
     }
-    await removeDeliveredReviewDrafts(repoPath, repo, permissions.viewer, number, delivered)
+    await removeDeliveredReviewDrafts(
+      repoPath,
+      repo,
+      permissions.viewer,
+      number,
+      delivered,
+      sendable,
+      submission.comparison,
+      authorizeCapturedAttempt,
+    )
+    if (settledReview.composition)
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        {
+          compositionId: settledReview.composition.id,
+          summary: settledReview.composition.summary,
+          event: settledReview.composition.event,
+          comparison: submission.comparison,
+        },
+        authorizeCapturedAttempt,
+      )
     return {
-      id: settledReview?.id ?? attempt,
-      state: settledReview?.state ?? '',
-      url: settledReview?.url ?? null,
+      id: settledReview.id,
+      state: settledReview.state,
+      url: settledReview.url,
       delivered: [...delivered],
+      ...(settledReview.composition ? { deliveredComposition: settledReview.composition } : {}),
     }
   }
 
@@ -1033,10 +1173,11 @@ export async function submitReview(
   const sentAt = new Date().toISOString()
   const boundary = await readReviewBoundary(remote, number, signal)
   const journalled = {
-    id: reviewAttemptId(toSend, files.comparison, postedIds),
+    id: reviewAttemptId(toSend, files.comparison, postedIds, submission.compositionId),
     number,
     kind: 'review' as const,
-    summary: reviewAttemptSummary(submission.body),
+    summary: submission.body,
+    ...(submission.compositionId ? { compositionId: submission.compositionId } : {}),
     threadId: null,
     headOid: files.comparison.headOid,
     // The whole comparison, because the head alone does not identify a diff: a
@@ -1049,7 +1190,7 @@ export async function submitReview(
     draftIds: postedIds,
     event: submission.event,
     at: sentAt,
-    repo: `${remote.owner}/${remote.name}`,
+    repo,
     viewer: permissions.viewer,
     comments: toRecord,
     // What GitHub already held when the attempt began, and whether that could
@@ -1064,10 +1205,63 @@ export async function submitReview(
   // case this guard exists for, and a record written only on the failure path
   // would be missing for precisely that one. So the journal is the first thing
   // that happens.
-  await recordUncertainWrite(repoPath, journalled, signal)
-  let result: ReviewMutationResult
+  const reservation = await reserveUncertainWrite(
+    repoPath,
+    journalled,
+    async () => {
+      const livePermissions = await revalidateReviewOwner(
+        repoPath,
+        number,
+        submission,
+        submission.comparison,
+        signal,
+      )
+      const liveBlocked = livePermissions.blocked[submission.event]
+      if (liveBlocked) throw new Error(liveBlocked)
+      if (submission.compositionId)
+        await assertReviewCompositionOwner(
+          repoPath,
+          repo,
+          submission.viewer,
+          number,
+          submission.comparison,
+          submission.compositionId,
+          submission.body,
+          submission.event,
+          signal,
+        )
+    },
+    signal,
+  )
+  if (reservation) throw new ReviewWriteUncertainError(reservation)
+  let credential: GitHubCredentialSession
   try {
-    const response = await reviewTransport(remote).rest<unknown>({
+    credential = await reviewDispatchCredential(remote, signal)
+    const dispatchPermissions = await revalidateReviewOwner(
+      repoPath,
+      number,
+      submission,
+      submission.comparison,
+      signal,
+      credential,
+    )
+    const dispatchBlocked = dispatchPermissions.blocked[submission.event]
+    if (dispatchBlocked) throw new Error(dispatchBlocked)
+  } catch (error) {
+    // No request has left. Remove only this captured attempt, not another owner's guard.
+    await clearUncertainWrite(
+      repoPath,
+      repo,
+      number,
+      submission.viewer,
+      journalled.id,
+      authorizeCapturedAttempt,
+    )
+    throw error
+  }
+  let responseData: unknown
+  try {
+    const response = await credential.rest<unknown>({
       method: 'POST',
       path: `repos/${remote.owner}/${remote.name}/pulls/${number}/reviews`,
       body: {
@@ -1083,76 +1277,110 @@ export async function submitReview(
       },
       signal,
     })
-    const record = isRecord(response.data) ? response.data : {}
-    const settledId = typeof record.id === 'number' ? String(record.id) : String(record.id ?? '')
-    const settledState = typeof record.state === 'string' ? record.state : ''
-    // GitHub answered, so this attempt is settled — but the record is kept as
-    // settled evidence rather than deleted. A crash or failed draft cleanup
-    // must not lose the proof that these comments reached GitHub. Retiring it
-    // is the next payload's job, once it no longer mentions these drafts.
-    await recordUncertainWrite(
-      repoPath,
-      {
-        ...journalled,
-        settled: {
-          reviewId: settledId,
-          state: settledState,
-          url: typeof record.html_url === 'string' ? record.html_url : null,
-          at: new Date().toISOString(),
-        },
-      },
-      signal,
-    )
-    // Everything confirmed by this operation: the comments adopted from an
-    // earlier review and the ones just posted. Reporting only the adopted ones
-    // would leave the newly posted comments in the view, and submitting again
-    // would post them a second time.
-    for (const id of postedIds) delivered.add(id)
-    if (files.comparison.headOid) {
-      await markReviewSnapshotReviewed(
-        repoPath,
-        repo,
-        permissions.viewer,
-        number,
-        files.comparison,
-        settledId,
-      ).catch(() => {})
-    }
-    result = {
-      id: settledId,
-      state: settledState,
-      url: typeof record.html_url === 'string' ? record.html_url : null,
-      delivered: [...delivered],
-    }
+    responseData = response.data
   } catch (error) {
     if (outcomeUnknown(error)) {
-      // The record went on before the request, so the guard is in force for this
-      // failure, for a reload, and for a crash. The records that were already
-      // settled stay settled, so the comments this recovery adopted keep their
-      // evidence even though this submission did not complete.
+      // The pre-dispatch guard survives an unconfirmed provider outcome.
       throw new ReviewOutcomeUnknownError(transportDetail(error))
     }
-    // A refusal is GitHub's own decision and needs no record of its own: nothing
-    // was applied, so the next attempt of these comments is a first attempt.
-    // Records already settled for other comments are left alone, because those
-    // comments are on GitHub whatever this refusal said.
-    await clearUncertainWrite(repoPath, repo, number, permissions.viewer, journalled.id, signal)
+    await clearUncertainWrite(
+      repoPath,
+      repo,
+      number,
+      permissions.viewer,
+      journalled.id,
+      authorizeCapturedAttempt,
+    )
     throw error
+  }
+  // Provider confirmation and durable bookkeeping are separate. A local
+  // publication failure must retain the guard, not masquerade as a refusal.
+  const record = isRecord(responseData) ? responseData : {}
+  if (
+    !Number.isSafeInteger(record.id) ||
+    (record.id as number) <= 0 ||
+    record.state !== stateForEvent(submission.event)
+  )
+    throw new ReviewOutcomeUnknownError(
+      'The provider did not confirm a usable review identity and the requested decision; authored text and its dispatched-attempt guard were retained.',
+    )
+  const settledId = String(record.id)
+  const settledState = record.state as string
+  // GitHub answered, so this attempt is settled — but the record is kept as
+  // settled evidence rather than deleted. A crash or failed draft cleanup
+  // must not lose the proof that these comments reached GitHub. Retiring it
+  // is the next payload's job, once it no longer mentions these drafts.
+  await recordUncertainWrite(
+    repoPath,
+    {
+      ...journalled,
+      settled: {
+        reviewId: settledId,
+        state: settledState,
+        url: typeof record.html_url === 'string' ? record.html_url : null,
+        at: new Date().toISOString(),
+      },
+    },
+    authorizeCapturedAttempt,
+  )
+  // Everything confirmed by this operation: the comments adopted from an
+  // earlier review and the ones just posted. Reporting only the adopted ones
+  // would leave the newly posted comments in the view, and submitting again
+  // would post them a second time.
+  for (const id of postedIds) delivered.add(id)
+  if (files.comparison.headOid) {
+    await markReviewSnapshotReviewed(
+      repoPath,
+      repo,
+      permissions.viewer,
+      number,
+      files.comparison,
+      settledId,
+    ).catch(() => {})
+  }
+  const result: ReviewMutationResult = {
+    id: settledId,
+    state: settledState,
+    url: typeof record.html_url === 'string' ? record.html_url : null,
+    delivered: [...delivered],
+    ...(submission.compositionId
+      ? {
+          deliveredComposition: {
+            id: submission.compositionId,
+            summary: submission.body,
+            event: submission.event,
+          },
+        }
+      : {}),
   }
   // Durable cleanup belongs to this captured repository/account, not the
   // renderer's current destination or authority. Keep it outside the POST
   // failure handler: a cleanup failure must retain settled delivery evidence.
-  await removeDeliveredReviewDrafts(repoPath, repo, permissions.viewer, number, delivered)
+  await removeDeliveredReviewDrafts(
+    repoPath,
+    repo,
+    permissions.viewer,
+    number,
+    delivered,
+    sendable,
+    submission.comparison,
+    authorizeCapturedAttempt,
+  )
+  if (submission.compositionId)
+    await retireDeliveredComposerText(
+      repoPath,
+      repo,
+      permissions.viewer,
+      number,
+      {
+        compositionId: submission.compositionId,
+        summary: submission.body,
+        event: submission.event,
+        comparison: submission.comparison,
+      },
+      authorizeCapturedAttempt,
+    )
   return result
-}
-
-/**
- * The summary a review carries, as GitHub stores it. A reconciliation matches
- * the review GitHub holds against this text, so it is the body on its own
- * rather than the body packed together with the comment texts.
- */
-function reviewAttemptSummary(body: string): string {
-  return body.trim()
 }
 
 /**
@@ -1173,6 +1401,7 @@ function reviewAttemptId(
   comments: readonly Record<string, unknown>[],
   comparison: ReviewComparison,
   draftIds: readonly string[],
+  compositionId?: string,
 ): string {
   const positions = comments
     .map((comment) =>
@@ -1184,7 +1413,9 @@ function reviewAttemptId(
   const where = [comparison.headOid, comparison.baseOid, comparison.baseRef]
     .map((part) => String(part ?? ''))
     .join(':')
-  return shortHash(`${where} ${draftIds.join(',')} ${positions}`)
+  return shortHash(
+    `${where}\0${draftIds.join(',')}\0${positions}${comments.length === 0 ? `\0${compositionId ?? ''}` : ''}`,
+  )
 }
 
 /**
@@ -1204,7 +1435,7 @@ function findLandedReply(
   for (const entry of comments) {
     if (attempt.threadCommentIds.includes(entry.id)) continue
     if (attempt.viewer !== undefined && entry.author !== attempt.viewer) continue
-    if (entry.body.trim() !== body.trim()) continue
+    if (entry.body !== body) continue
     return { id: entry.id, url: entry.url }
   }
   return null
@@ -1252,6 +1483,7 @@ async function reconcileOverlappingAttempts(
   comparison: ReviewComparison,
   draftIds: readonly string[],
   signal?: AbortSignal,
+  compositionId?: string,
 ): Promise<{
   delivered: Set<string>
   unsettled: ReviewUncertainWrite | null
@@ -1274,12 +1506,31 @@ async function reconcileOverlappingAttempts(
       // record about this submission rather than a stranger's: the record
       // composed at least one of the comments being sent now, so it can prove
       // that one landed. Where it cannot, the comment is sent.
-      entry.draftIds.some((theirs) => draftIds.includes(theirs)) &&
-      entry.comments.length > 0,
+      (entry.draftIds.some((theirs) => draftIds.includes(theirs)) ||
+        Boolean(compositionId && entry.compositionId === compositionId)),
   )
   for (const attempt of outstanding) {
+    // A receipt without the original authored version cannot certify cleanup
+    // or authorize posting an overlapping draft again.
+    if (
+      attempt.event === null ||
+      (attempt.comments.length === 0 && !attempt.compositionId) ||
+      attempt.comments.some(
+        (comment) =>
+          comment.draftId !== null &&
+          draftIds.includes(comment.draftId) &&
+          comment.authoredDraft === undefined,
+      )
+    )
+      return { delivered, unsettled: attempt, settled }
+    const confirmedReceipt =
+      attempt.settled !== null &&
+      /^\d+$/.test(attempt.settled.reviewId) &&
+      Number.isSafeInteger(Number(attempt.settled.reviewId)) &&
+      Number(attempt.settled.reviewId) > 0 &&
+      attempt.settled.state === stateForEvent(attempt.event)
     const landed =
-      attempt.settled !== null
+      confirmedReceipt && attempt.settled
         ? { id: attempt.settled.reviewId, state: attempt.settled.state, url: attempt.settled.url }
         : await findSettledReview(remote, number, attempt, signal)
     // GitHub holds exactly this review, so the comments it posted are already
@@ -1287,8 +1538,19 @@ async function reconcileOverlappingAttempts(
     // they were composed under, so the payload that follows leaves out those and
     // nothing else.
     if (landed) {
-      settled.push(landed)
-      if (attempt.settled === null) {
+      settled.push({
+        ...landed,
+        ...(attempt.compositionId && attempt.event
+          ? {
+              composition: {
+                id: attempt.compositionId,
+                summary: attempt.summary,
+                event: attempt.event,
+              },
+            }
+          : {}),
+      })
+      if (!confirmedReceipt) {
         await recordUncertainWrite(
           repoPath,
           {
@@ -1300,7 +1562,9 @@ async function reconcileOverlappingAttempts(
               at: new Date().toISOString(),
             },
           },
-          signal,
+          async () => {
+            await revalidateReviewOwner(repoPath, number, { repo, viewer }, comparison, signal)
+          },
         )
       }
       // One comment of that review, delivered, is one comment of this payload.
@@ -1323,7 +1587,10 @@ async function reconcileOverlappingAttempts(
           (mine) =>
             mine.draftId === comment.draftId &&
             sameAnchor(comment, mine) &&
-            mine.body.trim() === comment.body.trim(),
+            mine.body === comment.body &&
+            comment.authoredDraft !== undefined &&
+            mine.authoredDraft !== undefined &&
+            sameReviewDraft(comment.authoredDraft, mine.authoredDraft),
         )
         if (match) delivered.add(match.draftId as string)
       }
@@ -1405,6 +1672,7 @@ interface SettledReview {
   id: string
   state: string
   url: string | null
+  composition?: ReviewComposition
 }
 
 /**
@@ -1462,11 +1730,12 @@ function matchAttemptReview(
   commentsByReview: Map<number, UncertainComment[]>,
   attempt: ReviewUncertainWrite,
 ): SettledReview | null {
-  if (attempt.comments.length === 0) return null
+  if (!Number.isSafeInteger(review.id) || review.id <= 0) return null
+  if (attempt.comments.length === 0 && !attempt.compositionId) return null
   if (review.author !== attempt.viewer) return null
   if (review.commitId !== attempt.headOid) return null
   if (review.state !== stateForEvent(attempt.event)) return null
-  if (review.body.trim() !== attempt.summary.trim()) return null
+  if (review.body !== attempt.summary) return null
   // A review whose comments were not read whole cannot be compared whole, and a
   // partial comparison would claim a match that was never made. What is compared
   // here is every page of the pull request's review comments, grouped by the
@@ -1495,7 +1764,7 @@ function sameCommentSet(
       .map(String)
       .join(':') +
     '\u0000' +
-    comment.body.trim()
+    comment.body
   const count = new Map<string, number>()
   for (const comment of expected) count.set(key(comment), (count.get(key(comment)) ?? 0) + 1)
   for (const comment of actual) {
@@ -1514,12 +1783,13 @@ function stateForEvent(event: ReviewEvent | null): string | null {
   return null
 }
 
-async function readReviewPermissionsFrom(
+async function readReviewAuthorityFrom(
   remote: ParsedRemote,
   number: number,
   signal?: AbortSignal,
-): Promise<ReviewPermissions> {
-  const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
+  credential?: GitHubCredentialSession,
+): Promise<{ permissions: ReviewPermissions; comparison: ReviewComparison }> {
+  const data = await (credential ?? reviewTransport(remote)).graphql<Record<string, unknown>>(
     PERMISSIONS_QUERY,
     { owner: remote.owner, name: remote.name, number },
     { signal },
@@ -1537,9 +1807,33 @@ async function readReviewPermissionsFrom(
     state,
   )
   return {
-    ...permissions,
-    viewer: typeof login === 'string' && login !== '' ? login : '',
+    permissions: {
+      ...permissions,
+      viewer: typeof login === 'string' && login !== '' ? login : '',
+    },
+    comparison: {
+      headOid:
+        typeof pullRequest.headRefOid === 'string' && pullRequest.headRefOid !== ''
+          ? pullRequest.headRefOid
+          : null,
+      baseOid:
+        typeof pullRequest.baseRefOid === 'string' && pullRequest.baseRefOid !== ''
+          ? pullRequest.baseRefOid
+          : null,
+      baseRef:
+        typeof pullRequest.baseRefName === 'string' && pullRequest.baseRefName !== ''
+          ? pullRequest.baseRefName
+          : null,
+    },
   }
+}
+
+export async function readReviewPermissionsFrom(
+  remote: ParsedRemote,
+  number: number,
+  signal?: AbortSignal,
+): Promise<ReviewPermissions> {
+  return (await readReviewAuthorityFrom(remote, number, signal)).permissions
 }
 
 /**
@@ -1556,6 +1850,7 @@ export async function replyToThread(
   number: number,
   threadId: string,
   body: string,
+  owner: ReviewOwner,
   signal?: AbortSignal,
 ): Promise<ReviewMutationResult> {
   if (body.trim() === '') throw new Error('Write a reply before sending it.')
@@ -1563,9 +1858,20 @@ export async function replyToThread(
   // The journal is per repository, so the account is read to scope the guard to
   // whoever is actually replying: another account's unresolved reply must not
   // block this one.
-  const repo = `${remote.owner}/${remote.name}`
-  const permissions = await readReviewPermissionsFrom(remote, number, signal)
-  const attempt = shortHash(`reply ${threadId} ${body.trim()}`)
+  const repo = reviewRepositoryIdentity(remote)
+  if (owner.repo !== repo) throw new Error('The captured thread repository or host changed.')
+  const threadRead = await readReviewThreads(repoPath, number, signal)
+  const permissions = threadRead.permissions
+  requireReviewOwner(owner, threadRead.owner.repo, permissions.viewer)
+  const thread = threadRead.threads.threads.find((entry) => entry.id === threadId)
+  if (!thread || !thread.viewerCanReply)
+    throw new Error(
+      'This thread is unavailable in the selected pull request or no longer permits replies.',
+    )
+  const authorizeCapturedAttempt = async (): Promise<void> => {
+    requireReviewOwner(owner, repo, permissions.viewer)
+  }
+  const attempt = shortHash(JSON.stringify(['reply', threadId, body]))
   const before = await readThreadCommentIds(remote, threadId, signal)
 
   // A reply that was sent and never confirmed blocks the same reply, by the
@@ -1574,8 +1880,15 @@ export async function replyToThread(
   // against GitHub first: a reply GitHub already holds means it landed, the
   // record is retired, and the thread is re-read rather than written twice.
   const writes = await readUncertainWrites(repoPath, repo, number, permissions.viewer, signal)
-  const earlier = writes.find((entry) => entry.kind === 'reply' && entry.id === attempt)
+  const earlier = writes.find(
+    (entry) =>
+      entry.kind === 'reply' &&
+      entry.threadId === threadId &&
+      (entry.authoredReplyBody === body ||
+        (entry.authoredReplyBody === undefined && entry.summary.trim() === body.trim())),
+  )
   if (earlier) {
+    if (earlier.authoredReplyBody === undefined) throw new ReviewWriteUncertainError(earlier)
     const landed = findLandedReply(
       await readThreadComments(remote, threadId, signal),
       { threadCommentIds: earlier.threadCommentIds, viewer: earlier.viewer },
@@ -1586,7 +1899,24 @@ export async function replyToThread(
     // and the record retired: sending again would be a second copy of the same
     // reply, which is the duplicate this guard prevents.
     if (landed) {
-      await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        { threadId, body },
+        authorizeCapturedAttempt,
+      )
+      await clearUncertainWrite(
+        repoPath,
+        repo,
+        number,
+        permissions.viewer,
+        earlier.id,
+        async () => {
+          await revalidateReviewOwner(repoPath, number, owner, null, signal)
+        },
+      )
       return { id: landed.id, state: 'created', url: landed.url }
     }
     throw new ReviewWriteUncertainError(earlier)
@@ -1595,13 +1925,14 @@ export async function replyToThread(
   // Journalled before the mutation leaves, for the same reason as a review: a
   // crash between the request and its response is the case with no failure to
   // hang the record on. Only GitHub's own answer removes it.
-  await recordUncertainWrite(
+  const reservation = await reserveUncertainWrite(
     repoPath,
     {
       id: attempt,
       number,
       kind: 'reply',
-      summary: body.trim(),
+      summary: body,
+      authoredReplyBody: body,
       threadId,
       headOid: null,
       // A reply is reconciled against the thread's own comment list rather than
@@ -1624,38 +1955,67 @@ export async function replyToThread(
       // record is cleared once that list holds the reply.
       settled: null,
     },
+    async () => {
+      await revalidateReviewOwner(repoPath, number, owner, null, signal)
+      const current = await readThreadCommentIds(remote, threadId, signal)
+      if (current.length !== before.length || current.some((id) => !before.includes(id))) {
+        throw new Error(
+          'This thread changed while the reply waited. Read its latest comments before replying again.',
+        )
+      }
+    },
     signal,
   )
-
+  if (reservation) throw new ReviewWriteUncertainError(reservation)
+  let credential: GitHubCredentialSession
   try {
-    const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
+    credential = await reviewDispatchCredential(remote, signal)
+    await revalidateReviewOwner(repoPath, number, owner, null, signal, credential)
+  } catch (error) {
+    await clearUncertainWrite(
+      repoPath,
+      repo,
+      number,
+      owner.viewer,
+      attempt,
+      authorizeCapturedAttempt,
+    )
+    throw error
+  }
+
+  let data: Record<string, unknown>
+  try {
+    data = await credential.graphql<Record<string, unknown>>(
       REPLY_MUTATION,
       { threadId, body },
       { signal },
     )
-    const payload = isRecord(data.addPullRequestReviewThreadReply)
-      ? data.addPullRequestReviewThreadReply
-      : null
-    const comment = payload && isRecord(payload.comment) ? payload.comment : null
-    await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
-    return {
-      id: comment && typeof comment.id === 'string' ? comment.id : '',
-      state: 'created',
-      url: comment && typeof comment.url === 'string' ? comment.url : null,
-    }
   } catch (error) {
     if (!outcomeUnknown(error)) {
       // A refusal is GitHub's own decision; nothing was applied, so the record
       // goes and the next attempt is a first attempt.
-      await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
+      await clearUncertainWrite(
+        repoPath,
+        repo,
+        number,
+        permissions.viewer,
+        attempt,
+        authorizeCapturedAttempt,
+      )
       throw error
     }
-    // The reply may already exist. Reading the thread is how that is found out
-    // without sending a second copy of the same words. If that read itself
-    // fails, the error propagates with the record — written before the request —
-    // still in force, so an unreadable reconciliation can never be mistaken for
-    // a settled outcome.
-    const after = await readThreadComments(remote, threadId, signal)
+    // A retired read cannot settle this captured write, and must not turn its
+    // unknown outcome into a cancellation or query the replacement account.
+    if (signal?.aborted) throw new ReviewOutcomeUnknownError(transportDetail(error))
+    let after: ReviewThreadComment[]
+    try {
+      await revalidateReviewOwner(repoPath, number, owner, null, signal)
+      after = await readThreadComments(remote, threadId, signal)
+    } catch {
+      // Failed reconciliation is not evidence of refusal. Keep the durable
+      // captured-owner guard and report the original dispatched uncertainty.
+      throw new ReviewOutcomeUnknownError(transportDetail(error))
+    }
     // The same two checks as a resumed attempt: not one of the comments the
     // thread already held, and written by this account. A collaborator's
     // identical words are not this reviewer's reply.
@@ -1665,12 +2025,56 @@ export async function replyToThread(
       body,
     )
     if (landed) {
-      await clearUncertainWrite(repoPath, repo, number, permissions.viewer, attempt, signal)
+      await retireDeliveredComposerText(
+        repoPath,
+        repo,
+        permissions.viewer,
+        number,
+        { threadId, body },
+        authorizeCapturedAttempt,
+      )
+      await clearUncertainWrite(
+        repoPath,
+        repo,
+        number,
+        permissions.viewer,
+        attempt,
+        authorizeCapturedAttempt,
+      )
       return { id: landed.id, state: 'created', url: landed.url }
     }
     // Otherwise the record written before the request stands, and the next
     // identical reply is refused until GitHub's own state has been read.
     throw new ReviewOutcomeUnknownError(transportDetail(error))
+  }
+  const payload = isRecord(data.addPullRequestReviewThreadReply)
+    ? data.addPullRequestReviewThreadReply
+    : null
+  const comment = payload && isRecord(payload.comment) ? payload.comment : null
+  if (!comment || typeof comment.id !== 'string' || !comment.id)
+    throw new ReviewOutcomeUnknownError(
+      'The provider did not confirm the reply identity; authored text and its dispatched-attempt guard were retained.',
+    )
+  await retireDeliveredComposerText(
+    repoPath,
+    repo,
+    permissions.viewer,
+    number,
+    { threadId, body },
+    authorizeCapturedAttempt,
+  )
+  await clearUncertainWrite(
+    repoPath,
+    repo,
+    number,
+    permissions.viewer,
+    attempt,
+    authorizeCapturedAttempt,
+  )
+  return {
+    id: comment.id,
+    state: 'created',
+    url: typeof comment.url === 'string' ? comment.url : null,
   }
 }
 
@@ -1683,19 +2087,29 @@ export async function replyToThread(
  */
 export async function setThreadResolved(
   repoPath: string,
+  number: number,
   threadId: string,
   resolved: boolean,
+  owner: ReviewOwner,
   signal?: AbortSignal,
 ): Promise<ReviewMutationResult> {
   const remote = await originRemote(repoPath, signal)
+  const repo = reviewRepositoryIdentity(remote)
+  if (owner.repo !== repo) throw new Error('The captured thread repository or host changed.')
+  const read = await readReviewThreads(repoPath, number, signal)
+  requireReviewOwner(owner, read.owner.repo, read.permissions.viewer)
+  const selected = read.threads.threads.find((entry) => entry.id === threadId)
+  if (!selected || !(resolved ? selected.viewerCanResolve : selected.viewerCanUnresolve)) {
+    throw new Error(
+      'This thread is unavailable in the selected pull request or no longer permits this resolution change.',
+    )
+  }
   const query = resolved ? RESOLVE_MUTATION : UNRESOLVE_MUTATION
   const field = resolved ? 'resolveReviewThread' : 'unresolveReviewThread'
+  const credential = await reviewDispatchCredential(remote, signal)
+  await revalidateReviewOwner(repoPath, number, owner, null, signal, credential)
   try {
-    const data = await reviewTransport(remote).graphql<Record<string, unknown>>(
-      query,
-      { threadId },
-      { signal },
-    )
+    const data = await credential.graphql<Record<string, unknown>>(query, { threadId }, { signal })
     const payload = isRecord(data[field]) ? data[field] : null
     const thread = payload && isRecord(payload.thread) ? payload.thread : null
     if (!thread || typeof thread.id !== 'string') {
@@ -1726,14 +2140,24 @@ async function readThreadCommentPage(
   )
   const node = isRecord(data.node) ? data.node : null
   const connection = node && isRecord(node.comments) ? node.comments : null
-  const comments = (connection && Array.isArray(connection.nodes) ? connection.nodes : [])
+  if (!connection || !Array.isArray(connection.nodes)) {
+    throw new Error('GitHub did not return a readable thread comment boundary.')
+  }
+  const comments = connection.nodes
     .map(parseThreadComment)
     .filter((entry): entry is ReviewThreadComment => entry !== null)
+  if (comments.length !== connection.nodes.length) {
+    throw new Error('GitHub returned an unreadable thread comment in the reply boundary.')
+  }
   const pageInfo = connection && isRecord(connection.pageInfo) ? connection.pageInfo : null
-  const cursor =
-    pageInfo && pageInfo.hasNextPage === true && typeof pageInfo.endCursor === 'string'
-      ? pageInfo.endCursor
-      : null
+  if (
+    !pageInfo ||
+    typeof pageInfo.hasNextPage !== 'boolean' ||
+    (pageInfo.hasNextPage && (typeof pageInfo.endCursor !== 'string' || !pageInfo.endCursor))
+  ) {
+    throw new Error('GitHub did not return a complete thread pagination boundary.')
+  }
+  const cursor = pageInfo.hasNextPage ? (pageInfo.endCursor as string) : null
   return { comments, cursor }
 }
 
@@ -1759,6 +2183,11 @@ async function readThreadComments(
     cursor = next
     page += 1
   } while (cursor !== null && page < REVIEW_COMMENT_PAGE_LIMIT)
+  if (cursor !== null) {
+    throw new Error(
+      'This thread exceeds the reply comment read limit. Its complete boundary could not be verified.',
+    )
+  }
   return all
 }
 

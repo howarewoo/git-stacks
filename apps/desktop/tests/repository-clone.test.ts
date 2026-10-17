@@ -26,6 +26,7 @@ import {
   readGitEnvironment,
   sanitizeCredentialHelper,
 } from '../src/main/clone-repository'
+import type { CloneOutcome } from '../src/main/clone-repository'
 import { runCloneRequest } from '../src/main/clone-request'
 import { configurePromotionHelper, promoteRepository } from '../src/main/promote-repository'
 import { getSnapshot, resolveRepository } from '../src/main/git'
@@ -444,29 +445,72 @@ test('a concurrent empty destination folder created after clone begins is preser
   }
 })
 
-test('cancelling after the git process completes but before promotion leaves no destination and cleans only own staging', async () => {
+test('cancelling after upload-pack completes but before promotion leaves no destination and cleans only own staging', async () => {
   const root = await temporary()
   try {
     const remote = await bareRemote(root, 'cancel-postprocess')
     const parent = join(root, 'workspaces')
     await mkdir(parent)
     const destination = join(parent, 'postprocess')
+    const otherStaging = `${STAGING}another-operation`
+    await mkdir(join(parent, otherStaging))
+    await writeFile(join(parent, otherStaging, 'keep.txt'), 'unrelated staging\n')
 
     const done = join(root, 'git-done')
     const proceed = join(root, 'proceed-done')
     const wrapper = join(root, 'hook-done.sh')
     await writeFile(
       wrapper,
-      `#!/bin/sh\neval "$2"\ntouch "${done}"\nwhile [ ! -f "${proceed}" ]; do sleep 0.02; done\n`,
+      `#!${process.execPath}
+const { spawn } = require('node:child_process')
+const { existsSync, watch, writeFileSync } = require('node:fs')
+const args = process.argv.slice(2)
+// Git probes unknown SSH commands with -G before starting the transport.
+if (args.includes('-G')) process.exit(1)
+const command = args.at(-1)
+if (!command || !command.startsWith('git-upload-pack ')) process.exit(2)
+let child = spawn('/bin/sh', ['-c', 'exec ' + command], { stdio: 'inherit' })
+let watcher
+const stop = () => {
+  watcher?.close()
+  if (child) {
+    child.kill('SIGTERM')
+  } else {
+    process.exit(143)
+  }
+}
+process.on('SIGTERM', stop)
+process.on('SIGINT', stop)
+child.on('error', () => process.exit(1))
+child.on('close', (code, signal) => {
+  child = null
+  if (code !== 0 || signal) process.exit(code || 1)
+  const release = () => {
+    if (!existsSync(${JSON.stringify(proceed)})) return
+    watcher.close()
+    process.exit(0)
+  }
+  watcher = watch(${JSON.stringify(root)}, release)
+  writeFileSync(${JSON.stringify(done)}, 'upload-pack exited successfully\\n')
+  release()
+})
+`,
       { mode: 0o755 },
     )
 
     const previous = process.env.GIT_SSH_COMMAND
     process.env.GIT_SSH_COMMAND = wrapper
 
+    const controller = new AbortController()
+    let cloning: Promise<CloneOutcome> | undefined
+    const gate = Promise.withResolvers<void>()
+    const watcher = watch(root, (_event, filename) => {
+      if (filename === basename(done)) {
+        void stat(done).then(() => gate.resolve(), gate.reject)
+      }
+    })
     try {
-      const controller = new AbortController()
-      const cloning = cloneRepository({
+      cloning = cloneRepository({
         url: `git@localhost:${remote}`,
         fullName: 'acme/postprocess',
         parentDirectory: parent,
@@ -475,20 +519,36 @@ test('cancelling after the git process completes but before promotion leaves no 
         signal: controller.signal,
       })
 
-      // Wait until the git transfer has finished in staging
-      await waitForFile(root, basename(done))
-      // Abort before promotion occurs
+      // Attach the rejection assertion before either the gate or abort can settle the clone.
+      const cancelled = assert.rejects(cloning, /cancelled/iu)
+      void cancelled.catch(() => undefined)
+      await Promise.race([
+        gate.promise,
+        cloning.then(() => assert.fail('Clone promoted before the upload-pack gate')),
+      ])
+      assert.equal(await readFile(done, 'utf8'), 'upload-pack exited successfully\n')
       controller.abort()
       await writeFile(proceed, 'ok\n')
 
-      await assert.rejects(cloning, /cancelled/iu)
-      // Staging was cleaned up
-      assert.deepEqual(await stagingEntries(parent), [])
+      await cancelled
+      assert.deepEqual(await stagingEntries(parent), [otherStaging])
+      assert.equal(
+        await readFile(join(parent, otherStaging, 'keep.txt'), 'utf8'),
+        'unrelated staging\n',
+      )
       // Destination was never created
       assert.equal(await stat(destination).catch(() => null), null)
     } finally {
-      if (previous === undefined) delete process.env.GIT_SSH_COMMAND
-      else process.env.GIT_SSH_COMMAND = previous
+      watcher.close()
+      controller.abort()
+      // Release the owned SSH stand-in even when a preceding assertion fails.
+      try {
+        await writeFile(proceed, 'ok\n')
+      } finally {
+        await cloning?.catch(() => undefined)
+        if (previous === undefined) delete process.env.GIT_SSH_COMMAND
+        else process.env.GIT_SSH_COMMAND = previous
+      }
     }
   } finally {
     await rm(root, { recursive: true, force: true })

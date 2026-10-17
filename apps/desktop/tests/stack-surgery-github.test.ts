@@ -333,6 +333,8 @@ test('a retarget that landed before its response was lost is recognised, not rep
     )
     const progress = await getStackProgress(harness.repo)
     assert.deepEqual(progress?.remaining, [], 'the replay finished; only remote work is left')
+    assert.ok(progress?.surgery, 'recovery identifies surgery independently of restack kind')
+    assert.ok(progress.surgery.pullRequests.some((step) => step.action === 'retarget'))
     assert.ok(
       git(harness, ['for-each-ref', 'refs/git-stacks/']).includes('refs/git-stacks/'),
       'the original tips stay recoverable while the run is unfinished',
@@ -726,6 +728,19 @@ test('an interrupted remove keeps a journal that loads, and aborting restores th
     // layer still in place: the recovery banner has to be able to read all of it.
     const progress = await getStackProgress(harness.repo)
     assert.equal(progress?.kind, 'restack')
+    assert.ok(progress?.surgery, 'captured remote effects remain available to persistent recovery')
+    assert.ok(
+      progress.surgery.pullRequests.some(
+        (step) => step.number === layers.two.number && step.action === 'close',
+      ),
+    )
+    assert.notEqual(
+      progress.surgery.pullRequests.find(
+        (step) => step.number === layers.two.number && step.action === 'close',
+      )?.status,
+      'completed',
+      'a lost response must not be presented as a confirmed completed remote effect',
+    )
     assert.match(progress?.message ?? '', /remote step/u)
     assert.ok(
       git(harness, ['for-each-ref', 'refs/git-stacks/']).includes('refs/git-stacks/'),
@@ -1020,21 +1035,28 @@ test('a registration whose read-back 404s keeps its intent instead of posting ag
   await withPublishedStack(async (harness) => {
     await publishedFourLayerStack(harness)
     git(harness, ['switch', 'two'])
-    const state = await harness.readState()
-    // The create lands, and the read-back that has to prove it answers 404.
-    state.lostResponses = [
-      {
-        method: 'GET',
-        pathIncludes: '/stacks/1',
-        pathEndsWith: '/stacks/1',
-        // The read-back of the registration is the third read of that stack: the
-        // preview, the unstack verification, and the proof of the create.
-        after: 2,
-        status: 404,
-        message: 'Not Found',
-      },
-    ]
-    await harness.writeState(state)
+    const inner = createGitHubApiDouble()
+    let createdNumber: number | null = null
+    setGitHubTransport(
+      new DirectGitHubTransport({
+        token: 'fixture-token',
+        fetch: async (input, init) => {
+          const url = String(input)
+          if (
+            createdNumber !== null &&
+            url.endsWith(`/stacks/${createdNumber}`) &&
+            (init?.method ?? 'GET') === 'GET'
+          )
+            return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 })
+          const response = await inner(input, init)
+          if (url.endsWith('/stacks') && init?.method === 'POST' && response.ok) {
+            const created = (await response.clone().json()) as { number: number }
+            createdNumber = created.number
+          }
+          return response
+        },
+      }),
+    )
 
     const plan = await preview(harness, { kind: 'move', branch: 'two', target: 'three' })
     assert.deepEqual(plan.blockers, [])

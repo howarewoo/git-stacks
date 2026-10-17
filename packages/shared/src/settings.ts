@@ -112,6 +112,7 @@ export interface GitHubSettings {
 export interface AppearanceSettings {
   theme: ThemePreference
   reduceMotion: boolean
+  density?: 'compact' | 'standard'
 }
 
 export interface PrivacySettings {
@@ -177,7 +178,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   github: { host: GITHUB_DEFAULT_HOST },
   notifications: { enabled: false },
-  appearance: { theme: 'system', reduceMotion: false },
+  appearance: { theme: 'system', reduceMotion: false, density: 'compact' },
   privacy: { includeLocalPaths: false },
   updates: { channel: 'stable' },
   shortcuts: { ...DEFAULT_SHORTCUTS },

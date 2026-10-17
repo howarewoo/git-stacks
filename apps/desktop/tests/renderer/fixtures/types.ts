@@ -1,8 +1,14 @@
+import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
+import type { NativeOperationPreview } from '@git-stacks/shared/native-operation'
+import type { WorktreeLifecyclePreview } from '@git-stacks/shared/worktree-lifecycle'
+import type { OperationRecord } from '@git-stacks/shared/operation-scope'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import type { GraphPreferences } from '@git-stacks/shared/graph-preferences'
 import type { GraphChange } from './graph'
 import type {
   FileView,
+  ActionResult,
+  DesktopAPI,
   GitAction,
   HistoryPage,
   LinkedIssue,
@@ -33,9 +39,24 @@ import type { NotificationInbox } from '@git-stacks/shared/notifications'
 
 /** Every promise-returning `DesktopAPI` method the fixture double can intercept. */
 export type FixtureCall =
+  | 'inspect'
+  | 'captureOperation'
+  | 'operationSafety'
+  | 'executeOperation'
+  | 'operationRecords'
+  | 'worktreeLifecyclePreview'
+  | 'nativeOperationPreview'
+  | 'reviewedMergePreview'
+  | 'pullRequestAction'
+  | 'pullRequestPage'
+  | 'pullRequestLayer'
+  | 'worktreeInventory'
+  | 'cancelInventory'
+  | 'adoptWorktrees'
   | 'recentRepositories'
   | 'openRepository'
   | 'refresh'
+  | 'worktreeStatus'
   | 'prIndex'
   | 'prIndexDetail'
   | 'graphPreferences'
@@ -50,6 +71,8 @@ export type FixtureCall =
   | 'stackPreview'
   | 'surgeryPreview'
   | 'mergeStatus'
+  | 'submitStackProgress'
+  | 'repositoryOperationScope'
   | 'pullRequest'
   | 'reviewHeadline'
   | 'reviewFiles'
@@ -58,6 +81,7 @@ export type FixtureCall =
   | 'reviewSetViewed'
   | 'reviewThreads'
   | 'reviewDrafts'
+  | 'reviewDraftRecovery'
   | 'reviewSetDrafts'
   | 'reviewResolveDrafts'
   | 'reviewSubmit'
@@ -136,6 +160,7 @@ export interface FixtureScenario {
    */
   readonly snapshotsByPath?: Readonly<Record<string, RepositorySnapshot>>
   readonly prIndex?: PullRequestIndex
+  readonly inventory?: WorktreeInventory
   readonly graphPreferences?: GraphPreferences
   /**
    * The settings file this window reads and the GitHub CLI status behind it.
@@ -179,6 +204,11 @@ export interface FixtureScenario {
     | ReviewHistoryDiff
     | ((number: number, fromOid: string) => ReviewHistoryDiff)
   readonly stackPreviews?: Readonly<Partial<Record<StackKind, StackPreview>>>
+  readonly reviewedMergePreview?: StackPreview
+  readonly worktreeLifecyclePreview?: WorktreeLifecyclePreview
+  readonly nativeOperationPreview?: NativeOperationPreview
+  readonly operationRecords?: readonly OperationRecord[]
+  readonly actionResults?: Readonly<Partial<Record<GitAction['type'], ActionResult>>>
   /** The surgery preview a scenario answers; insert between two layers by default. */
   readonly surgeryPreview?: SurgeryPreview
   /** What the read-only merge-status read reports; nothing is submitted. */
@@ -220,6 +250,7 @@ export interface FixtureScenario {
    * footer of every other scenario to a session no one staged.
    */
   readonly githubCliStatus?: GitHubCliStatus
+  readonly githubCliStatuses?: Readonly<Record<string, GitHubCliStatus>>
   /**
    * What this computer's settings policy and settings file report beyond the
    * values themselves: which keys a policy fixes, which stored values were
@@ -250,6 +281,16 @@ export interface FixtureControl {
   readonly calls: FixtureCallRecord[]
   /** Call kinds currently held pending by `hold`. */
   readonly pending: FixtureCall[]
+  /** Actual gallery-owned cache diagnostics; never provider read payloads or credentials. */
+  reviewCache(): {
+    reads: readonly (readonly unknown[])[]
+    writes: ReadonlyArray<{
+      key: readonly unknown[] | null
+      status: string
+      retained: boolean
+      authored: unknown
+    }>
+  }
   /**
    * Installs another scenario's answers into the doubles already installed, without
    * remounting anything: the mounted tree keeps its state, its destination, and
@@ -271,7 +312,7 @@ export interface FixtureControl {
    */
   release(call?: FixtureCall, occurrence?: 'oldest' | 'newest'): number
   /** Rejects the next call of `call` once, then restores normal behavior. */
-  failNext(call: FixtureCall, message?: string): void
+  failNext(call: FixtureCall, message?: string, name?: string): void
   /**
    * Answers the next call of `call` with `value` once, then restores normal
    * behavior. The value is the answer the producer itself would return, so a
@@ -287,6 +328,15 @@ export interface FixtureControl {
   connect(): void
   /** Clears logs, holds, and one-shot failures while keeping the mounted scenario. */
   reset(): void
+  /** Captures the producer's repository and public CLI generation before work begins. */
+  operationScope(): { repositoryPath: string; remoteUrl: string | null; authority: string }
+  /** Publishes the supplied captured scope verbatim, including deliberately retired producers. */
+  pushPublication(
+    event: Parameters<Parameters<NonNullable<DesktopAPI['onSubmitStackProgress']>>[0]>[0],
+  ): void
+  pushMergeProgress(
+    event: Parameters<Parameters<NonNullable<DesktopAPI['onMergeProgress']>>[0]>[0],
+  ): void
   /**
    * Pushes a freshness state exactly as the main process does when a read
    * answers, fails, or hits a rate limit.
@@ -296,6 +346,9 @@ export interface FixtureControl {
   pushSnapshot(value: RepositorySnapshot): void
   /** Publishes a typed progressive or retained index without a mutation. */
   pushPrIndex(value: PullRequestIndex): void
+  /** Replaces future read answers without publishing or rebuilding held replies. */
+  serveInventory(value: WorktreeInventory): void
+  pushInventory(value: WorktreeInventory): void
   /** Changes source head, same-head base, or status and publishes the new index. */
   changeGraphPr(number: number, change: GraphChange): void
   /** Simulates dropping folders onto the window, dispatching to preload listeners. */

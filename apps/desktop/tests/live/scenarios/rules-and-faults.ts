@@ -10,7 +10,7 @@ import {
   getPullRequestChecks,
 } from '../../../src/main/pull-request-checks'
 import { pollAsyncMerge, startAsyncMerge } from '../../../src/main/merge-async'
-import { submitReview } from '../../../src/main/review-threads'
+import { readReviewThreads, submitReview } from '../../../src/main/review-threads'
 import type { ReviewFile } from '@git-stacks/shared/review'
 import { previewStack } from '../../../src/main/stacks'
 import { RepositoryScheduler } from '../../../src/main/repository-scheduler'
@@ -826,6 +826,7 @@ export const ruleAndFaultScenarios: readonly LiveScenario[] = [
           const file = files.files[0]
           assert(file !== undefined, 'the diff had no file to anchor an approval to')
           await submitReview(ctx.workspace.path, layer.number, {
+            ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
             event: 'APPROVE',
             body: 'Approved by the second account.',
             drafts: anchorsFrom(files, file.path).slice(0, 1),

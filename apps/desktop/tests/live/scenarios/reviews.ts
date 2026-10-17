@@ -73,6 +73,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
       ctx.log(`anchored ${REVIEW_FILE}:${draft.ref.line} from the read diff`)
 
       const result = await submitReview(ctx.workspace.path, layer.number, {
+        ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
         event: 'COMMENT',
         body: 'One line, chosen from the diff that was actually shown.',
         drafts: [draft],
@@ -109,6 +110,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
       ctx.log(`ranged ${REVIEW_FILE}:${start.ref.line}-${end.ref.line}`)
 
       await submitReview(ctx.workspace.path, layer.number, {
+        ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
         event: 'COMMENT',
         body: 'A range over two added lines.',
         drafts: [ranged],
@@ -131,6 +133,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
       const remote = await originRemote(ctx.workspace.path)
       const files = await readReviewFilesFrom(remote, layer.number)
       await submitReview(ctx.workspace.path, layer.number, {
+        ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
         event: 'COMMENT',
         body: 'Please look at this line.',
         drafts: anchorsFrom(files, REVIEW_FILE).slice(0, 1),
@@ -143,6 +146,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
         layer.number,
         thread.id,
         'Answering the question in the thread.',
+        (await readReviewThreads(ctx.workspace.path, layer.number)).owner,
       )
       assert(reply.state === 'created', `the reply reported ${reply.state}`)
 
@@ -203,8 +207,9 @@ export const reviewScenarios: readonly LiveScenario[] = [
 
       const summary = 'A comment sent once, whatever the network or the page count does.'
       const drafts = anchorsFrom(files, REVIEW_FILE).slice(0, 1)
-      const send = (): Promise<unknown> =>
+      const send = async (): Promise<unknown> =>
         submitReview(ctx.workspace.path, layer.number, {
+          ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
           event: 'COMMENT',
           body: summary,
           drafts,
@@ -297,6 +302,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
       const remote = await originRemote(ctx.workspace.path)
       const files = await readReviewFilesFrom(remote, layer.number)
       await submitReview(ctx.workspace.path, layer.number, {
+        ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
         event: 'COMMENT',
         body: 'A thread to answer.',
         drafts: anchorsFrom(files, REVIEW_FILE).slice(0, 1),
@@ -308,8 +314,14 @@ export const reviewScenarios: readonly LiveScenario[] = [
       // The same words, sent again. The journal is what stops this, and the only
       // thing worth asserting is what the host ends up holding. Each send answers
       // with the failure it raised, or null when it went through.
-      const sendReply = (text: string) =>
-        replyToThread(ctx.workspace.path, layer.number, thread.id, text).then(
+      const sendReply = async (text: string) =>
+        replyToThread(
+          ctx.workspace.path,
+          layer.number,
+          thread.id,
+          text,
+          (await readReviewThreads(ctx.workspace.path, layer.number)).owner,
+        ).then(
           () => null,
           (error: unknown) => error,
         )
@@ -351,6 +363,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
       const remote = await originRemote(ctx.workspace.path)
       const files = await readReviewFilesFrom(remote, layer.number)
       await submitReview(ctx.workspace.path, layer.number, {
+        ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
         event: 'COMMENT',
         body: 'To be resolved.',
         drafts: anchorsFrom(files, REVIEW_FILE).slice(0, 1),
@@ -360,12 +373,24 @@ export const reviewScenarios: readonly LiveScenario[] = [
       assert(!thread.resolved, 'a freshly created thread is already resolved')
       assert(thread.viewerCanResolve, 'this account may not resolve the thread it just wrote')
 
-      const resolved = await setThreadResolved(ctx.workspace.path, thread.id, true)
+      const resolved = await setThreadResolved(
+        ctx.workspace.path,
+        layer.number,
+        thread.id,
+        true,
+        (await readReviewThreads(ctx.workspace.path, layer.number)).owner,
+      )
       assert(resolved.state === 'resolved', `resolving reported ${resolved.state}`)
       const afterResolve = await firstThread(ctx, layer.number)
       assert(afterResolve.resolved, 'the thread did not read back as resolved')
 
-      const reopened = await setThreadResolved(ctx.workspace.path, thread.id, false)
+      const reopened = await setThreadResolved(
+        ctx.workspace.path,
+        layer.number,
+        thread.id,
+        false,
+        (await readReviewThreads(ctx.workspace.path, layer.number)).owner,
+      )
       assert(reopened.state === 'unresolved', `reopening reported ${reopened.state}`)
       const afterReopen = await firstThread(ctx, layer.number)
       assert(!afterReopen.resolved, 'the thread did not read back as unresolved')
@@ -392,6 +417,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
       })
 
       const error = await submitReview(ctx.workspace.path, layer.number, {
+        ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
         event: 'COMMENT',
         body: 'Written against the comparison that was on screen.',
         drafts,
@@ -431,6 +457,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
         setGitHubTransport(transport)
         try {
           return await submitReview(ctx.workspace.path, layer.number, {
+            ...(await readReviewThreads(ctx.workspace.path, layer.number)).owner,
             event: 'APPROVE',
             body: summary,
             drafts,
@@ -525,6 +552,7 @@ export const reviewScenarios: readonly LiveScenario[] = [
 
       const draft = anchorsFrom(files, renamedFile)[0]
       const result = await submitReview(ctx.workspace.path, pull.number, {
+        ...(await readReviewThreads(ctx.workspace.path, pull.number)).owner,
         event: 'COMMENT',
         body: 'Reviewing a renamed file.',
         drafts: [draft],

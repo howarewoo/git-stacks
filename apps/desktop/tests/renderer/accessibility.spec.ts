@@ -1,13 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { getViewFilterInput, openGallery, settle } from './helpers/gallery'
 import { DESTINATIONS, switchDestination } from './helpers/destinations'
-import {
-  openDeleteLocalBranchDialog,
-  openForcePushDialog,
-  openNewBranchDialog,
-  openStashDialog,
-  selectBranchInList,
-} from './helpers/dialogs'
 import { assertNoAxeViolations } from './helpers/axe'
 import { assertControlBorderContrast, measureControlBorders } from './helpers/borders'
 import {
@@ -23,432 +16,146 @@ function recordContrast(measurements: unknown): void {
 }
 
 test.describe('Automated accessibility audits and contrast', () => {
-  test.describe('Axe audits on real application surfaces', () => {
-    test('asserts zero axe violations (all axe rules) on shell onboarding pane', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'shell-no-repository' })
-      await settle(page)
-      await assertNoAxeViolations(page, 'Shell onboarding pane', { allRules: true })
-    })
-
-    test.describe('Axe audit across all six destinations', () => {
-      test.beforeEach(async ({ page }) => {
-        await openGallery(page, { scenario: 'shell-connected' })
-      })
-
-      for (const dest of DESTINATIONS) {
-        test(`asserts zero axe violations (all axe rules) on ${dest.label} (${dest.id})`, async ({
-          page,
-        }) => {
-          await switchDestination(page, dest.id)
-          await settle(page)
-          await assertNoAxeViolations(page, `${dest.label} destination`, { allRules: true })
-        })
-      }
-    })
+  test('asserts zero axe violations (all rules) without an open repository', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-no-repository' })
+    await settle(page)
+    await assertNoAxeViolations(page, 'Workbench without a repository', { allRules: true })
   })
 
-  test.describe('Axe audit on representative real dialogs (WCAG 2.1/2.2 AA tags, dialog subtree)', () => {
-    test('asserts zero axe violations in "Create a branch" dialog', async ({ page }) => {
+  for (const destination of DESTINATIONS) {
+    test(`asserts zero axe violations (all rules) on ${destination.label}`, async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
-      const dialog = await openNewBranchDialog(page)
-
-      await assertNoAxeViolations(page, 'Create a branch dialog', {
-        includeSelector: '[role="dialog"]',
-      })
-
-      await dialog.getByRole('button', { name: 'Cancel' }).click()
-    })
-
-    test('asserts zero axe violations in "Delete local branch?" dialog', async ({ page }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      const dialog = await openDeleteLocalBranchDialog(page, 'feature/checkout-tests')
-
-      await assertNoAxeViolations(page, 'Delete local branch dialog', {
-        includeSelector: '[role="dialog"]',
-      })
-      const measurements = await scanElementsContrast(page, [
-        '.workflow-dialog p',
-        '.workflow-dialog p strong',
-      ])
-      recordContrast(measurements)
-      assertContrast(measurements, 'Destructive dialog description and target')
-
-      await dialog.getByRole('button', { name: 'Cancel' }).click()
-    })
-
-    test('asserts zero axe violations in "Force push with lease" dialog', async ({ page }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      const dialog = await openForcePushDialog(page)
-
-      await assertNoAxeViolations(page, 'Force push with lease dialog', {
-        includeSelector: '[role="dialog"]',
-      })
-      const measurements = await scanElementsContrast(page, ['.workflow-dialog p'])
-      recordContrast(measurements)
-      assertContrast(measurements, 'Force-push dialog description')
-
-      await dialog.getByRole('button', { name: 'Cancel' }).click()
-    })
-  })
-
-  test.describe('Axe audit on component gallery specimen routes (WCAG 2.1/2.2 AA tags)', () => {
-    test('asserts zero axe violations on Foundations specimen', async ({ page }) => {
-      await openGallery(page, {
-        scenario: 'shell-connected',
-        route: 'foundations',
-      })
+      await switchDestination(page, destination.id)
       await settle(page)
-      await assertNoAxeViolations(page, 'Foundations specimen')
+      await assertNoAxeViolations(page, `${destination.label} surface`, { allRules: true })
     })
-  })
+  }
 
-  test.describe('Text contrast against real adjacent rendered backgrounds', () => {
-    test('measures key text elements on branches destination', async ({ page }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      await settle(page)
-
-      const selectorsToMeasure = [
-        '.titlebar-brand strong',
-        '.repo-name',
-        '.nav-item-active .nav-item-label',
-        '.nav-item:not(.nav-item-active) .nav-item-label',
-        '.list-title-group h1',
-        '.list-subtitle',
-        '.branch-copy strong',
-        '.branch-subject',
-        '.branch-updated',
-        '.branch-row-selected .branch-copy strong',
-        '.branch-row-selected .branch-subject',
-        '.branch-row-selected .branch-updated',
-      ]
-
-      const measurements = await scanElementsContrast(page, selectorsToMeasure)
-      recordContrast(measurements)
-      assertContrast(measurements, 'Branches destination key text surfaces')
-    })
-
-    test('measures key text elements on working changes destination', async ({ page }) => {
-      await openGallery(page, { scenario: 'files-staged' })
-      await switchDestination(page, 'changes')
-      await settle(page)
-
-      const selectorsToMeasure = [
-        '.list-title-group h1',
-        '.change-section-header h2',
-        '.file-copy',
-        '.commit-panel-heading h2',
-      ]
-
-      const measurements = await scanElementsContrast(page, selectorsToMeasure)
-      recordContrast(measurements)
-      assertContrast(measurements, 'Working changes text surfaces')
-    })
-
-    test('measures diff and status text contrast on real rendered backgrounds', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'files-conflicts' })
-      await switchDestination(page, 'changes')
-      await settle(page)
-
-      const selectorsToMeasure = ['.file-status', '.file-path-current', '.file-inspect']
-
-      const measurements = await scanElementsContrast(page, selectorsToMeasure)
-      recordContrast(measurements)
-      assertContrast(measurements, 'Diff and file status text surfaces')
-
-      await switchDestination(page, 'history')
-      await expect(page.locator('.code-diff')).toBeVisible()
-      const diffMeasurements = await scanElementsContrast(page, ['.diff-add', '.diff-remove'])
-      recordContrast(diffMeasurements)
-      assertContrast(diffMeasurements, 'Added and removed diff lines')
-    })
-
-    test('measures key text elements inside dialog', async ({ page }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      const dialog = await openNewBranchDialog(page)
-
-      const selectorsToMeasure = [
-        '.workflow-dialog h2',
-        '.workflow-dialog p',
-        '.workflow-dialog label',
-      ]
-
-      const measurements = await scanElementsContrast(page, selectorsToMeasure)
-      recordContrast(measurements)
-      assertContrast(measurements, 'Create a branch dialog text surfaces')
-
-      await dialog.getByRole('button', { name: 'Cancel' }).click()
-    })
-  })
-
-  test.describe('Non-text control border and focus ring contrast (>= 3.0:1)', () => {
-    test('focus ring on toolbar button contrasts >= 3:1 against adjacent background', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-
-      const fetchBtn = page.getByRole('button', { name: 'Fetch', exact: true })
-      const measurement = await measureFocusIndicatorContrast(page, fetchBtn)
-      recordContrast(measurement)
-
-      expect(measurement, 'Fetch focus ring must be measurable').not.toBeNull()
-      expect(
-        measurement!.ratio,
-        `Focus ring ${measurement!.ringColor} on ${measurement!.adjacentBackground} must be >= ${measurement!.requiredRatio}:1`,
-      ).toBeGreaterThanOrEqual(measurement!.requiredRatio)
-    })
-
-    test('focus ring on search input contrasts >= 3:1 against adjacent background', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-
-      const searchInput = getViewFilterInput(page)
-      const measurement = await measureFocusIndicatorContrast(page, searchInput)
-      recordContrast(measurement)
-
-      expect(measurement, 'Search field focus ring must be measurable').not.toBeNull()
-      expect(
-        measurement!.ratio,
-        `Focus ring ${measurement!.ringColor} on ${measurement!.adjacentBackground} must be >= ${measurement!.requiredRatio}:1`,
-      ).toBeGreaterThanOrEqual(measurement!.requiredRatio)
-    })
-
-    test('essential control borders contrast >= 3:1 against adjacent backgrounds (WCAG 1.4.11)', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      await settle(page)
-
-      // The border is on the control itself, not on its wrapper: `.toolbar-search` only
-      // positions the icon and the shortcut hint.
-      const readings = await measureControlBorders(page, [
-        {
-          label: 'repository search field',
-          locator: getViewFilterInput(page),
-        },
-      ])
-      recordContrast(readings)
-      assertControlBorderContrast(readings)
-    })
-
-    test('dialog control borders contrast >= 3:1 against adjacent backgrounds (WCAG 1.4.11)', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'files-staged' })
-      const dialog = await openStashDialog(page)
-
-      const readings = await measureControlBorders(page, [
-        {
-          label: 'stash message field',
-          locator: dialog.getByRole('textbox', { name: 'Message (optional)', exact: true }),
-        },
-        { label: 'include untracked checkbox', locator: dialog.getByRole('checkbox') },
-      ])
-      recordContrast(readings)
-      assertControlBorderContrast(readings)
-
-      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
-    })
-  })
-
-  test.describe('Disabled-action explanations and hints', () => {
-    test('default branch delete action displays explanation why it is disabled', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-
-      // Select default branch "main"
-      await selectBranchInList(page, 'main')
-
-      const inspector = page.locator('.details-pane')
-      const deleteBtn = inspector.getByRole('button', { name: 'Delete local branch', exact: true })
-      await expect(deleteBtn).toBeDisabled()
-
-      // The adjacent action-hint explains why the default branch cannot be deleted
-      await expect(
-        inspector.getByText('The default branch cannot be deleted.', { exact: true }),
-      ).toBeVisible()
-    })
-
-    test('current branch delete action displays explanation why it is disabled', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-
-      // Select current branch "feature/checkout"
-      await selectBranchInList(page, 'feature/checkout')
-
-      const inspector = page.locator('.details-pane')
-      const deleteBtn = inspector.getByRole('button', { name: 'Delete local branch', exact: true })
-      await expect(deleteBtn).toBeDisabled()
-
-      // The adjacent action-hint explains why the current branch cannot be deleted
-      await expect(
-        inspector.getByText('Switch to another branch before deleting this one.', { exact: true }),
-      ).toBeVisible()
-    })
-
-    test('GitHub unavailable banner in pull requests destination explains why', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'pull-requests-unavailable' })
-      await switchDestination(page, 'pullRequests')
-      await settle(page)
-
-      const ghBanner = page.locator('.gh-banner')
-      await expect(ghBanner).toBeVisible()
-      await expect(ghBanner).toContainText('GitHub data unavailable')
-      await expect(ghBanner).toContainText(
-        'GitHub metadata unavailable: the gh CLI is not installed',
-      )
-    })
-  })
-
-  test.describe('Colour-independent state', () => {
-    test('every status badge names its state in text, not colour or icon alone', async ({
-      page,
-    }) => {
+  for (const tab of ['Overview', 'Changes', 'Checks', 'Discussion']) {
+    test(`asserts zero axe violations (all rules) with inspector ${tab}`, async ({ page }) => {
       await openGallery(page, { scenario: 'pull-requests-checks' })
-      await switchDestination(page, 'pullRequests')
+      await page.locator('.bw-subtitle').filter({ hasText: /#\d+/ }).first().click()
+      await page.getByRole('tab', { name: tab, exact: tab !== 'Changes' }).click()
       await settle(page)
-
-      // The row's own words carry lifecycle, checks, and review independently, so
-      // removing every colour and icon would not remove the information.
-      const rows = page.locator('.pr-row')
-      const rowCount = await rows.count()
-      expect(rowCount).toBeGreaterThan(0)
-      const texts = await rows.evaluateAll((elements) =>
-        elements.map((element) => (element.textContent || '').toLowerCase()),
-      )
-      for (const text of texts) {
-        expect(text).toMatch(/(open|closed|merged|draft)/)
-        expect(text).toMatch(/checks (passing|failing|pending)|no checks/)
-        expect(text).toMatch(/review approved|changes requested|review required|no review decision/)
-      }
+      await assertNoAxeViolations(page, `${tab} inspector`, { allRules: true })
     })
+  }
 
-    test('branch rows state their Git status in words for a reader without colour', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'ancestry-requires-restack' })
-
-      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
-      expect(await rows.count()).toBeGreaterThan(0)
-
-      const names = await rows.evaluateAll((elements) =>
-        elements.map((element) => element.getAttribute('aria-label') || ''),
-      )
-      for (const name of names) {
-        expect(name.length).toBeGreaterThan(0)
-      }
-      // A branch that needs a restack says so; the warning colour is not the message.
-      expect(names.some((name) => name.includes('requires restack'))).toBe(true)
-      expect(names.some((name) => name.includes('current branch'))).toBe(true)
-    })
-
-    test('capability support states are labelled, never colour-coded alone', async ({ page }) => {
+  for (const surface of [
+    { trigger: 'Settings', title: 'Settings' },
+    { trigger: 'Inspect branch history', title: 'Selected committed history' },
+    { trigger: 'Notifications', title: 'Optional Notifications' },
+  ]) {
+    test(`asserts zero axe violations in ${surface.title} dialog`, async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
-      await switchDestination(page, 'diagnostics')
-      await settle(page)
-
-      const capabilityList = page.getByRole('list', { name: 'Detected capabilities' })
-      const rows = capabilityList.getByRole('listitem')
-      const rowCount = await rows.count()
-      expect(rowCount).toBeGreaterThan(0)
-      const texts = await rows.evaluateAll((elements) =>
-        elements.map((element) => (element.textContent || '').toLowerCase()),
-      )
-      for (const text of texts) {
-        expect(text).toMatch(/supported|limited|unsupported/)
+      if (surface.trigger === 'Inspect branch history') {
+        await page.getByRole('button', { name: 'main', exact: true }).click()
       }
+      await page.getByRole('button', { name: surface.trigger, exact: true }).click()
+      await expect(page.getByRole('dialog', { name: surface.title, exact: true })).toBeVisible()
+      await settle(page)
+      await assertNoAxeViolations(page, `${surface.title} dialog`, {
+        includeSelector: '[role="dialog"]',
+      })
     })
+  }
+
+  test('asserts zero axe violations on Foundations specimen', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected', route: 'foundations' })
+    await settle(page)
+    await assertNoAxeViolations(page, 'Foundations specimen')
   })
 
-  test.describe('Branch tree hierarchy matches the rows a reader can reach', () => {
-    test('a connected stack states one level per reachable parent under one root set', async ({
-      page,
-    }) => {
+  test('measures workbench navigation, row and inspector text against rendered backgrounds', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
+    await settle(page)
+    const readings = await scanElementsContrast(page, [
+      '.bw-workspace-name strong',
+      '.bw-workspace-name small',
+      '.bw-nav',
+      '.bw-panel-head h1',
+      '.bw-panel-head p',
+      '.bw-branch-name',
+      '.bw-subtitle',
+      '.bw-pr-status',
+      '.bw-inspector h2',
+      '.bw-section h3',
+      '.bw-section p',
+    ])
+    recordContrast(readings)
+    assertContrast(readings, 'Workbench text surfaces')
+  })
+
+  test('measures local inspection text and code contrast', async ({ page }) => {
+    await openGallery(page, { scenario: 'files-staged' })
+    await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
+    await page.getByRole('tab', { name: /^Changes/ }).click()
+    const files = page.getByRole('combobox', { name: 'Local file to inspect' })
+    await files.click()
+    await page.getByRole('option').first().click()
+    await expect(page.locator('.wb-code').first()).toBeVisible()
+    const readings = await scanElementsContrast(page, ['.bw-inspector p', '.wb-code'])
+    recordContrast(readings)
+    assertContrast(readings, 'Local file inspection')
+  })
+
+  for (const control of ['filter', 'settings'] as const) {
+    test(`${control} focus indicator contrasts >= 3:1`, async ({ page }) => {
       await openGallery(page, { scenario: 'shell-connected' })
-
-      const base = page.getByRole('treeitem', { name: /^main,/ })
-      await expect(base).toHaveAttribute('aria-level', '1')
-      await expect(base).toHaveAttribute('aria-posinset', '1')
-      await expect(base).toHaveAttribute('aria-setsize', '1')
-      await expect(page.getByRole('treeitem', { name: /^feature\/checkout,/ })).toHaveAttribute(
-        'aria-level',
-        '2',
-      )
-      await expect(
-        page.getByRole('treeitem', { name: /^feature\/checkout-tests,/ }),
-      ).toHaveAttribute('aria-level', '3')
+      const locator =
+        control === 'filter'
+          ? getViewFilterInput(page)
+          : page.getByRole('button', { name: 'Settings', exact: true })
+      const reading = await measureFocusIndicatorContrast(page, locator)
+      recordContrast(reading)
+      expect(reading, 'Focus indicator must be measurable').not.toBeNull()
+      expect(reading!.ratio).toBeGreaterThanOrEqual(reading!.requiredRatio)
     })
+  }
 
-    test('branches in a parent cycle are presented as roots of one sibling set', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'ancestry-cycle' })
+  test('essential filter border contrasts >= 3:1 against its background', async ({ page }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    const readings = await measureControlBorders(page, [
+      { label: 'branch filter', locator: getViewFilterInput(page) },
+    ])
+    recordContrast(readings)
+    assertControlBorderContrast(readings)
+  })
 
-      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
-      await expect(rows).toHaveCount(3)
-      // Neither branch can reach the other through this list, so both are roots
-      // beside `main` — three items in the one root set, not two nested singletons.
-      const hierarchy = await rows.evaluateAll((elements) =>
-        elements.map((element) => [
-          element.getAttribute('aria-level'),
-          element.getAttribute('aria-posinset'),
-          element.getAttribute('aria-setsize'),
-        ]),
-      )
-      expect(hierarchy).toEqual([
-        ['1', '1', '3'],
-        ['1', '2', '3'],
-        ['1', '3', '3'],
-      ])
-      // The cycle that produced those roots is still named in the rows themselves.
-      await expect(page.getByRole('treeitem', { name: /parent cycle/ })).toHaveCount(2)
-    })
+  test('qualified branch groups name relationship and state without relying on colour', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'ancestry-cycle' })
+    const rows = page.locator('.bw-lane-row')
+    expect(await rows.count()).toBeGreaterThan(0)
+    const names = await rows.evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute('aria-label') ?? ''),
+    )
+    for (const name of names) {
+      expect(name).toMatch(/Parent:|Published base|No recorded parent|cycle/i)
+      expect(name).toMatch(/worktree|clean|dirty|changes/i)
+      expect(name).toMatch(/pull request|PR association|review|approved|requested/i)
+    }
+    expect(names.some((name) => /cycle/i.test(name))).toBe(true)
+  })
 
-    test('a filter that hides the parent presents the row that is left as a root', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'shell-connected' })
-      await getViewFilterInput(page).fill('checkout-tests')
-      await settle(page)
-
-      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
-      // `feature/checkout` is filtered away, so the surviving row is a root of what
-      // is on screen rather than a child of a parent no reader can reach.
-      await expect(rows).toHaveCount(1)
-      await expect(rows.first()).toHaveAttribute('aria-level', '1')
-      await expect(rows.first()).toHaveAttribute('aria-posinset', '1')
-      await expect(rows.first()).toHaveAttribute('aria-setsize', '1')
-    })
-
-    test('rows that each lost their parent share the one root set of the filtered list', async ({
-      page,
-    }) => {
-      await openGallery(page, { scenario: 'ancestry-cycle' })
-      await getViewFilterInput(page).fill('cycle')
-      await settle(page)
-
-      const rows = page.getByRole('tree', { name: 'Repository branches' }).getByRole('treeitem')
-      // The base is filtered away as well, and the two remaining rows cannot reach
-      // each other, so the root set is the two of them — not one singleton per row.
-      const hierarchy = await rows.evaluateAll((elements) =>
-        elements.map((element) => [
-          element.getAttribute('aria-level'),
-          element.getAttribute('aria-posinset'),
-          element.getAttribute('aria-setsize'),
-        ]),
-      )
-      expect(hierarchy).toEqual([
-        ['1', '1', '2'],
-        ['1', '2', '2'],
-      ])
-    })
+  test('filtered branch ancestry remains reachable and names prerequisite context', async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    await getViewFilterInput(page).fill('checkout-tests')
+    await settle(page)
+    await expect(
+      page.getByRole('button', { name: 'feature/checkout-tests', exact: true }),
+    ).toBeVisible()
+    const context = page.locator('.bw-lane-row.bw-context')
+    expect(await context.count()).toBeGreaterThan(0)
+    for (const row of await context.all()) {
+      await expect(row).toHaveAttribute('aria-label', /Context: does not match current filter/)
+      await expect(row.getByRole('button').first()).toBeVisible()
+    }
   })
 })

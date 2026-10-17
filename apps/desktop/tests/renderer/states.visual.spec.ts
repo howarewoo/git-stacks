@@ -1,20 +1,27 @@
 import { expect, test } from '@playwright/test'
 import type { ScenarioName } from './fixtures/manifest'
 import { openGallery } from './helpers/gallery'
-import { switchDestination, type DestinationId } from './helpers/destinations'
 
-const cases: { scenario: ScenarioName; destination?: DestinationId }[] = [
+const cases: { scenario: ScenarioName }[] = [
   { scenario: 'shell-no-repository' },
   { scenario: 'shell-long-content' },
   { scenario: 'ancestry-deep' },
-  { scenario: 'history-error', destination: 'history' },
-  { scenario: 'workflow-conflict-recovery', destination: 'changes' },
+  { scenario: 'history-error' },
+  { scenario: 'workflow-conflict-recovery' },
 ]
 
-for (const { scenario, destination } of cases) {
+for (const { scenario } of cases) {
   test(`${scenario} state @visual`, async ({ page }) => {
     await openGallery(page, { scenario })
-    if (destination) await switchDestination(page, destination)
+    if (scenario === 'history-error') {
+      await page.getByRole('button', { name: 'main', exact: true }).click()
+      await page.getByRole('button', { name: 'Inspect branch history', exact: true }).click()
+      await expect(page.getByRole('dialog', { name: 'Selected committed history' })).toBeVisible()
+    } else if (scenario === 'workflow-conflict-recovery') {
+      await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
+      await page.getByRole('tab', { name: /^Changes/ }).click()
+      await expect(page.getByRole('tabpanel')).toBeVisible()
+    }
     await expect(page).toHaveScreenshot(`${scenario}.png`)
   })
 }

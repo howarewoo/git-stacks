@@ -1,3 +1,11 @@
+import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
+import { inventoryFixture, snapshotInventory } from './inventory'
+import type {
+  InspectionResult,
+  InspectionOperation,
+  InspectionContext,
+  InspectionArgs,
+} from '@git-stacks/shared/inspection'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
 import {
   parseGraphPreferences,
@@ -6,7 +14,8 @@ import {
 } from '@git-stacks/shared/graph-preferences'
 import { changeGraphIndex, graphDetail } from './graph'
 import type { UpdateStatus } from '@git-stacks/shared/update'
-import { REVIEW_STACK_METADATA_LIMIT } from '@git-stacks/shared/performance'
+import { REVIEW_STACK_METADATA_LIMIT, LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
+import { cliAuthority } from '@git-stacks/shared/operation-scope'
 import type {
   ActionResult,
   ConflictFile,
@@ -17,10 +26,9 @@ import type {
   GitRuntimeInfo,
   GitRuntimeStatus,
   HistoryPage,
-  MergeProgress,
-  MergeStatus,
   PushPreview,
   RemoteFreshness,
+  PullRequestLayerRead,
   RepositorySnapshot,
   SyncActivity,
   StackKind,
@@ -42,6 +50,7 @@ import {
   type PullRequestInboxSavedFilter,
 } from '@git-stacks/shared/pr-inbox'
 import type { ReviewHeadline, ReviewViewedRecord } from '@git-stacks/shared/review'
+import { sameReviewComparison } from '@git-stacks/shared/review'
 import {
   fileViewFixtures,
   historyCommits,
@@ -51,7 +60,6 @@ import {
   insertSurgeryPreview,
   leasePreview,
   mergePreview,
-  mergeStatus,
   mergeStatusQueueSentence,
   publishPreview,
   restackPreview,
@@ -69,9 +77,12 @@ import {
 import type { ReviewFile, ReviewLine, ReviewSide } from '@git-stacks/shared/review'
 import type {
   ReviewDraftRecord,
+  ReviewMutationResult,
   ReviewDraftResolution,
   ReviewEvent,
+  ReviewOwner,
 } from '@git-stacks/shared/review-threads'
+import { sameReviewDraft } from '@git-stacks/shared/review-threads'
 import { checksReportFor, notificationInbox, scenarios } from './scenarios'
 import { updateStatusFixture } from './update-status'
 import { diagnosticsReportFixture } from './diagnostics'
@@ -154,6 +165,12 @@ const runtimeStatus = (useSystemGit: boolean): GitRuntimeStatus => ({
 /** Deterministic status message per action, so success notices are screenshot-stable. */
 function actionMessage(action: GitAction): string {
   switch (action.type) {
+    case 'executeNativeOperation':
+      return 'Executed the reviewed native membership change'
+    case 'executeWorktreeLifecycle':
+      return 'Executed the reviewed worktree lifecycle'
+    case 'unregisterWorktrees':
+      return 'Removed selected registrations only; files, branches and PRs retained'
     case 'switch':
       return `Switched to ${action.ref}`
     case 'createBranch':
@@ -271,27 +288,36 @@ interface WaitingCall {
  */
 export function installFixtureControl(options: {
   scenario: string
+  inventoryConsumer?: () => boolean
   onScenarioChange: (name: string) => void
+  reviewCache: FixtureControl['reviewCache']
 }): FixtureControl {
   const actions: GitAction[] = []
   const externalUrls: string[] = []
   /** Pending drafts per pull request, held for the life of the page as the real journal is. */
-  const heldDrafts = new Map<number, ReviewDraftRecord>()
+  const heldDrafts = new Map<string, ReviewDraftRecord>()
+  const heldViewed = new Map<string, ReviewViewedRecord>()
   const calls: FixtureCallRecord[] = []
   const holds = new Set<FixtureCall>()
-  const oneShotFailures = new Map<FixtureCall, string>()
+  const oneShotFailures = new Map<FixtureCall, Error>()
   const oneShotAnswers = new Map<FixtureCall, unknown>()
   const dropListeners = new Set<(paths: string[]) => void>()
   const released = new Set<FixtureCall>()
   const waiting: WaitingCall[] = []
   let startsPending = new Set<FixtureCall>()
   let mergeStatusReads = 0
-  const mergeListeners = new Set<(progress: MergeProgress | null) => void>()
-  const publishMergeProgress = (progress: MergeProgress | null): void => {
-    for (const listener of mergeListeners) listener(progress)
+  type MergeEvent = Parameters<Parameters<NonNullable<DesktopAPI['onMergeProgress']>>[0]>[0]
+  type PublishEvent = Parameters<Parameters<NonNullable<DesktopAPI['onSubmitStackProgress']>>[0]>[0]
+  const mergeListeners = new Set<(event: MergeEvent) => void>()
+  const publicationListeners = new Set<(event: PublishEvent) => void>()
+  let publication: PublishEvent | null = null
+  const publishMergeProgress = (event: MergeEvent): void => {
+    for (const listener of mergeListeners) listener(event)
   }
   /** Saved filters, as the main process keeps them: whole-list writes, identities preserved. */
   let inboxFilters: PullRequestInboxSavedFilter[] = []
+  const operationApprovals = new Map<string, InspectionContext>()
+  const operationSafetyFacts = new Map<string, string>()
 
   const scenarioFor = (name: string): FixtureScenario =>
     scenarios[name as ScenarioName] ?? scenarios[DEFAULT_SCENARIO]
@@ -299,14 +325,42 @@ export function installFixtureControl(options: {
   let scenario = scenarioFor(options.scenario)
   let servedPrIndex = scenario.prIndex
   const prIndexListeners = new Set<(index: PullRequestIndex) => void>()
+  let inventoryConsumer = options.inventoryConsumer?.() ?? false
+  let retainedConsumerInventory: WorktreeInventory | null = null
+  let servedInventory =
+    scenario.inventory ??
+    (inventoryConsumer
+      ? inventoryFixture()
+      : snapshotInventory(
+          Object.values(
+            scenario.snapshotsByPath ??
+              (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+          ),
+        ))
+  let snapshotSources = new Map(
+    Object.entries(
+      scenario.snapshotsByPath ??
+        (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+    ),
+  )
+  const inventoryListeners = new Set<(value: WorktreeInventory) => void>()
   let active: RepositorySnapshot | null = scenario.snapshot
-  let servedCliStatus: GitHubCliStatus | null = null
+  const cliStatuses = new Map<string, GitHubCliStatus>()
+  const statusForHost = (host: string | null): GitHubCliStatus | null => {
+    if (host === null) return null
+    const declared = scenario.identity?.cli ?? scenario.githubCliStatus
+    return (
+      cliStatuses.get(host) ??
+      scenario.githubCliStatuses?.[host] ??
+      (declared?.host === host ? declared : null)
+    )
+  }
   const graphPreferenceState = new Map<string, GraphPreferences>()
   const graphPreferenceScope = (): string | null => {
     const remote = active?.remoteUrl?.match(
       /^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u,
     )
-    const cli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+    const cli = statusForHost(remote?.[1].toLowerCase() ?? null)
     const account = cli ? (cli.state === 'authenticated' ? cli.login : null) : servedPrIndex?.viewer
     return active && remote && account
       ? JSON.stringify({
@@ -317,9 +371,46 @@ export function installFixtureControl(options: {
         })
       : null
   }
+  const fixtureReviewOwner = (number: number) => {
+    const remote = active?.remoteUrl?.match(
+      /^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u,
+    )
+    const cli = statusForHost(remote?.[1].toLowerCase() ?? null)
+    return {
+      repo: remote ? `${remote[1]}/${remote[2]}`.toLowerCase() : '',
+      viewer: cli
+        ? cli.state === 'authenticated'
+          ? (cli.login ?? '')
+          : ''
+        : reviewPermissions(number).viewer,
+    }
+  }
+  const assertFixtureReviewOwner = (number: number, owner: ReviewOwner) => {
+    const current = fixtureReviewOwner(number)
+    if (
+      !current.repo ||
+      !current.viewer ||
+      owner.repo !== current.repo ||
+      owner.viewer !== current.viewer
+    )
+      throw new Error('The captured review owner changed before provider dispatch.')
+  }
+  const fixtureReviewKey = (number: number) =>
+    JSON.stringify([active?.path, fixtureReviewOwner(number), number])
   const graphPreferenceKey = (scope: string): string => {
     const { host, repository, account } = JSON.parse(scope)
     return JSON.stringify([host, repository, account])
+  }
+  const captureOperationScope = () => {
+    const host =
+      active?.remoteUrl
+        ?.match(/^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u)?.[1]
+        .toLowerCase() ?? null
+    return {
+      repositoryPath: active?.path ?? '',
+      remoteUrl: active?.remoteUrl ?? null,
+      authority: cliAuthority(host, statusForHost(host)),
+    }
   }
   const matchesGraphPreferenceScope = (
     actual: string | null,
@@ -383,7 +474,7 @@ export function installFixtureControl(options: {
       const queued = oneShotFailures.get(call)
       if (queued !== undefined) {
         oneShotFailures.delete(call)
-        return Promise.reject(new Error(queued))
+        return Promise.reject(queued)
       }
       if (permanent !== undefined) return Promise.reject(new Error(permanent))
       try {
@@ -530,14 +621,12 @@ export function installFixtureControl(options: {
   }
 
   /**
-   * The GitHub CLI session this double currently reports, moved the way the
-   * main process moves it: a settings change points the installation at another
-   * host, and a sign-in, switch, or logout in a terminal replaces the session
-   * behind the host it is pointed at. `null` means the scenario's own
-   * declaration still answers, which is the state a scenario starts in.
+   * The CLI status this double reports for each host. Settings selects which
+   * host a window reads; a sign-in, switch, or logout updates only that host.
    */
-  /** The one window listening for the session to change outside it. */
-  let cliStatusListener: ((status: GitHubCliStatus) => void) | null = null
+  /** Independent renderer observers share the preload event stream. */
+  const cliStatusListeners = new Set<(status: GitHubCliStatus) => void>()
+  const publishedSnapshotOwners = new WeakMap<RepositorySnapshot, GitHubCliStatus>()
 
   /**
    * The GitHub answer this double may give a repository read, which belongs to
@@ -559,8 +648,9 @@ export function installFixtureControl(options: {
   const answeredForServedCredential = (snapshot: RepositorySnapshot): RepositorySnapshot => {
     const declared = scenario.identity?.cli ?? scenario.githubCliStatus ?? null
     if (declared === null) return snapshot
-    const served = servedCliStatus ?? declared
-    if (served.host === declared.host && served.identity === declared.identity) return snapshot
+    const observed = publishedSnapshotOwners.get(snapshot) ?? declared
+    const served = statusForHost(observed.host) ?? observed
+    if (served.host === observed.host && served.identity === observed.identity) return snapshot
     return {
       ...snapshot,
       pullRequests: [],
@@ -639,6 +729,241 @@ export function installFixtureControl(options: {
     return { ...before, ...after, reference, state, message }
   }
   const desktop: DesktopAPI = {
+    captureOperation: async (context) => {
+      record('captureOperation', [context])
+      const repo = servedInventory.repositories.find(
+        (item) => item.identity.id === context.repositoryId,
+      )
+      const tree = repo?.worktrees.find((item) => item.id === context.worktreeId)
+      if (!repo || !tree || tree.missing)
+        throw new Error('Selected fixture execution directory is unavailable.')
+      const scope = await desktop.inspect!(context, 'repositoryOperationScope', [])
+      const token = crypto.randomUUID()
+      operationApprovals.set(token, structuredClone(context))
+      const source = await desktop.inspect!(context, 'refresh', [])
+      operationSafetyFacts.set(
+        token,
+        JSON.stringify([
+          repo,
+          scope,
+          source.pullRequests,
+          source.nativeStacks,
+          source.capabilities,
+        ]),
+      )
+      return {
+        token,
+        context: structuredClone(context),
+        scope,
+        repositoryId: repo.identity.id,
+        directoryIdentity: tree.id,
+        commonIdentity: repo.identity.id,
+        gitDirectory: tree.gitDirectory ?? repo.identity.commonDirectory,
+        gitDirectoryIdentity: tree.id,
+        commonDirectory: repo.identity.commonDirectory,
+        worktreeId: tree.id,
+        worktreePath: tree.path,
+        operationCommitOid: null,
+        headOid: tree.headOid,
+        fingerprint: 'fixture-captured-facts',
+        refs: repo.refs.map((ref) => ({ id: ref.id, ref: ref.name, oid: ref.oid })),
+        capturedAt: new Date().toISOString(),
+        coordination: 'Fixture app locks do not lock external tools.',
+      }
+    },
+    operationSafety: async (token, preview) => {
+      record('operationSafety', [token, preview])
+      const context = operationApprovals.get(token)
+      if (!context)
+        return { current: false, reason: 'Fixture original approval expired or was spent.' }
+      const repo = servedInventory.repositories.find(
+        (repo) => repo.identity.id === context.repositoryId,
+      )
+      const scope = await desktop.inspect!(context, 'repositoryOperationScope', [])
+      const source = await desktop.inspect!(context, 'refresh', [])
+      const actual = JSON.stringify([
+        repo,
+        scope,
+        source.pullRequests,
+        source.nativeStacks,
+        source.capabilities,
+      ])
+      return answer('operationSafety', () =>
+        actual === operationSafetyFacts.get(token)
+          ? { current: true, reason: null }
+          : {
+              current: false,
+              reason: 'Fixture original owner, ref, provider or permission facts changed.',
+            },
+      )
+    },
+    executeOperation: async (token, action) => {
+      record('executeOperation', [token, action])
+      const context = operationApprovals.get(token)
+      if (!context) throw new Error('Fixture approval was already spent.')
+      operationApprovals.delete(token)
+      operationSafetyFacts.delete(token)
+      const previous = active
+      const source = await desktop.inspect!(context, 'refresh', [])
+      active = source
+      try {
+        return await desktop.runAction(action)
+      } finally {
+        active = previous
+      }
+    },
+    operationRecords: () => {
+      record('operationRecords', [])
+      return answer('operationRecords', () =>
+        structuredClone([...(scenario.operationRecords ?? [])]),
+      )
+    },
+    worktreeLifecyclePreview: (request) => {
+      record('worktreeLifecyclePreview', [request])
+      return answer('worktreeLifecyclePreview', () => {
+        if (!scenario.worktreeLifecyclePreview)
+          throw new Error('This scenario has no lifecycle preview fixture.')
+        return structuredClone(scenario.worktreeLifecyclePreview)
+      })
+    },
+    nativeOperationPreview: (request) => {
+      record('nativeOperationPreview', [request])
+      return answer('nativeOperationPreview', () => {
+        if (!scenario.nativeOperationPreview)
+          throw new Error('This scenario has no native-operation preview fixture.')
+        return structuredClone(scenario.nativeOperationPreview)
+      })
+    },
+    reviewedMergePreview: (number) => {
+      record('reviewedMergePreview', [number])
+      return answer('reviewedMergePreview', () =>
+        structuredClone(
+          scenario.reviewedMergePreview ?? scenario.stackPreviews?.merge ?? mergePreview,
+        ),
+      )
+    },
+    inspect: async <K extends InspectionOperation>(
+      context: InspectionContext,
+      operation: K,
+      args: InspectionArgs<K>,
+    ): Promise<InspectionResult<K>> => {
+      record('inspect', [context, operation, args])
+      const repo = servedInventory.repositories.find(
+        (item) => item.identity.id === context.repositoryId,
+      )
+      if (!repo) throw new Error('Selected fixture repository was removed')
+      const tree = context.worktreeId
+        ? repo.worktrees.find((item) => item.id === context.worktreeId)
+        : undefined
+      if (context.worktreeId && (!tree || tree.missing))
+        throw new Error('Selected fixture directory was removed')
+      const source = snapshotSources.get(repo.registeredPaths[0]) ?? scenario.snapshot
+      if (!source) throw new Error('Selected fixture snapshot is unavailable')
+      const captured = {
+        ...structuredClone(source),
+        path: tree?.path ?? repo.registeredPaths[0],
+        headOid: tree?.headOid ?? source.headOid,
+        pullRequests:
+          operation === 'pullRequestLayer'
+            ? source.pullRequests
+            : repo.pullRequests.map((pr) => pr.facts),
+      }
+      const capturedActor = statusForHost(repo.remote?.host ?? 'github.com')?.identity
+      if (operation === 'pullRequestLayer') {
+        const selected = repo.pullRequests.find((pr) => pr.id === context.pullRequestId)
+        if (!selected || args[0] !== selected.number)
+          throw new Error('The request does not address the captured pull request.')
+      }
+      if (operation === 'refresh') {
+        record('refresh', [])
+        return admittedAnswer('refresh', () => captured) as Promise<
+          InspectionResult<typeof operation>
+        >
+      }
+      if (operation === 'worktreeStatus') {
+        record('worktreeStatus', [])
+        return admittedAnswer('worktreeStatus', () => ({
+          path: captured.path,
+          currentBranch: captured.currentBranch,
+          headOid: captured.headOid,
+          files: captured.files,
+          filesTruncated: captured.limits.filesTruncated,
+          observedAt: new Date().toISOString(),
+        })) as Promise<InspectionResult<typeof operation>>
+      }
+      if (operation === 'repositoryOperationScope')
+        return {
+          repositoryPath: captured.path,
+          remoteUrl: captured.remoteUrl,
+          authority: cliAuthority('github.com', statusForHost('github.com')),
+        } as InspectionResult<typeof operation>
+      const previous = active
+      active = captured
+      try {
+        const method = desktop[operation] as (
+          ...args: unknown[]
+        ) => Promise<InspectionResult<typeof operation>>
+        if (!method) throw new Error('Selected fixture operation is unavailable')
+        const response = method(...args)
+        if (operation !== 'pullRequestLayer') return response
+        return response.then((value) => {
+          const current = servedInventory.repositories.find(
+            (item) => item.identity.id === context.repositoryId,
+          )
+          if (
+            !current?.remote ||
+            current.remote.id !== repo.remote?.id ||
+            statusForHost(current.remote.host)?.identity !== capturedActor
+          )
+            throw new Error(
+              'The captured provider actor or origin changed; this result was retired.',
+            )
+          const layer = value as PullRequestLayerRead
+          const existing = new Map(current.pullRequests.map((pr) => [pr.number, pr]))
+          const observed = new Map(
+            [layer.pullRequest, layer.sourcePullRequest].map((pr) => [pr.number, pr]),
+          )
+          for (const pr of current.pullRequests)
+            if (!observed.has(pr.number)) observed.set(pr.number, pr.facts)
+          const pullRequests = [...observed.values()].slice(0, LIST_PAGE_SIZE).map((facts) => ({
+            id:
+              existing.get(facts.number)?.id ??
+              JSON.stringify([current.remote!.id, 'pr', String(facts.number)]),
+            remoteId: current.remote!.id,
+            number: facts.number,
+            headRef: facts.head,
+            headOid: facts.headOid ?? null,
+            refIds: existing.get(facts.number)?.refIds ?? [],
+            facts,
+          }))
+          servedInventory = {
+            ...servedInventory,
+            generation: servedInventory.generation + 1,
+            repositories: servedInventory.repositories.map((item) =>
+              item === current
+                ? {
+                    ...current,
+                    pullRequests,
+                    remoteFreshness: {
+                      state: 'stale',
+                      fetchedAt: layer.observedAt,
+                      checkedAt: layer.observedAt,
+                      detail:
+                        'A bounded exact member observation is not a complete repository readiness read.',
+                      rateLimitReset: null,
+                      pendingMutations: current.remoteFreshness?.pendingMutations ?? [],
+                    },
+                  }
+                : item,
+            ),
+          }
+          for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+          return value
+        })
+      } finally {
+        active = previous
+      }
+    },
     graphPreferences: () => {
       record('graphPreferences', [])
       return admittedAnswer('graphPreferences', () => graphPreferenceResult(graphPreferenceScope()))
@@ -665,6 +990,40 @@ export function installFixtureControl(options: {
           return graphPreferenceResult(null)
         graphPreferenceState.delete(graphPreferenceKey(scope))
         return graphPreferenceResult(scope)
+      })
+    },
+    worktreeInventory: (request) => {
+      record('worktreeInventory', [request])
+      const consumer = options.inventoryConsumer?.() ?? false
+      if (!scenario.inventory && consumer !== inventoryConsumer) {
+        const generation = servedInventory.generation + 1
+        if (inventoryConsumer) retainedConsumerInventory = servedInventory
+        servedInventory = consumer
+          ? (retainedConsumerInventory ?? inventoryFixture())
+          : snapshotInventory([...snapshotSources.values()].map(answeredForServedCredential))
+        servedInventory = { ...servedInventory, generation }
+        inventoryConsumer = consumer
+      }
+      const admitted = structuredClone(servedInventory)
+      return answer('worktreeInventory', () => admitted)
+    },
+    onWorktreeInventory: (listener) => {
+      inventoryListeners.add(listener)
+      return () => {
+        inventoryListeners.delete(listener)
+      }
+    },
+    cancelInventory: (requestId) => {
+      record('cancelInventory', [requestId])
+      // Keep deferred replies deliverable to prove the renderer's late-answer fence.
+      return answer('cancelInventory', () => undefined)
+    },
+    adoptWorktrees: (ids, requestId) => {
+      record('adoptWorktrees', [ids, requestId])
+      return answer('adoptWorktrees', () => {
+        throw new Error(
+          'Adoption requires main-owned directory validation; this browser fixture does not simulate registration success.',
+        )
       })
     },
     prIndex: (options) => {
@@ -695,7 +1054,10 @@ export function installFixtureControl(options: {
     },
     openRepository: (path) => {
       record('openRepository', path === undefined ? [] : [path])
-      const requested = path === undefined ? undefined : scenario.snapshotsByPath?.[path]
+      const requested =
+        path === undefined
+          ? active
+          : (snapshotSources.get(path) ?? scenario.snapshotsByPath?.[path])
       const opened = requested ?? scenario.snapshot
       if (!opened) throw new Error('No repository is open in this fixture.')
       // What this read answers is settled when it is admitted, under the
@@ -791,10 +1153,9 @@ export function installFixtureControl(options: {
     // one rebuilt for the host selected afterwards, which would be an answer
     // nobody asked for.
     get githubCliStatus(): (() => Promise<GitHubCliStatus>) | undefined {
-      // What this double reports is the session it currently serves, which a
-      // test can have moved: the scenario's own declaration until something
-      // serves the status this installation now answers with.
-      const declared = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      // The selected host's status includes its latest pushed session, if the
+      // fixture changed that host while this window was mounted.
+      const declared = statusForHost(settings.github.host)
       if (!declared) return undefined
       if (scenario.identity) {
         return () => {
@@ -813,9 +1174,9 @@ export function installFixtureControl(options: {
     // window asked for a status at all: a build without the optional read has
     // nothing to change either.
     onGitHubCliStatus: (listener) => {
-      cliStatusListener = listener
+      cliStatusListeners.add(listener)
       return () => {
-        if (cliStatusListener === listener) cliStatusListener = null
+        cliStatusListeners.delete(listener)
       }
     },
     // The optional Notification Center answers on its own calls, with its own
@@ -971,6 +1332,7 @@ export function installFixtureControl(options: {
     runAction: (action) => {
       record('runAction', [action])
       actions.push(action)
+      const operationScope = captureOperationScope()
       // A merge reports through the progress channel the way the main process does, and it
       // reports while the run is still going: the request is accepted, GitHub is still
       // running it, and the run returns before the result exists. What GitHub reports
@@ -979,26 +1341,33 @@ export function installFixtureControl(options: {
         const layer = mergePreview.merge?.layers[0]
         if (layer) {
           publishMergeProgress({
-            action: 'default',
-            status: 'running',
-            message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
-            layers: [
-              {
-                branch: layer.branch,
-                pullRequest: layer.pullRequest,
-                status: 'pending',
-                detail: 'GitHub has not reported a result yet; refresh to read this request',
-                mergedOid: null,
-                queue: null,
-                requestUuid: 'fixture-request-1',
-              },
-            ],
+            scope: operationScope,
+            source: 'action',
+            progress: {
+              action: 'default',
+              status: 'running',
+              message: `GitHub has not reported a result for pull request #${layer.pullRequest} yet`,
+              layers: [
+                {
+                  branch: layer.branch,
+                  pullRequest: layer.pullRequest,
+                  status: 'pending',
+                  detail: 'GitHub has not reported a result yet; refresh to read this request',
+                  mergedOid: null,
+                  queue: null,
+                  requestUuid: 'fixture-request-1',
+                },
+              ],
+            },
           })
         }
       }
       return answer<ActionResult>(
         'runAction',
-        () => ({ message: actionMessage(action) }),
+        () =>
+          structuredClone(
+            scenario.actionResults?.[action.type] ?? { message: actionMessage(action) },
+          ),
         scenario.actionFailures?.[action.type],
       )
     },
@@ -1072,7 +1441,7 @@ export function installFixtureControl(options: {
       record('stackPreview', [kind, branch])
       return answer<StackPreview>('stackPreview', () => {
         const preview = scenario.stackPreviews?.[kind] ?? stackPreviewsByKind[kind]
-        return preview.kind === kind ? preview : { ...preview, kind }
+        return { ...preview, kind, token: crypto.randomUUID() }
       })
     },
     surgeryPreview: (request) => {
@@ -1084,38 +1453,108 @@ export function installFixtureControl(options: {
     },
     mergeStatus: () => {
       record('mergeStatus', [])
-      return answer<MergeStatus>('mergeStatus', () => {
-        const base = scenario.mergeStatus ?? mergeStatus
+      const scope = captureOperationScope()
+      const base = structuredClone(scenario.mergeStatus ?? null)
+      const read = mergeStatusReads++
+      return answer('mergeStatus', () => {
+        if (!base) return { scope, source: 'journal-read' as const, progress: null }
         // The queue lands the group between reads, so a refresh visibly replaces the queued
         // layer with what GitHub now reports for it; a later read fails, standing in for a
         // transport error that must not erase the last result GitHub reported.
-        const read = mergeStatusReads++
         if (read === 2) throw new Error('GitHub is unreachable')
-        if (read === 0) return base
+        if (read === 0) return { scope, source: 'journal-read' as const, progress: base }
         return {
-          ...base,
-          layers: base.layers.map((layer) =>
-            layer.status === 'enqueued'
-              ? {
-                  ...layer,
-                  status: 'merged' as const,
-                  detail: 'Merged on GitHub as 4444444444',
-                  mergedOid: '4444444444444444444444444444444444444444',
-                  queue: { ...layer.queue!, outcome: 'merged' as const },
-                }
-              : layer,
-          ),
-          message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
+          scope,
+          source: 'journal-read' as const,
+          progress: {
+            ...base,
+            layers: base.layers.map((layer) =>
+              layer.status === 'enqueued'
+                ? {
+                    ...layer,
+                    status: 'merged' as const,
+                    detail: 'Merged on GitHub as 4444444444',
+                    mergedOid: '4444444444444444444444444444444444444444',
+                    queue: { ...layer.queue!, outcome: 'merged' as const },
+                  }
+                : layer,
+            ),
+            message: base.message.replace(mergeStatusQueueSentence, 'Pull request #40 merged.'),
+          },
+        }
+      })
+    },
+    repositoryOperationScope: () => {
+      record('repositoryOperationScope', [])
+      const scope = captureOperationScope()
+      return admittedAnswer('repositoryOperationScope', () => scope)
+    },
+    pullRequestAction: async (action, expectedScope) => {
+      record('pullRequestAction', [action, expectedScope])
+      return admittedAnswer('pullRequestAction', () => {
+        const current = captureOperationScope()
+        if (
+          current.repositoryPath !== expectedScope.repositoryPath ||
+          current.remoteUrl !== expectedScope.remoteUrl ||
+          current.authority !== expectedScope.authority
+        )
+          throw new Error('Captured provider scope changed.')
+        if (action.type === 'updatePr' && action.expectedBody !== undefined) {
+          const pr = active?.pullRequests.find((pr) => pr.number === action.number)
+          if (
+            !pr ||
+            `${pr.title}\n\nDeterministic fixture body for pull request #${pr.number}.` !==
+              action.expectedBody
+          )
+            throw new Error('Pull request body changed.')
+        }
+        return desktop.runAction(action)
+      })
+    },
+    pullRequestPage: (state, cursor) => {
+      record('pullRequestPage', [state, cursor])
+      return admittedAnswer('pullRequestPage', () => {
+        const offset = cursor === null ? 0 : Number(cursor)
+        if (!Number.isSafeInteger(offset) || offset < 0)
+          throw new Error('Invalid fixture PR cursor.')
+        const rows = (active?.pullRequests ?? []).filter(
+          (pr) => state === 'ALL' || pr.state === state,
+        )
+        return {
+          pullRequests: structuredClone(rows.slice(offset, offset + 50)),
+          next: offset + 50 < rows.length ? String(offset + 50) : null,
+          observedAt: new Date().toISOString(),
+        }
+      })
+    },
+    pullRequestLayer: (sourceNumber, memberNumber) => {
+      record('pullRequestLayer', [sourceNumber, memberNumber])
+      return admittedAnswer('pullRequestLayer', () => {
+        const source = active?.pullRequests.find((pr) => pr.number === sourceNumber)
+        const member = active?.pullRequests.find((pr) => pr.number === memberNumber)
+        const stack = active?.nativeStacks?.find((entry) =>
+          entry.pullRequests.some((pr) => pr.number === sourceNumber),
+        )
+        if (!source || !member || !stack?.pullRequests.some((pr) => pr.number === memberNumber))
+          throw new Error(
+            'GitHub has not confirmed this pull request as a member of the selected native stack.',
+          )
+        return {
+          sourcePullRequest: source,
+          pullRequest: member,
+          observedAt: new Date().toISOString(),
         }
       })
     },
     pullRequest: (number) => {
       record('pullRequest', [number])
-      return answer('pullRequest', () => {
+      return admittedAnswer('pullRequest', () => {
         const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         return {
           ...found,
+          canUpdate: found.canUpdate ?? true,
+          repositoryDefaultBranch: active?.defaultBranch ?? null,
           body: `${found.title}\n\nDeterministic fixture body for pull request #${number}.`,
         }
       })
@@ -1124,6 +1563,28 @@ export function installFixtureControl(options: {
       mergeListeners.add(listener)
       return () => {
         mergeListeners.delete(listener)
+      }
+    },
+    submitStackProgress: () => {
+      record('submitStackProgress', [])
+      const scope = captureOperationScope()
+      const progress =
+        publication &&
+        publication.scope.repositoryPath === scope.repositoryPath &&
+        publication.scope.remoteUrl === scope.remoteUrl &&
+        publication.scope.authority === scope.authority
+          ? structuredClone(publication.progress)
+          : null
+      return answer('submitStackProgress', () => ({
+        scope,
+        source: 'journal-read' as const,
+        progress,
+      }))
+    },
+    onSubmitStackProgress: (listener) => {
+      publicationListeners.add(listener)
+      return () => {
+        publicationListeners.delete(listener)
       }
     },
     reviewHeadline: (number) => {
@@ -1135,7 +1596,9 @@ export function installFixtureControl(options: {
         // from every pull request in the snapshot that names the same stack.
         const membership =
           found.stack && !scenario.reviewStackUnavailable
-            ? (active?.pullRequests
+            ? (active?.nativeStacks?.find((stack) => stack.number === found.stack?.stackNumber)
+                ?.pullRequests ??
+              active?.pullRequests
                 .filter((pr) => pr.stack?.stackNumber === found.stack?.stackNumber)
                 .map((pr) => ({
                   ...stackMember(pr.stack?.position ?? 1, pr.number, found.stack?.size ?? 1),
@@ -1144,7 +1607,8 @@ export function installFixtureControl(options: {
                   base: pr.base,
                   state: pr.state,
                   draft: pr.draft,
-                })) ?? null)
+                })) ??
+              null)
             : scenario.reviewStackUnavailable
               ? null
               : []
@@ -1219,32 +1683,51 @@ export function installFixtureControl(options: {
     },
     reviewFiles: (number) => {
       record('reviewFiles', [number])
-      return answer('reviewFiles', () => {
+      return admittedAnswer('reviewFiles', () => {
         const found = active?.pullRequests.find((pr) => pr.number === number)
         if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
-        return reviewFileSet(number, scenario.reviewHeadOid ?? found.headOid ?? `head-${number}`)
+        return reviewFileSet(
+          number,
+          scenario.reviewHeadOid ?? found.headOid ?? `head-${number}`,
+          found.base,
+          found.baseOid,
+        )
       })
     },
     reviewCommits: (number) => {
       record('reviewCommits', [number])
       return answer('reviewCommits', () => reviewCommits(number))
     },
-    reviewViewed: () => {
-      record('reviewViewed', [])
-      return answer('reviewViewed', () => null)
+    reviewViewed: (number) => {
+      record('reviewViewed', [number])
+      const key = fixtureReviewKey(number)
+      return answer('reviewViewed', () => heldViewed.get(key) ?? null)
     },
-    reviewSetViewed: (record_) => {
-      record('reviewSetViewed', [record_])
-      return answer('reviewSetViewed', () => record_ as ReviewViewedRecord)
+    reviewSetViewed: (record_, owner) => {
+      record('reviewSetViewed', [record_, owner])
+      const key = fixtureReviewKey(record_.number)
+      return answer('reviewSetViewed', () => {
+        const current = fixtureReviewOwner(record_.number)
+        if (owner.repo !== current.repo || owner.viewer !== current.viewer)
+          throw new Error('The captured viewed-file owner changed.')
+        heldViewed.set(key, record_)
+        return record_
+      })
     },
     reviewThreads: (number) => {
       record('reviewThreads', [number])
-      return answer('reviewThreads', () => {
+      return admittedAnswer('reviewThreads', () => {
         const found = active?.pullRequests.find((pr) => pr.number === number)
         const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         return {
-          threads: reviewThreadSet(number, headOid),
-          permissions: reviewPermissions(number, scenario.reviewPermissions),
+          owner: fixtureReviewOwner(number),
+          threads: reviewThreadSet(number, headOid, found?.base ?? null, {
+            baseOid: found?.baseOid,
+          }),
+          permissions: {
+            ...reviewPermissions(number, scenario.reviewPermissions),
+            viewer: fixtureReviewOwner(number).viewer,
+          },
         }
       })
     },
@@ -1253,42 +1736,95 @@ export function installFixtureControl(options: {
       // The real journal outlives the workspace, so the double keeps drafts for
       // the life of the page: leaving the review workspace and coming back has
       // to show the pending comments again, which is the behaviour being proven.
-      return answer('reviewDrafts', () => heldDrafts.get(number) ?? null)
+      return admittedAnswer('reviewDrafts', () => heldDrafts.get(fixtureReviewKey(number)) ?? null)
     },
-    reviewSetDrafts: (draftRecord) => {
-      record('reviewSetDrafts', [draftRecord])
-      heldDrafts.set(draftRecord.number, draftRecord)
-      return answer('reviewSetDrafts', () => draftRecord as ReviewDraftRecord)
+    reviewDraftRecovery: (selected) => {
+      record('reviewDraftRecovery', [selected])
+      return answer('reviewDraftRecovery', () => [])
+    },
+    reviewSetDrafts: (draftRecord, expectedUpdatedAt) => {
+      record('reviewSetDrafts', [draftRecord, expectedUpdatedAt])
+      const capturedKey = fixtureReviewKey(draftRecord.number)
+      const capturedRemote = active?.remoteUrl
+      return answer('reviewSetDrafts', () => {
+        const current = fixtureReviewOwner(draftRecord.number)
+        if (
+          capturedKey !== fixtureReviewKey(draftRecord.number) ||
+          capturedRemote !== active?.remoteUrl ||
+          draftRecord.repo.toLowerCase() !== current.repo.toLowerCase() ||
+          draftRecord.viewer.toLowerCase() !== current.viewer.toLowerCase()
+        )
+          throw new Error('The captured draft owner changed before the local journal write.')
+        const previous = heldDrafts.get(capturedKey)
+        if ((previous?.updatedAt ?? null) !== expectedUpdatedAt)
+          throw new Error('Saved drafts changed after this full set was read.')
+        const accepted = {
+          ...draftRecord,
+          updatedAt: new Date(
+            Math.max(Date.now(), Date.parse(previous?.updatedAt ?? '') + 1 || 0),
+          ).toISOString(),
+        }
+        heldDrafts.set(capturedKey, accepted)
+        return accepted
+      })
     },
     reviewSubmit: async (number, submission) => {
       record('reviewSubmit', [number, submission])
-      const result = await answer('reviewSubmit', () => ({
+      assertFixtureReviewOwner(number, submission)
+      const ownerKey = fixtureReviewKey(number)
+      const result: ReviewMutationResult = await answer('reviewSubmit', () => ({
         id: `review-${number}`,
         state: REVIEW_SUBMIT_STATES[submission.event],
         url: `https://github.com/acme/widgets/pull/${number}#pullrequestreview-1`,
         delivered: submission.drafts.map((draft) => draft.id),
+        ...(submission.compositionId
+          ? {
+              deliveredComposition: {
+                id: submission.compositionId,
+                summary: submission.body,
+                event: submission.event,
+              },
+            }
+          : {}),
       }))
       // Main retires the delivered identities even if the view has unmounted.
-      const delivered = new Set(result.delivered)
-      const record_ = heldDrafts.get(number)
-      if (record_) {
-        heldDrafts.set(number, {
-          ...record_,
-          drafts: record_.drafts.filter((draft) => !delivered.has(draft.id)),
-        })
+      const delivered = new Set(result.delivered ?? [])
+      const record_ = heldDrafts.get(ownerKey)
+      if (record_ && sameReviewComparison(record_.comparison, submission.comparison)) {
+        const confirmed = (draft: ReviewDraftRecord['drafts'][number]) =>
+          delivered.has(draft.id) && submission.drafts.some((sent) => sameReviewDraft(draft, sent))
+        const compositionDelivered =
+          result.deliveredComposition &&
+          record_.composer?.id === result.deliveredComposition.id &&
+          record_.composer.summary === result.deliveredComposition.summary &&
+          record_.composer.event === result.deliveredComposition.event
+        if (record_.drafts.some(confirmed) || compositionDelivered) {
+          heldDrafts.set(ownerKey, {
+            ...record_,
+            drafts: record_.drafts.filter((draft) => !confirmed(draft)),
+            ...(compositionDelivered
+              ? { composer: { ...record_.composer!, summary: '', event: 'COMMENT' as const } }
+              : {}),
+            updatedAt: new Date(
+              Math.max(Date.now(), Date.parse(record_.updatedAt) + 1),
+            ).toISOString(),
+          })
+        }
       }
       return result
     },
-    reviewReply: (number, threadId) => {
-      record('reviewReply', [number, threadId])
+    reviewReply: (number, threadId, body, owner) => {
+      record('reviewReply', [number, threadId, body, owner])
+      assertFixtureReviewOwner(number, owner)
       return answer('reviewReply', () => ({
         id: `reply-${threadId}`,
         state: 'COMMENTED',
         url: `https://github.com/acme/widgets/pull/${number}#discussion_r9`,
       }))
     },
-    reviewSetResolved: (number, threadId, resolved) => {
-      record('reviewSetResolved', [number, threadId, resolved])
+    reviewSetResolved: (number, threadId, resolved, owner) => {
+      record('reviewSetResolved', [number, threadId, resolved, owner])
+      assertFixtureReviewOwner(number, owner)
       return answer('reviewSetResolved', () => ({
         id: threadId,
         state: resolved ? 'RESOLVED' : 'UNRESOLVED',
@@ -1297,7 +1833,7 @@ export function installFixtureControl(options: {
     },
     reviewHistory: (number) => {
       record('reviewHistory', [number])
-      return answer('reviewHistory', () => {
+      return admittedAnswer('reviewHistory', () => {
         if (scenario.reviewHistory) {
           return typeof scenario.reviewHistory === 'function'
             ? scenario.reviewHistory(number)
@@ -1311,12 +1847,12 @@ export function installFixtureControl(options: {
           current: {
             headOid: currentHead,
             baseOid: 'b'.repeat(40),
-            baseRef: 'main',
+            baseRef: found?.base ?? null,
           },
           latest: {
             headOid: currentHead,
             baseOid: 'b'.repeat(40),
-            baseRef: 'main',
+            baseRef: found?.base ?? null,
             firstSeenAt: '2026-09-24T10:00:00.000Z',
             lastSeenAt: '2026-09-25T12:00:00.000Z',
             observations: 2,
@@ -1327,7 +1863,7 @@ export function installFixtureControl(options: {
           reviewed: {
             headOid: historicalHead,
             baseOid: 'b'.repeat(40),
-            baseRef: 'main',
+            baseRef: found?.base ?? null,
             firstSeenAt: '2026-09-22T08:00:00.000Z',
             lastSeenAt: '2026-09-23T09:00:00.000Z',
             observations: 3,
@@ -1339,7 +1875,7 @@ export function installFixtureControl(options: {
             {
               headOid: historicalHead,
               baseOid: 'b'.repeat(40),
-              baseRef: 'main',
+              baseRef: found?.base ?? null,
               firstSeenAt: '2026-09-22T08:00:00.000Z',
               lastSeenAt: '2026-09-23T09:00:00.000Z',
               observations: 3,
@@ -1350,7 +1886,7 @@ export function installFixtureControl(options: {
             {
               headOid: currentHead,
               baseOid: 'b'.repeat(40),
-              baseRef: 'main',
+              baseRef: found?.base ?? null,
               firstSeenAt: '2026-09-24T10:00:00.000Z',
               lastSeenAt: '2026-09-25T12:00:00.000Z',
               observations: 2,
@@ -1365,7 +1901,7 @@ export function installFixtureControl(options: {
     },
     reviewHistoryDiff: (number, fromOid) => {
       record('reviewHistoryDiff', [number, fromOid])
-      return answer('reviewHistoryDiff', () => {
+      return admittedAnswer('reviewHistoryDiff', () => {
         if (scenario.reviewHistoryDiff) {
           return typeof scenario.reviewHistoryDiff === 'function'
             ? scenario.reviewHistoryDiff(number, fromOid)
@@ -1376,7 +1912,7 @@ export function installFixtureControl(options: {
         const fromSnapshot = {
           headOid: fromOid,
           baseOid: 'b'.repeat(40),
-          baseRef: 'main',
+          baseRef: found?.base ?? null,
           firstSeenAt: '2026-09-22T08:00:00.000Z',
           lastSeenAt: '2026-09-23T09:00:00.000Z',
           observations: 1,
@@ -1390,7 +1926,7 @@ export function installFixtureControl(options: {
             state: 'unavailable',
             reason: `Historical commit ${fromOid.slice(0, 7)} is no longer in this repository (it may have been garbage-collected after a force-push).`,
             from: fromSnapshot,
-            to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+            to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: found?.base ?? null },
             mergeBaseOid: null,
             files: [],
             additions: 0,
@@ -1404,7 +1940,7 @@ export function installFixtureControl(options: {
           state: 'files',
           reason: '',
           from: fromSnapshot,
-          to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+          to: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: found?.base ?? null },
           mergeBaseOid: 'b'.repeat(40),
           files: [
             textFile('src/main/review.ts', '@@ -2,2 +2,2 @@', [
@@ -1419,18 +1955,20 @@ export function installFixtureControl(options: {
         return diff
       })
     },
-    reviewClearHistory: (number) => {
-      record('reviewClearHistory', [number])
-      return answer('reviewClearHistory', () => {
+    reviewClearHistory: (number, owner) => {
+      record('reviewClearHistory', [number, owner])
+      const capturedKey = fixtureReviewKey(number)
+      const response = admittedAnswer('reviewClearHistory', () => {
+        assertFixtureReviewOwner(number, owner)
         const found = active?.pullRequests.find((pr) => pr.number === number)
         const currentHead = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
         return {
           number,
-          current: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: 'main' },
+          current: { headOid: currentHead, baseOid: 'b'.repeat(40), baseRef: found?.base ?? null },
           latest: {
             headOid: currentHead,
             baseOid: 'b'.repeat(40),
-            baseRef: 'main',
+            baseRef: found?.base ?? null,
             firstSeenAt: '2026-09-25T12:00:00.000Z',
             lastSeenAt: '2026-09-25T12:00:00.000Z',
             observations: 1,
@@ -1443,7 +1981,7 @@ export function installFixtureControl(options: {
             {
               headOid: currentHead,
               baseOid: 'b'.repeat(40),
-              baseRef: 'main',
+              baseRef: found?.base ?? null,
               firstSeenAt: '2026-09-25T12:00:00.000Z',
               lastSeenAt: '2026-09-25T12:00:00.000Z',
               observations: 1,
@@ -1455,13 +1993,20 @@ export function installFixtureControl(options: {
           gap: null,
         }
       })
+      return response.then((result) => {
+        assertFixtureReviewOwner(number, owner)
+        if (capturedKey !== fixtureReviewKey(number))
+          throw new Error('The captured snapshot-history repository changed.')
+        return result
+      })
     },
     reviewResolveDrafts: (number, drafts) => {
       record('reviewResolveDrafts', [number, drafts])
       return answer('reviewResolveDrafts', () => {
         const found = active?.pullRequests.find((pr) => pr.number === number)
+        if (!found) throw new Error(`Pull request #${number} is not in this fixture snapshot.`)
         const headOid = scenario.reviewHeadOid ?? found?.headOid ?? `head-${number}`
-        const files = reviewFileSet(number, headOid)
+        const files = reviewFileSet(number, headOid, found.base, found.baseOid)
         // The main process re-resolves each anchor against a freshly read file
         // set; the double answers for the set it already serves, so a draft the
         // reviewer just wrote is exact and a draft naming a line the fixture does
@@ -1615,7 +2160,7 @@ export function installFixtureControl(options: {
       // rebuilding it from the replacement is the one thing this fence exists to
       // catch. The list is derived here, at admission, and only the delivery of
       // the answer is held.
-      const admittedCli = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus
+      const admittedCli = statusForHost(settings.github.host)
       const produce = () => {
         const query = request.query?.trim() ?? ''
         if (query === 'sso-error') {
@@ -1893,7 +2438,7 @@ export function installFixtureControl(options: {
       // carries the rows the host it asked about read. Reading the served status
       // inside a released producer would rebuild a held read as the replacement
       // account's answer, which is the one thing this boundary exists to catch.
-      const served = servedCliStatus ?? scenario.identity?.cli ?? scenario.githubCliStatus ?? null
+      const served = statusForHost(settings.github.host)
       const admitted = !scenario.inbox
         ? null
         : served && served.host !== 'github.com'
@@ -1906,8 +2451,66 @@ export function installFixtureControl(options: {
               })),
             }
           : scenario.inbox
+      const admittedHost = settings.github.host
+      const admittedAuthority = cliAuthority(admittedHost, served)
       return answer('pullRequestInbox', () => {
         if (!admitted) throw new Error('This fixture has no PR Inbox read behind it.')
+        if (
+          admitted.refresh.confirmedAt &&
+          settings.github.host === admittedHost &&
+          cliAuthority(admittedHost, statusForHost(admittedHost)) === admittedAuthority
+        ) {
+          const next = structuredClone(servedInventory)
+          for (const item of admitted.items) {
+            const repo = next.repositories.find(
+              (repo) =>
+                repo.registeredPaths.includes(item.repositoryPath) &&
+                repo.remote?.host.toLowerCase() === item.host.toLowerCase() &&
+                repo.remote.fullName.toLowerCase() === item.repository.toLowerCase(),
+            )
+            if (!repo?.remote) continue
+            const existing = repo.pullRequests.find((pr) => pr.number === item.number)
+            const id = existing?.id ?? JSON.stringify([repo.remote.id, 'pr', String(item.number)])
+            const refIds =
+              item.headRepository?.toLowerCase() === repo.remote.fullName.toLowerCase()
+                ? (existing?.refIds.filter(
+                    (id) => repo.refs.find((ref) => ref.id === id)?.oid === item.headOid,
+                  ) ?? [])
+                : []
+            const pr = {
+              id,
+              remoteId: repo.remote.id,
+              number: item.number,
+              headRef: item.head,
+              headOid: item.headOid ?? null,
+              refIds,
+              facts: structuredClone(item),
+            }
+            if (existing) Object.assign(existing, pr)
+            else repo.pullRequests.push(pr)
+            repo.remoteFreshness = {
+              state: 'stale',
+              fetchedAt: admitted.refresh.confirmedAt,
+              checkedAt: admitted.refresh.checkedAt,
+              detail: 'Bounded fixture provider rows are not a complete readiness read.',
+              rateLimitReset: null,
+              pendingMutations: repo.remoteFreshness?.pendingMutations ?? [],
+            }
+          }
+          for (const repo of next.repositories) {
+            const byRef = new Map<string, string[]>()
+            for (const pr of repo.pullRequests)
+              for (const id of pr.refIds) {
+                const ids = byRef.get(id) ?? []
+                ids.push(pr.id)
+                byRef.set(id, ids)
+              }
+            for (const ref of repo.refs) ref.pullRequestIds = byRef.get(ref.id) ?? []
+          }
+          next.generation += 1
+          servedInventory = next
+          for (const listener of inventoryListeners) listener(structuredClone(next))
+        }
         return admitted
       })
     },
@@ -2008,6 +2611,7 @@ export function installFixtureControl(options: {
     actions,
     externalUrls,
     calls,
+    reviewCache: options.reviewCache,
     get pending(): FixtureCall[] {
       const kinds = new Set<FixtureCall>(holds)
       for (const call of startsPending) {
@@ -2022,6 +2626,24 @@ export function installFixtureControl(options: {
     setScenario(name) {
       scenario = scenarioFor(name)
       servedPrIndex = scenario.prIndex
+      inventoryConsumer = options.inventoryConsumer?.() ?? false
+      retainedConsumerInventory = null
+      servedInventory =
+        scenario.inventory ??
+        (inventoryConsumer
+          ? inventoryFixture()
+          : snapshotInventory(
+              Object.values(
+                scenario.snapshotsByPath ??
+                  (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+              ),
+            ))
+      snapshotSources = new Map(
+        Object.entries(
+          scenario.snapshotsByPath ??
+            (scenario.snapshot ? { [scenario.snapshot.path]: scenario.snapshot } : {}),
+        ),
+      )
       seedGraphPreferences()
       // This double is installed once and outlives any number of scenario
       // changes. Only the answers change here: the mounted window keeps the
@@ -2033,7 +2655,7 @@ export function installFixtureControl(options: {
       if (scenario.notifications)
         hostInboxes.set(scenario.notifications.host, scenario.notifications)
       notificationSettings.github = { host: scenario.notifications?.host ?? GITHUB_DEFAULT_HOST }
-      servedCliStatus = null
+      cliStatuses.clear()
       released.clear()
       options.onScenarioChange(scenario.name)
     },
@@ -2061,7 +2683,7 @@ export function installFixtureControl(options: {
       // one: the fixture cannot rebuild a scenario's status for a host that
       // scenario never declared, and inventing a session for it would prove
       // nothing about the host switch.
-      servedCliStatus = status
+      cliStatuses.set(status.host, status)
     },
     publishCliStatus(status) {
       // The session changed outside the window, which is what the main process
@@ -2069,8 +2691,16 @@ export function installFixtureControl(options: {
       // session becomes the new one, so a read asked for afterwards answers as
       // the replacement rather than as the session it replaced, and the window
       // is told about it without having asked.
-      servedCliStatus = status
-      cliStatusListener?.(status)
+      const previous = statusForHost(status.host)
+      cliStatuses.set(status.host, status)
+      if (!scenario.inventory && !inventoryConsumer && previous?.identity !== status.identity) {
+        servedInventory = {
+          ...snapshotInventory([...snapshotSources.values()].map(answeredForServedCredential)),
+          generation: servedInventory.generation + 1,
+        }
+        for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+      }
+      for (const listener of cliStatusListeners) listener(status)
     },
     hold(call) {
       holds.add(call)
@@ -2108,8 +2738,10 @@ export function installFixtureControl(options: {
       }
       return settled
     },
-    failNext(call, message) {
-      oneShotFailures.set(call, message ?? `Git Stacks fixture: ${call} failed`)
+    failNext(call, message, name = 'Error') {
+      const failure = new Error(message ?? `Git Stacks fixture: ${call} failed`)
+      failure.name = name
+      oneShotFailures.set(call, failure)
     },
     answerNext(call, value) {
       oneShotAnswers.set(call, value)
@@ -2131,12 +2763,42 @@ export function installFixtureControl(options: {
       released.clear()
       waiting.length = 0
     },
+    operationScope: captureOperationScope,
+    pushPublication(event) {
+      publication = structuredClone(event)
+      for (const listener of publicationListeners) listener(event)
+    },
+    pushMergeProgress(event) {
+      publishMergeProgress(event)
+    },
     pushFreshness(value) {
       push('repository:remote-status', value)
     },
     pushSnapshot(value) {
+      const host =
+        value.remoteUrl
+          ?.match(/^(?:https?:\/\/|git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?$/u)?.[1]
+          .toLowerCase() ?? null
+      const owner = statusForHost(host)
+      if (owner) publishedSnapshotOwners.set(value, owner)
+      if (!scenario.inventory) {
+        if (snapshotSources.size === 1 && active?.path !== value.path) snapshotSources.clear()
+        snapshotSources.set(value.path, value)
+        servedInventory = {
+          ...snapshotInventory([...snapshotSources.values()]),
+          generation: servedInventory.generation + 1,
+        }
+        for (const listener of inventoryListeners) listener(structuredClone(servedInventory))
+      }
       active = value
       push('repository:background-snapshot', value)
+    },
+    serveInventory(value) {
+      servedInventory = structuredClone(value)
+    },
+    pushInventory(value) {
+      servedInventory = structuredClone(value)
+      for (const listener of inventoryListeners) listener(structuredClone(value))
     },
     pushPrIndex(value) {
       servedPrIndex = value

@@ -98,3 +98,32 @@ test('the decorator paces REST and GraphQL mutations across actors, but not read
   await reviewer.rest({ method: 'DELETE', path: 'repos/example/disposable' })
   assert.deepEqual(sent, [0, 1_000, 1_000, 1_000, 2_000])
 })
+
+test('pinned review dispatch retains live lost-response faults and shared mutation pacing', async () => {
+  const { pacing, now } = clock()
+  const sent: number[] = []
+  const inner = new DirectGitHubTransport({
+    token: 'synthetic-pinned-pacing-token',
+    fetch: async () => {
+      sent.push(now())
+      return new Response(JSON.stringify({ data: { ok: true } }), {
+        headers: { 'content-type': 'application/json' },
+      })
+    },
+  })
+  const transport = new FaultInjectingTransport(inner, pacing)
+  const credential = await transport.pinCredential()
+  const path = 'repos/example/disposable/pulls/1/reviews'
+  transport.loseOnce({ method: 'POST', pathIncludes: '/reviews' })
+  await assert.rejects(
+    credential.rest({ method: 'POST', path, body: { event: 'COMMENT' } }),
+    (error) => error instanceof GitHubTransportError && error.kind === 'network',
+  )
+  await credential.graphql('mutation ResolveThread { ok }')
+  assert.deepEqual(sent, [0, 1_000])
+  assert.deepEqual(transport.recentExchanges(), [
+    { method: 'POST', path, status: 200 },
+    { method: 'POST', path, status: 'network' },
+    { method: 'POST', path: 'graphql:ResolveThread', status: 200 },
+  ])
+})

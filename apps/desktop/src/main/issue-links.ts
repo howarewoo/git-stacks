@@ -13,6 +13,7 @@ import { isRecord } from '@git-stacks/shared/guards'
 import { getPullRequest, githubErrorMessage } from './github'
 import { hostTransport, remoteHostContext, type GitHubHostContext } from './github-host'
 import { patchPullRequest } from './stacks'
+import { validateInspectionDispatch } from './inspection-context'
 
 /**
  * Concurrency Note (Read-Compare-Write API Race):
@@ -236,7 +237,8 @@ export async function readLocalContextualIssueLinks(
       .map((v: string) => Number(v.trim()))
       .filter((n: number) => Number.isInteger(n) && n > 0)
     return [...new Set(numbers)]
-  } catch {
+  } catch (error) {
+    if (isCancelled(error)) throw error
     return []
   }
 }
@@ -251,6 +253,7 @@ export async function addLocalContextualIssueLink(
     return false
   }
   const key = `${CONFIG_PREFIX}${prNumber}.relatedissue`
+  await validateInspectionDispatch()
   await runGit(repoPath, ['config', '--local', '--add', key, String(issueNumber)])
   return true
 }
@@ -265,16 +268,16 @@ export async function removeLocalContextualIssueLink(
   if (!current.includes(issueNumber)) {
     return false
   }
-  const remaining = current.filter((n) => n !== issueNumber)
   const key = `${CONFIG_PREFIX}${prNumber}.relatedissue`
-  try {
-    await runGit(repoPath, ['config', '--local', '--unset-all', key])
-  } catch {
-    // Already unset
-  }
-  for (const num of remaining) {
-    await runGit(repoPath, ['config', '--local', '--add', key, String(num)])
-  }
+  await validateInspectionDispatch()
+  await runGit(repoPath, [
+    'config',
+    '--local',
+    '--fixed-value',
+    '--unset-all',
+    key,
+    String(issueNumber),
+  ])
   return true
 }
 
@@ -569,6 +572,8 @@ export async function previewIssueLink(
 
   if (relation === 'closing') {
     const livePr = await getPullRequest(repoPath, prNumber, signal)
+    if (livePr.canUpdate !== true)
+      throw new Error('The provider did not establish permission to edit closing references.')
     if (action === 'link') {
       if (
         !remote ||
@@ -647,6 +652,8 @@ export async function runLinkIssueAction(
 
   // Revalidate body immediately before writing!
   const livePr = await getPullRequest(repoPath, action.prNumber)
+  if (livePr.canUpdate !== true)
+    throw new Error('The provider did not establish permission to edit closing references.')
   if (livePr.base !== (await repositoryDefaultBranch(remote.fullName, host))) {
     throw new Error(
       'Closing keywords only close issues when the pull request targets the repository default branch.',
@@ -715,6 +722,8 @@ export async function runUnlinkIssueAction(
 
   // Revalidate body immediately before writing!
   const livePr = await getPullRequest(repoPath, action.prNumber)
+  if (livePr.canUpdate !== true)
+    throw new Error('The provider did not establish permission to edit closing references.')
   if (action.expectedBody !== undefined && livePr.body !== action.expectedBody) {
     throw new Error(
       `External body modification detected: the pull request description on GitHub was modified after this action was previewed. Reload the pull request before modifying issue links.`,

@@ -410,11 +410,16 @@ async function observationPath(repoPath: string): Promise<string> {
 
 export async function readMergeObservations(
   repoPath: string,
+  options: { strict?: boolean } = {},
 ): Promise<Map<number, MergeQueueObservation>> {
   const observations = new Map<number, MergeQueueObservation>()
   try {
     const parsed: unknown = JSON.parse(await fs.readFile(await observationPath(repoPath), 'utf8'))
-    if (!isRecord(parsed)) return observations
+    if (!isRecord(parsed)) {
+      if (options.strict)
+        throw new Error('Merge history is malformed; no new authorization is safe.')
+      return observations
+    }
     for (const value of Object.values(parsed)) {
       if (
         !isRecord(value) ||
@@ -424,11 +429,16 @@ export async function readMergeObservations(
         typeof value.headOid !== 'string' ||
         typeof value.requestedAt !== 'number'
       ) {
+        if (options.strict) throw new Error('Merge history contains an invalid remembered request.')
         continue
       }
       const action = MERGE_ACTIONS[typeof value.action === 'string' ? value.action : ''] ?? null
       const outcome = MERGE_OUTCOMES[typeof value.outcome === 'string' ? value.outcome : '']
-      if (!action || !outcome) continue
+      if (!action || !outcome) {
+        if (options.strict)
+          throw new Error('Merge history contains an unknown request disposition.')
+        continue
+      }
       const method = MERGE_METHODS[typeof value.method === 'string' ? value.method : ''] ?? null
       const request = isRecord(value.request) ? value.request : null
       observations.set(value.pullRequest, {
@@ -460,8 +470,9 @@ export async function readMergeObservations(
         entry: parseQueueEntry(value.entry),
       })
     }
-  } catch {
-    // An absent or unreadable journal means this repository has no remembered merge request.
+  } catch (error) {
+    if (options.strict && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    // Absence is distinct from unreadability for every authorization/write path.
   }
   return observations
 }
@@ -472,7 +483,7 @@ export async function recordMergeObservation(
 ): Promise<void> {
   const target = await observationPath(repoPath)
   await fs.mkdir(path.dirname(target), { recursive: true })
-  const current = await readMergeObservations(repoPath)
+  const current = await readMergeObservations(repoPath, { strict: true })
   current.set(observation.pullRequest, observation)
   const payload: Record<string, MergeQueueObservation> = {}
   for (const [key, value] of current.entries()) payload[String(key)] = value

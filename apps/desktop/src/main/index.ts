@@ -1,3 +1,36 @@
+import { previewNativeOperation, validateNativeOperationPreview } from './native-operation'
+import { previewReviewedMerge, validateStackPreview } from './stacks'
+import { assertStackActionTarget, isStackAction } from './stacks'
+import { previewWorktreeLifecycle, validateWorktreeLifecyclePreview } from './worktree-lifecycle'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import {
+  captureOperation,
+  revalidateOperation,
+  runRecordedOperation,
+  readOperationRecords,
+  validateRecordedRecovery,
+  createOperationProviderValidator,
+  withCapturedOperationLock,
+  validateCapturedDirectory,
+  createOperationEffectValidator,
+} from './operation-authority'
+import type { OperationCapture } from '@git-stacks/shared/operation-scope'
+import { parseReviewComposerDraft } from '@git-stacks/shared/review-threads'
+import { inspectionAuthority, validateInspectionDispatch } from './inspection-context'
+import {
+  INSPECTION_CHANNELS,
+  type InspectionContext,
+  type InspectionOperation,
+} from '@git-stacks/shared/inspection'
+import { discoverWorktrees } from './worktree-inventory'
+import { LIST_PAGE_SIZE, WORKTREE_READ_CONCURRENCY } from '@git-stacks/shared/performance'
+import type { InventoryRequest } from '@git-stacks/shared/worktree-inventory'
+import { WorktreeInventoryService, adoptionPaths } from './worktree-inventory'
+import {
+  cliAuthority,
+  sameOperationScope,
+  type OperationScope,
+} from '@git-stacks/shared/operation-scope'
 import {
   app,
   BrowserWindow,
@@ -10,11 +43,13 @@ import {
   shell,
 } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, writeFile, realpath } from 'node:fs/promises'
 import { dirname, join, resolve, sep, basename } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isRecord } from '@git-stacks/shared/guards'
 import {
   getSnapshot,
+  getWorktreeInspectionStatus,
   resolveRepository,
   runAction,
   getFileView,
@@ -39,12 +74,26 @@ import {
 } from './stacks'
 import { previewReconciliationRepair } from './reconciliation'
 import { getPullRequestIssueLinks, previewIssueLink, searchGitHubIssues } from './issue-links'
-import { originRemote, readReviewCommits, readReviewFiles, readReviewHeadline } from './review'
+import {
+  originRemote,
+  readReviewCommits,
+  readReviewFiles,
+  readReviewHeadline,
+  readNativeStackLayer,
+  reviewRepositoryIdentity,
+} from './review'
 import { readViewedRecord, writeViewedRecord } from './review-viewed'
 import { clearReviewHistory, readReviewHistory, readReviewHistoryDiff } from './review-history'
-import { readReviewDrafts, writeReviewDrafts } from './review-drafts'
+import {
+  readReviewDrafts,
+  writeReviewDrafts,
+  readReviewDraftRecovery,
+  assertReviewDraftOwner,
+} from './review-drafts'
 import {
   readReviewPermissions,
+  readReviewPermissionsFrom,
+  revalidateReviewOwner,
   readReviewThreads,
   replyToThread,
   resolveReviewDraftsAt,
@@ -58,11 +107,13 @@ import {
   rerunPullRequestCheck,
 } from './pull-request-checks'
 import type { PullRequestChecksOptions } from './pull-request-checks'
+import type { PullRequestPage, PullRequest, PullRequestLayerRead } from '@git-stacks/shared/types'
 import type {
   ReviewDraft,
   ReviewDraftRecord,
   ReviewEvent,
   ReviewSubmission,
+  ReviewOwner,
 } from '@git-stacks/shared/review-threads'
 import { REVIEW_EVENTS } from '@git-stacks/shared/review-threads'
 import type { ReviewComparison, ReviewLineRef, ReviewViewedRecord } from '@git-stacks/shared/review'
@@ -89,7 +140,6 @@ import {
   RepositorySyncCoordinator,
   type SyncIntervals,
 } from './sync-coordinator'
-import { RepositoryWatcher } from './git-watcher'
 import {
   configureGitRuntime,
   gitRuntimeStatus,
@@ -99,7 +149,11 @@ import {
 } from './git-runtime'
 import { CredentialVault } from './credentials'
 import { safeStorageProtector } from './secret-storage'
-import { forgetGitHubCliServices, gitHubCliStatusService } from './github-cli'
+import {
+  forgetGitHubCliServices,
+  gitHubCliStatusService,
+  onGitHubCliStatusChange,
+} from './github-cli'
 import { retireLegacyPrimaryRecord } from './notification-protection'
 import { NotificationCenter, notificationCredentialStore } from './notifications'
 import {
@@ -137,6 +191,7 @@ import {
   GITHUB_DOTCOM_HOST,
   githubHostContext,
   hostTransport,
+  withGitHubCredentialSession,
   probeGitHubHost,
   remoteHostContext,
   type GitHubHostContext,
@@ -207,6 +262,8 @@ if (!app.isPackaged && process.env.GIT_STACKS_USER_DATA) {
 
 let window: BrowserWindow | null = null
 let activeRepository: string | null = null
+const progressOwner = new AsyncLocalStorage<OperationScope>()
+const operationCaptures = new Map<string, OperationCapture>()
 let recents: RecentRepository[] = []
 /**
  * Moves whenever the registered repository list changes, which a read cannot see
@@ -221,11 +278,24 @@ let inboxRegistrationGeneration = 0
 function setRecents(next: RecentRepository[]): void {
   recents = next
   inboxRegistrationGeneration += 1
+  inventory.register(next.map((item) => item.path))
 }
 const operations = new RepositoryOperations()
 
 const scheduler = new RepositoryScheduler()
-let watcher: RepositoryWatcher | null = null
+const inventory = new WorktreeInventoryService(
+  scheduler,
+  (value) => {
+    if (window && !window.isDestroyed())
+      window.webContents.send('repositories:inventory-updated', value)
+  },
+  (registeredPaths) => {
+    if (activeRepository && registeredPaths.includes(activeRepository)) sync.notifyLocalChange()
+  },
+  {},
+  (root, signal) => getSnapshot(root, signal, undefined, 'reuse', false, true),
+)
+const inventoryKeys = new RequestRegistry()
 
 /**
  * Background refresh reads run on the scheduler rather than the foreground
@@ -257,7 +327,8 @@ const sync = new RepositorySyncCoordinator({
     backgroundRead(
       root,
       signal,
-      (path, readSignal) => getSnapshot(path, readSignal, undefined, request.github.remote),
+      (path, readSignal) =>
+        getSnapshot(path, readSignal, undefined, request.github.remote, false, true),
       request.requestId,
       snapshotReadPurpose(request.github),
     ),
@@ -328,6 +399,7 @@ sync.onEvent((event) => {
         prIndex.adopt(event.snapshot.path, host.host, origin.fullName, event.snapshot.pullRequests)
     }
     const { githubStale, ...snapshot } = event.snapshot
+    inventory.adoptRemote(event.snapshot)
     window.webContents.send('repository:background-snapshot', snapshot)
     return
   }
@@ -340,20 +412,7 @@ sync.onEvent((event) => {
   }
 })
 
-function startBackgroundSync(root: string, snapshot: RepositorySnapshot): void {
-  watcher?.stop()
-  watcher = new RepositoryWatcher(root, () => {
-    // A commit, a branch switch, or a ref update made outside this window — and
-    // the repository coming back after a move — all land the same way.
-    sync.notifyLocalChange()
-  })
-  void watcher.start()
-  sync.attach(root, snapshot)
-}
-
 function stopBackgroundSync(): void {
-  watcher?.stop()
-  watcher = null
   prIndex.invalidate()
   sync.detach()
 }
@@ -607,40 +666,47 @@ let updateService: UpdateService | null = null
  * no path to either has ever left the main process.
  */
 function githubCli() {
-  return gitHubCliStatusService(configuredHost().host, {
-    onChange: (status) => {
-      // The queue's rows belong to the account that read them, so a new identity
-      // is established before the window hears about the status that carries it.
-      // A credential replaced outside this app — in the CLI itself — changes the
-      // identity, and everything read under the old one is dropped with it.
-      const identity = cliIdentity(status)
-      if (identity !== inboxIdentity) {
-        retireInboxIdentity(identity)
-        // A credential replaced outside this app changes whose GitHub answers
-        // every cached read belongs to, not only the queue's. Everything host-
-        // scoped in flight is stopped and its generation retired, what was
-        // observed about hosts is forgotten, and the reports keyed by validator
-        // are dropped: none of them may answer for a credential that no longer
-        // exists. Local Git state and the notification inbox's own host
-        // credential are untouched by this.
-        for (const controller of hostWork) controller.abort()
-        hostWork.clear()
-        hostGeneration += 1
-        forgetHost()
-        // Every GitHub read still running is pinned to the credential that has
-        // just been replaced, so none of them may repopulate a cache, a payload,
-        // or a row that now belongs to another account. Local Git is untouched:
-        // none of these readers can reach it.
-        readKeys.cancelGitHub()
-        retireConfirmedGitHubPayloads()
-        prIndex.invalidate()
-        retirePullRequestChecks()
-        clearCredentialCheckBackoffs()
-      }
-      window?.webContents.send('github-cli:status', status)
-    },
-  })
+  return gitHubCliStatusService(configuredHost().host)
 }
+
+const cliIdentities = new Map<string, string>()
+onGitHubCliStatusChange((status) => {
+  // The queue's rows belong to the account that read them, so a new identity
+  // is established before the window hears about the status that carries it.
+  // A credential replaced outside this app — in the CLI itself — changes the
+  // identity, and everything read under the old one is dropped with it.
+  const identity = cliIdentity(status)
+  const host = canonicalHostName(status.host)
+  const previous = cliIdentities.get(host)
+  cliIdentities.set(host, identity)
+  if (identity !== previous) retireInboxIdentity([...cliIdentities.values()].sort().join('\u0000'))
+  // A host's first proof establishes its scope; subsequent replacements
+  // retire reads. Other hosts' unchanged proofs must not alternate identities.
+  if (previous !== undefined && identity !== previous) {
+    // A credential replaced outside this app changes whose GitHub answers
+    // every cached read belongs to, not only the queue's. Everything host-
+    // scoped in flight is stopped and its generation retired, what was
+    // observed about hosts is forgotten, and the reports keyed by validator
+    // are dropped: none of them may answer for a credential that no longer
+    // exists. Local Git state and the notification inbox's own host
+    // credential are untouched by this.
+    for (const controller of hostWork) controller.abort()
+    hostWork.clear()
+    hostGeneration += 1
+    forgetHost()
+    // Every GitHub read still running is pinned to the credential that has
+    // just been replaced, so none of them may repopulate a cache, a payload,
+    // or a row that now belongs to another account. Local Git is untouched:
+    // none of these readers can reach it.
+    readKeys.cancelGitHub()
+    inventory.retireRemote()
+    retireConfirmedGitHubPayloads()
+    prIndex.invalidate()
+    retirePullRequestChecks()
+    clearCredentialCheckBackoffs()
+  }
+  window?.webContents.send('github-cli:status', status)
+})
 
 /**
  * The optional GitHub Notifications Center.
@@ -772,6 +838,7 @@ function applySettings(settings: AppSettings): void {
   for (const controller of hostWork) controller.abort()
   hostWork.clear()
   hostGeneration += 1
+  inventory.retireRemote()
   // The selected host is part of the queue's identity, and a host change can
   // arrive without a CLI status to announce it. The services of every host are
   // dropped with it, so a returning host reads its CLI afresh rather than
@@ -780,6 +847,7 @@ function applySettings(settings: AppSettings): void {
   prIndex.invalidate()
   forgetHost(previousHost ?? undefined)
   forgetGitHubCliServices()
+  cliIdentities.clear()
   // The notification inbox belongs to the host it was read from, and the window
   // is holding it. The old center is retired here, where the host changed, and
   // the new host's is opened and published at once: its old timer never runs
@@ -920,8 +988,31 @@ async function inGitRuntime<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 function repository() {
+  const captured = inspectionAuthority.getStore()
+  if (captured) return captured.root
   if (!activeRepository) throw new Error('Open a local Git repository first.')
   return activeRepository
+}
+
+const inspectionReads = new RepositoryScheduler(WORKTREE_READ_CONCURRENCY)
+
+async function repositoryOperationScope(
+  root: string,
+  signal?: AbortSignal,
+): Promise<OperationScope> {
+  const generation = hostGeneration
+  const remoteUrl = await getOriginUrl(root, signal)
+  const host = remoteHostContext(parseRemote(remoteUrl))
+  const service = host ? gitHubCliStatusService(host.host) : null
+  const status = service ? await service.read() : null
+  if (
+    signal?.aborted ||
+    (inspectionAuthority.getStore()?.root ?? activeRepository) !== root ||
+    generation !== hostGeneration ||
+    (host && service !== gitHubCliStatusService(host.host))
+  )
+    throw new CommandCancelled()
+  return { repositoryPath: root, remoteUrl, authority: cliAuthority(host?.host ?? null, status) }
 }
 
 /**
@@ -936,6 +1027,13 @@ function readRepository<T>(
   /** What this read depends on; only a GitHub read dies with a replaced credential. */
   purpose: ReadPurpose = 'local',
 ): Promise<T> {
+  const captured = inspectionAuthority.getStore()
+  if (captured) {
+    const controller = readKeys.claim(captured.root, requestId, purpose)
+    return inGitRuntime(() =>
+      operation(captured.root, AbortSignal.any([controller.signal, captured.signal])),
+    ).finally(() => readKeys.release(captured.root, requestId, controller))
+  }
   const root = repository()
   const controller = readKeys.claim(root, requestId, purpose)
   const superseded = () =>
@@ -948,15 +1046,21 @@ function readRepository<T>(
     .finally(() => readKeys.release(root, requestId, controller))
 }
 
-async function remember(path: string) {
-  const next = [
-    { path, name: basename(path) },
-    ...recents.filter((item) => item.path !== path),
-  ].slice(0, 12)
-  await mkdir(dirname(settingsPath()), { recursive: true })
-  await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), { mode: 0o600 })
-  await rename(`${settingsPath()}.tmp`, settingsPath())
-  setRecents(next)
+let registrationWrite: Promise<void> = Promise.resolve()
+async function remember(selected: string | string[]) {
+  const paths = typeof selected === 'string' ? [selected] : [...new Set(selected)]
+  const write = registrationWrite.then(async () => {
+    const next = [
+      ...paths.map((path) => ({ path, name: basename(path) })),
+      ...recents.filter((item) => !paths.includes(item.path)),
+    ]
+    await mkdir(dirname(settingsPath()), { recursive: true })
+    await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), { mode: 0o600 })
+    await rename(`${settingsPath()}.tmp`, settingsPath())
+    setRecents(next)
+  })
+  registrationWrite = write.catch(() => {})
+  await write
 }
 
 function requirePullRequestNumber(value: unknown): number {
@@ -1082,21 +1186,22 @@ async function activateRepository(selected: string, signal?: AbortSignal) {
   // Retire old reads before waiting for the operation queue; a long-running
   // history/diff must not delay switching to a newly selected repository.
   if (activeRepository) readKeys.cancelRoot(activeRepository)
+  inventoryKeys.cancelRoot('inventory')
   stopBackgroundSync()
   return operations.switchRepository(path, async () => {
     if (signal?.aborted) throw new CommandCancelled()
     return inGitRuntime(async () => {
       if (signal?.aborted) throw new CommandCancelled()
-      const snapshot = await getSnapshot(path, undefined, undefined, 'reuse')
+      const snapshot = await getSnapshot(path, undefined, undefined, 'reuse', false, true)
       if (signal?.aborted) throw new CommandCancelled()
       // Past this point the recent entry is written and the switch completes:
       // recents and the active repository must name the same folder.
       await remember(path)
       activeRepository = path
-      startBackgroundSync(path, snapshot)
-      // The local workspace opens without waiting for every GitHub page. The
-      // existing coordinator owns the subsequent complete remote refresh.
-      void sync.refreshNow().catch(() => {
+      sync.attach(path, snapshot)
+      // Selection reuses qualified remote knowledge across local authorities.
+      // Explicit refresh and mutation preflight still request live provider reads.
+      void sync.selectNow().catch(() => {
         // The coordinator already reports background failure; a repository switch
         // can also retire this refresh before it obtains a snapshot.
       })
@@ -1192,6 +1297,9 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
   if (typeof record.viewer !== 'string' || record.viewer.length > 128) {
     throw new Error('Invalid review draft record.')
   }
+  const composer =
+    record.composer === undefined ? undefined : parseReviewComposerDraft(record.composer)
+  if (composer === null) throw new Error('Invalid saved review composer text.')
   return {
     number: record.number,
     repo: record.repo,
@@ -1200,8 +1308,24 @@ function requireDraftRecord(value: unknown): ReviewDraftRecord {
     // the diff they were read from.
     comparison: requireComparison(record.comparison),
     drafts: record.drafts.map(requireDraft),
+    ...(composer ? { composer } : {}),
     updatedAt: record.updatedAt,
   }
+}
+
+function requireReviewOwner(value: unknown): ReviewOwner {
+  if (
+    !isRecord(value) ||
+    typeof value.repo !== 'string' ||
+    value.repo.length > 512 ||
+    value.repo.split('/').length !== 3 ||
+    typeof value.viewer !== 'string' ||
+    !value.viewer ||
+    value.viewer.length > 128
+  ) {
+    throw new Error('The captured review host, repository and account are required.')
+  }
+  return { repo: value.repo, viewer: value.viewer }
 }
 
 function requireSubmission(value: unknown): ReviewSubmission {
@@ -1220,9 +1344,20 @@ function requireSubmission(value: unknown): ReviewSubmission {
   if (typeof submission.comparison !== 'object' || submission.comparison === null) {
     throw new Error('Invalid review submission.')
   }
+  if (
+    submission.compositionId !== undefined &&
+    (typeof submission.compositionId !== 'string' ||
+      !submission.compositionId ||
+      submission.compositionId.length > 128)
+  )
+    throw new Error('Invalid review composition identity.')
   return {
+    ...requireReviewOwner(submission),
     event: event as ReviewEvent,
     body: submission.body,
+    ...(typeof submission.compositionId === 'string'
+      ? { compositionId: submission.compositionId }
+      : {}),
     drafts: submission.drafts.map(requireDraft),
     // The comparison the diff was rendered from. Without it the backend cannot
     // tell a review of what the reviewer read from a review of whatever the head
@@ -1457,11 +1592,18 @@ async function currentDiagnostics(settings: AppSettings) {
  * A request from outside the app is refused rather than failed, and a cancelled
  * operation is the answer the user asked for, so neither is recorded.
  */
+const inspectionHandlers = new Map<
+  string,
+  (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown
+>()
+
 const ipcMain = {
   handle<Args extends unknown[]>(
     channel: string,
     listener: (event: IpcMainInvokeEvent, ...args: Args) => unknown,
   ): void {
+    if (Object.values(INSPECTION_CHANNELS).some((value) => value === channel))
+      inspectionHandlers.set(channel, (event, ...args) => listener(event, ...(args as Args)))
     electronIpcMain.handle(channel, (event, ...args: Args) =>
       Promise.resolve()
         .then(() => {
@@ -1483,6 +1625,655 @@ function requireUpdateService(): UpdateService {
   return updateService
 }
 function installHandlers() {
+  ipcMain.handle(
+    'repository:pull-request-page',
+    (event, stateValue: unknown, cursorValue: unknown) => {
+      if (!inspectionAuthority.getStore())
+        throw new Error('Captured repository context is required.')
+      if (
+        typeof stateValue !== 'string' ||
+        !['OPEN', 'CLOSED', 'MERGED', 'ALL'].includes(stateValue)
+      )
+        throw new Error('Choose a supported pull request lifecycle.')
+      const cursor =
+        cursorValue === null ? null : requireString(cursorValue, 'pull request cursor', 2048)
+      return readRepository(
+        async (root, signal) => {
+          const origin = await getOriginUrl(root, signal)
+          if (!origin) throw new Error('This repository has no provider origin.')
+          const page = await getPullRequestIndexPage(
+            origin,
+            cursor,
+            false,
+            signal,
+            stateValue as 'OPEN' | 'CLOSED' | 'MERGED' | 'ALL',
+            true,
+          )
+          return {
+            pullRequests: page.pullRequests,
+            next: page.next,
+            observedAt: new Date().toISOString(),
+            nativeMessage: page.nativeMessage,
+          }
+        },
+        'pull-request-page',
+        'github',
+      )
+    },
+  )
+  ipcMain.handle(
+    'repository:pull-request-layer',
+    (event, sourceValue: unknown, memberValue: unknown, requestId: unknown) => {
+      if (!inspectionAuthority.getStore())
+        throw new Error('Captured pull request context is required.')
+      return readRepository(
+        (root, signal) =>
+          readNativeStackLayer(
+            root,
+            requirePullRequestNumber(sourceValue),
+            requirePullRequestNumber(memberValue),
+            signal,
+          ),
+        requestIdClaim(requestId, 'pull-request-layer'),
+        'github',
+      )
+    },
+  )
+  ipcMain.handle('inspection:snapshot', () => {
+    if (!inspectionAuthority.getStore()) throw new Error('Captured repository context is required.')
+    return readRepository(
+      async (root, signal) => {
+        const local = Boolean(inspectionAuthority.getStore()?.context.worktreeId)
+        const snapshot = await getSnapshot(
+          root,
+          signal,
+          undefined,
+          local ? 'reuse' : 'live',
+          false,
+          true,
+        )
+        return snapshot
+      },
+      `inspection-snapshot:${inspectionAuthority.getStore()?.context.worktreeId ?? 'repository'}`,
+      'github',
+    )
+  })
+  ipcMain.handle('inspection:worktree-status', () => {
+    if (!inspectionAuthority.getStore()?.context.worktreeId)
+      throw new Error('Captured working-directory context is required.')
+    return readRepository(
+      getWorktreeInspectionStatus,
+      `inspection-status:${inspectionAuthority.getStore()?.context.worktreeId}`,
+    )
+  })
+  ipcMain.handle('operation:capture', async (_event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('A qualified operation context is required.')
+    const context: InspectionContext = {
+      repositoryId: requireString(value.repositoryId, 'repository identity'),
+      worktreeId: requireString(value.worktreeId, 'worktree identity'),
+    }
+    for (const key of ['refId', 'pullRequestId'] as const)
+      if (value[key] !== undefined) context[key] = requireString(value[key], key)
+    const registered = inventory
+      .current()
+      .repositories.find((repo) => repo.identity.id === context.repositoryId)
+    if (
+      !registered ||
+      !registered.registeredPaths.some((path) => recents.some((recent) => recent.path === path))
+    )
+      throw new Error('The captured common repository is no longer registered.')
+    const tree = registered.worktrees.find((tree) => tree.id === context.worktreeId)
+    if (!tree) throw new Error('Choose the exact discovered execution worktree.')
+    return inGitRuntime(async () => {
+      for (const linked of registered.worktrees)
+        await scheduler.bind(linked.path, context.repositoryId)
+      return scheduler.read(context.repositoryId, async () => {
+        for (const [token, value] of operationCaptures)
+          if (Date.now() - Date.parse(value.capturedAt) > 5 * 60_000)
+            operationCaptures.delete(token)
+        const captured = await captureOperation(
+          tree.path,
+          context,
+          await repositoryOperationScope(tree.path),
+        )
+        operationCaptures.set(captured.token, captured)
+        return captured
+      })
+    })
+  })
+  ipcMain.handle('operation:safety', async (_event, tokenValue: unknown, previewValue: unknown) => {
+    const token = requireString(tokenValue, 'original operation approval', 256)
+    const captured = operationCaptures.get(token)
+    if (!captured || Date.now() - Date.parse(captured.capturedAt) > 5 * 60_000)
+      return {
+        current: false,
+        reason: 'The original approval expired, was retired or was dispatched.',
+      }
+    try {
+      return await inGitRuntime(() =>
+        scheduler.read(captured.repositoryId, async () => {
+          const registered = inventory
+            .current()
+            .repositories.find((repo) => repo.identity.id === captured.repositoryId)
+          if (
+            !registered?.registeredPaths.some((path) =>
+              recents.some((recent) => recent.path === path),
+            )
+          )
+            throw new Error('The original repository registration was retired.')
+          await revalidateOperation(captured, await repositoryOperationScope(captured.worktreePath))
+          if (previewValue !== undefined) {
+            if (!isRecord(previewValue)) throw new Error('The original typed preview is required.')
+            const previewToken = requireString(previewValue.token, 'original preview', 256)
+            if (previewValue.kind === 'stack')
+              await validateStackPreview(captured.worktreePath, previewToken)
+            else if (previewValue.kind === 'native')
+              await validateNativeOperationPreview(captured.worktreePath, previewToken)
+            else if (previewValue.kind === 'lifecycle')
+              await validateWorktreeLifecyclePreview(captured.worktreePath, previewToken)
+            else throw new Error('Unknown original preview kind.')
+          }
+          if (
+            !sameOperationScope(
+              captured.scope,
+              await repositoryOperationScope(captured.worktreePath),
+            )
+          )
+            throw new Error('Original provider authority changed during safety inspection.')
+          await validateCapturedDirectory(captured)
+          return { current: true, reason: null }
+        }),
+      )
+    } catch (error) {
+      return { current: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('operation:execute', async (_event, tokenValue: unknown, action: GitAction) => {
+    if (
+      !isRecord(action) ||
+      ![
+        'fetch',
+        'push',
+        'forcePush',
+        'renameBranch',
+        'setUpstream',
+        'setParent',
+        'deleteBranch',
+        'deleteBranches',
+        'deleteRemoteBranch',
+        'deleteRemoteBranches',
+        'executeStack',
+        'submitStack',
+        'submitStackRetry',
+        'submitStackDismiss',
+        'stackContinue',
+        'stackAbort',
+        'operationContinue',
+        'operationSkip',
+        'operationAbort',
+        'executeSurgery',
+        'executeNativeOperation',
+        'reconcileRepair',
+        'executeWorktreeLifecycle',
+        'unregisterWorktrees',
+      ].includes(String(action.type))
+    )
+      throw new Error(
+        'This captured channel permits management and explicit operational recovery only, not development checkout/stash/reset/file actions.',
+      )
+    const token = requireString(tokenValue, 'operation capture', 256)
+    const captured = operationCaptures.get(token)
+    if (!captured || Date.now() - Date.parse(captured.capturedAt) > 5 * 60_000)
+      throw new Error(
+        'This approval expired, is unavailable or was already dispatched; never replay an uncertain action.',
+      )
+    // Claim synchronously before awaiting a lane; a duplicate event cannot spend this approval twice.
+    operationCaptures.delete(token)
+    return inspectionReads.mutate(captured.repositoryId, () =>
+      scheduler.mutate(captured.repositoryId, () =>
+        withCapturedOperationLock(captured, () =>
+          inGitRuntime(async () => {
+            if (
+              !inventory
+                .current()
+                .repositories.some(
+                  (repo) =>
+                    repo.identity.id === captured.repositoryId &&
+                    repo.registeredPaths.some((path) =>
+                      recents.some((recent) => recent.path === path),
+                    ),
+                )
+            )
+              throw new Error('The original repository registration was retired.')
+            const scope = await repositoryOperationScope(captured.worktreePath)
+            await revalidateOperation(captured, scope)
+            if (action.type === 'operationSkip' && !captured.operationCommitOid)
+              throw new Error('The exact paused commit is unavailable; no Skip was dispatched.')
+            await validateRecordedRecovery(captured, action)
+            const selectedRef = captured.refs.find((ref) => ref.id === captured.context.refId)?.ref
+            if (isStackAction(action))
+              assertStackActionTarget(
+                action,
+                selectedRef,
+                inventory
+                  .current()
+                  .repositories.find((repo) => repo.identity.id === captured.repositoryId)
+                  ?.pullRequests.find((pr) => pr.id === captured.context.pullRequestId)?.number,
+              )
+            else if (
+              ['renameBranch', 'setUpstream', 'deleteBranch', 'deleteRemoteBranch'].includes(
+                action.type,
+              ) &&
+              'ref' in action &&
+              action.ref !== selectedRef
+            )
+              throw new Error('This action does not address the captured qualified ref.')
+            if (action.type === 'push' || action.type === 'forcePush') {
+              const tree = (await discoverWorktrees(captured.worktreePath)).worktrees.find(
+                (tree) => tree.id === captured.worktreeId,
+              )
+              if (!selectedRef || tree?.refId !== captured.context.refId)
+                throw new Error(
+                  'Ordinary publication must address the explicit owning checkout; use Publish for other selected layers.',
+                )
+            }
+            if (action.type === 'deleteBranches' || action.type === 'deleteRemoteBranches') {
+              if (
+                !Array.isArray(action.branches) ||
+                !action.branches.length ||
+                action.branches.some(
+                  (target) =>
+                    !captured.refs.some(
+                      (ref) => ref.ref === target.ref && ref.oid === target.expectedOid,
+                    ),
+                )
+              )
+                throw new Error(
+                  'Every batch target and tip must belong to this captured common repository.',
+                )
+            }
+            const origin = await getConfigValue(captured.worktreePath, 'remote.origin.url')
+            const capturedGeneration = hostGeneration
+            const capturedHost = remoteHostContext(parseRemote(scope.remoteUrl))
+            const capturedService = capturedHost ? gitHubCliStatusService(capturedHost.host) : null
+            const privateCredential = capturedHost
+              ? await hostCredentialAuthority(capturedHost.host)
+              : null
+            const validate = createOperationEffectValidator(
+              captured,
+              scope,
+              createOperationProviderValidator(captured.worktreePath, async (currentOrigin) => {
+                const currentCredential = capturedHost
+                  ? await hostCredentialAuthority(capturedHost.host)
+                  : null
+                if (
+                  capturedGeneration !== hostGeneration ||
+                  (capturedHost && capturedService !== gitHubCliStatusService(capturedHost.host)) ||
+                  !sameOperationScope(scope, {
+                    repositoryPath: captured.worktreePath,
+                    remoteUrl: currentOrigin,
+                    authority: cliAuthority(
+                      capturedHost?.host ?? null,
+                      capturedService?.current() ?? null,
+                    ),
+                  }) ||
+                  privateCredential !== currentCredential
+                )
+                  throw new Error(
+                    'Original origin or private provider authority changed at the effect boundary; no further step is authorized.',
+                  )
+              }),
+            )
+            const settings = (await readSettingsFile(settingsFile())).settings
+            return progressOwner.run(scope, () =>
+              runRecordedOperation(captured, action, () =>
+                inspectionAuthority.run(
+                  {
+                    root: captured.worktreePath,
+                    context: captured.context,
+                    signal: new AbortController().signal,
+                    origin,
+                    originUrl: scope.remoteUrl,
+                    validate,
+                    validateEffect: validate,
+                  },
+                  async () => {
+                    if (action.type !== 'unregisterWorktrees')
+                      return runAction(captured.worktreePath, action, settings.git.mergeTool)
+                    if (
+                      !Array.isArray(action.worktreeIds) ||
+                      !action.worktreeIds.length ||
+                      new Set(action.worktreeIds).size !== action.worktreeIds.length
+                    )
+                      throw new Error(
+                        'Choose the exact registered worktree subset without duplicates.',
+                      )
+                    const fresh = await discoverWorktrees(captured.worktreePath)
+                    const paths = action.worktreeIds.map((id) => {
+                      const tree = fresh.worktrees.find((tree) => tree.id === id)
+                      if (!tree || !recents.some((recent) => recent.path === tree.path))
+                        throw new Error(
+                          'A selected registration is unavailable; no subset was silently trimmed.',
+                        )
+                      return tree.path
+                    })
+                    const write = registrationWrite.then(async () => {
+                      const next = recents.filter((recent) => !paths.includes(recent.path))
+                      await validate()
+                      await writeFile(`${settingsPath()}.tmp`, JSON.stringify(next), {
+                        mode: 0o600,
+                      })
+                      await validate()
+                      await rename(`${settingsPath()}.tmp`, settingsPath())
+                      setRecents(next)
+                    })
+                    registrationWrite = write.catch(() => {})
+                    await write
+                    return {
+                      message: `Removed only ${paths.join(', ')} from app registration. Files, worktree administration, branches and PRs remain unchanged.`,
+                    }
+                  },
+                ),
+              ),
+            )
+          }),
+        ),
+      ),
+    )
+  })
+  ipcMain.handle('operation:records', async () =>
+    inGitRuntime(async () => {
+      const result = []
+      for (const repo of inventory.current().repositories) {
+        const root = repo.registeredPaths.find((path) =>
+          recents.some((recent) => recent.path === path),
+        )
+        if (!root) continue
+        const scope = await repositoryOperationScope(root)
+        const records = await readOperationRecords(root)
+        result.push(
+          ...records.filter((record) =>
+            sameOperationScope(record.scope, { ...scope, repositoryPath: record.worktreePath }),
+          ),
+        )
+      }
+      return result
+    }),
+  )
+  ipcMain.handle(
+    'inspection:request',
+    async (
+      event,
+      value: unknown,
+      operationValue: unknown,
+      argsValue: unknown,
+      requestIdValue: unknown,
+    ) => {
+      if (
+        !isRecord(value) ||
+        typeof operationValue !== 'string' ||
+        !Object.hasOwn(INSPECTION_CHANNELS, operationValue) ||
+        !Array.isArray(argsValue) ||
+        argsValue.length > 4
+      )
+        throw new Error('Invalid captured inspection request.')
+      const context: InspectionContext = {
+        repositoryId: requireString(value.repositoryId, 'repository identity'),
+      }
+      for (const key of ['worktreeId', 'refId', 'pullRequestId'] as const)
+        if (value[key] !== undefined) context[key] = requireString(value[key], key)
+      if (value.operationToken !== undefined)
+        context.operationToken = requireString(
+          value.operationToken,
+          'operation authority token',
+          256,
+        )
+      const operation = operationValue as InspectionOperation
+      if (operation === 'cancel') {
+        readKeys.cancel(context.repositoryId, requireString(argsValue[0], 'request id', 256))
+        return
+      }
+      const requestId =
+        requestIdValue === undefined
+          ? `inspection-boundary:${operation}`
+          : requireString(requestIdValue, 'request id', 256)
+      const purpose =
+        operation.startsWith('review') ||
+        operation === 'pullRequestPage' ||
+        operation === 'pullRequest' ||
+        operation === 'pullRequestLayer' ||
+        operation === 'pullRequestAction' ||
+        operation === 'searchIssues' ||
+        operation === 'pullRequestIssueLinks' ||
+        operation === 'previewIssueLink' ||
+        operation === 'pullRequestChecks' ||
+        operation === 'rerunPullRequestCheck' ||
+        operation === 'nativeOperationPreview' ||
+        operation === 'stackPreview' ||
+        operation === 'reviewedMergePreview' ||
+        operation === 'surgeryPreview' ||
+        operation === 'reconciliationPreview' ||
+        (operation === 'refresh' && !context.worktreeId)
+          ? 'github'
+          : 'local'
+      const controller = readKeys.claim(context.repositoryId, requestId, purpose)
+      return inspectionReads
+        .read(
+          context.repositoryId,
+          async (signal) => {
+            const registered = inventory
+              .current()
+              .repositories.find((repo) => repo.identity.id === context.repositoryId)
+            if (
+              !registered ||
+              !registered.registeredPaths.some((path) =>
+                recents.some((recent) => recent.path === path),
+              )
+            )
+              throw new Error('The inspected repository is no longer registered.')
+            const known = context.worktreeId
+              ? registered.worktrees.find((tree) => tree.id === context.worktreeId)
+              : undefined
+            if (context.worktreeId && (!known || known.missing || known.kind === 'bare'))
+              throw new Error('Choose an existing worktree for local inspection.')
+            const root = known?.path ?? registered.registeredPaths[0]
+            if (known) {
+              if ((await realpath(known.path)) !== known.path)
+                throw new Error('The selected physical worktree path changed.')
+              await inGitRuntime(() =>
+                adoptionPaths(inventory.current(), [known.id], scheduler, signal),
+              )
+            }
+            const fresh = await inGitRuntime(() => discoverWorktrees(root, signal))
+            if (
+              fresh.identity.id !== context.repositoryId ||
+              (known &&
+                !fresh.worktrees.some(
+                  (tree) => tree.id === known.id && tree.path === known.path && !tree.missing,
+                ))
+            )
+              throw new Error('The inspected directory or Git administrative identity changed.')
+            if (context.refId && !fresh.refs.some((ref) => ref.id === context.refId))
+              throw new Error(
+                'The selected qualified ref is unavailable in the current observed scope.',
+              )
+            if (
+              known &&
+              context.refId &&
+              fresh.worktrees.find((tree) => tree.id === known.id)?.refId !== context.refId
+            )
+              throw new Error('The selected directory no longer checks out this qualified branch.')
+            if (
+              ['worktreeStatus', 'fileView', 'conflictView', 'openInEditor'].includes(operation) &&
+              !known
+            )
+              throw new Error('Select an explicit worktree before reading or opening local files.')
+            if (operation === 'history') {
+              const selectedRef = fresh.refs.find((ref) => ref.id === context.refId)
+              if (argsValue[0] !== selectedRef?.name && !(known && argsValue[0] === 'HEAD'))
+                throw new Error('History must address the selected qualified ref or worktree HEAD.')
+            }
+            if (context.pullRequestId) {
+              const pr = registered.pullRequests.find(
+                (candidate) => candidate.id === context.pullRequestId,
+              )
+              if (!pr) throw new Error('The captured pull request association changed.')
+              if (fresh.remote?.id !== pr.remoteId)
+                throw new Error('The selected pull request remote authority changed.')
+              if (context.refId && !pr.refIds.includes(context.refId))
+                throw new Error(
+                  'The selected ref no longer has this qualified pull request association.',
+                )
+              const first = argsValue[0]
+              const number = isRecord(first) ? (first.number ?? first.prNumber) : first
+              if (
+                operation.startsWith('review') ||
+                operation === 'pullRequest' ||
+                operation === 'pullRequestLayer' ||
+                operation === 'pullRequestAction' ||
+                operation === 'pullRequestIssueLinks' ||
+                operation === 'previewIssueLink' ||
+                operation === 'pullRequestChecks' ||
+                operation === 'rerunPullRequestCheck'
+              ) {
+                if (operation !== 'reviewDraftRecovery' && number !== pr.number)
+                  throw new Error('The request does not address the captured pull request.')
+              }
+            } else if (
+              operation.startsWith('review') ||
+              operation === 'pullRequest' ||
+              operation === 'pullRequestLayer' ||
+              operation === 'pullRequestAction' ||
+              operation === 'searchIssues' ||
+              operation === 'pullRequestIssueLinks' ||
+              operation === 'previewIssueLink' ||
+              operation === 'pullRequestChecks' ||
+              operation === 'rerunPullRequestCheck'
+            ) {
+              throw new Error('Select a source-qualified pull request.')
+            }
+            const listener = inspectionHandlers.get(INSPECTION_CHANNELS[operation])
+            if (!listener) throw new Error('This inspection operation is unavailable.')
+            const origin = await inGitRuntime(() =>
+              getConfigValue(root, 'remote.origin.url', signal),
+            )
+            const originUrl = await inGitRuntime(() => getOriginUrl(root, signal))
+            const initialTree = fresh.worktrees.find((tree) =>
+              known ? tree.id === known.id : tree.path === root,
+            )
+            const initialRef = fresh.refs.find((ref) => ref.id === context.refId)
+            const validate = async () => {
+              signal.throwIfAborted()
+              if (context.operationToken) {
+                const captured = operationCaptures.get(context.operationToken)
+                if (
+                  !captured ||
+                  Date.now() - Date.parse(captured.capturedAt) > 5 * 60_000 ||
+                  captured.repositoryId !== context.repositoryId ||
+                  captured.worktreeId !== context.worktreeId ||
+                  captured.worktreePath !== root ||
+                  (context.refId !== undefined && context.refId !== captured.context.refId) ||
+                  (context.pullRequestId !== undefined &&
+                    context.pullRequestId !== captured.context.pullRequestId) ||
+                  !sameOperationScope(captured.scope, await repositoryOperationScope(root, signal))
+                )
+                  throw new Error(
+                    'The prepared operation provider authority changed; this read was retired.',
+                  )
+                await validateCapturedDirectory(captured)
+              }
+              const observed = inventory.current()
+              const current = observed.repositories.find(
+                (repo) => repo.identity.id === context.repositoryId,
+              )
+              if (
+                !current ||
+                !current.registeredPaths.some((path) =>
+                  recents.some((recent) => recent.path === path),
+                )
+              )
+                throw new Error('The captured repository registration was retired.')
+              if (initialTree && initialTree.kind !== 'bare')
+                await inGitRuntime(() =>
+                  adoptionPaths(observed, [initialTree.id], scheduler, signal),
+                )
+              const after = await inGitRuntime(() => discoverWorktrees(root, signal))
+              const tree = initialTree
+                ? after.worktrees.find((tree) => tree.id === initialTree.id)
+                : undefined
+              const ref = initialRef
+                ? after.refs.find((ref) => ref.id === initialRef.id)
+                : undefined
+              if (
+                after.identity.id !== fresh.identity.id ||
+                (initialTree &&
+                  (!tree ||
+                    tree.path !== initialTree.path ||
+                    tree.missing ||
+                    tree.gitDirectory !== initialTree.gitDirectory ||
+                    tree.refId !== initialTree.refId ||
+                    tree.headOid !== initialTree.headOid)) ||
+                (initialRef &&
+                  (!ref || ref.oid !== initialRef.oid || ref.kind !== initialRef.kind)) ||
+                after.remote?.id !== fresh.remote?.id
+              )
+                throw new Error(
+                  'The captured directory, ref or remote authority changed; this request was retired.',
+                )
+              const currentOrigin = await inGitRuntime(() =>
+                getConfigValue(root, 'remote.origin.url', signal),
+              )
+              if (currentOrigin !== origin)
+                throw new Error('The captured origin changed; this request was retired.')
+              const currentOriginUrl = await inGitRuntime(() => getOriginUrl(root, signal))
+              if (currentOriginUrl !== originUrl)
+                throw new Error('The captured origin changed; this request was retired.')
+              if (
+                context.pullRequestId &&
+                !current.pullRequests.some(
+                  (pr) =>
+                    pr.id === context.pullRequestId &&
+                    pr.remoteId === after.remote?.id &&
+                    (!context.refId || pr.refIds.includes(context.refId)),
+                )
+              )
+                throw new Error('The captured pull request association was retired.')
+              signal.throwIfAborted()
+            }
+            await validate()
+            const result = await inspectionAuthority.run(
+              { root, context, signal, origin, originUrl, validate },
+              () => listener(event, ...argsValue),
+            )
+            await validate()
+            signal.throwIfAborted()
+            if (operation === 'refresh' && !context.worktreeId)
+              inventory.adoptRemote(result as RepositorySnapshot)
+            if (operation === 'pullRequestPage' && originUrl) {
+              const page = result as PullRequestPage
+              inventory.adoptPullRequestPage(
+                context.repositoryId,
+                page.pullRequests,
+                originUrl,
+                page.observedAt,
+              )
+            }
+            if (operation === 'pullRequestLayer' && originUrl) {
+              const layer = result as PullRequestLayerRead
+              inventory.adoptPullRequestPage(
+                context.repositoryId,
+                [layer.pullRequest, layer.sourcePullRequest],
+                originUrl,
+                layer.observedAt,
+              )
+            }
+            return result
+          },
+          controller.signal,
+        )
+        .finally(() => readKeys.release(context.repositoryId, requestId, controller))
+    },
+  )
   // The clone destination is chosen with the platform folder picker, so the
   // renderer never composes a filesystem path of its own.
   ipcMain.handle('repositories:choose-destination', async (event, current: unknown) => {
@@ -1496,6 +2287,50 @@ function installHandlers() {
   })
   ipcMain.handle('repositories:recent', (event) => {
     return recents
+  })
+  ipcMain.handle('repositories:inventory', async (_event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('Invalid inventory request.')
+    const request: InventoryRequest = {
+      requestId: requireString(value.requestId, 'request id', 256),
+    }
+    if (value.selectedWorktreeId !== undefined)
+      request.selectedWorktreeId = requireString(value.selectedWorktreeId, 'worktree identity')
+    if (value.visibleWorktreeIds !== undefined) {
+      if (
+        !Array.isArray(value.visibleWorktreeIds) ||
+        value.visibleWorktreeIds.length > LIST_PAGE_SIZE
+      )
+        throw new Error('Invalid visible worktree selection.')
+      request.visibleWorktreeIds = value.visibleWorktreeIds.map((id) =>
+        requireString(id, 'worktree identity'),
+      )
+    }
+    const controller = inventoryKeys.claim('inventory', request.requestId)
+    try {
+      return await inGitRuntime(() => inventory.read(request, controller.signal))
+    } finally {
+      inventoryKeys.release('inventory', request.requestId, controller)
+    }
+  })
+  ipcMain.handle('repositories:inventory-cancel', (_event, id: unknown) => {
+    inventoryKeys.cancel('inventory', requireString(id, 'request id', 256))
+  })
+  ipcMain.handle('repositories:adopt-worktrees', async (_event, ids: unknown, id: unknown) => {
+    if (!Array.isArray(ids) || !ids.length || ids.length > LIST_PAGE_SIZE)
+      throw new Error('Choose discovered worktree directories.')
+    const requested = ids.map((value) => requireString(value, 'worktree identity'))
+    const requestId = requireString(id, 'request id', 256)
+    const controller = inventoryKeys.claim('inventory', requestId)
+    try {
+      const paths = await inGitRuntime(() =>
+        adoptionPaths(inventory.current(), requested, scheduler, controller.signal),
+      )
+      // Registration alone does not change the active repository or its checkout.
+      await remember(paths)
+      return recents
+    } finally {
+      inventoryKeys.release('inventory', requestId, controller)
+    }
   })
   ipcMain.handle('repositories:open', async (event, requestedPath: unknown) => {
     if (requestedPath !== undefined) {
@@ -1651,37 +2486,120 @@ function installHandlers() {
       throw new Error('Window activity must report focus and visibility.')
     }
     sync.reportActivity(activity as SyncActivity)
+    inventory.setActive((activity as SyncActivity).focused && (activity as SyncActivity).visible)
   })
   ipcMain.handle('repository:dismiss-pending-mutation', (event, id: unknown) => {
     if (typeof id !== 'string' || !id) throw new Error('A pending mutation id is required.')
     return sync.dismissPendingMutation(id)
   })
+  ipcMain.handle(
+    'repository:pull-request-action',
+    async (_event, value: unknown, expectedValue: unknown) => {
+      if (!inspectionAuthority.getStore()?.context.pullRequestId)
+        throw new Error('Captured pull request authority is required.')
+      if (
+        !isRecord(value) ||
+        !['updatePr', 'closePr', 'reopenPr', 'linkIssue', 'unlinkIssue'].includes(
+          String(value.type),
+        )
+      )
+        throw new Error('This captured channel permits only pull request management.')
+      const action = value as unknown as Parameters<typeof runAction>[1]
+      const root = repository()
+      try {
+        return await scheduler.mutate(inspectionAuthority.getStore()!.context.repositoryId, () =>
+          inGitRuntime(async () => {
+            if (
+              !isRecord(expectedValue) ||
+              typeof expectedValue.repositoryPath !== 'string' ||
+              typeof expectedValue.authority !== 'string' ||
+              (expectedValue.remoteUrl !== null && typeof expectedValue.remoteUrl !== 'string')
+            )
+              throw new Error('A captured provider scope is required.')
+            const current = await repositoryOperationScope(root)
+            if (!sameOperationScope(current, expectedValue as unknown as OperationScope))
+              throw new Error(
+                'The captured provider or account changed; no pull request management was sent.',
+              )
+            const host = remoteHostContext(parseRemote(current.remoteUrl))
+            if (!host) throw new Error('A captured GitHub host is required.')
+            const session = await gitHubCliStatusService(host.host).pinCredential(current.authority)
+            await validateInspectionDispatch()
+            return withGitHubCredentialSession(host, session, () => runAction(root, action))
+          }),
+        )
+      } catch (error) {
+        sync.recordMutationFailure(action, error)
+        throw error
+      }
+    },
+  )
   ipcMain.handle('repository:action', async (event, action: GitAction) => {
     const root = repository()
+    const generation = hostGeneration
     try {
+      const authority = inventory
+        .current()
+        .repositories.find(
+          (repo) =>
+            repo.registeredPaths.includes(root) ||
+            repo.worktrees.some((tree) => tree.path === root),
+        )?.identity.id
       // A mutation claims the repository lane: background reads end first, so a
       // stage or a commit never waits on a network that is not answering.
-      return await scheduler.mutate(root, () =>
-        // Naming the repository is the admission check: a switch can complete
-        // while this action waited for the background reads it ends, and an
-        // action must never apply to the repository the window already left.
-        operations.write(
-          () =>
-            inGitRuntime(async () => {
-              // The merge tool configured in Settings wins over Git's own
-              // configuration for the one action that consults it.
-              const settings = (await readSettingsFile(settingsFile())).settings
-              return runAction(root, action, settings.git.mergeTool)
-            }),
-          root,
+      // Claim inspection first: its adoption checks still need the background lane
+      // while unwinding, so taking that lane first would deadlock nested reads.
+      return await inspectionReads.mutate(authority ?? root, () =>
+        scheduler.mutate(root, () =>
+          // Naming the repository is the admission check: a switch can complete
+          // while this action waited for the background reads it ends, and an
+          // action must never apply to the repository the window already left.
+          operations.write(
+            () =>
+              inGitRuntime(async () => {
+                // The merge tool configured in Settings wins over Git's own
+                // configuration for the one action that consults it.
+                const settings = (await readSettingsFile(settingsFile())).settings
+                if (
+                  action.type === 'submitStack' ||
+                  action.type === 'submitStackRetry' ||
+                  action.type === 'submitStackDismiss' ||
+                  action.type === 'executeStack'
+                ) {
+                  const scope = await repositoryOperationScope(root)
+                  if (generation !== hostGeneration) throw new CommandCancelled()
+                  return progressOwner.run(scope, () =>
+                    runAction(root, action, settings.git.mergeTool),
+                  )
+                }
+                return runAction(root, action, settings.git.mergeTool)
+              }),
+            root,
+          ),
         ),
       )
     } catch (error) {
-      // A high-impact remote mutation that lost its answer is listed, never
-      // re-sent: reconnecting resumes reads only.
       sync.recordMutationFailure(action, error)
       throw error
     }
+  })
+  ipcMain.handle('repository:worktree-lifecycle-preview', (_event, request: unknown) => {
+    const context = inspectionAuthority.getStore()?.context
+    if (!context || !isRecord(request) || request.repositoryId !== context.repositoryId)
+      throw new Error('Captured repository authority is required for lifecycle inspection.')
+    return readRepository(
+      (root) => previewWorktreeLifecycle(root, request),
+      'worktree-lifecycle-preview',
+    )
+  })
+  ipcMain.handle('repository:native-operation-preview', (_event, request: unknown) => {
+    if (!inspectionAuthority.getStore()?.context.worktreeId)
+      throw new Error('Choose an explicit native-management execution directory.')
+    return readRepository(
+      (root) => previewNativeOperation(root, request),
+      'native-operation-preview',
+      'github',
+    )
   })
   ipcMain.handle('repository:file', (event, filePath: string) => {
     return readRepository((root, signal) => getFileView(root, filePath, signal), `file:${filePath}`)
@@ -1690,7 +2608,14 @@ function installHandlers() {
     // The conflict view reports the tool it would use, so the configured value
     // the merge action honours is the one the resolver shows.
     const settings = (await readSettingsFile(settingsFile())).settings
-    return readRepository((root) => getConflictView(root, filePath, settings.git.mergeTool))
+    return readRepository((root) =>
+      getConflictView(
+        root,
+        filePath,
+        settings.git.mergeTool,
+        Boolean(inspectionAuthority.getStore()),
+      ),
+    )
   })
   ipcMain.handle('repository:history', (event, ref: string, skip: number, requestId?: string) => {
     return readRepository((root, signal) => getHistory(root, ref, skip, signal), requestId)
@@ -1701,9 +2626,29 @@ function installHandlers() {
   ipcMain.handle('repository:push-preview', (event) => {
     return readRepository((root) => getPushPreview(root))
   })
+  ipcMain.handle('repository:reviewed-merge-preview', (_event, number: unknown) => {
+    const context = inspectionAuthority.getStore()?.context
+    const source = inventory
+      .current()
+      .repositories.find((repo) => repo.identity.id === context?.repositoryId)
+      ?.pullRequests.find((pr) => pr.id === context?.pullRequestId)
+    if (!source || source.number !== number)
+      throw new Error('Choose the exact source-qualified reviewed pull request.')
+    return readRepository(
+      (root) => previewReviewedMerge(root, requirePullRequestNumber(number)),
+      'reviewed-merge-preview',
+      'github',
+    )
+  })
   ipcMain.handle('repository:stack-preview', (event, kind: StackKind, branch: string) => {
     return readRepository(
-      async (root, signal) => previewStack(root, await getSnapshot(root, signal), kind, branch),
+      async (root, signal) =>
+        previewStack(
+          root,
+          await getSnapshot(root, signal, undefined, 'live', false, true),
+          kind,
+          branch,
+        ),
       'stack-preview',
       'github',
     )
@@ -1711,37 +2656,79 @@ function installHandlers() {
   ipcMain.handle('repository:surgery-preview', (event, request: unknown) => {
     return readRepository(
       async (root, signal) =>
-        previewSurgery(root, await getSnapshot(root, signal), validateSurgeryRequest(request)),
+        previewSurgery(
+          root,
+          await getSnapshot(root, signal, undefined, 'live', false, true),
+          validateSurgeryRequest(request),
+        ),
       'surgery-preview',
       'github',
     )
   })
   ipcMain.handle('repository:reconciliation-preview', (event, stackKey: string) => {
     return readRepository(
-      async (root) => previewReconciliationRepair(root, await getSnapshot(root), stackKey),
+      async (root) =>
+        previewReconciliationRepair(
+          root,
+          await getSnapshot(root, undefined, undefined, 'live', false, true),
+          stackKey,
+        ),
       'reconciliation-preview',
       'github',
     )
   })
   ipcMain.handle('repository:submit-stack-progress', (event) => {
-    return readRepository((root) => getSubmitStackProgress(root))
+    return readRepository(
+      async (root, signal) => {
+        const scope = await repositoryOperationScope(root, signal)
+        const progress = await getSubmitStackProgress(root)
+        if (signal.aborted) throw new CommandCancelled()
+        return {
+          scope,
+          source: 'journal-read' as const,
+          progress,
+        }
+      },
+      'submit-stack-progress',
+      'github',
+    )
   })
   // Read-only: a queue outcome or a still-running request is read from the journal and GitHub,
   // never by asking for another merge.
   ipcMain.handle('repository:merge-status', (event) => {
-    return readRepository((root) => getMergeStatus(root), 'merge-status', 'github')
+    return readRepository(
+      async (root, signal) => {
+        const scope = await repositoryOperationScope(root, signal)
+        const progress = await getMergeStatus(root)
+        if (signal.aborted) throw new CommandCancelled()
+        return { scope, source: 'journal-read' as const, progress }
+      },
+      'merge-status',
+      'github',
+    )
   })
+  ipcMain.handle('repository:operation-scope', () =>
+    readRepository(repositoryOperationScope, 'operation-scope', 'github'),
+  )
   // A running submission pushes its own progress. The renderer cannot poll for it: the read
 
   // queues behind the very action that is producing the steps, so it would only ever observe
   // the finished state.
   onPublishProgress((progress: PublishProgress | null) => {
-    window?.webContents.send('submit-stack-progress', progress)
+    const scope = progressOwner.getStore()
+    if (!scope) return
+    window?.webContents.send('submit-stack-progress', {
+      scope,
+      source: 'action',
+      progress,
+    })
   })
   // A merge runs on GitHub's side, so its result arrives asynchronously. Pushing it is the
   // only way the dialog can follow it: a read would queue behind the merge itself.
   onMergeProgress((progress: MergeProgress | null) => {
-    window?.webContents.send('merge-progress', progress)
+    const scope = progressOwner.getStore()
+    if (!scope) return
+    window?.webContents.send('merge-progress', { scope, source: 'action', progress })
   })
   ipcMain.handle('repository:pull-request', (event, number: number) => {
     return readRepository(
@@ -1816,14 +2803,60 @@ function installHandlers() {
   })
   ipcMain.handle('repository:review-viewed', (event, number: unknown) => {
     return readRepository(
-      (root, signal) => readViewedRecord(root, requirePullRequestNumber(number), signal),
+      async (root, signal) => {
+        const prNumber = requirePullRequestNumber(number)
+        const remote = await originRemote(root, signal)
+        const permissions = await readReviewPermissionsFrom(remote, prNumber, signal)
+        const record = await readViewedRecord(
+          root,
+          {
+            host: remote.host,
+            repository: `${remote.owner}/${remote.name}`,
+            viewer: permissions.viewer,
+          },
+          prNumber,
+          signal,
+        )
+        await revalidateReviewOwner(
+          root,
+          prNumber,
+          { repo: reviewRepositoryIdentity(remote), viewer: permissions.viewer },
+          null,
+          signal,
+        )
+        return record
+      },
       'review-viewed',
       'github',
     )
   })
-  ipcMain.handle('repository:review-set-viewed', (event, value: unknown) => {
+  ipcMain.handle('repository:review-set-viewed', (event, value: unknown, ownerValue: unknown) => {
     return readRepository(
-      (root, signal) => writeViewedRecord(root, requireViewedRecord(value), signal),
+      async (root, signal) => {
+        const record = requireViewedRecord(value)
+        const remote = await originRemote(root, signal)
+        const owner = requireReviewOwner(ownerValue)
+        if (owner.repo !== reviewRepositoryIdentity(remote))
+          throw new Error('The captured viewed-file repository or host changed.')
+        const permissions = await readReviewPermissionsFrom(remote, record.number, signal)
+        if (owner.viewer !== permissions.viewer)
+          throw new Error(
+            'The viewed-file account changed. The replacement account was not marked as having viewed this file.',
+          )
+        return writeViewedRecord(
+          root,
+          {
+            host: remote.host,
+            repository: `${remote.owner}/${remote.name}`,
+            viewer: permissions.viewer,
+          },
+          record,
+          async () => {
+            await revalidateReviewOwner(root, record.number, owner, record.comparison, signal)
+          },
+          signal,
+        )
+      },
       'review-set-viewed',
       'github',
     )
@@ -1843,60 +2876,122 @@ function installHandlers() {
         // is what says whose drafts these are. Reading them without naming the
         // account and the repository would hand one account another's unsent
         // words to submit.
-        const permissions = await readReviewPermissions(
-          root,
+        const permissions = await readReviewPermissionsFrom(
+          remote,
           requirePullRequestNumber(number),
           signal,
         )
-        return readReviewDrafts(
+        const record = await readReviewDrafts(
           root,
-          `${remote.owner}/${remote.name}`,
+          reviewRepositoryIdentity(remote),
           permissions.viewer,
           requirePullRequestNumber(number),
           signal,
         )
+        await revalidateReviewOwner(
+          root,
+          requirePullRequestNumber(number),
+          { repo: reviewRepositoryIdentity(remote), viewer: permissions.viewer },
+          null,
+          signal,
+        )
+        return record
       },
       'review-drafts',
       'github',
     )
   })
-  ipcMain.handle('repository:review-set-drafts', (event, value: unknown) => {
+  ipcMain.handle(
+    'repository:review-set-drafts',
+    (event, value: unknown, expectedUpdatedAt: unknown) => {
+      return readRepository(
+        async (root, signal) => {
+          const incoming = requireDraftRecord(value)
+          if (
+            expectedUpdatedAt !== null &&
+            (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.length > 128)
+          ) {
+            throw new Error('A full draft save requires its observed saved version.')
+          }
+          const remote = await originRemote(root, signal)
+          const owner = requireReviewOwner(incoming)
+          if (owner.repo !== reviewRepositoryIdentity(remote))
+            throw new Error('The draft repository or host changed. Your unsent text was not moved.')
+          // Compare the captured public owner with Git and GitHub before saving;
+          // changing credentials never silently adopts another authority's text.
+          const permissions = await readReviewPermissions(root, incoming.number, signal)
+          if (owner.viewer !== permissions.viewer)
+            throw new Error('The draft account changed. Your unsent text was not moved.')
+          await assertReviewDraftOwner(
+            root,
+            owner.repo,
+            owner.viewer,
+            incoming.number,
+            incoming.drafts.map((draft) => draft.id),
+            incoming.comparison,
+            signal,
+          )
+          return writeReviewDrafts(
+            root,
+            { ...incoming, ...owner },
+            expectedUpdatedAt,
+            async () => {
+              await revalidateReviewOwner(root, incoming.number, owner, null, signal)
+            },
+            signal,
+          )
+        },
+        'review-set-drafts',
+        'github',
+      )
+    },
+  )
+  ipcMain.handle('repository:review-draft-recovery', (event, value: unknown) => {
+    const selected =
+      value === null
+        ? null
+        : (() => {
+            if (
+              !isRecord(value) ||
+              typeof value.repo !== 'string' ||
+              value.repo.split('/').length !== 2 ||
+              value.repo.length > 512 ||
+              typeof value.viewer !== 'string' ||
+              value.viewer.length > 128
+            ) {
+              throw new Error('Choose the original locally saved record to recover.')
+            }
+            return {
+              repo: value.repo,
+              viewer: value.viewer,
+              number: requirePullRequestNumber(value.number),
+            }
+          })()
     return readRepository(
-      async (root, signal) => {
-        const incoming = requireDraftRecord(value)
-        const remote = await originRemote(root, signal)
-        // The repository and the account are stamped here, from the ones Git and
-        // GitHub name, rather than taken from the renderer. The renderer does not
-        // know either, and a record that adopted a caller-supplied owner would be
-        // exactly the record that could be planted under the wrong one.
-        const permissions = await readReviewPermissions(root, incoming.number, signal)
-        return writeReviewDrafts(
-          root,
-          { ...incoming, repo: `${remote.owner}/${remote.name}`, viewer: permissions.viewer },
-          signal,
-        )
-      },
-      'review-set-drafts',
-      'github',
+      (root, signal) => readReviewDraftRecovery(root, selected, signal),
+      'review-draft-recovery',
     )
   })
   ipcMain.handle('repository:review-submit', (event, number: unknown, value: unknown) => {
-    return operations.write(() =>
+    const root = repository()
+    return scheduler.mutate(inspectionAuthority.getStore()?.context.repositoryId ?? root, () =>
       inGitRuntime(() =>
-        submitReview(repository(), requirePullRequestNumber(number), requireSubmission(value)),
+        submitReview(root, requirePullRequestNumber(number), requireSubmission(value)),
       ),
     )
   })
   ipcMain.handle(
     'repository:review-reply',
-    (event, number: unknown, threadId: unknown, body: unknown) => {
-      return operations.write(() =>
+    (event, number: unknown, threadId: unknown, body: unknown, owner: unknown) => {
+      const root = repository()
+      return scheduler.mutate(inspectionAuthority.getStore()?.context.repositoryId ?? root, () =>
         inGitRuntime(() =>
           replyToThread(
-            repository(),
+            root,
             requirePullRequestNumber(number),
             requireThreadId(threadId),
             requireCommentBody(body),
+            requireReviewOwner(owner),
           ),
         ),
       )
@@ -1904,10 +2999,19 @@ function installHandlers() {
   )
   ipcMain.handle(
     'repository:review-resolve',
-    (event, number: unknown, threadId: unknown, resolved: unknown) => {
+    (event, number: unknown, threadId: unknown, resolved: unknown, owner: unknown) => {
       if (typeof resolved !== 'boolean') throw new Error('Choose whether to resolve this thread.')
-      return operations.write(() =>
-        inGitRuntime(() => setThreadResolved(repository(), requireThreadId(threadId), resolved)),
+      const root = repository()
+      return scheduler.mutate(inspectionAuthority.getStore()?.context.repositoryId ?? root, () =>
+        inGitRuntime(() =>
+          setThreadResolved(
+            root,
+            requirePullRequestNumber(number),
+            requireThreadId(threadId),
+            resolved,
+            requireReviewOwner(owner),
+          ),
+        ),
       )
     },
   )
@@ -1941,15 +3045,22 @@ function installHandlers() {
             requirePullRequestNumber(number),
             requireCommitOid(fromOid),
             signal,
+            Boolean(inspectionAuthority.getStore()),
           ),
         requestIdClaim(requestId, 'review-history-diff'),
         'github',
       )
     },
   )
-  ipcMain.handle('repository:review-clear-history', (event, number: unknown) => {
+  ipcMain.handle('repository:review-clear-history', (event, number: unknown, owner: unknown) => {
     return readRepository(
-      (root, signal) => clearReviewHistory(root, requirePullRequestNumber(number), signal),
+      (root, signal) =>
+        clearReviewHistory(
+          root,
+          requirePullRequestNumber(number),
+          requireReviewOwner(owner),
+          signal,
+        ),
       'review-clear-history',
       'github',
     )
@@ -1971,7 +3082,10 @@ function installHandlers() {
   // Rerunning a workflow mutates GitHub, so it is a write: it is refused while any
   // other repository operation is in flight rather than interleaving with one.
   ipcMain.handle('repository:pull-request-check-rerun', (event, number: number, runId: number) => {
-    return operations.write(() => rerunPullRequestCheck(repository(), number, runId))
+    const root = repository()
+    return scheduler.mutate(inspectionAuthority.getStore()?.context.repositoryId ?? root, () =>
+      rerunPullRequestCheck(root, number, runId),
+    )
   })
 
   ipcMain.handle('operation:cancel', (event, requestId: unknown) => {
@@ -1981,8 +3095,8 @@ function installHandlers() {
     // The queue runs across repositories, so it is cancelled whether or not one
     // is open: a window with no repository still has a queue to stop.
     inboxKeys.cancel(INBOX_ROOT, requestId)
-    if (!activeRepository) return
-    readKeys.cancel(activeRepository, requestId)
+    const root = inspectionAuthority.getStore()?.root ?? activeRepository
+    if (root) readKeys.cancel(root, requestId)
   })
   ipcMain.handle('external:open', async (event, value: unknown) => {
     // Trust is decided by the hosts this installation already speaks to, never
@@ -2036,6 +3150,35 @@ function installHandlers() {
             // registered since must retire it rather than publish it.
             const finalIdentity = await inboxIdentityNow()
             if (combined.aborted || finalIdentity !== identity) throw new CommandCancelled()
+            if (
+              (report.refresh.state === 'fresh' || report.refresh.state === 'partial') &&
+              report.refresh.confirmedAt
+            ) {
+              const listed = new Map<string, { originUrl: string; facts: PullRequest[] }>()
+              const current = inventory.current()
+              for (const item of report.items) {
+                const repo = current.repositories.find(
+                  (repo) =>
+                    repo.registeredPaths.includes(item.repositoryPath) &&
+                    repo.remote?.host.toLowerCase() === item.host.toLowerCase() &&
+                    repo.remote.fullName.toLowerCase() === item.repository.toLowerCase(),
+                )
+                const originUrl = targets.find(
+                  (target) => target.path === item.repositoryPath,
+                )?.originUrl
+                if (!repo || !originUrl) continue
+                const entry = listed.get(repo.identity.id) ?? { originUrl, facts: [] }
+                entry.facts.push(item)
+                listed.set(repo.identity.id, entry)
+              }
+              for (const [id, page] of listed)
+                inventory.adoptPullRequestPage(
+                  id,
+                  page.facts,
+                  page.originUrl,
+                  report.refresh.confirmedAt,
+                )
+            }
             return report
           },
           requestIdClaim(asked.requestId, 'inbox-refresh'),
@@ -2248,9 +3391,11 @@ function installHandlers() {
     if (typeof relativePath !== 'string' || relativePath.length === 0) {
       throw new Error('A file path is required.')
     }
-    if (!activeRepository) return { opened: false, reason: 'No repository is open.' }
+    const root = inspectionAuthority.getStore()?.root ?? activeRepository
+    if (!root) return { opened: false, reason: 'No selected repository is available.' }
     const settings = (await readSettingsFile(settingsFile())).settings
-    return openInEditor(settings.git.editor, activeRepository, relativePath)
+    await validateInspectionDispatch()
+    return openInEditor(settings.git.editor, root, relativePath)
   })
   // CLI status only: a real read of the installed CLI and the account it holds.
   // There is no sign-in, account-switch, or sign-out channel — those belong to
@@ -2376,6 +3521,7 @@ async function createWindow() {
     window = null
     // Nothing watches or polls for a window that no longer exists.
     stopBackgroundSync()
+    inventory.stop()
   })
   if (devUrl) await window.loadURL(devUrl)
   else await window.loadURL(`${productionOrigin}/index.html`)

@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { MAX_COMMAND_BYTES, MAX_STATUS_BYTES } from '@git-stacks/shared/performance'
 import type { ChangedFile, GitOperation, Stash } from '@git-stacks/shared/types'
 import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
+import { assertInspectionOrigin, validateOperationEffect } from './inspection-context'
 
 export const execFile = promisify(execFileCallback)
 export const MAX_BUFFER = MAX_COMMAND_BYTES
@@ -17,6 +18,7 @@ export interface CommandError extends Error {
   code?: string | number
   stdout?: string
   stderr?: string
+  gitDispatched?: boolean
 }
 
 export interface RefRecord {
@@ -307,6 +309,121 @@ export function commandEnvironment(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     ...env,
   }
 }
+
+const configReadArgument = /^--(?:get(?:-all|-regexp|-urlmatch|-color|-colorbool)?|list)$/
+const branchEffectArgument = /^(-[dDmMfF]|--(?:delete|move|force|set-upstream-to|unset-upstream))/
+const gitEffects = new Set([
+  'update-ref',
+  'switch',
+  'checkout',
+  'checkout-index',
+  'restore',
+  'reset',
+  'rebase',
+  'merge',
+  'cherry-pick',
+  'revert',
+  'push',
+  'fetch',
+  'pull',
+  'add',
+  'apply',
+  'stash',
+  'commit',
+  'clean',
+  'am',
+  'rm',
+  'mv',
+  'init',
+  'update-index',
+  'read-tree',
+  'pack-refs',
+])
+const branchReads = new Set([
+  '--show-current',
+  '--list',
+  '--all',
+  '--remotes',
+  '-a',
+  '-r',
+  '-v',
+  '-vv',
+  '--contains',
+  '--no-contains',
+  '--merged',
+  '--no-merged',
+  '--format',
+  '--points-at',
+])
+
+/** Only effects participate: validation performs Git reads and must not recurse. */
+function hasGitEffect(args: string[]): boolean {
+  let command = 0
+  while (command < args.length && args[command].startsWith('-')) {
+    const arg = args[command]
+    command +=
+      arg === '-c' ||
+      arg === '-C' ||
+      arg === '--git-dir' ||
+      arg === '--work-tree' ||
+      arg === '--config-env'
+        ? 2
+        : 1
+  }
+  const name = args[command]
+  const first = args[command + 1]
+  if (name === 'config') {
+    if (first === 'get' || first === 'list') return false
+    let values = 0
+    for (let i = command + 1; i < args.length; i++) {
+      const arg = args[i]
+      if (configReadArgument.test(arg) || arg === '-l') return false
+      if (!arg.startsWith('-')) values++
+    }
+    return (
+      values !== 1 ||
+      args.includes('--unset') ||
+      args.includes('--unset-all') ||
+      args.includes('--remove-section')
+    )
+  }
+  if (name === 'worktree') return first !== 'list'
+  if (name === 'remote')
+    return (
+      first === 'add' ||
+      first === 'remove' ||
+      first === 'rm' ||
+      first === 'rename' ||
+      first === 'set-url' ||
+      first === 'set-head' ||
+      first === 'prune'
+    )
+  if (name === 'symbolic-ref') {
+    let values = 0
+    for (let i = command + 1; i < args.length; i++) {
+      if (args[i] === '--delete') return true
+      if (!args[i].startsWith('-') && ++values > 1) return true
+    }
+    return false
+  }
+  if (name === 'branch') {
+    let value = false
+    let read = false
+    for (let i = command + 1; i < args.length; i++) {
+      const arg = args[i]
+      if (branchEffectArgument.test(arg)) return true
+      if (branchReads.has(arg) || arg.startsWith('--format=') || arg.startsWith('--sort='))
+        read = true
+      if (!arg.startsWith('-')) value = true
+    }
+    return value && !read
+  }
+  if (name === 'hash-object') return args.includes('-w')
+  if (name === 'apply' && args.includes('--check')) return false
+  if (name === 'stash' && (first === 'list' || first === 'show')) return false
+  if (name === 'rebase' && first === '--show-current-patch') return false
+  return gitEffects.has(name)
+}
 export async function runGit(
   repoPath: string,
   args: string[],
@@ -314,13 +431,17 @@ export async function runGit(
   signal?: AbortSignal,
 ): Promise<string> {
   const runtime = await resolveGitRuntime()
+  if (hasGitEffect(args)) await validateOperationEffect()
   return execute(
     runtime.executable,
     args,
     repoPath,
     gitCommandEnvironment(runtime, commandEnvironment(env)),
     signal,
-  )
+  ).catch((error: CommandError) => {
+    error.gitDispatched = error.code !== 'ENOENT' && error.code !== 'EACCES'
+    throw error
+  })
 }
 
 /**
@@ -397,6 +518,7 @@ export async function runGitWithInput(
   env?: NodeJS.ProcessEnv,
 ): Promise<string> {
   const runtime = await resolveGitRuntime()
+  if (hasGitEffect(args)) await validateOperationEffect()
   return executeWithInput(
     runtime.executable,
     args,
@@ -577,6 +699,7 @@ export async function runGitCapped(
   options: CappedOptions,
 ): Promise<CappedResult> {
   const runtime = await resolveGitRuntime()
+  if (hasGitEffect(args)) await validateOperationEffect()
   return executeCapped(runtime.executable, args, repoPath, {
     ...options,
     env: gitCommandEnvironment(runtime, commandEnvironment(options.env)),
@@ -646,9 +769,11 @@ export async function getOriginUrl(repoPath: string, signal?: AbortSignal): Prom
     const value = stripTrailingNewline(
       await runGit(repoPath, ['remote', 'get-url', 'origin'], undefined, signal),
     )
+    assertInspectionOrigin(value || null, true)
     return value || null
   } catch (error) {
     if (isExitCode(error, 2) || isExitCode(error, 128)) {
+      assertInspectionOrigin(null, true)
       return null
     }
     throw error
@@ -733,9 +858,11 @@ export async function getConfigValue(
     const value = stripTrailingNewline(
       await runGit(repoPath, ['config', '--get', key], undefined, signal),
     )
+    if (key === 'remote.origin.url') assertInspectionOrigin(value || null)
     return value || null
   } catch (error) {
     if (isExitCode(error, 1) || isExitCode(error, 2) || isExitCode(error, 128)) {
+      if (key === 'remote.origin.url') assertInspectionOrigin(null)
       return null
     }
     throw error
@@ -886,6 +1013,8 @@ export async function gitPathExists(
 export async function getOperationState(
   repoPath: string,
   signal?: AbortSignal,
+  /** Discovery may supply its already validated administrative directory to avoid seven subprocesses. */
+  gitDirectory?: string,
 ): Promise<OperationState> {
   const names = [
     'rebase-merge',
@@ -896,13 +1025,20 @@ export async function getOperationState(
     'sequencer',
     'BISECT_LOG',
   ]
-  const reads = names.map((name) => gitPathExists(repoPath, name, signal))
   let existing: boolean[]
-  try {
-    existing = await Promise.all(reads)
-  } catch (error) {
-    await Promise.allSettled(reads)
-    throw error
+  if (gitDirectory) {
+    if (signal?.aborted) throw new CommandCancelled()
+    const entries = new Set(await fs.readdir(gitDirectory))
+    if (signal?.aborted) throw new CommandCancelled()
+    existing = names.map((name) => entries.has(name))
+  } else {
+    const reads = names.map((name) => gitPathExists(repoPath, name, signal))
+    try {
+      existing = await Promise.all(reads)
+    } catch (error) {
+      await Promise.allSettled(reads)
+      throw error
+    }
   }
   const rebase = existing[0] || existing[1]
   const operation = rebase

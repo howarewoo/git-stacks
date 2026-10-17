@@ -315,6 +315,31 @@ test('unborn repositories support their first staged commit without GitHub', asy
   }
 })
 
+test('SHA-256 unborn commits use a full-length zero old value in the HEAD guard', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'git-stacks-unborn-sha256-'))
+  try {
+    execFileSync('git', ['init', '--object-format=sha256', '-b', 'main', root], { stdio: 'pipe' })
+    const git = (...args: string[]) => runRealGit(root, args)
+    git('config', 'user.name', 'Test')
+    git('config', 'user.email', 'test@example.invalid')
+    await writeFile(join(root, 'first.txt'), 'sha256 first\n')
+    const repo = await resolveRepository(root)
+    await runAction(repo, { type: 'stage', paths: ['first.txt'] })
+    await runAction(repo, {
+      type: 'commit',
+      message: 'First SHA-256 commit',
+      amend: false,
+      expectedHead: null,
+      expectedHeadRef: 'refs/heads/main',
+    })
+    assert.equal(git('rev-parse', 'HEAD').length, 64)
+    assert.equal(git('symbolic-ref', 'HEAD'), 'refs/heads/main')
+    assert.equal(git('show', 'HEAD:first.txt'), 'sha256 first')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('divergent pull and push cannot rewrite either side of a remote branch', async () => {
   const { root, repo, git } = await fixture()
   try {

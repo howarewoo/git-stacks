@@ -38,7 +38,11 @@ const generatedFile = textFile(
 async function openReview(page: Page, file: ReviewFile): Promise<void> {
   await openGallery(page, { scenario: 'review-stacked' })
   // Keep the scenario's comparison: the conversation read answers for this head.
-  const base = reviewFileSet(NUMBER, HEAD_OID)
+  const baseRef = await page.evaluate(
+    async (number) => (await window.desktop.reviewHeadline!(number)).pullRequest.base,
+    NUMBER,
+  )
+  const base = reviewFileSet(NUMBER, HEAD_OID, baseRef)
   await answerNextDoubleCall(page, 'reviewFiles', {
     ...base,
     files: [...base.files, file],

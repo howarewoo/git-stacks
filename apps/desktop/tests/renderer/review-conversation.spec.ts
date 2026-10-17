@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { openGallery, settle } from './helpers/gallery'
+import { getDoubleCalls, openGallery, settle } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import type { Page } from '@playwright/test'
 
@@ -115,7 +115,7 @@ test.describe('Leaving a review', () => {
     const body = 'Keep every character in this unsent draft.'
     await editor.pressSequentially(body, { delay: 10 })
     await expect(editor).toHaveValue(body)
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     await expect(editor).toHaveValue(body)
@@ -148,7 +148,7 @@ test.describe('Leaving a review', () => {
     await page.evaluate(() => window.fixture.hold('reviewSubmit'))
     await page.getByRole('button', { name: 'Submit 1 comment as one review' }).click()
     await expect.poll(async () => (await submissions(page)).length).toBe(1)
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await page.evaluate(() => window.fixture.release('reviewSubmit'))
     await switchDestination(page, 'review')
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
@@ -238,7 +238,7 @@ test.describe('Leaving a review', () => {
     // reading and deciding, and it is where an identity is easiest to lose: the
     // count that names the next comment lives with the drafts, and nothing is
     // on screen to rebuild it from.
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await settle(page)
 
@@ -344,7 +344,7 @@ test.describe('Leaving a review', () => {
     await addPendingComment(page, 'Comment on src/main/review.ts:1 (head)', 'Unfinished thought.')
     await expect(page.locator('.review-draft')).toHaveCount(1)
 
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await settle(page)
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
@@ -361,17 +361,15 @@ test.describe('Leaving a review', () => {
   test('a journal read that answers after the reviewer starts writing does not replace their words', async ({
     page,
   }) => {
-    // The journal read is asynchronous and the diff it waits for is not: lines
-    // can be selected and commented on as soon as the files are on screen, which
-    // can be before the read of what was left last time comes back. The read
-    // describes the drafts as they were when it began, so answering it after an
-    // edit would replace words just typed with that older snapshot — and put the
+    // The initial qualified journal baseline was already observed by setup.
+    // A later refresh can describe that old set while an edit is being saved.
+    // Its delayed answer must not replace the words just typed or put the old
     // snapshot back on disk at the next edit.
     //
     // The read is held on a promise that returns whatever the journal held the
     // moment the read started, which is what the main process would have read,
     // rather than whatever it holds by the time the test lets it answer.
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await page.evaluate(() => {
       const bridge = window.desktop
       const read = bridge.reviewDrafts?.bind(bridge)
@@ -387,9 +385,19 @@ test.describe('Leaving a review', () => {
         return whenTheReadBegan
       }
     })
+    const readsBefore = (await getDoubleCalls(page)).filter(
+      (entry) => entry.call === 'reviewDrafts',
+    ).length
     await switchDestination(page, 'review')
-    // The review is usable with the journal read still out: the diff is what is
-    // on screen, and a line can be picked before the journal has answered.
+    await page.getByRole('button', { name: 'Reload review data from GitHub', exact: true }).click()
+    await expect
+      .poll(
+        async () =>
+          (await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewDrafts').length,
+      )
+      .toBeGreaterThan(readsBefore)
+    // A refresh is now genuinely in flight, while the previously observed
+    // baseline still permits local composition at this same qualified owner.
     await page.getByRole('button', { name: RANGE_FIRST }).click()
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
     await expect(page.getByRole('button', { name: 'Add pending comment' })).toBeVisible()
@@ -459,7 +467,7 @@ test.describe('Anchors that no longer name their line', () => {
       'Comment on src/main/review.ts:1 (head)',
       'Written before the push.',
     )
-    await switchDestination(page, 'history')
+    await switchDestination(page, 'branches')
     await switchDestination(page, 'review')
     await settle(page)
     await page.getByRole('button', { name: 'Conversation', exact: true }).click()
@@ -482,6 +490,72 @@ test.describe('Anchors that no longer name their line', () => {
     // And nothing was posted anywhere, because the draft no longer names a line.
     expect(await submissions(page)).toEqual([])
   })
+})
+
+test('unattributed local recovery is explicit, text-only, and never adopts a draft or mutation', async ({
+  page,
+}) => {
+  await page.evaluate(() =>
+    window.fixture.answerNext('reviewDraftRecovery', [
+      {
+        repo: 'acme/widgets',
+        viewer: 'ada',
+        number: 42,
+        count: 1,
+        bodies: null,
+      },
+    ]),
+  )
+  await page.getByText('PR actions', { exact: true }).click()
+  await page.getByRole('button', { name: 'Recover unattributed local text' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toContainText('acme/widgets')
+  await page.keyboard.press('Alt+ArrowRight')
+  await page.keyboard.press('Control+Alt+ArrowDown')
+  await expect(dialog).toBeVisible()
+  expect(
+    (await getDoubleCalls(page)).filter(
+      (entry) => entry.call === 'reviewHeadline' && entry.args[0] !== 42,
+    ),
+  ).toEqual([])
+  await expect(dialog).not.toContainText('A sentence whose original host was never recorded.')
+  await expect(page.locator('.review-draft')).toHaveCount(0)
+  await page.evaluate(() =>
+    window.fixture.answerNext('reviewDraftRecovery', [
+      {
+        repo: 'acme/widgets',
+        viewer: 'ada',
+        number: 42,
+        count: 1,
+        bodies: ['A sentence whose original host was never recorded.'],
+      },
+    ]),
+  )
+  await dialog.getByRole('button', { name: 'Show original text for manual recovery' }).click()
+  await expect(dialog).toContainText('A sentence whose original host was never recorded.')
+  await dialog.getByRole('button', { name: 'Close without changing records' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.review-draft')).toHaveCount(0)
+  expect(
+    await page.evaluate(() =>
+      window.fixture.calls.filter((entry) =>
+        [
+          'runAction',
+          'reviewSetDrafts',
+          'reviewSubmit',
+          'reviewReply',
+          'reviewSetResolved',
+        ].includes(entry.call),
+      ),
+    ),
+  ).toEqual([])
+  expect(
+    await page.evaluate(() =>
+      window.fixture.calls
+        .filter((entry) => entry.call === 'reviewDraftRecovery')
+        .map((entry) => entry.args),
+    ),
+  ).toEqual([[null], [{ repo: 'acme/widgets', viewer: 'ada', number: 42 }]])
 })
 
 test.describe('Viewer permissions', () => {
@@ -524,17 +598,23 @@ test.describe('Threads', () => {
       const desktop = window.desktop
       const reply = desktop.reviewReply?.bind(desktop)
       if (reply) {
-        desktop.reviewReply = async (number, threadId, body) => {
+        desktop.reviewReply = async (number, threadId, body, owner) => {
           const sent = ((
             window as unknown as {
               __replies?: { number: number; threadId: string; body: string }[]
             }
           ).__replies ??= [])
           sent.push({ number, threadId, body })
-          return reply(number, threadId, body)
+          return reply(number, threadId, body, owner)
         }
       }
     })
+    const capturedOwner = await page.evaluate(
+      async () => (await window.desktop.reviewThreads!(42)).owner,
+    )
+    const readsBeforeReply = await page.evaluate(
+      () => window.fixture.calls.filter((entry) => entry.call === 'reviewThreads').length,
+    )
 
     await page.locator('.review-thread').first().getByRole('button', { name: 'Reply' }).click()
     await page
@@ -549,6 +629,11 @@ test.describe('Threads', () => {
           .__replies ?? [],
     )
     expect(replies).toEqual([{ number: 42, threadId: 'T_thr_1', body: 'Agreed.' }])
+    expect(
+      await page.evaluate(
+        () => window.fixture.calls.find((entry) => entry.call === 'reviewReply')?.args[3],
+      ),
+    ).toEqual(capturedOwner)
     // The reply left the composer, and the thread is read again so the panel
     // reflects GitHub rather than what the local mutation believed.
     await expect(
@@ -558,7 +643,7 @@ test.describe('Threads', () => {
       await page.evaluate(
         () => window.fixture.calls.filter((entry) => entry.call === 'reviewThreads').length,
       ),
-    ).toBeGreaterThan(1)
+    ).toBeGreaterThan(readsBeforeReply)
   })
 
   test('resolved and outdated threads are shown as such, and resolving is reversible', async ({
@@ -577,4 +662,30 @@ test.describe('Threads', () => {
     await expect(second).toContainText('outdated')
     await expect(second.getByRole('button', { name: 'Reopen' })).toBeVisible()
   })
+})
+
+test('a submitted thread opens its actual head-bound line in the stacked comparison', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'review-stacked' })
+  await switchDestination(page, 'review')
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click()
+  const thread = page.locator('.review-thread').first()
+  await expect(thread).toContainText('src/main/review.ts:2 (head)')
+  await thread.getByRole('button', { name: 'Show in diff', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Code', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await expect(
+    page.locator('.review-line-selected').getByRole('button', {
+      name: RANGE_SECOND,
+      exact: true,
+    }),
+  ).toBeVisible()
+  expect(
+    (await getDoubleCalls(page)).filter((entry) =>
+      ['runAction', 'reviewSubmit', 'reviewReply', 'reviewSetResolved'].includes(entry.call),
+    ),
+  ).toEqual([])
 })

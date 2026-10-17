@@ -164,12 +164,7 @@ export async function measureDesktop(repoRoot, fixture) {
   const started = performance.now()
   const child = spawn(
     electron,
-    [
-      '--no-sandbox',
-      '--disable-gpu',
-      `--remote-debugging-port=${port}`,
-      join(repoRoot, 'out/main/index.js'),
-    ],
+    ['--disable-gpu', `--remote-debugging-port=${port}`, join(repoRoot, 'out/main/index.js')],
     {
       cwd: repoRoot,
       detached: process.platform !== 'win32',
@@ -197,22 +192,9 @@ export async function measureDesktop(repoRoot, fixture) {
         process.env.ELECTRON_RENDERER_URL || 'app://git-stacks',
       ),
     )
-    await until(client, "!!document.querySelector('button.onboarding-recent')")
-    // The environment report can move this button between mouse-down and mouse-up.
-    await evaluate(client, "document.querySelector('button.onboarding-recent').focus()")
-    for (const type of ['keyDown', 'keyUp']) {
-      await client.send('Input.dispatchKeyEvent', {
-        type,
-        key: 'Enter',
-        code: 'Enter',
-        text: type === 'keyDown' ? '\r' : undefined,
-        windowsVirtualKeyCode: 13,
-        nativeVirtualKeyCode: 13,
-      })
-    }
     await until(
       client,
-      "document.querySelector('.list-subtitle')?.textContent?.trim() === '3001 shown' && document.querySelectorAll('.branch-row').length === 200",
+      "document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('3001 matches · 0 context · 2801 unmounted') && document.querySelectorAll('.bw-lane-row').length === 200",
     )
     await evaluate(
       client,
@@ -221,7 +203,7 @@ export async function measureDesktop(repoRoot, fixture) {
     )
     const startupMs = performance.now() - started
 
-    const search = 'input[aria-label="Filter current view branches, files, and pull requests"]'
+    const search = 'input[aria-label="Filter branches by branch, PR, or path"]'
     await click(client, search)
     await evaluate(
       client,
@@ -231,8 +213,9 @@ export async function measureDesktop(repoRoot, fixture) {
         control.addEventListener('input', () => {
           const started = performance.now();
           const observer = new MutationObserver(() => {
-            if (document.querySelector('.list-subtitle')?.textContent?.trim() !== '1 shown') return;
-            const row = document.querySelector('.branch-row');
+            if (!document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('1 matches · 0 context · 0 unmounted')) return;
+            if (document.querySelectorAll('.bw-lane-row').length !== 1) return;
+            const row = document.querySelector('.bw-lane-row');
             if (!row?.textContent?.includes('feature/branch-2999')) return;
             observer.disconnect();
             requestAnimationFrame(() => requestAnimationFrame(() => {

@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { canonicalHostName } from '@git-stacks/shared/host'
 import { commandCode, commandDetail, MAX_BUFFER } from './git-core'
 import { isRecord } from '@git-stacks/shared/guards'
+import { validateInspectionDispatch } from './inspection-context'
 import {
   conditionalCacheKey,
   conditionalHeaders,
@@ -431,6 +432,10 @@ export interface GitHubGraphqlOptions {
 }
 
 /** The only GitHub capability domain services may use; it never exposes a token or raw fetch. */
+export type GitHubCredentialSession = Pick<GitHubTransport, 'rest' | 'graphql' | 'paginate'> & {
+  readonly authority: string
+}
+
 export interface GitHubTransport {
   readonly kind: 'direct' | 'gh'
   /**
@@ -483,6 +488,8 @@ export interface GitHubTransport {
    * has already left.
    */
   credentialAuthority(options?: GitHubGraphqlOptions): Promise<string>
+  /** Main-only requests sharing one credential; absence must refuse guarded writes. */
+  pinCredential?(options?: GitHubGraphqlOptions): Promise<GitHubCredentialSession>
 }
 
 export function emptyRateLimit(): GitHubRateLimit {
@@ -1009,6 +1016,24 @@ export class DirectGitHubTransport implements GitHubTransport {
     return hostCredentialAuthority(this.host ?? GITHUB_HOST, this.accessCredential()?.token ?? null)
   }
 
+  async pinCredential(options: GitHubGraphqlOptions = {}): Promise<GitHubCredentialSession> {
+    if (options.signal?.aborted)
+      throw new GitHubTransportError({ kind: 'cancelled', detail: 'the request was cancelled' })
+    const access = this.accessCredential()
+    if (!access)
+      throw new GitHubTransportError({
+        kind: 'unauthorized',
+        detail: 'no GitHub credential was supplied to this transport',
+      })
+    const pinned = new DirectGitHubTransport({ ...this.options, token: access.token })
+    return {
+      authority: pinned.requestAuthority,
+      rest: pinned.rest.bind(pinned),
+      graphql: pinned.graphql.bind(pinned),
+      paginate: pinned.paginate.bind(pinned),
+    }
+  }
+
   private async headers(
     hasBody: boolean,
     customHeaders?: Record<string, string>,
@@ -1074,6 +1099,7 @@ export class DirectGitHubTransport implements GitHubTransport {
             : { kind: 'cancelled', detail: 'the request was cancelled' },
         )
       }
+      await validateInspectionDispatch()
       const response = await request$(url, {
         method,
         headers: access.headers,
@@ -1568,6 +1594,7 @@ export class GhGitHubTransport implements GitHubTransport {
         })
       let output: string
       try {
+        await validateInspectionDispatch()
         output = await run(args, { signal: controller.signal, timeoutMs, input })
       } catch (error) {
         if (timedOut)
@@ -1711,6 +1738,13 @@ export class GhGitHubTransport implements GitHubTransport {
   }
 
   async rest<T = unknown>(request: GitHubRestRequest): Promise<GitHubRestResponse<T>> {
+    return this.restRequest<T>(request)
+  }
+
+  private async restRequest<T>(
+    request: GitHubRestRequest,
+    pinned?: GitHubCliSnapshot,
+  ): Promise<GitHubRestResponse<T>> {
     // The credential this request will carry is part of the cache identity. A
     // body read as one account is not this account's answer to ask again, and a
     // validator recorded for one credential must never be replayed against the
@@ -1719,14 +1753,15 @@ export class GhGitHubTransport implements GitHubTransport {
     // consulted, and handed to the request that follows, so one read of the
     // credential serves both.
     const cache = request.cache === true ? this.options.cache : undefined
-    const snapshot: GitHubCliSnapshot | null =
-      cache === undefined
+    const snapshot =
+      pinned ??
+      (cache === undefined
         ? null
         : await this.credentialSnapshot({
             ...(request.signal ? { signal: request.signal } : {}),
             ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
-          })
-    const key = snapshot ? conditionalCacheKey(request, snapshot.authority) : null
+          }))
+    const key = cache && snapshot ? conditionalCacheKey(request, snapshot.authority) : null
     const cached: CachedGitHubResponse | null = key === null ? null : (cache?.get(key) ?? null)
     const conditional =
       key === null
@@ -1737,11 +1772,18 @@ export class GhGitHubTransport implements GitHubTransport {
   }
 
   async paginate<T = unknown>(request: GitHubRestRequest): Promise<T[]> {
+    return this.paginateRequest<T>(request)
+  }
+
+  private async paginateRequest<T>(
+    request: GitHubRestRequest,
+    snapshot?: GitHubCliSnapshot,
+  ): Promise<T[]> {
     const items: T[] = []
     let path: string | null = request.path
     const origin = new URL(this.apiUrl).origin
     for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
-      const response = await this.request<unknown>({ ...request, path })
+      const response = await this.request<unknown>({ ...request, path }, snapshot)
       // The response has already been recorded against this host. A publication
       // naming no host is process-wide: it would replace what another host, or
       // another account of this one, last reported.
@@ -1786,6 +1828,15 @@ export class GhGitHubTransport implements GitHubTransport {
     variables: Record<string, unknown> = {},
     options: GitHubGraphqlOptions = {},
   ): Promise<{ data: T; authority: string }> {
+    return this.graphqlRequest<T>(query, variables, options)
+  }
+
+  private async graphqlRequest<T>(
+    query: string,
+    variables: Record<string, unknown>,
+    options: GitHubGraphqlOptions,
+    pinned?: GitHubCliSnapshot,
+  ): Promise<{ data: T; authority: string }> {
     // The authority is the credential this request's own child was pinned to,
     // which is the credential `credentialAuthority` resolves separately. A proof
     // that pins the credential before and after its request needs the one in the
@@ -1795,14 +1846,16 @@ export class GhGitHubTransport implements GitHubTransport {
     // When this request left, so that a refusal carried in a 200 is judged against
     // the report that was current when its child was started.
     const requestOrder = nextGitHubRequestOrder()
-    const response = await this.request<unknown>({
-      method: 'POST',
-      // A host that serves GraphQL from its own path is given that path; the
-      // default host keeps `/graphql` under its API base.
-      path: this.options.graphqlUrl ?? 'graphql',
-      body: { query, variables },
-      ...options,
-    })
+    const response = await this.request<unknown>(
+      {
+        method: 'POST',
+        // Enterprise hosts may serve GraphQL outside their REST API base.
+        path: this.options.graphqlUrl ?? 'graphql',
+        body: { query, variables },
+        ...options,
+      },
+      pinned,
+    )
     const data = graphqlData<T>(
       response.data,
       response.status,
@@ -1812,6 +1865,26 @@ export class GhGitHubTransport implements GitHubTransport {
         publishRateLimit(limit, kind, this.destinationHost, response.authority, requestOrder),
     )
     return { data, authority: response.authority }
+  }
+
+  async pinCredential(options: GitHubGraphqlOptions = {}): Promise<GitHubCredentialSession> {
+    const snapshot = await this.credentialSnapshot(options)
+    if (!snapshot.credentialPinned)
+      throw new GitHubTransportError({
+        kind: 'unauthorized',
+        detail: `no GitHub CLI credential for ${this.destinationHost} could be pinned`,
+      })
+    return {
+      authority: snapshot.authority,
+      rest: <T = unknown>(request: GitHubRestRequest) => this.restRequest<T>(request, snapshot),
+      paginate: <T = unknown>(request: GitHubRestRequest) =>
+        this.paginateRequest<T>(request, snapshot),
+      graphql: async <T = Record<string, unknown>>(
+        query: string,
+        variables: Record<string, unknown> = {},
+        requestOptions: GitHubGraphqlOptions = {},
+      ) => (await this.graphqlRequest<T>(query, variables, requestOptions, snapshot)).data,
+    }
   }
 
   /**

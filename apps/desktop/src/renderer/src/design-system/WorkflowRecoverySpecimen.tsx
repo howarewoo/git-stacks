@@ -19,6 +19,10 @@ const JOURNEY_LAYERS: PublishProgress['layers'] = [
   {
     branch: 'feature/checkout',
     base: 'main',
+    oid: 'a'.repeat(40),
+    baseOid: 'b'.repeat(40),
+    remoteOid: null,
+    push: 'create',
     create: true,
     pullRequest: 101,
     title: 'Checkout validation',
@@ -31,6 +35,10 @@ const JOURNEY_LAYERS: PublishProgress['layers'] = [
   {
     branch: 'feature/checkout-orders',
     base: 'feature/checkout',
+    oid: 'c'.repeat(40),
+    baseOid: 'a'.repeat(40),
+    remoteOid: 'd'.repeat(40),
+    push: 'force',
     create: false,
     pullRequest: 102,
     title: 'Orders',
@@ -144,29 +152,37 @@ function recoveryApi(mode: string): WorkflowStackAPI {
       }
       return mode === 'mismatch' ? movedPreview : publishPreview
     },
-    submitStackProgress: async () =>
-      mode === 'non-retryable'
-        ? {
-            ...journal,
-            message: 'GitHub rejected the native stack chain.',
-            steps: [
-              {
-                kind: 'create-stack',
-                branch: null,
-                label: 'Register native stack',
-                status: 'failed',
-                pullRequest: null,
-                detail: '',
-                failure: {
-                  summary: 'Invalid chain (422).',
-                  recovery:
-                    'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
-                  retryable: false,
+    submitStackProgress: async () => ({
+      scope: {
+        repositoryPath: snapshot.path,
+        remoteUrl: snapshot.remoteUrl,
+        authority: 'recovery-specimen',
+      },
+      source: 'journal-read',
+      progress:
+        mode === 'non-retryable'
+          ? {
+              ...journal,
+              message: 'GitHub rejected the native stack chain.',
+              steps: [
+                {
+                  kind: 'create-stack',
+                  branch: null,
+                  label: 'Register native stack',
+                  status: 'failed',
+                  pullRequest: null,
+                  detail: '',
+                  failure: {
+                    summary: 'Invalid chain (422).',
+                    recovery:
+                      'Fix the pull request bases or readiness on GitHub, then dismiss this submission and take a fresh preview.',
+                    retryable: false,
+                  },
                 },
-              },
-            ],
-          }
-        : journal,
+              ],
+            }
+          : journal,
+    }),
     onSubmitStackProgress: () => noop,
     onMergeProgress: () => noop,
   }

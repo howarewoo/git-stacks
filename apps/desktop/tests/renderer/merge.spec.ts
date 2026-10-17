@@ -1,9 +1,11 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { openGallery, publishCliStatus, releaseDoubleCalls, settle } from './helpers/gallery'
+import { selectBranchInList } from './helpers/dialogs'
+import { switchDestination } from './helpers/destinations'
 
 /**
- * The merge dialog, driven as a person drives it: open the merge preview, send the
- * merge, and read what GitHub reports afterwards.
+ * The merge dialog, driven as a person drives it: open the captured merge outcomes, send
+ * the merge, and read what GitHub reports afterwards.
  *
  * A run that GitHub is still running speaks through the progress channel and then
  * returns. What the dialog shows from then on has to be the read-back, because a read
@@ -14,41 +16,36 @@ import { openGallery, publishCliStatus, releaseDoubleCalls, settle } from './hel
 test.describe('Merge reads after a run', () => {
   test('a finished run is replaced by what GitHub reports', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-lifecycle' })
-    await page.getByRole('button', { name: 'Preview PR merge', exact: true }).first().click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeOutcomes(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
 
     // Before the run: what GitHub reports for earlier requests, with one pull request
     // still running a request.
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
-    await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
+    await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
 
     // Held open, so the state the run itself publishes is observed rather than raced past.
     await page.evaluate(() => window.fixture.hold('runAction'))
     await dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last().click()
     const runningMessage = dialog.getByRole('region', { name: /^Merge result/ })
     await expect(runningMessage).toBeVisible()
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toHaveCount(0)
 
     await releaseDoubleCalls(page, 'runAction')
-    await expect(runningMessage).toHaveCount(0)
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
-    await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
 
-    // A later read is still what GitHub reports, and the control that asks for it is
-    // reachable the whole time.
+    // The completed read supersedes pushed progress without replaying the merge.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
+    await expect(runningMessage).toHaveCount(0)
     await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
+    expect(
+      await page.evaluate(() =>
+        window.fixture.actions.filter((action) => action.type === 'executeStack'),
+      ),
+    ).toHaveLength(1)
   })
 
-  test('an idle merge dialog reads the replacement account without submitting another merge', async ({
-    page,
-  }) => {
+  test('an idle merge approval cannot move to a replacement account', async ({ page }) => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
-    await page.getByRole('treeitem', { name: /^feature\/checkout-tests,/ }).click()
-    await page.getByRole('button', { name: 'Preview PR merge', exact: true }).first().click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeOutcomes(page)
     await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
     await publishCliStatus(page, {
       state: 'authenticated',
@@ -58,28 +55,242 @@ test.describe('Merge reads after a run', () => {
       identity: 'cli:github.com:replacement:1',
       message: null,
     })
-    await expect(dialog.getByText('WHAT GITHUB REPORTS NOW')).toBeVisible()
-    await expect(dialog.getByText('Merged on GitHub as 4444444444')).toBeVisible()
-    await expect(dialog.getByRole('button', { name: 'Refresh what GitHub reports' })).toBeEnabled()
+    await expect(
+      dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last(),
+    ).toBeDisabled()
+    await expect(dialog.getByRole('button', { name: 'Reload preview' })).toBeDisabled()
+    await expect(
+      dialog.getByText('github.com|github.com|authenticated|octo|cli:github.com:octo:1', {
+        exact: true,
+      }),
+    ).toBeVisible()
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 
   test('a refused merge stays failed on reopen, with the reason GitHub gave', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-merge-refused' })
-    await page.getByRole('button', { name: 'Preview PR merge', exact: true }).first().click()
-    const dialog = page.getByRole('dialog', { name: 'Merge pull request' })
+    const dialog = await openMergeOutcomes(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
     // A terminal `failed` result never changes, so a reopened dialog has to present the
     // refusal as the failure it is, still carrying GitHub's own reason. `InlineAlert` only
     // carries `role="alert"` for an error tone, so this also proves the refusal is presented
     // as an error rather than as the success a fallback would have produced.
-    const refusal = dialog.getByRole('alert')
+    const refusal = dialog
+      .getByRole('region', { name: /^What GitHub reports now/ })
+      .getByRole('alert')
     await expect(refusal).toContainText('Required review is missing')
     await expect(dialog.getByText('failed', { exact: true })).toBeVisible()
 
-    // Reading again answers with the same refusal: no later read quietly resolves it.
+    // A later read must not erase the refusal, even when that read fails.
     await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
-    await expect(dialog.getByRole('alert')).toContainText('Required review is missing')
+    await expect(refusal).toContainText('Required review is missing')
   })
+})
+
+test('a merge that landed one captured target stays partial when a later target fails', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'github-cli-authenticated' })
+  const dialog = await openMergeOutcomes(page)
+  await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
+  await page.evaluate(() => window.fixture.hold('runAction'))
+  await dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last().click()
+  await page.evaluate(() => {
+    window.fixture.pushMergeProgress({
+      scope: window.fixture.operationScope(),
+      source: 'action',
+      progress: {
+        action: 'default',
+        status: 'failed',
+        message: 'First target merged; the second target was refused.',
+        layers: [
+          {
+            branch: 'feature/checkout',
+            pullRequest: 40,
+            status: 'merged',
+            detail: 'Merged on GitHub as 4444444444',
+            mergedOid: '4444444444444444444444444444444444444444',
+            queue: null,
+            requestUuid: 'landed-target',
+          },
+          {
+            branch: 'feature/checkout-tests',
+            pullRequest: 41,
+            status: 'failed',
+            detail: 'Required review is missing',
+            mergedOid: null,
+            queue: null,
+            requestUuid: 'refused-target',
+          },
+        ],
+      },
+    })
+    window.fixture.failNext('mergeStatus', 'Readback unavailable')
+  })
+  await releaseDoubleCalls(page, 'runAction')
+  await expect(dialog.getByText('Partially completed', { exact: true })).toBeVisible()
+  await expect(dialog.getByText('Not applied', { exact: true })).toHaveCount(0)
+  await expect(dialog).toContainText('Merged on GitHub as 4444444444')
+  await expect(dialog).toContainText('Required review is missing')
+  expect(await page.evaluate(() => window.fixture.actions)).toHaveLength(1)
+})
+
+async function openCapturedRecovery(page: Page, branchName = 'feature/checkout') {
+  await selectBranchInList(page, branchName)
+  await page.getByRole('button', { name: 'Operations and recovery', exact: true }).click()
+  const dialog = page.getByRole('dialog', {
+    name: 'Repository-qualified operations and recovery',
+    exact: true,
+  })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: 'Capture selected directory for recovery' }).click()
+  const recovery = dialog.getByRole('region', { name: 'Remote operation recovery' })
+  await expect(recovery).toBeVisible()
+  return { dialog, recovery }
+}
+
+/**
+ * The merge dialog is reached from the recovery region of an explicitly captured
+ * directory, through the merge outcomes that directory's journal reports.
+ */
+async function openMergeOutcomes(page: Page, branchName = 'feature/checkout') {
+  const { recovery } = await openCapturedRecovery(page, branchName)
+  await recovery.getByRole('button', { name: 'Review merge outcomes' }).click()
+  return page.getByRole('dialog', { name: 'Merge pull request' })
+}
+
+test('recovery reads only an explicitly captured directory and browsing never replays a mutation', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'github-cli-authenticated' })
+  const { dialog, recovery } = await openCapturedRecovery(page)
+  await expect(recovery).toContainText('has not reported a result yet')
+  expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+  await page.keyboard.press('Escape')
+  await expect(dialog).not.toBeVisible()
+  for (const destination of ['activity', 'attention', 'pullRequests', 'branches'] as const) {
+    await switchDestination(page, destination)
+    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+  }
+  await selectBranchInList(page, 'feature/checkout')
+  await page.getByRole('button', { name: 'Operations and recovery', exact: true }).click()
+  await expect(dialog).toBeVisible()
+  await expect(recovery).toBeVisible()
+  expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+})
+
+test('a retired producer cannot replace outcomes for the explicitly captured directory', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'github-cli-authenticated' })
+  const { recovery } = await openCapturedRecovery(page)
+  await page.evaluate(() => {
+    const scope = window.fixture.operationScope()
+    const progress = {
+      action: 'default' as const,
+      status: 'running' as const,
+      message: 'Current captured merge',
+      layers: [
+        {
+          branch: 'feature/checkout-tests',
+          pullRequest: 41,
+          status: 'pending' as const,
+          detail: 'Current authority owns this request',
+          mergedOid: null,
+          queue: null,
+          requestUuid: 'current',
+        },
+      ],
+    }
+    window.fixture.pushMergeProgress({ scope, source: 'action', progress })
+    const retired = { ...scope, authority: `${scope.authority}-retired` }
+    window.fixture.pushMergeProgress({
+      scope: retired,
+      source: 'action',
+      progress: { ...progress, message: 'Retired merge must not appear' },
+    })
+    window.fixture.pushMergeProgress({ scope: retired, source: 'action', progress: null })
+  })
+  await expect(recovery).toContainText('Current captured merge')
+  await expect(recovery).not.toContainText('Retired merge must not appear')
+  expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+})
+
+test('a recovery journal read failure stays visible without retrying a mutation', async ({
+  page,
+}) => {
+  await openGallery(page, { scenario: 'github-cli-authenticated' })
+  await selectBranchInList(page, 'feature/checkout')
+  await page.evaluate(() => {
+    window.fixture.failNext('mergeStatus', 'Initial recovery unavailable')
+  })
+  await page.getByRole('button', { name: 'Operations and recovery', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Repository-qualified operations and recovery' })
+  await dialog.getByRole('button', { name: 'Capture selected directory for recovery' }).click()
+  await expect(dialog).toContainText('Recovery read unavailable')
+  await expect(dialog.getByText('Completed', { exact: true })).toHaveCount(0)
+  expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+})
+test('captured publication survives a failed journal read without replay', async ({ page }) => {
+  await openGallery(page, { scenario: 'github-cli-authenticated' })
+  await page.evaluate(() => window.fixture.hold('submitStackProgress'))
+  const { recovery } = await openCapturedRecovery(page)
+  await page.evaluate(() => {
+    window.fixture.pushPublication({
+      scope: window.fixture.operationScope(),
+      source: 'action',
+      progress: {
+        operationId: 'captured-shell-publication',
+        status: 'failed',
+        message: 'Captured remote update was refused',
+        resumeAt: 0,
+        allowForce: true,
+        layers: [
+          {
+            branch: 'feature/checkout-tests',
+            base: 'main',
+            oid: 'a'.repeat(40),
+            baseOid: 'b'.repeat(40),
+            remoteOid: 'c'.repeat(40),
+            push: 'force',
+            create: false,
+            pullRequest: 41,
+            title: 'Captured title',
+            body: 'Captured body',
+            draft: true,
+            updateBase: false,
+            force: true,
+            createIntent: false,
+          },
+        ],
+        steps: [
+          {
+            kind: 'push',
+            branch: 'feature/checkout-tests',
+            label: 'Captured push feature/checkout-tests',
+            status: 'failed',
+            pullRequest: null,
+            detail: '',
+            failure: {
+              summary: 'Remote refused update',
+              recovery: 'Read before retrying',
+              retryable: true,
+            },
+          },
+        ],
+      },
+    })
+  })
+  await expect(recovery).toContainText('Captured remote update was refused')
+  await page.evaluate(() => {
+    window.fixture.failNext('submitStackProgress', 'Recovery transport unavailable')
+    window.fixture.release('submitStackProgress')
+  })
+  await expect(recovery).toContainText('Captured remote update was refused')
+  await recovery.getByRole('button', { name: 'Review publication recovery' }).click()
+  const publication = page.getByRole('dialog', { name: 'Publish stack', exact: true })
+  await expect(publication).toContainText('Captured push feature/checkout-tests')
+  await expect(publication).toContainText('Original operation authority was not recorded')
+  expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
 })

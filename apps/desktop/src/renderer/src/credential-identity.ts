@@ -1,31 +1,4 @@
-import type { Branch, GitHubCliStatus, RepositorySnapshot } from '@git-stacks/shared/types'
-import { canonicalHostName } from '@git-stacks/shared/host'
-
-/**
- * The authority the GitHub state on screen was read under.
- *
- * It is the host this window reads for, the state that host's CLI is in, the
- * account behind it, and the opaque generation the main process stamped on the
- * credential itself. Any of them changing replaces the authority; an
- * equivalent re-read of the same session does not, which is what lets a plain
- * refresh keep the rows it re-confirmed.
- *
- * Every surface holding something GitHub answered is fenced by this one
- * string — the repository's own GitHub fields, the review workspace, the
- * checks panel, the discovery dialog — so they retire together and cannot
- * disagree about which session they belong to. It carries no credential and
- * nothing that names one beyond the login the CLI already reports.
- */
-export function cliAuthority(host: string | null, status: GitHubCliStatus | null): string {
-  const name = host === null ? '' : canonicalHostName(host)
-  return [
-    name,
-    canonicalHostName(status?.host ?? name),
-    status?.state ?? 'checking',
-    status?.login ?? '',
-    status?.identity ?? '',
-  ].join('|')
-}
+import type { Branch, RepositorySnapshot } from '@git-stacks/shared/types'
 
 /**
  * What a window may keep on screen after the credential behind GitHub was

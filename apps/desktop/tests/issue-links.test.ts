@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import {
   extractClosingReferences,
@@ -23,6 +25,7 @@ import {
 } from './fixtures/github-harness'
 import { createGitHubApiDouble } from './fixtures/github-api-double'
 import { DirectGitHubTransport, setGitHubTransport } from '../src/main/github-transport'
+import { inspectionAuthority } from '../src/main/inspection-context'
 
 function git(harness: GitHubHarness, args: string[]): string {
   return execFileSync('git', ['-C', harness.repo, ...args], {
@@ -306,6 +309,20 @@ test('local contextual links are stored and removed idempotently in local git co
     const removedAgain = await removeLocalContextualIssueLink(harness.repo, 1, 42)
     assert.equal(removedAgain, false)
     assert.deepEqual(await readLocalContextualIssueLinks(harness.repo, 1), [55])
+  })
+})
+
+test('local contextual unlinking removes all exact matches without rewriting unrelated values', async () => {
+  await withHarness(async (harness) => {
+    const key = 'gitstacks.pr.7.relatedissue'
+    for (const value of ['10', '101', '110', '101', '0102', 'invalid']) {
+      git(harness, ['config', '--local', '--add', key, value])
+    }
+
+    assert.equal(await removeLocalContextualIssueLink(harness.repo, 7, 101), true)
+    assert.equal(git(harness, ['config', '--local', '--get-all', key]), '10\n110\n0102\ninvalid')
+    assert.equal(await removeLocalContextualIssueLink(harness.repo, 7, 101), false)
+    assert.equal(git(harness, ['config', '--local', '--get-all', key]), '10\n110\n0102\ninvalid')
   })
 })
 
@@ -716,5 +733,126 @@ test('fork PR targets origin issues and handles permission errors cleanly', asyn
     // Body on GitHub remains unmodified
     const state = await harness.readState()
     assert.equal(state.prs[0].body, 'Initial fork body\n')
+  })
+})
+
+test('captured contextual linking refuses an origin retired after its config read without changing metadata', async () => {
+  await withHarness(async (harness) => {
+    const origin = git(harness, ['config', '--get', 'remote.origin.url'])
+    const controller = new AbortController()
+    let enter!: () => void
+    let release!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    const paused = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const linking = inspectionAuthority.run(
+      {
+        root: harness.repo,
+        context: { repositoryId: 'captured-contextual-repository' },
+        signal: controller.signal,
+        origin,
+        originUrl: origin,
+        validate: async () => {
+          enter()
+          await paused
+          if (git(harness, ['config', '--get', 'remote.origin.url']) !== origin)
+            throw new Error('The captured origin was retired.')
+        },
+      },
+      () => addLocalContextualIssueLink(harness.repo, 7, 101),
+    )
+    await entered
+    git(harness, ['remote', 'set-url', 'origin', 'https://github.com/retired/origin.git'])
+    const afterRetirement = await readFile(join(harness.repo, '.git', 'config'), 'utf8')
+    release()
+    await assert.rejects(linking)
+    assert.equal(await readFile(join(harness.repo, '.git', 'config'), 'utf8'), afterRetirement)
+    assert.deepEqual(await readLocalContextualIssueLinks(harness.repo, 7), [])
+  })
+})
+
+test('captured contextual unlinking propagates cancellation before its unset instead of swallowing refusal', async () => {
+  await withHarness(async (harness) => {
+    await addLocalContextualIssueLink(harness.repo, 7, 101)
+    await addLocalContextualIssueLink(harness.repo, 7, 102)
+    const before = await readFile(join(harness.repo, '.git', 'config'), 'utf8')
+    const controller = new AbortController()
+    let enter!: () => void
+    let release!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    const paused = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const unlinking = inspectionAuthority.run(
+      {
+        root: harness.repo,
+        context: { repositoryId: 'captured-contextual-repository' },
+        signal: controller.signal,
+        origin: null,
+        originUrl: null,
+        validate: async () => {
+          enter()
+          await paused
+        },
+      },
+      () => removeLocalContextualIssueLink(harness.repo, 7, 101),
+    )
+    await entered
+    controller.abort()
+    release()
+    await assert.rejects(unlinking)
+    assert.equal(await readFile(join(harness.repo, '.git', 'config'), 'utf8'), before)
+    assert.deepEqual(await readLocalContextualIssueLinks(harness.repo, 7), [101, 102])
+  })
+})
+
+test('captured contextual unlinking preserves all links when the head retires before removal', async () => {
+  await withHarness(async (harness) => {
+    await addLocalContextualIssueLink(harness.repo, 7, 101)
+    await addLocalContextualIssueLink(harness.repo, 7, 102)
+    await addLocalContextualIssueLink(harness.repo, 7, 103)
+    const head = git(harness, ['rev-parse', 'HEAD'])
+    const controller = new AbortController()
+
+    let enter!: () => void
+    let release!: () => void
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    const paused = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const unlinking = inspectionAuthority.run(
+      {
+        root: harness.repo,
+        context: { repositoryId: 'captured-contextual-repository' },
+        signal: controller.signal,
+        origin: null,
+        originUrl: null,
+        validate: async () => {
+          enter()
+          await paused
+          if (git(harness, ['rev-parse', 'HEAD']) !== head)
+            throw new Error('The captured head was retired.')
+        },
+      },
+      () => removeLocalContextualIssueLink(harness.repo, 7, 101),
+    )
+    await entered
+    git(harness, ['commit', '--allow-empty', '-m', 'Retire captured head'])
+    const afterRetirement = await readFile(join(harness.repo, '.git', 'config'), 'utf8')
+    release()
+    await assert.rejects(unlinking)
+    assert.equal(await readFile(join(harness.repo, '.git', 'config'), 'utf8'), afterRetirement)
+    assert.deepEqual(
+      await readLocalContextualIssueLinks(harness.repo, 7),
+      [101, 102, 103],
+      'retirement prevents removal and leaves unrelated links intact',
+    )
   })
 })

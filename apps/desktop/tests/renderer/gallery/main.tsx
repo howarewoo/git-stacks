@@ -8,8 +8,9 @@ import { TooltipProvider } from '../../../src/renderer/src/components/ui/tooltip
 import { DataSurfacesSpecimen } from '../../../src/renderer/src/design-system/DataSurfacesSpecimen'
 import { DialogSpecimen } from '../../../src/renderer/src/design-system/DialogSpecimen'
 import { FoundationsSpecimen } from '../../../src/renderer/src/design-system/FoundationsSpecimen'
-import { ShellSpecimen } from '../../../src/renderer/src/design-system/ShellSpecimen'
 import { installFixtureControl } from '../fixtures/control'
+import { InventoryConsumer } from './inventory-consumer'
+import { WorkbenchV5Gallery } from './workbench-v5'
 import {
   DEFAULT_SCENARIO,
   GALLERY_ROUTES,
@@ -38,12 +39,31 @@ const requestedScenario =
 // the same way the preload script provides it in the packaged application.
 const control = installFixtureControl({
   scenario: requestedScenario,
+  inventoryConsumer: () => routeFromHash(window.location.hash) === 'inventory',
   onScenarioChange: (name) => {
     const search = new URLSearchParams(window.location.search)
     search.set('scenario', name)
     window.history.replaceState(null, '', `?${search.toString()}${window.location.hash}`)
     for (const listener of scenarioListeners) listener()
   },
+  reviewCache: () => ({
+    reads: queryClient
+      .getQueryCache()
+      .getAll()
+      .filter((query) => query.queryKey[0] === 'review')
+      .map((query) => query.queryKey),
+    writes: queryClient
+      .getMutationCache()
+      .getAll()
+      .filter((mutation) => mutation.options.mutationKey?.[0] === 'review')
+      .map((mutation) => ({
+        key: mutation.options.mutationKey ?? null,
+        status: mutation.state.status,
+        retained: mutation.options.meta?.retainedReviewDraft === true,
+        authored:
+          mutation.options.meta?.retainedReviewDraft === true ? mutation.state.variables : null,
+      })),
+  }),
 })
 
 function GalleryIndex({ scenario }: { scenario: string }) {
@@ -82,13 +102,17 @@ function GalleryIndex({ scenario }: { scenario: string }) {
 
 function renderRoute(route: GalleryRouteId, remountKey: string) {
   switch (route) {
+    case 'inventory':
+      return <InventoryConsumer />
+    case 'workbenchV5':
+      return <WorkbenchV5Gallery key={remountKey} />
     case 'index':
       return <GalleryIndex key={remountKey} scenario={remountKey} />
     case 'controls':
     case 'foundations':
       return <FoundationsSpecimen key={remountKey} />
     case 'shell':
-      return <ShellSpecimen key={remountKey} />
+      return <WorkbenchV5Gallery key={remountKey} />
     case 'data':
       return <DataSurfacesSpecimen key={remountKey} />
     case 'dialog':

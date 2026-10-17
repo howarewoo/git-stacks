@@ -8,31 +8,10 @@ import {
 } from './helpers/gallery'
 
 test.describe('Onboarding and repository discovery', () => {
-  test('displays detected Git environment facts and standard Git explanation', async ({ page }) => {
+  test('offers local registration and discovery without a repository open', async ({ page }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await settle(page)
-
-    // Standard Git explanation is clearly visible
-    await expect(
-      page.getByText(
-        'A repository stays ordinary Git: clone it here, then keep using it in your terminal, your editor, or GitHub Desktop.',
-      ),
-    ).toBeVisible()
-
-    // Environment detection facts are rendered
-    await expect(page.getByText('Ada Lovelace <ada@example.invalid>')).toBeVisible()
-    await expect(page.getByText('main', { exact: true })).toBeVisible()
-    await expect(page.getByText('Credential helper: osxkeychain')).toBeVisible()
-    await expect(page.getByText('ssh client on PATH (OpenSSH 9.8p1)')).toBeVisible()
-
-    // Primary action buttons are available
-    await expect(page.getByRole('button', { name: 'Search GitHub', exact: true })).toBeVisible()
-    await expect(
-      page.getByRole('button', { name: 'Add local repository', exact: true }),
-    ).toBeVisible()
-
-    // Visual proof of the onboarding empty state pane
-    await page.screenshot({ path: 'test-results/onboarding-pane.png' })
+    await expect(page.getByRole('button', { name: 'Find and clone', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add repository', exact: true })).toBeEnabled()
   })
 
   test('searches accessible repositories, previews commands, and handles clone collisions and cancellation', async ({
@@ -42,7 +21,7 @@ test.describe('Onboarding and repository discovery', () => {
     await settle(page)
 
     // Open clone dialog
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await expect(dialog).toBeVisible()
 
@@ -106,7 +85,7 @@ test.describe('Onboarding and repository discovery', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     const repository = dialog.getByRole('button').filter({ hasText: 'howarewoo/git-stacks' })
     await repository.click()
@@ -133,12 +112,16 @@ test.describe('Onboarding and repository discovery', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await expect(dialog.getByText('howarewoo/git-stacks')).toBeVisible()
     await holdDoubleCall(page, 'searchRepositories')
     await dialog.getByPlaceholder('Name, owner, or description').fill('a replacement search')
     await dialog.getByRole('button', { name: 'Search', exact: true }).click()
+    const search = dialog.getByRole('button', { name: 'Search', exact: true })
+    await expect(search).toHaveAttribute('aria-busy', 'true')
+    await expect(search.locator('[data-slot="button-spinner"]')).toHaveCount(1)
+    await expect(search.locator('.lucide-search')).toHaveCount(1)
     await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
     await answerNextDoubleCall(page, 'searchRepositories', {
@@ -166,7 +149,7 @@ test.describe('Onboarding and repository discovery', () => {
       })
     })
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await page.getByRole('button', { name: 'Search GitHub', exact: true }).click()
+    await page.getByRole('button', { name: 'Find and clone', exact: true }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await dialog.getByRole('button').filter({ hasText: 'howarewoo/git-stacks' }).click()
     await dialog.getByRole('button', { name: 'Choose folder', exact: true }).click()

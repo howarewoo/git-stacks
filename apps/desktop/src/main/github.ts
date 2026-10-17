@@ -151,6 +151,8 @@ function parseGraphQlPullRequest(
     draft: value.isDraft === true,
     checks: pullRequestChecks(checkEntries),
     ...(typeof value.headRefOid === 'string' ? { headOid: value.headRefOid } : {}),
+    ...(typeof value.baseRefOid === 'string' ? { baseOid: value.baseRefOid } : {}),
+    ...(typeof value.viewerCanUpdate === 'boolean' ? { canUpdate: value.viewerCanUpdate } : {}),
     ...(headRepository ? { headRepository } : {}),
     ...(typeof value.reviewDecision === 'string' ? { reviewDecision: value.reviewDecision } : {}),
     ...(typeof value.mergeStateStatus === 'string' ? { mergeState: value.mergeStateStatus } : {}),
@@ -328,6 +330,7 @@ export async function getGitHubData(
   repoPath: string,
   originUrl: string | null,
   signal?: AbortSignal,
+  includeTracked = true,
 ): Promise<GitHubResult> {
   const remote = parseRemote(originUrl)
   const host = remoteHostContext(remote)
@@ -400,7 +403,7 @@ export async function getGitHubData(
       endCursor = next
     }
     const known = new Set(pullRequests.map((entry) => entry.number))
-    for (const number of await trackedPullRequestNumbers(repoPath, signal)) {
+    for (const number of includeTracked ? await trackedPullRequestNumbers(repoPath, signal) : []) {
       if (signal?.aborted) throw new CommandCancelled()
       if (known.has(number)) continue
       const exact = await getPullRequest(repoPath, number, signal)
@@ -435,17 +438,99 @@ export async function getGitHubData(
   }
 }
 
+const trackedPayloads = new Map<string, PullRequest & { headRepository?: string | null }>()
+
+export function retireTrackedGitHubPayloads(): void {
+  trackedPayloads.clear()
+}
+
+/** Adds only this local authority's tracked closed PRs to shared provider knowledge. */
+export async function withTrackedPullRequests(
+  repoPath: string,
+  originUrl: string | null,
+  data: GitHubResult,
+  signal?: AbortSignal,
+  refresh = true,
+  mayFallBack = true,
+): Promise<GitHubResult> {
+  if (!data.available) return data
+  const numbers = await trackedPullRequestNumbers(repoPath, signal)
+  if (numbers.every((number) => data.pullRequests.some((entry) => entry.number === number)))
+    return data
+  const remote = parseRemote(originUrl)
+  if (!remote) return data
+  const host = remoteHostContext(remote)
+  if (!host) return data
+  const authority = await hostTransport(host).credentialAuthority()
+  const pullRequests = [...data.pullRequests]
+  const local = pullRequests.map((_, index) => data.sameRepository(index))
+  const known = new Set(pullRequests.map((entry) => entry.number))
+  let unavailable: GitHubResult | null = null
+  for (const number of numbers) {
+    if (known.has(number)) continue
+    const key = JSON.stringify([host.host, remote.fullName.toLowerCase(), authority, number])
+    const held = trackedPayloads.get(key)
+    if (!refresh && !held) continue
+    let exact = held
+    let refreshed = false
+    try {
+      if (refresh) {
+        exact = await getPullRequest(repoPath, number, signal)
+        refreshed = true
+      }
+    } catch (error) {
+      if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
+      observeGraphqlFailure(host, error)
+      unavailable = unavailableGitHubResult(githubErrorMessage(error), typedFailure(error))
+      if (!mayFallBack) exact = undefined
+    }
+    if (!exact) continue
+    if (refreshed) {
+      trackedPayloads.delete(key)
+      trackedPayloads.set(key, exact)
+      while (trackedPayloads.size > 128) {
+        const oldest = trackedPayloads.keys().next()
+        if (oldest.done) break
+        trackedPayloads.delete(oldest.value)
+      }
+    }
+    pullRequests.push(exact)
+    local.push(exact.headRepository?.toLowerCase() === remote.fullName.toLowerCase())
+    known.add(number)
+  }
+  const stacks = refresh ? await loadRepositoryNativeStacks(originUrl, pullRequests, signal) : null
+  return {
+    ...data,
+    ...(unavailable
+      ? { available: false, message: unavailable.message, failure: unavailable.failure }
+      : {}),
+    pullRequests,
+    sameRepository: (index) => typeof index === 'number' && local[index] === true,
+    ...(stacks
+      ? {
+          nativeStacks: stacks.nativeStacks,
+          nativeStackPreviewAvailable: stacks.available,
+          nativeStackPreviewReason: stacks.reason,
+          nativeStackMessage: stacks.message,
+        }
+      : {}),
+  }
+}
+
 /** One lightweight page; this never replaces getGitHubData's complete mutation read. */
 export async function getPullRequestIndexPage(
   originUrl: string,
   cursor: string | null,
   conservative: boolean,
   signal?: AbortSignal,
+  state: PullRequest['state'] | 'ALL' = 'OPEN',
+  full = false,
 ): Promise<{
   pullRequests: PullRequest[]
   next: string | null
   viewer: string | null
   conservative: boolean
+  nativeMessage?: string
 }> {
   const remote = parseRemote(originUrl)
   const host = remoteHostContext(remote)
@@ -454,9 +539,13 @@ export async function getPullRequestIndexPage(
   const query = (basic: boolean) => `query($owner: String!, $name: String!, $cursor: String) {
     viewer { login }
     repository(owner: $owner, name: $name) {
-      pullRequests(first: 50, after: $cursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
-        nodes { number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner }
-          ${basic ? '' : 'author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }'} }
+      pullRequests(first: 50, after: $cursor, states: ${state === 'ALL' ? '[OPEN, CLOSED, MERGED]' : state}, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        nodes { ${
+          full
+            ? pullRequestFields(basic)
+            : `number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner }
+          ${basic ? '' : 'author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }'}`
+        } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -488,18 +577,21 @@ export async function getPullRequestIndexPage(
     throw new Error('GitHub returned an invalid pull request cursor')
   }
   const pullRequests = connection.nodes.map(
-    (node) => parseGraphQlPullRequest(node, true)?.pullRequest,
+    (node) => parseGraphQlPullRequest(node, basic || !full)?.pullRequest,
   )
-  if (pullRequests.some((pr) => !pr || pr.state !== 'OPEN')) {
-    throw new Error('GitHub returned an invalid open pull request')
+  if (pullRequests.some((pr) => !pr || (state !== 'ALL' && pr.state !== state))) {
+    throw new Error('GitHub returned an invalid pull request for the requested lifecycle')
   }
   const viewer =
     isRecord(page.viewer) && typeof page.viewer.login === 'string' ? page.viewer.login : null
+  const facts = pullRequests as PullRequest[]
+  const native = full ? await loadRepositoryNativeStacks(originUrl, facts, signal, transport) : null
   return {
-    pullRequests: pullRequests as PullRequest[],
+    pullRequests: facts,
     next: next as string | null,
     viewer,
     conservative: basic,
+    ...(native ? { nativeMessage: native.message } : {}),
   }
 }
 
@@ -554,11 +646,12 @@ function isSchemaRefusal(error: unknown): boolean {
  * request with its merge and check state honestly unknown.
  */
 function pullRequestFields(conservative: boolean, withBody = false): string {
-  const base = `number title url headRefName headRefOid baseRefName isDraft state headRepository { nameWithOwner } mergeCommit { oid }${withBody ? ' body' : ''}`
+  const base = `number title url headRefName headRefOid baseRefName baseRefOid isDraft state headRepository { nameWithOwner } mergeCommit { oid }${withBody ? ' body' : ''}`
   return conservative
     ? base
     : `${base}
         author { login } reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } } } pageInfo { hasNextPage } }
+        viewerCanUpdate
         reviewDecision mergeStateStatus
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`
 }
@@ -587,6 +680,7 @@ export async function getPullRequest(
   const transport = hostTransport(host)
   const query = (conservative: boolean) => `query($owner: String!, $name: String!, $number: Int!) {
     repository(owner: $owner, name: $name) {
+      defaultBranchRef { name }
       pullRequest(number: $number) {
         ${pullRequestFields(conservative, true)}
       }
@@ -650,7 +744,13 @@ export async function getPullRequest(
       // A host without the stacks resource keeps stack null; membership is never
       // invented from a host that did not report it.
     }
-    return { ...parsed.pullRequest, body: node.body }
+    const defaultBranch =
+      isRecord(repository) &&
+      isRecord(repository.defaultBranchRef) &&
+      typeof repository.defaultBranchRef.name === 'string'
+        ? repository.defaultBranchRef.name
+        : null
+    return { ...parsed.pullRequest, body: node.body, repositoryDefaultBranch: defaultBranch }
   } catch (error) {
     if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
     observeGraphqlFailure(host, error)

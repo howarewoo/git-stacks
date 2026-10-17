@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { promises as fs, writeFileSync } from 'node:fs'
 import {
+  chmod,
   link,
   lstat,
   mkdtemp,
@@ -161,6 +162,100 @@ async function withHeadAdvanceBeforeCommand(
     race.end()
   }
   return triggered
+}
+
+test('guarded commit and amend preserve attached and detached HEAD identity and content', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    git('switch', '-c', 'feature/guarded')
+    for (const detached of [false, true]) {
+      if (detached) git('switch', '--detach')
+      for (const amend of [false, true]) {
+        const old = git('rev-parse', 'HEAD')
+        await writeFile(join(repo, 'shared.txt'), `change ${detached} ${amend}\n`)
+        git('add', 'shared.txt')
+        await runAction(repo, {
+          type: 'commit',
+          message: `guarded ${detached} ${amend}`,
+          amend,
+          expectedHead: old,
+          expectedHeadRef: detached ? 'HEAD' : 'refs/heads/feature/guarded',
+        })
+        const next = git('rev-parse', 'HEAD')
+        assert.notEqual(next, old)
+        if (!detached) {
+          assert.equal(git('symbolic-ref', 'HEAD'), 'refs/heads/feature/guarded')
+        }
+        assert.equal(git('log', '-1', '--format=%s'), `guarded ${detached} ${amend}`)
+        assert.equal(git('show', 'HEAD:shared.txt'), `change ${detached} ${amend}`)
+      }
+    }
+  } finally {
+    await cleanup(root)
+  }
+})
+
+for (const mutation of [
+  'standalone HEAD',
+  'mismatched HEAD companion',
+  'matched literal HEAD companion',
+  'other branch',
+  'other ref',
+] as const) {
+  test(`a guarded commit rejects a real ${mutation} transaction without changing refs`, async () => {
+    const { root, repo, git } = await fixture()
+    try {
+      const original = git('rev-parse', 'HEAD')
+      const tree = git('rev-parse', 'HEAD^{tree}')
+      const replacement = git('commit-tree', tree, '-p', original, '-m', 'replacement')
+      const different = git('commit-tree', tree, '-p', original, '-m', 'different')
+      git('branch', 'other')
+      git('tag', 'other')
+      const hooks = join(repo, '.git', 'hooks')
+      const hook = join(hooks, 'pre-commit')
+      // Run a real transaction under the command's inherited guard, before the
+      // commit's own transaction. --no-deref makes HEAD a literal update rather
+      // than letting Git collapse it into an update of the captured branch.
+      const commands =
+        mutation === 'standalone HEAD'
+          ? [`update HEAD ${replacement} ${original}`]
+          : mutation === 'mismatched HEAD companion' ||
+              mutation === 'matched literal HEAD companion'
+            ? [
+                `update refs/heads/main ${replacement} ${original}`,
+                `update HEAD ${mutation === 'mismatched HEAD companion' ? different : replacement} ${original}`,
+              ]
+            : [
+                `update ${mutation === 'other branch' ? 'refs/heads/other' : 'refs/tags/other'} ${replacement} ${original}`,
+              ]
+      await writeFile(
+        hook,
+        `#!/bin/sh
+printf '%s\\n' 'start' ${commands.flatMap((command) => ["'option no-deref'", `'${command}'`]).join(' ')} 'prepare' 'commit' | git update-ref --stdin
+`,
+      )
+      await chmod(hook, 0o700)
+      await writeFile(join(repo, 'shared.txt'), 'staged change\n')
+      git('add', 'shared.txt')
+      await assert.rejects(
+        runAction(repo, {
+          type: 'commit',
+          message: 'must not commit',
+          amend: false,
+          expectedHead: original,
+          expectedHeadRef: 'refs/heads/main',
+        }),
+      )
+      assert.equal(git('symbolic-ref', 'HEAD'), 'refs/heads/main')
+      assert.equal(git('rev-parse', 'HEAD'), original)
+      assert.equal(git('rev-parse', 'refs/heads/main'), original)
+      assert.equal(git('rev-parse', 'refs/heads/other'), original)
+      assert.equal(git('rev-parse', 'refs/tags/other'), original)
+      assert.equal(git('show', ':shared.txt'), 'staged change')
+    } finally {
+      await cleanup(root)
+    }
+  })
 }
 
 test('branch creation uses the captured parent when its ref advances before switch', async () => {

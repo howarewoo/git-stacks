@@ -831,6 +831,7 @@ const READ_ONLY_PROBE = `(async () => {
     bridge: typeof window.desktop?.recentRepositories,
     calls: [
       await report('recentRepositories', () => window.desktop.recentRepositories()),
+      await report('worktreeInventory', () => window.desktop.worktreeInventory({ requestId: 'sender-inventory-smoke' })),
       await report('refresh', () => window.desktop.refresh()),
       await report('graphPreferences', () => window.desktop.graphPreferences()),
       await report('saveGraphPreferences', () => window.desktop.saveGraphPreferences({
@@ -2738,6 +2739,82 @@ async function run(options) {
       return 'window.open denied and the off-app navigation was prevented'
     })
 
+    await check(
+      'packaged inventory bridge discovers simultaneous worktrees without checkout or Git writes',
+      async () => {
+        const linked = join(workspace.root, 'inventory linked Ω')
+        git(workspace, ['worktree', 'add', '-b', 'inventory/smoke', linked])
+        try {
+          await writeFile(join(linked, 'inventory-untracked.txt'), 'Read-only inventory fixture\n')
+          const head = git(workspace, ['rev-parse', 'HEAD'])
+          const index = await readFile(join(workspace.repo, '.git', 'index'))
+          const config = await readFile(join(workspace.repo, '.git', 'config'))
+          const discovered = await page.evaluate(() =>
+            window.desktop.worktreeInventory({ requestId: 'packaged-inventory' }),
+          )
+          const repository = discovered.repositories.find((item) =>
+            item.registeredPaths.includes(workspace.repo),
+          )
+          assert(repository, 'The registered local authority was absent from inventory')
+          const primary = repository.worktrees.find((tree) => tree.path === workspace.repo)
+          const worktree = repository.worktrees.find((tree) => tree.path === linked)
+          assert(
+            primary && worktree,
+            'The primary and linked worktrees were not discovered together',
+          )
+          assertEqual(worktree.kind, 'linked', 'Linked worktree classification')
+          assertEqual(worktree.status, 'dirty', 'Linked worktree status')
+          assertEqual(worktree.counts.untracked, 1, 'Linked untracked count')
+          assert(primary.id !== worktree.id, 'Worktree identities were conflated')
+          assertEqual(primary.repositoryId, worktree.repositoryId, 'Common local authority')
+          assertEqual(
+            git(workspace, ['rev-parse', 'HEAD']),
+            head,
+            'Inventory changed the primary HEAD',
+          )
+          assert(
+            (await readFile(join(workspace.repo, '.git', 'index'))).equals(index),
+            'Inventory rewrote the primary index',
+          )
+          assert(
+            (await readFile(join(workspace.repo, '.git', 'config'))).equals(config),
+            'Inventory rewrote Git config',
+          )
+          const refused = await page.evaluate(async () => {
+            try {
+              await window.desktop.adoptWorktrees(['unknown-authority'], 'adoption-refusal')
+              return false
+            } catch {
+              return true
+            }
+          })
+          assert(refused, 'Adoption accepted an undiscovered identity')
+          const adopted = await page.evaluate(async (id) => {
+            const registered = await window.desktop.adoptWorktrees([id], 'packaged-adoption')
+            const active = await window.desktop.refresh()
+            return { registered, activePath: active.path }
+          }, worktree.id)
+          assert(
+            adopted.registered.some((item) => item.path === linked),
+            'Adoption did not register the existing linked directory',
+          )
+          assertEqual(
+            adopted.activePath,
+            workspace.repo,
+            'Adoption changed the active checkout context',
+          )
+          assertEqual(git(workspace, ['rev-parse', 'HEAD']), head, 'Adoption changed HEAD')
+          assert(
+            (await readFile(join(workspace.repo, '.git', 'config'))).equals(config),
+            'Adoption rewrote Git config',
+          )
+          return 'Actual shipped main/preload: shared common authority, dirty local facts, existing-directory adoption without focus/checkout change and refused forged adoption'
+        } finally {
+          git(workspace, ['worktree', 'remove', '--force', linked])
+          git(workspace, ['branch', '-D', 'inventory/smoke'])
+        }
+      },
+    )
     await check('main answers the app origin and refuses a foreign one', async () => {
       // Local Git is open, so refresh reaches its handler while PR indexing truthfully refuses
       // the local-only origin. The refusal that follows must instead be the origin guard alone.

@@ -1,4 +1,17 @@
+import type { NativeOperationRequest, NativeOperationPreview } from './native-operation'
+import type {
+  WorktreeLifecycleRequest,
+  WorktreeLifecyclePreview,
+  WorktreeLifecycleResult,
+} from './worktree-lifecycle'
 import type { SnapshotLimits } from './performance'
+import type { InventoryRequest, WorktreeInventory, InventoryId } from './worktree-inventory'
+import type {
+  OperationProgress,
+  OperationScope,
+  OperationCapture,
+  OperationRecord,
+} from './operation-scope'
 
 import type { GitHubHostStatus } from './host'
 import type { RepositoryCapabilities } from './capabilities'
@@ -29,6 +42,8 @@ import type {
   ReviewDraftResolution,
   ReviewMutationResult,
   ReviewSubmission,
+  ReviewOwner,
+  ReviewDraftRecovery,
   ReviewThreadRead,
 } from './review-threads'
 import type {
@@ -263,10 +278,15 @@ export interface PullRequest {
   draft: boolean
   checks: 'passing' | 'failing' | 'pending' | 'none'
   headOid?: string
+  /** Provider-observed base revision; a missing OID cannot establish base stability. */
+  baseOid?: string
   mergeOid?: string
   headRepository?: string
-  reviewDecision?: string
+  reviewDecision?: string | null
   mergeState?: string
+  /** Actual provider edit permission; absence is not permission. */
+  canUpdate?: boolean
+  repositoryDefaultBranch?: string | null
   stack?: PullRequestStackMembership | null
   /** Source-backed collaboration facts; absent means the source did not establish them. */
   author?: string | null
@@ -393,6 +413,8 @@ export interface Branch {
   subject: string
   updatedAt: string
   parent: string | null
+  /** Main-resolved qualified endpoint used for the parent comparison; never the tracking upstream. */
+  parentRef?: string | null
   /** Parent commits absent from this branch; null when no parent comparison is available. */
   parentBehind: number | null
   pr: PullRequest | null
@@ -647,6 +669,7 @@ export interface StackStep {
   branch: string
   parent: string
   oid: string
+  baseOid: string | null
   commits: number
   title: string
   pr: PullRequest | null
@@ -839,6 +862,11 @@ export interface PublishStep {
 export interface PublishLayer {
   branch: string
   base: string
+  /** Immutable, full captured Git authority for this publication layer. */
+  oid: string
+  baseOid: string
+  remoteOid: string | null
+  push: SyncPushKind
   title: string
   body: string
   draft: boolean
@@ -865,6 +893,14 @@ export interface PublishPreview {
   steps: PublishStep[]
   stackNumber: number | null
   stackAction: PublishStackAction
+  originalMembership: {
+    number: number
+    head: string
+    headOid: string | null
+    base: string
+    state: PullRequest['state']
+  }[]
+  resultingOrder: string[]
   /** Layers whose base must change on an existing pull request to be submitted. */
   baseChanges: string[]
   capturedAt: string
@@ -909,12 +945,29 @@ export type SubmitStackAction =
   | { type: 'submitStackDismiss' }
 
 export interface StackProgress {
+  operationId: string
+  /** Null when the local-only replay has no remote force consent. */
+  allowForce: boolean | null
   kind: 'restack' | 'sync'
   originalBranch: string
   currentBranch: string | null
   completed: string[]
   remaining: string[]
   message: string
+  /** Already-journalled surgery effects; absent for ordinary restack and Sync. */
+  surgery?: {
+    pullRequests: {
+      number: number
+      action: 'retarget' | 'close'
+      status: 'pending' | 'dispatched' | 'completed'
+    }[]
+    nativeStack: {
+      number: number
+      action: 'unstack' | 'unstack-and-create'
+      unstackStatus: 'pending' | 'dispatched' | 'completed'
+      createStatus: 'pending' | 'completed' | 'skipped'
+    } | null
+  }
 }
 export type StackAction =
   | { type: 'setParent'; branch: string; parent: string }
@@ -935,7 +988,14 @@ export type StackAction =
       /** Consent to close the pull request of a submitted layer the surgery removes. */
       closePullRequests: boolean
     }
-  | { type: 'updatePr'; number: number; title: string; body: string; draft: boolean }
+  | {
+      type: 'updatePr'
+      number: number
+      title: string
+      body: string
+      draft: boolean
+      expectedBody?: string
+    }
   | { type: 'closePr' | 'reopenPr'; number: number }
   | { type: 'createNativeStack'; pullRequests: number[] }
   | { type: 'addPullRequestsToNativeStack'; stackNumber: number; pullRequests: number[] }
@@ -961,7 +1021,16 @@ export type StackAction =
       expectedBody?: string
     }
 
+/** Provider-only management of a captured PR; never a local Git or stack mutation. */
+export type PullRequestAction = Extract<
+  StackAction,
+  { type: 'updatePr' | 'closePr' | 'reopenPr' | 'linkIssue' | 'unlinkIssue' }
+>
+
 export type GitAction =
+  | { type: 'executeWorktreeLifecycle'; token: string; coordinationConfirmed: boolean }
+  | { type: 'executeNativeOperation'; token: string; confirmed: boolean }
+  | { type: 'unregisterWorktrees'; worktreeIds: string[] }
   | { type: 'switch'; ref: string; carry?: boolean }
   | { type: 'createBranch'; name: string; parent: string }
   | { type: 'deleteBranch'; ref: string; force: boolean; expectedOid: string }
@@ -1016,6 +1085,7 @@ export type MergeLayerStatus =
   | 'enqueued'
   | 'failed'
   | 'pending'
+  | 'unconfirmed'
   | 'not-requested'
   | 'not-merged'
 
@@ -1065,6 +1135,7 @@ export interface ActionResult {
   url?: string
   /** Present only for a merge: the per-pull-request outcome, including queue state. */
   merge?: MergeResult
+  worktreeLifecycle?: WorktreeLifecycleResult
 }
 
 /**
@@ -1224,6 +1295,28 @@ export interface GitHubCliStatus {
   message: string | null
 }
 
+import type {
+  InspectionContext,
+  InspectionOperation,
+  InspectionArgs,
+  InspectionResult,
+  InspectionWorktreeStatus,
+} from './inspection'
+
+export interface PullRequestPage {
+  pullRequests: PullRequest[]
+  next: string | null
+  observedAt: string
+  nativeMessage?: string
+}
+
+/** Exact provider read of a source-confirmed native member, not a cached-list lookup. */
+export interface PullRequestLayerRead {
+  sourcePullRequest: PullRequest
+  pullRequest: PullRequest
+  observedAt: string
+}
+
 export interface DesktopAPI {
   /**
    * What the configured GitHub host was observed to support. Every field is a
@@ -1234,6 +1327,34 @@ export interface DesktopAPI {
   openRepository(path?: string): Promise<RepositorySnapshot | null>
   /** Adds an existing local repository by absolute path, for a folder dialog or a dropped folder. */
   addRepository?(path: string): Promise<RepositorySnapshot | null>
+  /** Main-owned read-only discovery and bounded simultaneous worktree facts. */
+  worktreeInventory?(request: InventoryRequest): Promise<WorktreeInventory>
+  onWorktreeInventory?(listener: (inventory: WorktreeInventory) => void): () => void
+  cancelInventory?(requestId: string): Promise<void>
+  /** Register selected discovered existing directories; never checks out or recreates them. */
+  adoptWorktrees?(ids: InventoryId[], requestId: string): Promise<RecentRepository[]>
+  inspect?<K extends InspectionOperation>(
+    context: InspectionContext,
+    operation: K,
+    args: InspectionArgs<K>,
+    requestId?: string,
+  ): Promise<InspectionResult<K>>
+  /** Explicit main-minted authority; neither selection nor ambient repository grants it. */
+  captureOperation?(context: InspectionContext): Promise<OperationCapture>
+  /** Read-only validation of an existing approval; no new token or draft is created. */
+  operationSafety?(
+    token: string,
+    preview?: {
+      kind: 'stack' | 'native' | 'lifecycle'
+      token: string
+    },
+  ): Promise<{ current: boolean; reason: string | null }>
+  executeOperation?(token: string, action: GitAction): Promise<ActionResult>
+  operationRecords?(): Promise<OperationRecord[]>
+  worktreeLifecyclePreview?(request: WorktreeLifecycleRequest): Promise<WorktreeLifecyclePreview>
+  nativeOperationPreview?(request: NativeOperationRequest): Promise<NativeOperationPreview>
+  /** Captured inspection facade only; production callers use inspect(context, 'worktreeStatus', []). */
+  worktreeStatus?(): Promise<InspectionWorktreeStatus>
   /** Accessible repositories for the signed-in account; paginated and cancellable. */
   searchRepositories?(
     request: RepositoryDiscoveryRequest,
@@ -1256,6 +1377,8 @@ export interface DesktopAPI {
    */
   onRepositoryDropped?(listener: (paths: string[]) => void): () => void
   refresh(): Promise<RepositorySnapshot>
+  /** Origin-host CLI authority for the active repository, not the Settings host. */
+  repositoryOperationScope(): Promise<OperationScope>
   /** Lightweight source-backed open PR pages; never a mutation preflight. */
   prIndex?(options?: { refresh: boolean }): Promise<PullRequestIndex>
   onPrIndex?(listener: (index: PullRequestIndex) => void): () => void
@@ -1268,28 +1391,44 @@ export interface DesktopAPI {
   commitDiff(oid: string, requestId?: string): Promise<{ text: string; truncated: boolean }>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
+  reviewedMergePreview?(number: number): Promise<StackPreview>
   /** The reviewed insert, move, or remove surgery for one stack. */
   surgeryPreview(request: SurgeryRequest): Promise<SurgeryPreview>
   /** Resumable Submit Stack progress left on disk, or null when nothing is pending. */
-  submitStackProgress?: () => Promise<PublishProgress | null>
+  submitStackProgress?: () => Promise<OperationProgress<PublishProgress>>
   /**
    * Subscribes to progress pushed by a running submission, and returns the unsubscribe. The
    * dialog uses this rather than polling, because a read queues behind the action that is
    * producing the steps.
    */
-  onSubmitStackProgress?: (listener: (progress: PublishProgress | null) => void) => () => void
+  onSubmitStackProgress?: (
+    listener: (event: OperationProgress<PublishProgress>) => void,
+  ) => () => void
   /**
    * Subscribes to the running merge's own progress. A merge waits on GitHub's background
    * result, so the dialog cannot poll for it: the read queues behind the action itself.
    */
-  onMergeProgress?: (listener: (progress: MergeProgress | null) => void) => () => void
+  onMergeProgress?: (listener: (event: OperationProgress<MergeProgress>) => void) => () => void
   /**
    * Read-only: what GitHub now reports for merge requests made earlier, including requests it
    * is still running and pull requests it dropped from a merge queue. It submits nothing.
    */
-  mergeStatus?: () => Promise<MergeStatus | null>
+  mergeStatus?: () => Promise<OperationProgress<MergeStatus>>
   reconciliationPreview?: (stackKey: string) => Promise<ReconciliationPreview>
   pullRequest(number: number): Promise<PullRequest & { body: string }>
+  pullRequestPage?(
+    state: PullRequest['state'] | 'ALL',
+    cursor: string | null,
+  ): Promise<PullRequestPage>
+  pullRequestLayer?(
+    sourceNumber: number,
+    memberNumber: number,
+    requestId?: string,
+  ): Promise<PullRequestLayerRead>
+  pullRequestAction?(
+    action: PullRequestAction,
+    expectedScope: OperationScope,
+  ): Promise<ActionResult>
   /** The review workspace headline: one pull request plus the stack layers around it. */
   reviewHeadline?(number: number, requestId?: string): Promise<ReviewHeadline>
   /** Every file of one pull request, read from GitHub rather than the working tree. */
@@ -1297,12 +1436,19 @@ export interface DesktopAPI {
   reviewCommits?(number: number, requestId?: string): Promise<ReviewCommitSet>
   /** Locally recorded viewed files, bound to the head they were read at. */
   reviewViewed?(number: number): Promise<ReviewViewedRecord | null>
-  reviewSetViewed?(record: ReviewViewedRecord): Promise<ReviewViewedRecord>
+  reviewSetViewed?(record: ReviewViewedRecord, owner: ReviewOwner): Promise<ReviewViewedRecord>
   /** Threads and the viewer's permissions for one pull request, read from GitHub. */
   reviewThreads?(number: number, requestId?: string): Promise<ReviewThreadRead>
   /** Locally recorded pending comments, journalled beside the repository. */
   reviewDrafts?(number: number): Promise<ReviewDraftRecord | null>
-  reviewSetDrafts?(record: ReviewDraftRecord): Promise<ReviewDraftRecord>
+  /** Explicit local recovery of unqualified historical text; never returns anchors. */
+  reviewDraftRecovery?(
+    selected: Pick<ReviewDraftRecovery, 'repo' | 'viewer' | 'number'> | null,
+  ): Promise<ReviewDraftRecovery[]>
+  reviewSetDrafts?(
+    record: ReviewDraftRecord,
+    expectedUpdatedAt: string | null,
+  ): Promise<ReviewDraftRecord>
   /**
    * Where each pending draft's lines sit at the comparison on screen now. The
    * view marks a stale draft before anybody presses submit; the main process
@@ -1317,11 +1463,17 @@ export interface DesktopAPI {
    * re-anchored onto a revision the reviewer never read.
    */
   reviewSubmit?(number: number, submission: ReviewSubmission): Promise<ReviewMutationResult>
-  reviewReply?(number: number, threadId: string, body: string): Promise<ReviewMutationResult>
+  reviewReply?(
+    number: number,
+    threadId: string,
+    body: string,
+    owner: ReviewOwner,
+  ): Promise<ReviewMutationResult>
   reviewSetResolved?(
     number: number,
     threadId: string,
     resolved: boolean,
+    owner: ReviewOwner,
   ): Promise<ReviewMutationResult>
   reviewHistory?(number: number, requestId?: string): Promise<ReviewHistory>
   reviewHistoryDiff?(
@@ -1329,7 +1481,7 @@ export interface DesktopAPI {
     fromOid: string,
     requestId?: string,
   ): Promise<ReviewHistoryDiff>
-  reviewClearHistory?(number: number): Promise<ReviewHistory>
+  reviewClearHistory?(number: number, owner: ReviewOwner): Promise<ReviewHistory>
   /** The detailed checks behind one pull request, with its own freshness and permissions. */
   pullRequestChecks?: (
     number: number,
@@ -1382,9 +1534,9 @@ export interface DesktopAPI {
    */
   githubCliStatus?(): Promise<GitHubCliStatus>
   /**
-   * Subscribes to status changes main established on its own — a host change, a
-   * request that proved the credential had been replaced — and returns the
-   * unsubscribe.
+   * Subscribes to status changes for every host main reads, including repository
+   * origins. Filter by the surface's host; operation scope consumers refresh the
+   * scope when its authority's host changes. Returns the unsubscribe.
    */
   onGitHubCliStatus?: (listener: (status: GitHubCliStatus) => void) => () => void
   /**

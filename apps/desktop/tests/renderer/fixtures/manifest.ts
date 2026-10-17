@@ -16,6 +16,8 @@ export const GALLERY_ROUTES = {
   shell: '#/design-system-shell-specimen',
   data: '#/design-system-data-specimen',
   dialog: '#/design-system-dialog-specimen',
+  inventory: '#/inventory-consumer',
+  workbenchV5: '#/workbench-v5',
 } as const
 
 export type GalleryRouteId = keyof typeof GALLERY_ROUTES
@@ -31,6 +33,7 @@ export const SCENARIO_NAMES = [
   'github-cli-missing',
   'github-cli-signed-out',
   'github-cli-authenticated',
+  'github-cli-cross-host-operation',
   'github-cli-discovery',
   // Ancestry
   'ancestry-linear',
@@ -92,6 +95,7 @@ export const SCENARIO_NAMES = [
   'review-force-pushed',
   'review-stacked',
   'review-long-stack',
+  'review-uncached-native-layer',
   'review-stack-partial',
   'review-stack-error',
   'review-stack-stale',

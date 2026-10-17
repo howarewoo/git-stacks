@@ -1,20 +1,17 @@
 export type ShortcutId =
   | 'palette.open'
   | 'search.focus'
+  | 'repository.next'
+  | 'repository.previous'
   | 'stack.selectParent'
   | 'stack.selectChild'
   | 'stack.selectTop'
   | 'stack.selectBottom'
-  | 'stack.checkout'
   | 'stack.restack'
   | 'stack.sync'
   | 'stack.openPr'
   | 'view.branches'
-  | 'view.stacks'
-  | 'view.changes'
   | 'view.pullRequests'
-  | 'view.stashes'
-  | 'view.history'
   | 'view.review'
   | 'view.diagnostics'
   | 'view.prInbox'
@@ -34,6 +31,20 @@ export interface ShortcutMetadata {
 
 export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
   {
+    id: 'repository.next',
+    label: 'Next pinned repository',
+    group: 'General',
+    defaultChord: 'Mod+Alt+ArrowRight',
+    description: 'Restore the next repository inspection context without checkout.',
+  },
+  {
+    id: 'repository.previous',
+    label: 'Previous pinned repository',
+    group: 'General',
+    defaultChord: 'Mod+Alt+ArrowLeft',
+    description: 'Restore the previous repository inspection context without checkout.',
+  },
+  {
     id: 'palette.open',
     label: 'Open command palette',
     group: 'General',
@@ -51,36 +62,29 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     id: 'stack.selectParent',
     label: 'Select parent branch',
     group: 'Stack navigation',
-    defaultChord: 'Alt+ArrowUp',
+    defaultChord: 'Alt+ArrowDown',
     description: 'Move branch selection to the parent without mutating the working tree.',
   },
   {
     id: 'stack.selectChild',
     label: 'Select child branch',
     group: 'Stack navigation',
-    defaultChord: 'Alt+ArrowDown',
+    defaultChord: 'Alt+ArrowUp',
     description: 'Move branch selection to the first child without mutating the working tree.',
   },
   {
     id: 'stack.selectTop',
-    label: 'Select stack top',
+    label: 'Select lane tip',
     group: 'Stack navigation',
     defaultChord: 'Alt+Shift+ArrowUp',
-    description: 'Move branch selection to the top of this stack without switching.',
+    description: 'Locate an observed descendant tip above this branch, without checkout.',
   },
   {
     id: 'stack.selectBottom',
-    label: 'Select stack bottom',
+    label: 'Select observed root',
     group: 'Stack navigation',
     defaultChord: 'Alt+Shift+ArrowDown',
-    description: 'Move branch selection to the root parent of this stack.',
-  },
-  {
-    id: 'stack.checkout',
-    label: 'Check out selected branch',
-    group: 'Stack navigation',
-    defaultChord: 'Mod+Enter',
-    description: 'Switch the working tree to the selected branch through clean-tree safeguards.',
+    description: 'Locate the observed root parent below this branch, without checkout.',
   },
   {
     id: 'stack.restack',
@@ -112,39 +116,11 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     description: 'Switch to the Branches view.',
   },
   {
-    id: 'view.stacks',
-    label: 'Go to Stacks',
-    group: 'Views',
-    defaultChord: 'Mod+2',
-    description: 'Switch to the Stacks view.',
-  },
-  {
-    id: 'view.history',
-    label: 'Go to History',
-    group: 'Views',
-    defaultChord: 'Mod+3',
-    description: 'Switch to the commit history view.',
-  },
-  {
-    id: 'view.changes',
-    label: 'Go to Working changes',
-    group: 'Views',
-    defaultChord: 'Mod+4',
-    description: 'Switch to the unstaged and staged changes view.',
-  },
-  {
     id: 'view.pullRequests',
     label: 'Go to Pull requests',
     group: 'Views',
     defaultChord: 'Mod+5',
     description: 'Switch to the Pull requests list.',
-  },
-  {
-    id: 'view.stashes',
-    label: 'Go to Stashes',
-    group: 'Views',
-    defaultChord: 'Mod+6',
-    description: 'Switch to the Stashes view.',
   },
   {
     id: 'view.review',
@@ -191,13 +167,12 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
   },
   {
     id: 'view.prInbox',
-    label: 'Go to PR Inbox',
+    label: 'Go to Needs attention',
     group: 'Views',
     // `Mod+8` is Diagnostics, so the cross-repository pull request queue takes
     // the next free view chord.
     defaultChord: 'Mod+9',
-    description:
-      'Switch to the GitHub-derived pull request queue across your registered repositories.',
+    description: 'Inspect source-backed attention across registered repositories.',
   },
   {
     id: 'view.notifications',

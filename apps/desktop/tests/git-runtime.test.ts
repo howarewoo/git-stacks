@@ -794,23 +794,36 @@ testOnRuntimes('a clean and smudge filter configured like Git LFS still runs', a
   git('config', 'filter.lfs.required', 'true')
   await writeFile(join(repo, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n')
   await writeFile(join(repo, 'model.bin'), 'version https://git-lfs.github.com/spec/v1\n')
-  // A machine-wide Git LFS installation configures filter.lfs.process, which would
-  // replace the repository's own filter driver, so this case runs against no global config.
-  const globalConfig = join(await temporaryRoot('git-stacks-global-'), 'gitconfig')
-  await writeFile(globalConfig, '')
-  process.env.GIT_CONFIG_GLOBAL = globalConfig
+  // filter.lfs.process in either system or global config supersedes clean/smudge.
+  const isolatedConfig = join(await temporaryRoot('git-stacks-config-'), 'gitconfig')
+  await writeFile(isolatedConfig, '')
+  const originalGlobalConfig = process.env.GIT_CONFIG_GLOBAL
+  const originalSystemConfig = process.env.GIT_CONFIG_SYSTEM
+  process.env.GIT_CONFIG_GLOBAL = isolatedConfig
+  process.env.GIT_CONFIG_SYSTEM = isolatedConfig
   try {
     await runAction(repo, { type: 'stage', paths: ['model.bin'] })
     assert.match(await readFile(cleanMarker, 'utf8'), /model\.bin/u)
+    assert.equal(
+      (await runGit(repo, ['show', ':model.bin'])).trim(),
+      'version https://git-lfs.github.com/spec/v1',
+    )
     await rm(join(repo, 'model.bin'))
     await runGit(repo, ['checkout', '--', 'model.bin'])
     assert.match(await readFile(smudgeMarker, 'utf8'), /model\.bin/u)
+    assert.equal(
+      await readFile(join(repo, 'model.bin'), 'utf8'),
+      'version https://git-lfs.github.com/spec/v1\n',
+    )
     assert.equal(
       (await runGit(repo, ['config', '--get', 'filter.lfs.clean'])).trim(),
       `${shellQuotedPath(clean)} %f`,
     )
   } finally {
-    delete process.env.GIT_CONFIG_GLOBAL
+    if (originalGlobalConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL
+    else process.env.GIT_CONFIG_GLOBAL = originalGlobalConfig
+    if (originalSystemConfig === undefined) delete process.env.GIT_CONFIG_SYSTEM
+    else process.env.GIT_CONFIG_SYSTEM = originalSystemConfig
     await rm(filters, { recursive: true, force: true })
   }
 })

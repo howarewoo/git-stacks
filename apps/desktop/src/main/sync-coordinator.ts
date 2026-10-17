@@ -36,7 +36,7 @@ export interface SnapshotGitHubRequest {
    * payload without asking GitHub, and `on-failure` reads now but keeps that
    * payload when GitHub cannot answer.
    */
-  remote: 'live' | 'reuse' | 'on-failure'
+  remote: 'live' | 'reuse' | 'on-failure' | 'select'
 }
 
 export interface SyncEvent {
@@ -304,6 +304,13 @@ export class RepositorySyncCoordinator {
     return snapshot
   }
 
+  /** Selecting a local authority reuses qualified remote knowledge when present. */
+  async selectNow(): Promise<RepositorySnapshot> {
+    const snapshot = await this.run('visible', { manual: true, select: true, requestId: 'select' })
+    if (!snapshot) throw new Error('Repository selection failed.')
+    return snapshot
+  }
+
   /**
    * Records a high-impact mutation whose answer was lost. It stays listed until
    * the person dismisses it; no refresh path replays it.
@@ -374,7 +381,7 @@ export class RepositorySyncCoordinator {
   /** True while the visible tier may also be doing local-only work. */
   private async run(
     tier: 'visible' | 'local' | 'secondary',
-    options: { manual?: boolean; requestId?: string } = {},
+    options: { manual?: boolean; select?: boolean; requestId?: string } = {},
   ): Promise<RepositorySnapshot | null> {
     const repository = this.repository
     if (!repository) return null
@@ -468,7 +475,7 @@ export class RepositorySyncCoordinator {
   private async execute(
     repository: string,
     tier: 'visible' | 'local' | 'secondary',
-    options: { manual?: boolean; requestId?: string },
+    options: { manual?: boolean; select?: boolean; requestId?: string },
     sequence: number,
   ): Promise<RepositorySnapshot | null> {
     if (tier === 'secondary') return this.refreshInbox(repository, sequence)
@@ -498,7 +505,7 @@ export class RepositorySyncCoordinator {
       snapshot = await this.deps.scheduler.read(repository, (signal) =>
         this.deps.readSnapshot(repository, signal, {
           requestId: options.requestId ?? 'sync-refresh',
-          github: { remote: live ? 'live' : 'on-failure' },
+          github: { remote: options.select ? 'select' : live ? 'live' : 'on-failure' },
         }),
       )
     } catch (error) {

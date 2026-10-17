@@ -43,7 +43,9 @@ export const UPSTREAM_RECONCILIATION = {
     'Command uses cmdk; Calendar uses DayPicker; Chart uses Recharts; Carousel uses Embla; Resizable uses react-resizable-panels; Input OTP uses input-otp; conversation recipes use @shadcn/react where their upstream implementation requires it.',
     'Data Table adapts the TanStack recipe to installed v9 with string-record columns, sorting and pagination. Date Picker exposes an owned single-date convenience API. Direction is exported as Direction with an explicit direction prop.',
     'Typography adds canonical compact heading/body/label/metadata/code roles beside upstream content styles. Recipes use a soft rounded card system with solid neutral surfaces, ink primary actions, pastel microaccents, circular icon controls, and explicit spacing. Whitespace and tonal contrast separate groups; structural outlines are absent. Sparse diffuse shadows and secondary-card offsets support purposeful layers without changing operational workflows.',
+    'Iconography is an owned foundation using direct named lucide-react imports; Lucide documentation is its source, not a shadcn component.',
     'Examples are catalog-only local simulations, not desktop product features or Git/GitHub transports.',
+    'WorkbenchPane is an owned composition, not an upstream inventory entry: header/footer slots remain persistent around an independently scrolling body; bodyClassName styles that scroll region. The catalog Git composition and desktop v5 workbench consume the same exported implementation.',
   ],
 } as const
 
@@ -1178,6 +1180,29 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     upstreamDoc: 'https://ui.shadcn.com/docs/typeset',
     reconciledWith:
       'shadcn/typeset owned MIT CSS adaptation; theme tokens and local font roles, no runtime or markdown parser.',
+  },
+  {
+    id: 'iconography',
+    name: 'Iconography',
+    group: 'Foundations',
+    summary:
+      'Lucide navigation, action, Git object and labelled status icons with contextual sizing.',
+    usage:
+      'Compose direct named icons with shared controls; preserve visible status text and label ambiguous actions.',
+    anatomy:
+      '16px and 20px Lucide glyphs, Button with decorative icon, and required-label IconButton with a 44px target.',
+    keyboard:
+      'Tab reaches local example actions; Enter and Space activate them and announce local feedback without Git or network operations.',
+    tokens: [
+      'semantic.text.primary',
+      'semantic.text.secondary',
+      'semantic.feedback.success-text',
+      'semantic.feedback.warning-text',
+    ],
+    importExample: "import { GitBranch, RefreshCw } from 'lucide-react'",
+    upstreamDoc: 'https://lucide.dev/guide/packages/lucide-react',
+    reconciledWith:
+      'Owned Git Stacks foundation; existing lucide-react outline icons, not a shadcn catalog component.',
   },
 ]
 

@@ -6,6 +6,7 @@ import type {
   ReviewSnapshot,
 } from '@git-stacks/shared/review-snapshots'
 import { reviewHistoryOf } from '@git-stacks/shared/review-snapshots'
+import type { ReviewOwner } from '@git-stacks/shared/review-threads'
 import { type ParsedRemote, runGit } from './git-core'
 import { isRecord } from '@git-stacks/shared/guards'
 import { GitHubTransportError } from './github-transport'
@@ -15,11 +16,12 @@ import {
   parseReviewFileEntry,
   readReviewIdentity,
   reviewTransport,
+  reviewRepositoryIdentity,
   ReviewRevisionMovedError,
   toReviewHunk,
 } from './review'
 import { clearReviewSnapshots, readReviewSnapshotLog, recordObservedHead } from './review-snapshots'
-import { readReviewPermissions } from './review-threads'
+import { readReviewPermissionsFrom, revalidateReviewOwner } from './review-threads'
 
 /**
  * Reads the update history of one pull request for the active account.
@@ -35,8 +37,8 @@ export async function readReviewHistory(
   signal?: AbortSignal,
 ): Promise<ReviewHistory> {
   const remote = await originRemote(repoPath, signal)
-  const repo = `${remote.owner}/${remote.name}`
-  const permissions = await readReviewPermissions(repoPath, number, signal)
+  const repo = reviewRepositoryIdentity(remote)
+  const permissions = await readReviewPermissionsFrom(remote, number, signal)
   const identity = await readReviewIdentity(remote, number, signal)
   const log = await recordObservedHead(
     repoPath,
@@ -45,6 +47,15 @@ export async function readReviewHistory(
     number,
     identity.comparison,
     identity.totalCommits,
+    async () => {
+      await revalidateReviewOwner(
+        repoPath,
+        number,
+        { repo, viewer: permissions.viewer },
+        null,
+        signal,
+      )
+    },
     new Date().toISOString(),
     signal,
   )
@@ -98,6 +109,7 @@ async function diffEndpointWithGit(
   fromOid: string,
   toOid: string,
   signal?: AbortSignal,
+  readOnly = false,
 ): Promise<{
   files: ReviewFile[]
   additions: number
@@ -114,6 +126,7 @@ async function diffEndpointWithGit(
       .then(() => true)
       .catch(() => false)
     if (!fromExists) {
+      if (readOnly) return null
       try {
         await runGit(
           repoPath,
@@ -151,6 +164,7 @@ async function diffEndpointWithGit(
       .then(() => true)
       .catch(() => false)
     if (!toExists) {
+      if (readOnly) return null
       try {
         await runGit(
           repoPath,
@@ -314,12 +328,14 @@ export async function readReviewHistoryDiff(
   number: number,
   fromOid: string,
   signal?: AbortSignal,
+  readOnly = false,
 ): Promise<ReviewHistoryDiff> {
   const remote = await originRemote(repoPath, signal)
-  const repo = `${remote.owner}/${remote.name}`
-  const permissions = await readReviewPermissions(repoPath, number, signal)
+  const repo = reviewRepositoryIdentity(remote)
+  const permissions = await readReviewPermissionsFrom(remote, number, signal)
   const before = await readReviewIdentity(remote, number, signal)
   const log = await readReviewSnapshotLog(repoPath, repo, permissions.viewer, number, signal)
+  await revalidateReviewOwner(repoPath, number, { repo, viewer: permissions.viewer }, null, signal)
 
   const snapshot: ReviewSnapshot | undefined = log?.snapshots.find(
     (entry) => entry.headOid === fromOid,
@@ -385,7 +401,7 @@ export async function readReviewHistoryDiff(
   }
 
   // 1. Try local Git endpoint diff first for a true tree-to-tree comparison across force-push/rebase.
-  const gitResult = await diffEndpointWithGit(repoPath, fromOid, currentHead, signal)
+  const gitResult = await diffEndpointWithGit(repoPath, fromOid, currentHead, signal, readOnly)
   if (gitResult) {
     const after = await readReviewIdentity(remote, number, signal)
     if (!sameReviewComparison(before.comparison, after.comparison)) {
@@ -508,12 +524,24 @@ export async function readReviewHistoryDiff(
 export async function clearReviewHistory(
   repoPath: string,
   number: number,
+  owner: ReviewOwner,
   signal?: AbortSignal,
 ): Promise<ReviewHistory> {
   const remote = await originRemote(repoPath, signal)
-  const repo = `${remote.owner}/${remote.name}`
-  const permissions = await readReviewPermissions(repoPath, number, signal)
-  await clearReviewSnapshots(repoPath, repo, permissions.viewer, number, signal)
+  const repo = reviewRepositoryIdentity(remote)
+  if (repo !== owner.repo) throw new Error('The captured history repository or host changed.')
+  const permissions = await readReviewPermissionsFrom(remote, number, signal)
+  if (permissions.viewer !== owner.viewer) throw new Error('The captured history account changed.')
+  await clearReviewSnapshots(
+    repoPath,
+    owner.repo,
+    owner.viewer,
+    number,
+    async () => {
+      await revalidateReviewOwner(repoPath, number, owner, null, signal)
+    },
+    signal,
+  )
   const identity = await readReviewIdentity(remote, number, signal)
   return reviewHistoryOf(number, identity.comparison, null)
 }

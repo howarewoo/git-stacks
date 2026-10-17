@@ -1,3 +1,12 @@
+import { getPullRequestChecks } from './pull-request-checks'
+import { unknownRemoteOutcome } from './remote-mutations'
+import {
+  recordOperationResult,
+  recordOperationPreview,
+  recordOperationRecovery,
+  unresolvedOperationRecords,
+  confirmRecordedMerge,
+} from './operation-authority'
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -112,7 +121,6 @@ import {
   recordMergeObservation,
   startAsyncMerge,
   mergeQueueState,
-  queueConfiguredFor,
   readMergeQueueRead,
   type MergeQueueRead,
   type AsyncMergeResult,
@@ -207,6 +215,9 @@ interface StackPlan {
    * request per layer.
    */
   merge: MergePreview | null
+  mergeRequirements?: Record<string, string>
+  providerOnly?: boolean
+  reviewedPreview?: StackPreview
 }
 
 interface JournalEntry {
@@ -229,8 +240,9 @@ interface SyncPushEntry {
   branch: string
   expectedRemoteOid: string | null
   force: boolean
-  status?: 'pending' | 'completed'
+  status?: 'pending' | 'dispatched' | 'completed'
   publishedOid?: string | null
+  expectedLocalOid?: string
 }
 
 interface SyncPushConfig {
@@ -287,7 +299,7 @@ interface SurgeryPullRequestStep {
   /** The base GitHub recorded when the preview was taken. */
   fromBase: string
   toBase: string
-  status: 'pending' | 'completed'
+  status: 'pending' | 'dispatched' | 'completed'
 }
 
 /**
@@ -304,7 +316,7 @@ interface SurgeryStackStep {
   /** The members the recreated stack must hold, bottom-to-top. */
   members: number[]
   trunk: string
-  unstackStatus: 'pending' | 'completed'
+  unstackStatus: 'pending' | 'dispatched' | 'completed'
   createStatus: 'pending' | 'completed' | 'skipped'
   createRequested: boolean
   stackNumberAfter: number | null
@@ -346,6 +358,7 @@ interface CapturedPullRequest {
   state: PullRequest['state']
   base: string
   headOid: string | null
+  baseOid?: string | null
 }
 
 /** The captured local tip and remote tip a push step may still act on. */
@@ -473,7 +486,7 @@ export function validateStackAction(value: unknown): StackAction {
       if (!hasOnlyKeys(value, ['type'])) stackActionError(`Invalid ${value.type} action`)
       return { type: value.type }
     case 'updatePr':
-      if (!hasOnlyKeys(value, ['type', 'number', 'title', 'body', 'draft'])) {
+      if (!hasOnlyKeys(value, ['type', 'number', 'title', 'body', 'draft', 'expectedBody'])) {
         stackActionError('Invalid updatePr action')
       }
       if (
@@ -491,12 +504,20 @@ export function validateStackAction(value: unknown): StackAction {
       ) {
         stackActionError('pull request body must be a string without NUL bytes')
       }
+      if (
+        value.expectedBody !== undefined &&
+        (typeof value.expectedBody !== 'string' ||
+          value.expectedBody.length > MAX_MESSAGE_LENGTH ||
+          value.expectedBody.includes('\0'))
+      )
+        stackActionError('Expected pull request body must be a string without NUL bytes')
       return {
         type: 'updatePr',
         number: value.number,
         title: requireString(value.title, 'pull request title'),
         body: value.body,
         draft: value.draft,
+        ...(typeof value.expectedBody === 'string' ? { expectedBody: value.expectedBody } : {}),
       }
     case 'closePr':
     case 'reopenPr':
@@ -716,12 +737,44 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Stac
     // branch to restore is exactly the work its journal records.
     (parsed.entries.length === 0 &&
       !(Array.isArray(parsed.created) && parsed.created.length > 0) &&
-      !(Array.isArray(parsed.removed) && parsed.removed.length > 0)) ||
+      !(Array.isArray(parsed.removed) && parsed.removed.length > 0) &&
+      !(
+        isRecord(parsed.syncPushes) &&
+        Array.isArray(parsed.syncPushes.branches) &&
+        parsed.syncPushes.branches.length > 0
+      )) ||
     parsed.entries.length > 2048
   )
     throw invalid()
   const names = new Set<string>()
   const branches = new Set<string>()
+  if (parsed.syncPushes !== undefined) {
+    const pushes = parsed.syncPushes
+    if (
+      !isRecord(pushes) ||
+      typeof pushes.pushUrl !== 'string' ||
+      typeof pushes.allowForce !== 'boolean' ||
+      !Array.isArray(pushes.branches)
+    )
+      throw invalid()
+    const pushBranches = new Set<string>()
+    for (const push of pushes.branches) {
+      if (
+        !isRecord(push) ||
+        typeof push.branch !== 'string' ||
+        pushBranches.has(push.branch) ||
+        (push.expectedRemoteOid !== null && !isOid(push.expectedRemoteOid)) ||
+        typeof push.force !== 'boolean' ||
+        (push.status !== undefined &&
+          !['pending', 'dispatched', 'completed'].includes(String(push.status))) ||
+        (push.publishedOid != null && !isOid(push.publishedOid)) ||
+        (push.expectedLocalOid !== undefined && !isOid(push.expectedLocalOid))
+      )
+        throw invalid()
+      pushBranches.add(push.branch)
+      names.add(push.branch)
+    }
+  }
   for (const entry of parsed.entries) {
     if (
       !isRecord(entry) ||
@@ -818,7 +871,7 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Stac
         !['retarget', 'close'].includes(String(step.action)) ||
         typeof step.fromBase !== 'string' ||
         typeof step.toBase !== 'string' ||
-        !['pending', 'completed'].includes(String(step.status))
+        !['pending', 'dispatched', 'completed'].includes(String(step.status))
       )
         throw invalid()
       names.add(step.branch)
@@ -836,7 +889,7 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Stac
         !Array.isArray(stack.members) ||
         stack.members.some((member: unknown) => typeof member !== 'number') ||
         typeof stack.trunk !== 'string' ||
-        !['pending', 'completed'].includes(String(stack.unstackStatus)) ||
+        !['pending', 'dispatched', 'completed'].includes(String(stack.unstackStatus)) ||
         !['pending', 'completed', 'skipped'].includes(String(stack.createStatus)) ||
         typeof stack.createRequested !== 'boolean' ||
         (stack.stackNumberAfter !== null && typeof stack.stackNumberAfter !== 'number')
@@ -853,6 +906,7 @@ async function readJournal(repoPath: string, signal?: AbortSignal): Promise<Stac
 }
 
 async function writeJournal(repoPath: string, journal: StackJournal): Promise<void> {
+  await recordOperationRecovery('stack', journal.id)
   const target = await journalPath(repoPath)
   const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`
   await fs.writeFile(temporary, JSON.stringify(journal), { encoding: 'utf8', mode: 0o600 })
@@ -1721,9 +1775,8 @@ async function captureSyncTrunk(
   trunk: string,
   pushUrl: string | null,
   layers: SyncLayerFacts[],
-  fetchFailure: string | null,
 ): Promise<SyncCapture> {
-  const blockers: string[] = fetchFailure ? [fetchFailure] : []
+  const blockers: string[] = []
   const localOid = await resolveCommit(repoPath, `refs/heads/${trunk}`)
   const remoteOidValue = await resolveCommit(repoPath, `refs/remotes/origin/${trunk}`)
   if (!localOid) blockers.push(`Local ${trunk} does not exist`)
@@ -1765,17 +1818,8 @@ async function capturePlan(
   selectedBranch: string,
 ): Promise<{ plan: StackPlan; preview: StackPreview }> {
   const root = await repositoryPath(repoPath)
-  // A sync reads the remote first: the trunk it replays onto and every lease it
-  // may later spend are the tips this fetch produced.
-  let fetchFailure: string | null = null
-  if (kind === 'sync') {
-    try {
-      await ensureNoBusyOperation(root, 'sync the stack')
-      await runGit(root, ['fetch', '--all', '--prune'])
-    } catch (error) {
-      fetchFailure = `Could not fetch and prune the remotes: ${commandDetail(error)}`
-    }
-  }
+  // Preview is read-only. Fetch is a separately captured Git operation; Sync
+  // reviews the fetched trunk and leases without mutating metadata on inspection.
   const refs = await getRefs(root)
   const currentBranch = await getCurrentBranch(root)
   const currentHead = await resolveCommit(root, 'HEAD')
@@ -1808,7 +1852,8 @@ async function capturePlan(
   const mergedJournal = await readMergedPrJournal(root)
   const connected = connectedBranchNames(records, selectedBranch, trunk)
   const blockers = [...connected.blockers]
-  if (fetchFailure) blockers.push(fetchFailure)
+  if (snapshot.limits?.branchesSkipped)
+    blockers.push('Dependency inspection is partial; a complete backend scope is required.')
   let mergeMethods: ('merge' | 'squash' | 'rebase')[] = []
   let pushUrl: string | null = null
   if (kind === 'publish' || kind === 'sync') {
@@ -1865,7 +1910,10 @@ async function capturePlan(
   const operation = await getOperationState(root)
   if (operation.busy) blockers.push('A Git operation is already in progress')
   const files = await getStatus(root)
-  if (files.length > 0) blockers.push('Commit or stash uncommitted changes before restacking')
+  if (files.length > 0)
+    blockers.push(
+      'The explicitly chosen execution directory has local changes. Resolve them externally; no stash or cleanup is performed.',
+    )
   const selectedRecord = records.get(selectedBranch)
   if (!selectedRecord) blockers.push(`Branch ${selectedBranch} is not a local branch`)
   if (selectedBranch === trunk)
@@ -1920,6 +1968,7 @@ async function capturePlan(
           state: record.pr.state,
           base: record.pr.base,
           headOid: record.pr.headOid ?? null,
+          baseOid: record.pr.baseOid ?? null,
         }
       : null
     if (record.pr?.state === 'MERGED') {
@@ -2207,9 +2256,11 @@ async function capturePlan(
         // A read that cannot answer contributes neither, so an unreadable host never offers
         // or withholds queue delivery on its say-so.
         const queueRead = await readQueueCapability(root, originFullName, selectedEntry.pr.number)
-        queueConfigured =
-          queueRead?.enabled === true ||
-          queueConfiguredFor(await readMergeObservations(root), selectedEntry.pr.base)
+        if (!queueRead || queueRead.enabled === null)
+          blockers.push(
+            'Live merge-queue policy is unknown; no strategy is authorized from an old enqueue or a badge.',
+          )
+        queueConfigured = queueRead?.enabled === true
         merge = mergePreviewFor(
           chain.layers,
           selectedEntry.pr,
@@ -2254,7 +2305,7 @@ async function capturePlan(
     }
   }
   const syncCapture: SyncCapture | null =
-    kind === 'sync' ? await captureSyncTrunk(root, trunk, pushUrl, syncLayers, fetchFailure) : null
+    kind === 'sync' ? await captureSyncTrunk(root, trunk, pushUrl, syncLayers) : null
   if (entries.length === 0 && kind !== 'merge' && kind !== 'sync') {
     blockers.push(
       'No unmerged branches remain in this stack; select a remaining branch to continue',
@@ -2279,6 +2330,19 @@ async function capturePlan(
       : `Merges into ${entry.parent} first, from its own request`
   }
 
+  const mergeRequirements: Record<string, string> = {}
+  if (merge)
+    for (const layer of merge.layers) {
+      const policy = await captureMergeCheckPolicy(
+        root,
+        layer.pullRequest,
+        layer.headOid,
+        layer.base,
+      )
+      mergeRequirements[String(layer.pullRequest)] = policy.signature
+      blockers.push(...policy.blockers)
+      warnings.push(policy.detail)
+    }
   // A merge review is about the pull requests one action will land, not about every branch in
   // the connected graph, so the reviewed steps are the merge's own layers, bottom-to-top.
   const reviewEntries = merge
@@ -2292,6 +2356,7 @@ async function capturePlan(
       branch: entry.branch,
       parent: entry.parent,
       oid: entry.oldTip,
+      baseOid: entry.parentOid,
       commits: await commitCount(root, entry.boundary, entry.oldTip),
       title: entry.pr?.title ?? entry.branch,
       pr: entry.pr,
@@ -2332,26 +2397,26 @@ async function capturePlan(
     mergeMethods,
     sync: syncCapture,
     merge,
+    mergeRequirements,
   }
   const syncPreview = syncCapture ? buildSyncPreview(syncCapture, selectedBranch) : null
   if (syncPreview)
     blockers.push(...syncPreview.blockers.filter((reason) => !blockers.includes(reason)))
-  plans.set(token, plan)
-  return {
-    plan,
-    preview: {
-      token,
-      kind,
-      branch: selectedBranch,
-      steps,
-      warnings,
-      blockers,
-      mergeMethods: plan.mergeMethods,
-      merge,
-      publish: kind === 'publish' ? await publishPreview(plan) : null,
-      sync: syncPreview,
-    },
+  const preview: StackPreview = {
+    token,
+    kind,
+    branch: selectedBranch,
+    steps,
+    warnings,
+    blockers,
+    mergeMethods: plan.mergeMethods,
+    merge,
+    publish: kind === 'publish' ? await publishPreview(plan) : null,
+    sync: syncPreview,
   }
+  plan.reviewedPreview = preview
+  plans.set(token, plan)
+  return { plan, preview }
 }
 
 function prunePlans(): void {
@@ -2415,6 +2480,17 @@ async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
     layers.push({
       branch: entry.branch,
       base: entry.parent,
+      oid: entry.oldTip,
+      baseOid: entry.parentOid,
+      remoteOid: entry.remoteOid,
+      push:
+        entry.remoteOid === entry.oldTip
+          ? 'none'
+          : entry.remoteOid === null
+            ? 'create'
+            : (await isAncestor(plan.repoPath, entry.remoteOid, entry.oldTip))
+              ? 'fast-forward'
+              : 'force',
       title,
       body: `${title}\n\nGit Stacks branch: ${entry.branch}\nBase: ${entry.parent}`,
       draft: true,
@@ -2448,6 +2524,27 @@ async function publishPreview(plan: StackPlan): Promise<PublishPreview> {
     steps: publishSteps(layers, stackAction, stackNumber),
     stackNumber,
     stackAction,
+    originalMembership:
+      plan.capturedStacks
+        .find((stack) => stack.number === stackNumber)
+        ?.members.map((member) => ({
+          number: member.number,
+          head: member.head,
+          headOid: member.headSha ?? null,
+          base: member.base,
+          state: member.state,
+        })) ?? [],
+    resultingOrder:
+      stackAction === 'none'
+        ? []
+        : [
+            ...new Set([
+              ...(plan.capturedStacks
+                .find((stack) => stack.number === stackNumber)
+                ?.members.map((member) => member.head) ?? []),
+              ...layers.map((layer) => layer.branch),
+            ]),
+          ],
     baseChanges,
     capturedAt: new Date().toISOString(),
   }
@@ -2638,6 +2735,7 @@ export function onPublishProgress(listener: PublishProgressListener): () => void
 }
 
 async function writePublishOperation(repoPath: string, operation: PublishOperation): Promise<void> {
+  await recordOperationRecovery('publication', operation.id)
   const target = await publishPath(repoPath)
   const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`
   await fs.writeFile(temporary, JSON.stringify(operation), { encoding: 'utf8', mode: 0o600 })
@@ -2972,6 +3070,7 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
     }
   }
   for (const entry of plan.entries) {
+    if (plan.providerOnly) continue
     const parent = await getBranchParent(repoPath, entry.branch)
     if ((plan.capturedParents[entry.branch] ?? null) !== parent) {
       throw new Error(`Stack preview is stale: parent metadata for ${entry.branch} changed`)
@@ -3036,7 +3135,8 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
     if (
       current.state !== captured.state ||
       current.base !== captured.base ||
-      current.headOid !== captured.headOid
+      current.headOid !== captured.headOid ||
+      (captured.baseOid !== undefined && (current.baseOid ?? null) !== captured.baseOid)
     ) {
       throw new Error(
         `Stack preview is stale: pull request #${captured.number} for ${branch} changed on GitHub after this preview was taken`,
@@ -3068,6 +3168,66 @@ async function revalidatePlan(repoPath: string, plan: StackPlan): Promise<void> 
   }
 }
 
+/** Inspection of a retained approval, not a new preview or authority token. */
+export async function validateStackPreview(root: string, token: string): Promise<void> {
+  const plan = plans.get(token) ?? surgeryPlans.get(token)?.stackPlan
+  if (!plan || plan.repoPath !== root || plan.expiresAt <= Date.now())
+    throw new Error('The original stack preview expired or is unavailable.')
+  await revalidatePlan(root, plan)
+  if (plan.entries.some((entry) => entry.pr)) {
+    const live = await getGitHubData(root, plan.originUrl)
+    if (!live.available) throw new Error(live.message)
+    for (const entry of plan.entries) {
+      if (!entry.pr) continue
+      const current = live.pullRequests.find((pr) => pr.number === entry.pr!.number)
+      const facts = (pr: PullRequest) =>
+        JSON.stringify([
+          pr.number,
+          pr.headOid,
+          pr.base,
+          pr.baseOid,
+          pr.state,
+          pr.draft,
+          pr.checks,
+          pr.reviewDecision,
+          pr.mergeState,
+          pr.canUpdate,
+        ])
+      if (!current || facts(current) !== facts(entry.pr))
+        throw new Error(`Original provider safety facts for #${entry.pr.number} changed.`)
+    }
+  }
+  if (plan.kind === 'merge' && plan.merge && plan.originFullName) {
+    const data = await getGitHubData(root, plan.originUrl)
+    if (!data.available) throw new Error(data.message)
+    revalidateMergeMembership(plan.merge, data)
+    const selected = plan.merge.layers.at(-1)!
+    const queue = await readQueueCapability(root, plan.originFullName, selected.pullRequest)
+    if (
+      !queue ||
+      queue.enabled === null ||
+      queue.headOid !== selected.headOid ||
+      queue.base !== selected.base ||
+      (queue.enabled === true) !== plan.merge.actions.includes('merge_queue')
+    )
+      throw new Error('Original reviewed merge-queue policy changed or is unreadable.')
+    for (const layer of plan.merge.layers) {
+      const pr = data.pullRequests.find((pr) => pr.number === layer.pullRequest)
+      if (!pr || pr.state !== 'OPEN' || pr.headOid !== layer.headOid || pr.base !== layer.base)
+        throw new Error('Original reviewed merge head, state or base changed.')
+      const policy = await captureMergeCheckPolicy(root, pr.number, layer.headOid, layer.base)
+      if (
+        policy.signature !== plan.mergeRequirements?.[String(pr.number)] ||
+        policy.blockers.length
+      )
+        throw new Error('Original reviewed checks or merge permission changed.')
+    }
+    const methods = await repositoryMergeMethods(plan.originFullName, await repositoryHost(root))
+    if (JSON.stringify(methods) !== JSON.stringify(plan.mergeMethods))
+      throw new Error('Original repository merge permission or methods changed.')
+  }
+}
+
 async function restoreCheckout(
   repoPath: string,
   branch: string | null,
@@ -3076,11 +3236,11 @@ async function restoreCheckout(
   if (branch) {
     const exists = await refExists(repoPath, `refs/heads/${branch}`)
     if (exists) {
-      await runGit(repoPath, ['switch', '--', branch])
+      await runGit(repoPath, ['switch', '--no-overwrite-ignore', '--', branch])
       return
     }
   }
-  if (head) await runGit(repoPath, ['switch', '--detach', head])
+  if (head) await runGit(repoPath, ['switch', '--no-overwrite-ignore', '--detach', head])
 }
 
 async function backupEntries(repoPath: string, journal: StackJournal): Promise<void> {
@@ -3457,9 +3617,9 @@ async function removeJournalBranches(repoPath: string, journal: StackJournal): P
           ? journal.originalBranch
           : null
       if (restore && (await refExists(repoPath, `refs/heads/${restore}`))) {
-        await runGit(repoPath, ['switch', '--', restore])
+        await runGit(repoPath, ['switch', '--no-overwrite-ignore', '--', restore])
       } else {
-        await runGit(repoPath, ['switch', '--detach', item.oldTip])
+        await runGit(repoPath, ['switch', '--no-overwrite-ignore', '--detach', item.oldTip])
       }
     }
     await runGit(repoPath, ['update-ref', '-d', `refs/heads/${item.branch}`, item.oldTip])
@@ -3487,6 +3647,7 @@ async function restackJournal(
   await ensureNoBusyOperation(repoPath, 'resume the stack')
   await ensureClean(repoPath, 'resume the stack')
   await verifyCompletedEntries(repoPath, journal)
+  await recordOperationRecovery('stack', journal.id)
   await backupEntries(repoPath, journal)
   await writeJournal(repoPath, journal)
   for (const entry of journal.entries) {
@@ -3523,7 +3684,7 @@ async function restackJournal(
     journal.status = 'running'
     journal.message = `Restacking ${entry.branch} onto ${entry.newParent}`
     try {
-      await runGit(repoPath, ['switch', '--', entry.branch])
+      await runGit(repoPath, ['switch', '--no-overwrite-ignore', '--', entry.branch])
       if ((await resolveCommit(repoPath, `refs/heads/${entry.branch}`)) !== entry.oldTip) {
         throw new Error(`Branch ${entry.branch} changed after preview; no replay was attempted`)
       }
@@ -3592,6 +3753,14 @@ async function restackJournal(
     for (const item of branches) {
       const oid = await resolveCommit(repoPath, `refs/heads/${item.branch}`)
       if (!oid) throw new Error(`Branch ${item.branch} no longer exists after the replay`)
+      const expected =
+        journal.entries.find(
+          (entry) => entry.branch === item.branch && entry.status === 'completed',
+        )?.newTip ?? item.expectedLocalOid
+      if (!expected || oid !== expected)
+        throw new Error(
+          `The approved local tip of ${item.branch} is changed or unknown; no publication is authorized.`,
+        )
       if (item.status === 'completed') {
         const currentRemote = await remoteOid(repoPath, pushUrl, item.branch)
         if (item.publishedOid && currentRemote !== item.publishedOid) {
@@ -3617,6 +3786,15 @@ async function restackJournal(
         await writeJournal(repoPath, journal)
         continue
       }
+      if (item.status === 'dispatched')
+        throw new Error(
+          `The previous push of ${item.branch} is unconfirmed. Its remote is not the sent tip; no replay is authorized. Inspect actual effects and use separate explicit recovery.`,
+        )
+      item.status = 'dispatched'
+      item.publishedOid = oid
+      journal.status = 'uncertain'
+      journal.message = `Publishing ${item.branch} @ ${oid}; interruption requires read-back, never automatic replay.`
+      await writeJournal(repoPath, journal)
       await pushBranch(repoPath, item.branch, oid, item.expectedRemoteOid, allowForce, pushUrl)
       item.status = 'completed'
       item.publishedOid = oid
@@ -3693,7 +3871,7 @@ async function runRestackCascade(
   syncPushes?: SyncPushConfig,
 ): Promise<ActionResult> {
   if (plan.blockers.length > 0) throw new Error(plan.blockers.join('; '))
-  if (entries.length === 0) {
+  if (entries.length === 0 && !syncPushes) {
     return { message: 'No remaining unmerged stack branches require restacking' }
   }
   await ensureNoBusyOperation(repoPath, 'restack the stack')
@@ -3763,27 +3941,12 @@ async function runPlanSync(
       expectedRemoteOid: plan.capturedRemoteOids[layer.branch] ?? null,
       force: layer.push === 'force',
       status: 'pending',
+      expectedLocalOid: plan.capturedTips[layer.branch],
     })),
   }
   const replayed = new Set(rebases.map((layer) => layer.branch))
   const entries = plan.entries.filter((entry) => replayed.has(entry.branch))
-  if (entries.length > 0) {
-    return runRestackCascade(repoPath, plan, entries, syncPushes)
-  }
-  const pushed: string[] = []
-  for (const item of syncPushes.branches) {
-    const oid = await resolveCommit(repoPath, `refs/heads/${item.branch}`)
-    if (!oid) throw new Error(`Branch ${item.branch} no longer exists`)
-    if (oid === item.expectedRemoteOid) continue
-    await pushBranch(repoPath, item.branch, oid, item.expectedRemoteOid, allowForce, pushUrl)
-    pushed.push(item.branch)
-  }
-  return {
-    message:
-      pushed.length > 0
-        ? `Pushed ${pushed.join(', ')}`
-        : `Stack is already in sync with ${preview.trunk.remote}`,
-  }
+  return runRestackCascade(repoPath, plan, entries, syncPushes)
 }
 
 interface SurgeryRecord {
@@ -3837,6 +4000,10 @@ async function captureSurgery(
 ): Promise<{ plan: SurgeryPlan; stackPlan: StackPlan }> {
   const blockers: string[] = []
   const warnings: string[] = []
+  if (snapshot.limits?.branchesSkipped)
+    blockers.push(
+      'Dependency inspection is partial; the entire backend scope must be proven before surgery.',
+    )
   const anchor = request.branch
   await validateBranchName(root, anchor)
   if (request.kind === 'insert') await validateBranchName(root, request.name)
@@ -3844,17 +4011,12 @@ async function captureSurgery(
   const operation = await getOperationState(root)
   if (operation.busy) blockers.push('A Git operation is already in progress')
   if ((await getStatus(root)).length > 0) {
-    blockers.push('Commit or stash uncommitted changes before changing a stack')
+    blockers.push(
+      'The explicitly chosen execution directory has local changes. Resolve them externally; no stash or cleanup is performed.',
+    )
   }
   const currentBranch = await getCurrentBranch(root)
   const currentHead = await resolveCommit(root, 'HEAD')
-  let fetchFailure: string | null = null
-  try {
-    await runGit(root, ['fetch', '--all', '--prune'])
-  } catch (error) {
-    fetchFailure = `Could not fetch and prune the remotes: ${commandDetail(error)}`
-    blockers.push(fetchFailure)
-  }
   const refs = await getRefs(root)
   const defaultBranch =
     snapshot.defaultBranch || (await getDefaultBranch(root, refs, currentBranch))
@@ -4121,7 +4283,6 @@ async function captureSurgery(
     revalidateRemote: true,
     merge: null,
   }
-  if (fetchFailure) stackPlan.blockers = [fetchFailure, ...stackPlan.blockers]
   return { plan, stackPlan }
 }
 
@@ -4285,6 +4446,12 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
           `Pull request #${step.number} changed from ${step.fromBase} to ${current.base} on GitHub`,
         )
       }
+      if (step.status === 'dispatched')
+        throw new Error(
+          `The retarget of #${step.number} is unconfirmed; its old base is not permission to replay a lost request.`,
+        )
+      step.status = 'dispatched'
+      await writeJournal(root, journal)
       await patchPullRequest(surgery.fullName, step.number, { base: step.toBase }, host)
       const readBack = await getPullRequest(root, step.number)
       assertPullRequestIdentity(step, readBack, expectedPullRequestHead(journal, step))
@@ -4307,6 +4474,12 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
       if (step.status === 'completed') {
         throw new Error(`Pull request #${step.number} was reopened after this surgery closed it`)
       }
+      if (step.status === 'dispatched')
+        throw new Error(
+          `The close of #${step.number} is unconfirmed; an open read is not permission to replay a lost request.`,
+        )
+      step.status = 'dispatched'
+      await writeJournal(root, journal)
       await patchPullRequest(surgery.fullName, step.number, { state: 'closed' }, host)
       const readBack = await getPullRequest(root, step.number)
       assertPullRequestIdentity(step, readBack, expectedPullRequestHead(journal, step))
@@ -4346,6 +4519,12 @@ async function runSurgeryRemote(root: string, journal: StackJournal): Promise<st
           `Native stack #${stack.stackNumber} now holds ${observed.join(', ')} instead of the reviewed membership ${stack.membersBefore.join(', ')}`,
         )
       }
+      if (stack.unstackStatus === 'dispatched')
+        throw new Error(
+          'The prior unstack is unconfirmed; unchanged membership does not authorize replay.',
+        )
+      stack.unstackStatus = 'dispatched'
+      await writeJournal(root, journal)
       await unstackNativeStackAction(root, surgery.fullName, stack.stackNumber)
       // GitHub either empties the stack or dissolves it, and only a merged pull
       // request survives an unstack, so the proof is that no stack still holds an
@@ -4578,6 +4757,7 @@ export async function runSurgery(
   await ensureNoBusyOperation(root, 'change the stack')
   await ensureClean(root, 'change the stack')
   await revalidatePlan(root, stackPlan)
+  await recordOperationPreview(preview)
   const pushedLayers = plan.layers.filter((layer) => layer.push !== 'none')
   if (pushedLayers.length > 0 && !stackPlan.pushUrl) {
     throw new Error(
@@ -4630,6 +4810,7 @@ export async function runSurgery(
             force: layer.push === 'force',
             status: 'pending' as const,
             publishedOid: null,
+            expectedLocalOid: layer.oldTip,
           })),
         }
       : undefined,
@@ -4674,7 +4855,10 @@ export async function runSurgery(
   return restackJournal(root, journal, (pending) => runSurgeryRemote(root, pending))
 }
 
-async function stackContinue(repoPath: string): Promise<ActionResult> {
+async function stackContinue(
+  repoPath: string,
+  command: 'continue' | 'skip' = 'continue',
+): Promise<ActionResult> {
   const journal = await readJournal(repoPath)
   if (!journal) throw new Error('No interrupted Git Stacks operation is available')
   if (journal.status === 'aborting')
@@ -4697,6 +4881,10 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
     ? (pending: StackJournal): Promise<string> => runSurgeryRemote(repoPath, pending)
     : undefined
   const active = journal.entries.find((entry) => entry.status === 'rebasing')
+  if (command === 'skip' && (!active || !(await activeRebaseState(repoPath))))
+    throw new Error(
+      'Skip requires the original journal-owned active rebase; pending remote writes cannot be skipped.',
+    )
   if (!active) return restackJournal(repoPath, journal, surgeryRemote)
   await verifyCompletedEntries(repoPath, journal)
   await verifyEntryMetadata(repoPath, active)
@@ -4719,7 +4907,7 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
   try {
     await runGit(
       repoPath,
-      ['-c', 'rebase.updateRefs=false', '-c', 'rebase.autoStash=false', 'rebase', '--continue'],
+      ['-c', 'rebase.updateRefs=false', '-c', 'rebase.autoStash=false', 'rebase', `--${command}`],
       {
         GIT_EDITOR: 'true',
         GIT_REFLOG_ACTION: replayReflogAction(journal, active),
@@ -4733,6 +4921,10 @@ async function stackContinue(repoPath: string): Promise<ActionResult> {
   }
   await completeEntry(repoPath, journal, active)
   return restackJournal(repoPath, journal, surgeryRemote)
+}
+
+export async function skipStackOperation(repoPath: string): Promise<ActionResult> {
+  return stackContinue(repoPath, 'skip')
 }
 
 async function stackAbort(repoPath: string): Promise<ActionResult> {
@@ -4774,7 +4966,7 @@ async function stackAbort(repoPath: string): Promise<ActionResult> {
     (journal.entries.some((entry) => entry.branch === currentBranch) ||
       createdNames.includes(currentBranch))
   ) {
-    await runGit(repoPath, ['switch', '--detach', 'HEAD'])
+    await runGit(repoPath, ['switch', '--no-overwrite-ignore', '--detach', 'HEAD'])
   }
   for (const entry of [...journal.entries].reverse()) {
     if (entry.status === 'restored') continue
@@ -4950,6 +5142,14 @@ async function repositoryMergeMethods(
       path: `repos/${fullName}`,
     })
     if (!isRecord(data)) return null
+    if (
+      !isRecord(data.permissions) ||
+      !['push', 'maintain', 'admin'].some(
+        (permission) =>
+          data.permissions && isRecord(data.permissions) && data.permissions[permission] === true,
+      )
+    )
+      return null
     const methods: ('merge' | 'squash' | 'rebase')[] = []
     if (data.allow_merge_commit === true) methods.push('merge')
     if (data.allow_squash_merge === true) methods.push('squash')
@@ -4988,6 +5188,8 @@ function mergeLayerBlockers(pr: PullRequest, base: string, head: string): string
   if (!pr.headOid || pr.headOid !== head)
     blockers.push(`Pull request #${pr.number} head does not match the reviewed local tip`)
   if (pr.draft) blockers.push(`Pull request #${pr.number} is still a draft`)
+  if (pr.metadata !== 'full' || !pr.baseOid)
+    blockers.push(`Pull request #${pr.number} requirements or base revision are unknown`)
   return blockers
 }
 
@@ -5165,7 +5367,7 @@ function mergePreviewFor(
     : ['default', 'direct_merge']
   if (!queueConfigured) {
     warnings.push(
-      `Neither GitHub's own merge-queue capability for ${selected.base} nor an accepted enqueue recorded here reports a queue, so this preview offers a direct merge or the repository default. Choosing the merge queue still works: GitHub reports whether it accepted it.`,
+      `Neither GitHub's own merge-queue capability for ${selected.base} nor an accepted enqueue recorded here reports a queue, so this preview offers a direct merge or the repository default. Merge queue is unavailable in this preview; reload after GitHub reports queue capability.`,
     )
   }
   const layerNumbers = layers.map((entry) => entry.pr?.number ?? 0)
@@ -6264,6 +6466,7 @@ async function dismissSubmitStack(repoPath: string): Promise<ActionResult> {
   const root = await repositoryPath(repoPath)
   const operation = await readPublishOperation(root)
   if (!operation) return { message: 'There is no Submit Stack operation to dismiss' }
+  await recordOperationRecovery('publication', operation.id)
   await removePublishOperation(root)
   return {
     message: `Dismissed the submission of ${operation.layers.length} layer${
@@ -6401,7 +6604,7 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
       queueRead,
       live === null ? null : { headOid: live.headOid ?? null, base: live.base ?? null },
     )
-    layers.push({
+    const layer: MergeLayerResult = {
       branch: observation.branch,
       pullRequest: observation.pullRequest,
       status:
@@ -6420,7 +6623,9 @@ export async function getMergeStatus(repoPath: string): Promise<MergeStatus | nu
       mergedOid: result?.mergeOid ?? live?.mergeOid ?? null,
       queue,
       requestUuid: observation.request?.uuid ?? null,
-    })
+    }
+    await confirmRecordedMerge(root, effective, layer)
+    layers.push(layer)
   }
   return { layers, message: mergeStatusMessage(layers) }
 }
@@ -6648,8 +6853,10 @@ async function mergeStack(
   ) {
     throw new Error('Stack preview is stale: origin changed')
   }
-  await ensureNoBusyOperation(repoPath, 'merge the pull request')
-  await ensureClean(repoPath, 'merge the pull request')
+  if (!plan.providerOnly) {
+    await ensureNoBusyOperation(repoPath, 'merge the pull request')
+    await ensureClean(repoPath, 'merge the pull request')
+  }
   await revalidatePlan(repoPath, plan)
   if (!plan.originFullName) throw new Error('A github.com origin remote is required')
   const host = await repositoryHost(repoPath)
@@ -6693,6 +6900,40 @@ async function mergeStack(
     }
   }
   revalidateMergeMembership(merge, data)
+  const priorRequests = await readMergeObservations(repoPath, { strict: true })
+  const unresolved = await unresolvedOperationRecords(repoPath)
+  for (const layer of merge.layers) {
+    const prior = priorRequests.get(layer.pullRequest)
+    if (
+      unresolved.some(
+        (record) =>
+          (!record.preview ||
+            !('merge' in record.preview) ||
+            record.preview.merge?.layers.some(
+              (entry) => entry.pullRequest === layer.pullRequest && entry.headOid === layer.headOid,
+            )) &&
+          record.result?.merge?.layers.some(
+            (entry) =>
+              entry.pullRequest === layer.pullRequest &&
+              ['pending', 'enqueued', 'unconfirmed'].includes(
+                record.mergeConfirmations?.[entry.pullRequest]?.status ?? entry.status,
+              ),
+          ),
+      )
+    )
+      throw new Error(
+        `Pull request #${layer.pullRequest} retains a durable unresolved merge intent; inspect the original request without replay.`,
+      )
+    if (
+      prior &&
+      prior.headOid === layer.headOid &&
+      (prior.outcome === 'pending' || prior.outcome === 'enqueued') &&
+      !(prior.outcome === 'enqueued' && mergeQueueState(prior, '')?.outcome === 'dropped')
+    )
+      throw new Error(
+        `Pull request #${layer.pullRequest} already has a pending or accepted-but-unconfirmed request for this head. Read its status; no merge replay is authorized.`,
+      )
+  }
   const selected = merge.layers[merge.layers.length - 1]
   const results: MergeLayerResult[] = merge.layers.map((layer) => ({
     branch: layer.branch,
@@ -6746,11 +6987,78 @@ async function mergeStack(
         // observed here rather than assumed from the preview.
         result.detail = `GitHub retargeted this pull request to ${current.base}`
       }
-      if (mergeAction === 'direct_merge') {
+      if (
+        landed === 0 &&
+        plan.capturedPrs[layer.branch]?.baseOid !== undefined &&
+        (current.baseOid ?? null) !== plan.capturedPrs[layer.branch]?.baseOid
+      )
+        throw new Error(`Pull request #${layer.pullRequest} base revision changed since review.`)
+      const liveQueue = await readQueueCapability(repoPath, plan.originFullName, layer.pullRequest)
+      if (
+        !liveQueue ||
+        liveQueue.enabled === null ||
+        liveQueue.headOid !== current.headOid ||
+        liveQueue.base !== current.base
+      )
+        throw new Error(
+          'Live queue policy or its reviewed head/base is unknown; no merge request was sent.',
+        )
+      if (mergeAction === 'merge_queue' && !liveQueue.enabled)
+        throw new Error('This live base no longer supports merge-queue delivery.')
+      if (!(await repositoryMergeMethods(plan.originFullName, host)))
+        throw new Error('Current repository merge permissions or methods are unavailable.')
+      const requirements = await captureMergeCheckPolicy(
+        repoPath,
+        layer.pullRequest,
+        layer.headOid,
+        current.base,
+      )
+      if (requirements.blockers.length) throw new Error(requirements.blockers.join('; '))
+      if (
+        plan.mergeRequirements?.[String(layer.pullRequest)] !== requirements.signature &&
+        landed === 0
+      )
+        throw new Error('Required check policy changed since the reviewed preview.')
+      if (
+        (mergeAction === 'direct_merge' || (mergeAction === 'default' && !liveQueue.enabled)) &&
+        requirements.directBlocked
+      )
+        throw new Error('Required checks are not confirmed passing.')
+      if (mergeAction === 'direct_merge' || (mergeAction === 'default' && !liveQueue.enabled)) {
         const gates = directMergeGates(current)
         if (gates.length > 0) throw new Error(gates.join('; '))
       }
-      await setPullRequestNumber(repoPath, layer.branch, layer.pullRequest)
+      if (!plan.providerOnly) await setPullRequestNumber(repoPath, layer.branch, layer.pullRequest)
+      await recordOperationResult({
+        message:
+          'Reviewed merge admitted; provider dispatch outcome remains unconfirmed until read-back.',
+        merge: {
+          action: mergeAction,
+          method: action.mergeMethod,
+          native: merge.native,
+          layers: results.map((entry) =>
+            entry.pullRequest === layer.pullRequest
+              ? {
+                  ...entry,
+                  status: 'unconfirmed',
+                  detail: 'Dispatch admitted; interruption requires read-back, never replay.',
+                }
+              : { ...entry },
+          ),
+          remaining: [],
+        },
+      })
+      await recordMergeRequest(repoPath, {
+        request: null,
+        layers: merge.native ? merge.layers.filter((item) => item.includedInRequest) : [layer],
+        action: mergeAction,
+        method: mergeAction === 'direct_merge' ? action.mergeMethod : null,
+        outcome: 'pending',
+        enqueuedAt: null,
+        requestedAt: Date.now(),
+        message:
+          'Merge dispatch admitted; outcome is unconfirmed until provider read-back. No automatic replay.',
+      })
       attempted = true
       const start = await startAsyncMerge({
         fullName: plan.originFullName,
@@ -6936,8 +7244,21 @@ async function mergeStack(
       break
     } catch (error) {
       if (error instanceof HeldMergeRequestError || !attempted) throw error
-      result.status = 'failed'
-      result.detail = commandDetail(error)
+      result.status = unknownRemoteOutcome(error) ? 'unconfirmed' : 'failed'
+      result.detail = `${commandDetail(error)}${result.status === 'unconfirmed' ? ' The provider may have accepted this request; read its status, never replay it.' : ''}`
+      if (result.status === 'failed')
+        await recordMergeRequest(repoPath, {
+          request: result.requestUuid
+            ? { pullRequest: layer.pullRequest, uuid: result.requestUuid }
+            : null,
+          layers: [layer],
+          action: mergeAction,
+          method: mergeAction === 'direct_merge' ? action.mergeMethod : null,
+          outcome: 'failed',
+          enqueuedAt: null,
+          requestedAt: Date.now(),
+          message: result.detail,
+        })
       break
     }
   }
@@ -7025,21 +7346,9 @@ async function mergeStack(
           : 'The pull request was closed without merging, so the queue dropped it'
     }
   }
-  let fetchMessage = ''
-  try {
-    if ((await getOriginUrl(repoPath)) !== plan.originUrl) {
-      throw new Error('Origin changed after the merge')
-    }
-    for (const branch of [plan.trunk, ...confirmed.map((entry) => entry.layer.branch)]) {
-      await runGit(repoPath, [
-        'fetch',
-        'origin',
-        `refs/heads/${branch}:refs/remotes/origin/${branch}`,
-      ])
-    }
-  } catch (error) {
-    fetchMessage = ` Refreshing origin tracking refs failed: ${commandDetail(error)}`
-  }
+  const fetchMessage = confirmed.length
+    ? ' Fetch explicitly to refresh origin tracking refs and import the confirmed merge commits; no checkout is changed by landing.'
+    : ''
   for (const entry of confirmed) {
     const mergeOid =
       entry.mergeOid ??
@@ -7051,6 +7360,7 @@ async function mergeStack(
       mergeOid,
       mergedAt: Date.now(),
     })
+    if (plan.providerOnly) continue
     await setConfig(
       repoPath,
       `branch.${entry.layer.branch}.gitStacksMergedHeadPr`,
@@ -7112,10 +7422,17 @@ async function updatePullRequest(
   title: string,
   body: string,
   draft: boolean,
+  expectedBody?: string,
 ): Promise<ActionResult> {
   const origin = await currentOrigin(repoPath)
   const current = await getPullRequest(repoPath, number)
+  if (current.canUpdate !== true)
+    throw new Error('The provider did not establish permission to edit this pull request.')
   if (current.state === 'MERGED') throw new Error(`Pull request #${number} is already merged`)
+  if (expectedBody !== undefined && current.body !== expectedBody)
+    throw new Error(
+      'The pull request body changed. Reload its current body before saving; authored input was not sent.',
+    )
   await patchPullRequest(origin.fullName, number, { title, body }, origin.host)
   if (current.draft !== draft) {
     await changePullRequestDraft(origin.fullName, number, draft, origin.host)
@@ -7134,6 +7451,10 @@ async function changePullRequestState(
 ): Promise<ActionResult> {
   const origin = await currentOrigin(repoPath)
   const current = await getPullRequest(repoPath, number)
+  if (current.canUpdate !== true)
+    throw new Error(
+      'The provider did not establish permission to change this pull request lifecycle.',
+    )
   if (state === 'open' && current.state === 'MERGED')
     throw new Error(`Pull request #${number} cannot be reopened after merge`)
   await patchPullRequest(origin.fullName, number, { state }, origin.host)
@@ -7239,13 +7560,59 @@ export async function getStackProgress(
     .filter((entry) => entry.status !== 'completed')
     .map((entry) => entry.branch)
   return {
+    operationId: journal.id,
+    allowForce: journal.syncPushes?.allowForce ?? null,
     kind: journal.kind,
     originalBranch: journal.originalBranch ?? '',
     currentBranch: journal.currentBranch,
     completed,
     remaining,
     message: journal.message,
+    ...(journal.surgery
+      ? {
+          surgery: {
+            pullRequests: journal.surgery.pullRequests.map(({ number, action, status }) => ({
+              number,
+              action,
+              status,
+            })),
+            nativeStack: journal.surgery.stack
+              ? {
+                  number: journal.surgery.stack.stackNumber,
+                  action: journal.surgery.stack.action,
+                  unstackStatus: journal.surgery.stack.unstackStatus,
+                  createStatus: journal.surgery.stack.createStatus,
+                }
+              : null,
+          },
+        }
+      : {}),
   }
+}
+
+/** A planner token cannot move the selected qualified target to another branch. */
+export function assertStackActionTarget(
+  action: StackAction,
+  qualifiedRef: string | undefined,
+  pullRequestNumber?: number,
+): void {
+  if (pullRequestNumber !== undefined && action.type === 'executeStack') {
+    const plan = plans.get(action.token)
+    if (plan?.kind === 'merge' && plan.merge?.layers.at(-1)?.pullRequest !== pullRequestNumber)
+      throw new Error(
+        'The reviewed merge token does not belong to the captured qualified pull request.',
+      )
+  }
+  if (!qualifiedRef) return
+  const branch = qualifiedRef.replace(/^refs\/heads\//, '')
+  if (action.type === 'executeStack' || action.type === 'submitStack') {
+    if (plans.get(action.token)?.branch !== branch)
+      throw new Error('The preview does not belong to the captured qualified branch.')
+  } else if (action.type === 'executeSurgery') {
+    if (surgeryPlans.get(action.token)?.plan.request.branch !== branch)
+      throw new Error('The surgery does not belong to the captured qualified branch.')
+  } else if (action.type === 'setParent' && action.branch !== branch)
+    throw new Error('Dependency edits must address the captured qualified branch.')
 }
 
 export async function runStackAction(
@@ -7271,7 +7638,14 @@ export async function runStackAction(
     case 'executeSurgery':
       return runSurgery(root, action.token, action.allowForce, action.closePullRequests)
     case 'updatePr':
-      return updatePullRequest(root, action.number, action.title, action.body, action.draft)
+      return updatePullRequest(
+        root,
+        action.number,
+        action.title,
+        action.body,
+        action.draft,
+        action.expectedBody,
+      )
     case 'closePr':
       return changePullRequestState(root, action.number, 'closed')
     case 'reopenPr':
@@ -7287,6 +7661,7 @@ export async function runStackAction(
         throw new Error('Stack preview token is missing or expired; refresh the preview')
       if (plan.repoPath !== root) throw new Error('Stack preview belongs to a different repository')
       plans.delete(action.token)
+      if (plan.reviewedPreview) await recordOperationPreview(plan.reviewedPreview)
       if (plan.kind === 'restack') return runRestackCascade(root, plan, plan.entries)
       if (plan.kind === 'sync') return runPlanSync(root, plan, action.allowForce)
       if (plan.kind === 'publish') {
@@ -7305,6 +7680,7 @@ export async function runStackAction(
       if (plan.kind !== 'publish')
         throw new Error('That preview does not describe a stack submission')
       plans.delete(action.token)
+      if (plan.reviewedPreview) await recordOperationPreview(plan.reviewedPreview)
       return runSubmitStack(root, plan, action)
     }
     case 'submitStackRetry':
@@ -7349,4 +7725,256 @@ export async function runStackAction(
         confirmRewrites: action.confirmRewrites,
       })
   }
+}
+
+async function captureMergeCheckPolicy(root: string, number: number, head: string, base: string) {
+  const report = await getPullRequestChecks(root, number, { headSha: head, base, force: true })
+  const blockers: string[] = []
+  if (
+    !report.available ||
+    report.truncated ||
+    !report.rollup.requirementKnown ||
+    !['live', 'not-modified'].includes(report.freshness) ||
+    report.headSha !== head ||
+    report.base !== base
+  )
+    blockers.push(
+      `Required checks/rules for #${number} are unknown, incomplete or stale; merge is blocked.`,
+    )
+  const required = report.checks.filter((check) => check.requirement === 'required')
+  return {
+    signature: JSON.stringify(
+      required.map((check) => [check.name, check.source, check.appId]).sort(),
+    ),
+    blockers,
+    directBlocked: Boolean(
+      report.rollup.requiredFailing || report.rollup.requiredPending || report.rollup.unknown,
+    ),
+    detail: `#${number} required checks: ${required.map((check) => `${check.name}: ${check.state}`).join(', ') || (report.rollup.requirementKnown ? 'none required by the observed rules' : 'unknown')}`,
+  }
+}
+
+/** Provider-owned downstack inspection does not require local copies of its branches. */
+export async function previewReviewedMerge(
+  repoPath: string,
+  number: number,
+): Promise<StackPreview> {
+  if (!Number.isInteger(number) || number <= 0) throw new Error('Choose a qualified pull request.')
+  const root = await repositoryPath(repoPath)
+  const origin = await currentOrigin(root)
+  const data = await getGitHubData(root, origin.url)
+  if (!data.available) throw new Error(data.message)
+  const selected = await getPullRequest(root, number)
+  if (!selected.headOid || selected.headRepository?.toLowerCase() !== origin.fullName.toLowerCase())
+    throw new Error('The reviewed PR head must belong to this exact provider repository.')
+  const defaultBranch =
+    selected.repositoryDefaultBranch ??
+    (await getDefaultBranch(root, await getRefs(root), await getCurrentBranch(root)))
+  const blockers: string[] = []
+  const warnings: string[] = []
+  if (!data.nativeStackPreviewAvailable && data.nativeStackPreviewReason !== 'endpoint-missing')
+    blockers.push(
+      'Native membership capability is unknown or unavailable for this account; complete reviewed scope cannot be authorized.',
+    )
+  let trunk = defaultBranch
+  const downstack: PullRequest[] = []
+  const stacks = data.nativeStacks ?? []
+  if (selected.stack) {
+    const stack = stacks.find((stack) => stack.number === selected.stack?.stackNumber)
+    if (!stack || !stack.open || !data.nativeStackPreviewAvailable)
+      throw new Error('Actual source-confirmed native membership could not be established.')
+    trunk = stack.base
+    for (const member of stack.pullRequests
+      .filter((member) => member.position <= selected.stack!.position)
+      .sort((a, b) => a.position - b.position)) {
+      const pr = await getPullRequest(root, member.number)
+      if (
+        pr.head !== member.head ||
+        pr.headOid !== member.headSha ||
+        pr.base !== member.base ||
+        pr.state !== member.state
+      )
+        throw new Error('A native member moved while resolving the complete reviewed downstack.')
+      if (pr.state === 'OPEN') downstack.push(pr)
+    }
+  } else {
+    const seen = new Set<number>()
+    let current: PullRequest | null = selected
+    while (current) {
+      if (seen.has(current.number))
+        throw new Error('Cyclic provider base chain; merge scope is unprovable.')
+      seen.add(current.number)
+      downstack.unshift(current)
+      if (current.base === trunk) break
+      const parent = await exactPrForBranch(current.base, data)
+      if (!parent || parent.state !== 'OPEN')
+        throw new Error(
+          `Cannot prove the reviewed lower layer for ${current.base}; merge is blocked instead of truncating scope.`,
+        )
+      current = parent
+    }
+  }
+  if (!downstack.some((pr) => pr.number === selected.number))
+    throw new Error('Selected PR is not part of the resolved open downstack.')
+  const entries: PlanEntry[] = downstack.map((pr) => ({
+    branch: pr.head,
+    parent: pr.base,
+    parentRef: `refs/heads/${pr.base}`,
+    parentOid: pr.baseOid ?? '',
+    oldParent: null,
+    oldTip: pr.headOid ?? '',
+    boundary: pr.baseOid ?? '',
+    oldParentTip: null,
+    parentTipSource: 'parent-tip',
+    needsRestack: false,
+    pr,
+    remoteOid: pr.headOid ?? null,
+    upstream: null,
+    retargetedFrom: null,
+    note: 'Provider-owned merge only; no local checkout, restack or deletion.',
+  }))
+  const methods = await repositoryMergeMethods(origin.fullName, await repositoryHost(root))
+  if (!methods?.length)
+    blockers.push('Current repository merge permission or meaningful methods are unavailable.')
+  const queue = await readQueueCapability(root, origin.fullName, number)
+  if (
+    !queue ||
+    queue.enabled === null ||
+    queue.headOid !== selected.headOid ||
+    queue.base !== selected.base
+  )
+    blockers.push('Live merge-queue policy for the reviewed head/base is unknown.')
+  const requirements: Record<string, string> = {}
+  const priorRequests = await readMergeObservations(root, { strict: true })
+  const unresolved = await unresolvedOperationRecords(root)
+  for (const pr of downstack) {
+    blockers.push(...mergeLayerBlockers(pr, pr.base, pr.headOid ?? ''))
+    if (
+      unresolved.some(
+        (record) =>
+          (!record.preview ||
+            !('merge' in record.preview) ||
+            record.preview.merge?.layers.some(
+              (entry) => entry.pullRequest === pr.number && entry.headOid === pr.headOid,
+            )) &&
+          record.result?.merge?.layers.some(
+            (entry) =>
+              entry.pullRequest === pr.number &&
+              ['pending', 'enqueued', 'unconfirmed'].includes(
+                record.mergeConfirmations?.[entry.pullRequest]?.status ?? entry.status,
+              ),
+          ),
+      )
+    )
+      blockers.push(
+        `#${pr.number} retains a durable unresolved merge intent; inspect the original request without replay.`,
+      )
+    const prior = priorRequests.get(pr.number)
+    if (
+      prior &&
+      prior.headOid === pr.headOid &&
+      (prior.outcome === 'pending' || prior.outcome === 'enqueued') &&
+      !(prior.outcome === 'enqueued' && mergeQueueState(prior, '')?.outcome === 'dropped')
+    )
+      blockers.push(
+        `#${pr.number} already has a pending or accepted-but-unconfirmed request for this head. Read its status; no replay is authorized.`,
+      )
+    const policy = await captureMergeCheckPolicy(root, pr.number, pr.headOid ?? '', pr.base)
+    blockers.push(...policy.blockers)
+    warnings.push(policy.detail, ...directMergeGates(pr))
+    requirements[String(pr.number)] = policy.signature
+  }
+  const merge = mergePreviewFor(
+    entries,
+    selected,
+    stacks,
+    queue?.enabled === true,
+    blockers,
+    warnings,
+  )
+  const counts: Record<number, number> = {}
+  for (const pr of downstack) {
+    const { data: source } = await hostTransport(await repositoryHost(root)).rest<
+      Record<string, unknown>
+    >({ path: `repos/${origin.fullName}/pulls/${pr.number}` })
+    if (
+      !isRecord(source) ||
+      !Number.isInteger(source.commits) ||
+      Number(source.commits) < 0 ||
+      !isRecord(source.head) ||
+      source.head.sha !== pr.headOid ||
+      !isRecord(source.base) ||
+      source.base.sha !== pr.baseOid
+    )
+      throw new Error('Provider merge scope moved or its commit count could not be established.')
+    counts[pr.number] = Number(source.commits)
+  }
+  const token = randomUUID()
+  const plan: StackPlan = {
+    token,
+    repoPath: root,
+    expiresAt: Date.now() + PLAN_TTL_MS,
+    kind: 'merge',
+    branch: selected.head,
+    trunk,
+    defaultBranch,
+    originUrl: origin.url,
+    pushUrl: null,
+    originFullName: origin.fullName,
+    originalBranch: await getCurrentBranch(root),
+    originalHead: await resolveCommit(root, 'HEAD'),
+    entries,
+    capturedParents: {},
+    capturedParentTips: {},
+    capturedParentOids: {},
+    capturedTips: {},
+    capturedRemoteOids: {},
+    capturedMergedHeads: {},
+    capturedPrs: Object.fromEntries(
+      downstack.map((pr) => [
+        pr.head,
+        {
+          number: pr.number,
+          state: pr.state,
+          base: pr.base,
+          baseOid: pr.baseOid ?? null,
+          headOid: pr.headOid ?? null,
+        },
+      ]),
+    ),
+    capturedStacks: stacks.map(captureStack),
+    nativeStacksAvailable: data.nativeStackPreviewAvailable === true,
+    nativeStacksReason: data.nativeStackPreviewReason ?? 'unreachable',
+    blockers,
+    warnings,
+    mergeMethods: methods ?? [],
+    merge,
+    sync: null,
+    mergeRequirements: requirements,
+    providerOnly: true,
+  }
+  const preview: StackPreview = {
+    token,
+    kind: 'merge',
+    branch: selected.head,
+    blockers,
+    warnings,
+    mergeMethods: methods ?? [],
+    merge,
+    publish: null,
+    sync: null,
+    steps: entries.map((entry) => ({
+      branch: entry.branch,
+      parent: entry.parent,
+      oid: entry.oldTip,
+      baseOid: entry.parentOid || null,
+      commits: counts[entry.pr!.number],
+      title: entry.pr!.title,
+      pr: entry.pr,
+      note: entry.note,
+    })),
+  }
+  plan.reviewedPreview = preview
+  plans.set(token, plan)
+  return preview
 }

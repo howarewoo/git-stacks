@@ -1,4 +1,5 @@
 import { isRecord } from '@git-stacks/shared/guards'
+import { readReviewedHeads } from './review-snapshots'
 import { summariseCheckRollupState } from '@git-stacks/shared/pull-request-checks'
 import {
   DEFAULT_PULL_REQUEST_INBOX_BUDGET,
@@ -48,7 +49,7 @@ export interface PullRequestInboxTarget {
 
 /** Fallbacks omit unsupported fields without changing the remaining query. */
 const BASIC_FIELDS = `
-    number title url headRefName headRefOid baseRefName isDraft state
+    number title url headRefName headRefOid baseRefName baseRefOid isDraft state
     updatedAt mergedAt
     author { login }
     headRepository { nameWithOwner }
@@ -560,6 +561,7 @@ function inboxItem(
     // rather than rendering this as a real result.
     checks: context.basic ? 'none' : inboxChecks(node.commits),
     ...(typeof node.headRefOid === 'string' ? { headOid: node.headRefOid } : {}),
+    ...(typeof node.baseRefOid === 'string' ? { baseOid: node.baseRefOid } : {}),
     ...(headRepository ? { headRepository } : {}),
     repository: context.repository,
     repositoryPath: context.path,
@@ -1005,6 +1007,37 @@ export async function readPullRequestInbox(
         if (viewer !== null && viewer !== result.viewer) hostsDisagree = true
         viewer ??= result.viewer
       }
+      if (result.viewer) {
+        const baselines = new Map<number, NonNullable<PullRequestInboxItem['reviewBaseline']>>()
+        let unavailable = false
+        for (const root of entry.paths) {
+          try {
+            const observed = await readReviewedHeads(
+              root,
+              `${host.host}/${fullName.toLowerCase()}`,
+              result.viewer,
+              signal,
+            )
+            for (const [number, baseline] of observed) {
+              const previous = baselines.get(number)
+              if (!previous || Date.parse(baseline.reviewedAt) > Date.parse(previous.reviewedAt))
+                baselines.set(number, baseline)
+            }
+          } catch (error) {
+            if (signal?.aborted || isCancelled(error)) throw new CommandCancelled()
+            unavailable = true
+          }
+        }
+        for (const item of result.items) {
+          const baseline = baselines.get(item.number)
+          item.reviewBaselineState = unavailable
+            ? 'unavailable'
+            : baseline
+              ? 'known'
+              : 'none-recorded'
+          if (baseline && !unavailable) item.reviewBaseline = baseline
+        }
+      }
       items.push(...result.items)
       if (result.truncated) truncated.push(fullName)
       report(result.status, result.detail, result.viewer)
@@ -1101,6 +1134,7 @@ interface InboxReadTarget {
   host: GitHubHostContext | null
   fullName: string
   key: string
+  paths: string[]
 }
 
 /**
@@ -1124,12 +1158,15 @@ function inboxReadTargets(targets: readonly PullRequestInboxTarget[]): InboxRead
       target,
       host,
       fullName,
+      paths: [target.path],
       key:
         remote && host ? inboxItemKey(host.host, fullName, 0).slice(0, -1) : `local:${target.path}`,
     }
     const current = chosen.get(entry.key)
-    if (current && current.target.path <= target.path) continue
-    chosen.set(entry.key, entry)
+    if (current) {
+      if (!current.paths.includes(target.path)) current.paths.push(target.path)
+      if (current.target.path > target.path) current.target = target
+    } else chosen.set(entry.key, entry)
   }
   return [...chosen.values()]
 }
@@ -1282,7 +1319,7 @@ export function retiredPullRequestInboxReport(
  */
 export function inboxTargetSet(targets: readonly PullRequestInboxTarget[]): string {
   return inboxReadTargets(targets)
-    .map((entry) => `${entry.key}\u0000${entry.target.path}`)
+    .map((entry) => `${entry.key}\u0000${entry.paths.toSorted().join('\u0000')}`)
     .sort()
     .join('\n')
 }

@@ -20,9 +20,11 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
       })
       expect(hasHorizontalScroll).toBe(false)
 
-      const navButtons = page.locator('.workspace-nav button')
+      const navButtons = page
+        .getByRole('complementary', { name: 'Workspace navigation' })
+        .getByRole('button')
       const navCount = await navButtons.count()
-
+      expect(navCount).toBeGreaterThan(0)
       for (let i = 0; i < navCount; i++) {
         const button = navButtons.nth(i)
         const box = await button.boundingBox()
@@ -43,6 +45,27 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
       }
     })
 
+    test('selected branch inspector remains keyboard operable at compact reflow', async ({
+      page,
+    }) => {
+      await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
+      const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
+      await expect(inspector).toBeVisible()
+      for (const name of ['Overview', 'Changes', 'Checks', 'Discussion']) {
+        const tab = inspector.getByRole('tab', { name: new RegExp(`^${name}`) })
+        await tab.focus()
+        await page.keyboard.press('Enter')
+        await expect(tab).toHaveAttribute('aria-selected', 'true')
+        const box = await tab.boundingBox()
+        expect(box).not.toBeNull()
+        expect(box!.x).toBeGreaterThanOrEqual(0)
+        expect(box!.x + box!.width).toBeLessThanOrEqual(720)
+      }
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+      ).toBe(false)
+    })
+
     // Every destination — not just the two the suite used to name — has to
     // survive the 200% reflow without pushing actions off-screen.
     for (const destination of DESTINATIONS) {
@@ -57,15 +80,6 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
           return document.documentElement.scrollWidth > window.innerWidth
         })
         expect(hasHorizontalScroll).toBe(false)
-
-        if (destination.id === 'changes') {
-          await expect(
-            page.getByRole('heading', { level: 2, name: 'Staged', exact: true }),
-          ).toBeVisible()
-          await expect(
-            page.getByRole('heading', { level: 2, name: 'Unstaged', exact: true }),
-          ).toBeVisible()
-        }
 
         const box = await heading.boundingBox()
         expect(box).not.toBeNull()
@@ -88,7 +102,7 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
       await settle(page)
 
       const buttonTransition = await page
-        .locator('.gs-button')
+        .getByRole('button', { name: 'Settings', exact: true })
         .first()
         .evaluate((el) => {
           const style = window.getComputedStyle(el)

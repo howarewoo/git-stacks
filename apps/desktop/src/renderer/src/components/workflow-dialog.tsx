@@ -1,6 +1,13 @@
 import * as React from 'react'
 import { useForm, useSelector } from '@tanstack/react-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { OperationProgress, OperationCapture } from '@git-stacks/shared/operation-scope'
+import { useOperationSafety } from '../lib/operation-safety'
+import {
+  mergeProgressAfterRead,
+  operationProgressKeys,
+  readOperationProgress,
+} from '../lib/operation-progress'
 import { ExternalLink, Link2, LoaderCircle, Search, Trash2 } from 'lucide-react'
 import type {
   Branch,
@@ -11,7 +18,6 @@ import type {
   MergeLayerResult,
   MergeProgress,
   PublishLayerChoice,
-  PublishProgress,
   PullRequest,
   PushPreview,
   RepositorySnapshot,
@@ -47,6 +53,7 @@ import {
   BlockerList,
   MergeOutcomePanel,
   OperationContext,
+  CapturedOperationContext,
   OperationSteps,
   PhaseStatus,
   PublishProgressPanel,
@@ -75,7 +82,7 @@ export type WorkflowRequest =
   | { kind: 'rename' | 'parent' | 'upstream'; branch: Branch }
   | { kind: 'pull' | 'merge' | 'stash' | 'forcePush' }
   | { kind: 'commitAction'; commit: Commit; mode: 'cherryPick' | 'revert' }
-  | { kind: 'stack'; branch: string; operation: StackKind }
+  | { kind: 'stack'; branch: string; operation: StackKind; pullRequest?: number }
   | { kind: 'surgery'; request: SurgeryRequest }
   | { kind: 'pr'; number: number }
   | {
@@ -134,7 +141,7 @@ const SURGERY_ACTION_BADGE: Record<SurgeryLayerAction, BadgeProps['variant']> = 
 
 const SURGERY_STACK_LABELS: Record<NonNullable<SurgeryPreview['nativeStack']>['action'], string> = {
   none: 'Native stack membership is unchanged',
-  unstack: `Unstack the native stack, then register the pull requests in the new order`,
+  unstack: 'Unstack the native stack without registering a replacement stack',
   'unstack-and-create': `Unstack the native stack, then register it again in the new order`,
 }
 
@@ -152,7 +159,9 @@ export function surgeryRequestFor(
 ): SurgeryRequest {
   return request.request.kind === 'insert'
     ? { ...request.request, name: name.trim() }
-    : request.request
+    : request.request.kind === 'move'
+      ? { ...request.request, target: name.trim() }
+      : request.request
 }
 
 type WorkflowData =
@@ -194,7 +203,13 @@ function initialWorkflowName(request: WorkflowRequest, snapshot: RepositorySnaps
     if (request.kind === 'upstream') return request.branch.upstreamRef ?? ''
     return request.branch.parent ?? snapshot.defaultBranch
   }
-  return request.kind === 'surgery' && request.request.kind === 'insert' ? request.request.name : ''
+  return request.kind === 'surgery'
+    ? request.request.kind === 'insert'
+      ? request.request.name
+      : request.request.kind === 'move'
+        ? request.request.target
+        : ''
+    : ''
 }
 
 function workflowComposition(request: WorkflowRequest): WorkflowComposition {
@@ -252,13 +267,23 @@ export function previewIdentity(data: WorkflowData): string | null {
 export type WorkflowStackAPI = Pick<
   DesktopAPI,
   | 'stackPreview'
+  | 'operationSafety'
   | 'submitStackProgress'
   | 'onSubmitStackProgress'
   | 'onMergeProgress'
   | 'mergeStatus'
 > &
   Partial<
-    Pick<DesktopAPI, 'searchIssues' | 'pullRequestIssueLinks' | 'previewIssueLink' | 'pullRequest'>
+    Pick<
+      DesktopAPI,
+      | 'searchIssues'
+      | 'pullRequestIssueLinks'
+      | 'previewIssueLink'
+      | 'pullRequest'
+      | 'surgeryPreview'
+      | 'pushPreview'
+      | 'reviewedMergePreview'
+    >
   >
 
 interface PrLinkedIssuesSectionProps {
@@ -271,6 +296,7 @@ interface PrLinkedIssuesSectionProps {
   runAction: (action: GitAction, label: string) => Promise<boolean>
   stackApi: WorkflowStackAPI
   defaultBranch: string
+  canEditBody: boolean
   onMutationBusy: (busy: boolean) => void
   onBodyMutation: (preview: IssueLinkPreview) => void
 }
@@ -287,6 +313,7 @@ function PrLinkedIssuesSection({
   defaultBranch,
   onMutationBusy,
   onBodyMutation,
+  canEditBody,
 }: PrLinkedIssuesSectionProps) {
   const queryClient = useQueryClient()
   const instance = React.useId()
@@ -352,7 +379,7 @@ function PrLinkedIssuesSection({
   const [writing, setActionBusy] = React.useState(false)
   const actionBusy = writing || linkQuery.isFetching || unlinkQuery.isFetching
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null)
-  const closingAvailable = pr.base === defaultBranch
+  const closingAvailable = canEditBody && Boolean(defaultBranch) && pr.base === defaultBranch
 
   const loadLinks = React.useCallback(async () => {
     try {
@@ -584,8 +611,11 @@ function PrLinkedIssuesSection({
       ) : null}
       {!closingAvailable ? (
         <p className="text-xs text-[var(--gs-semantic-text-secondary)] mb-2">
-          Closing keywords only close issues on pull requests targeting {defaultBranch}. This pull
-          request targets {pr.base}; use a related link instead.
+          {!canEditBody
+            ? 'Provider body-edit permission has not been established; local related links remain separate.'
+            : !defaultBranch
+              ? 'The provider default branch is unknown; closing links are unavailable.'
+              : `Closing keywords only close issues when this PR targets ${defaultBranch}, not ${pr.base}. Use a related link instead.`}
         </p>
       ) : null}
 
@@ -601,7 +631,7 @@ function PrLinkedIssuesSection({
                   {link.state.toLowerCase()}
                 </Badge>
                 <Badge variant={link.relation === 'closing' ? 'accent' : 'outline'}>
-                  {link.relation === 'closing' ? 'closes on merge' : 'related'}
+                  {link.relation === 'closing' ? 'closing keyword' : 'local related link'}
                 </Badge>
                 <span className="font-medium truncate" title={link.title}>
                   #{link.number} {link.title}
@@ -610,7 +640,7 @@ function PrLinkedIssuesSection({
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={disabled || actionBusy}
+                disabled={disabled || actionBusy || (link.relation === 'closing' && !canEditBody)}
                 aria-label={`Remove link to issue #${link.number} from this pull request`}
                 tooltip={`Remove ${link.relation === 'closing' ? 'closing keyword from PR description' : 'local related link'}`}
                 onClick={() => void handleUnlink(link)}
@@ -661,17 +691,11 @@ function PrLinkedIssuesSection({
             <Button
               size="sm"
               variant="danger"
+              loading={actionBusy}
               disabled={disabled || actionBusy || hasFormEdits}
               onClick={() => handleConfirmUnlinkClosing(pendingUnlink)}
             >
-              {actionBusy ? (
-                <>
-                  <LoaderCircle className="size-3 animate-spin mr-1" />
-                  Removing…
-                </>
-              ) : (
-                'Confirm removal'
-              )}
+              Confirm removal
             </Button>
           </div>
         </div>
@@ -711,18 +735,12 @@ function PrLinkedIssuesSection({
             </Button>
             <Button
               size="sm"
-              variant="accent"
+              variant="default"
+              loading={actionBusy}
               disabled={disabled || actionBusy || hasFormEdits}
               onClick={() => handleConfirmCloseWhenMerged(pendingClosingLink)}
             >
-              {actionBusy ? (
-                <>
-                  <LoaderCircle className="size-3 animate-spin mr-1" />
-                  Updating PR…
-                </>
-              ) : (
-                'Confirm close when merged'
-              )}
+              Confirm close when merged
             </Button>
           </div>
         </div>
@@ -757,14 +775,11 @@ function PrLinkedIssuesSection({
           <Button
             size="sm"
             variant="secondary"
+            loading={searching}
             disabled={disabled || searching || actionBusy || !query.trim()}
             onClick={() => void search.handleSubmit()}
           >
-            {searching ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <Search className="size-3.5" />
-            )}
+            <Search className="size-3.5" />
             Search
           </Button>
         </div>
@@ -807,7 +822,7 @@ function PrLinkedIssuesSection({
                         {closingAvailable ? (
                           <Button
                             size="sm"
-                            variant="accent"
+                            variant="secondary"
                             disabled={disabled || actionBusy}
                             tooltip="Insert closing keyword into PR description to close this issue when PR is merged"
                             onClick={() => void handleRequestClosingLink(issue)}
@@ -840,6 +855,10 @@ export function WorkflowDialog({
   onRequest,
   stackApi = window.desktop,
   defaults,
+  providerManagement = false,
+  safetyRevision = '',
+  providerSourceCurrent = true,
+  capturedAuthority,
 }: {
   request: WorkflowRequest
   snapshot: RepositorySnapshot
@@ -854,6 +873,10 @@ export function WorkflowDialog({
   stackApi?: WorkflowStackAPI
   /** Stored defaults, used to seed the pull strategy and merge method. */
   defaults?: AppSettings | null
+  providerManagement?: boolean
+  safetyRevision?: string
+  providerSourceCurrent?: boolean
+  capturedAuthority?: OperationCapture | null
 }) {
   // TanStack Form owns every editable value in this dialog. The state declared below
   // it is domain state: reviewed previews, progress, recovery and dispatch identity.
@@ -901,28 +924,55 @@ export function WorkflowDialog({
   const queryClient = useQueryClient()
   const instance = React.useId()
   const queryScope = React.useMemo(() => ({ instance, authority }), [instance, authority])
-  const progressKey = ['workflow-publication-progress', snapshot.path, queryScope] as const
-  const mergeProgressKey = ['workflow-merge-progress', snapshot.path, queryScope] as const
-  const mergeStatusKey = ['workflow-merge-status', snapshot.path, queryScope] as const
+  const operationScope = React.useMemo(
+    () =>
+      capturedAuthority?.scope ?? {
+        repositoryPath: snapshot.path,
+        remoteUrl: snapshot.remoteUrl,
+        authority,
+      },
+    [capturedAuthority?.scope, snapshot.path, snapshot.remoteUrl, authority],
+  )
+  const operationKeys = React.useMemo(() => operationProgressKeys(operationScope), [operationScope])
+  const {
+    publication: progressKey,
+    mergeProgress: mergeProgressKey,
+    merge: mergeStatusKey,
+  } = operationKeys
   const progressQuery = useQuery({
     queryKey: progressKey,
     enabled: false,
-    queryFn: async () => (await stackApi.submitStackProgress?.()) ?? null,
+    queryFn: ({ signal }) =>
+      readOperationProgress(stackApi.submitStackProgress!, operationScope, signal),
   })
-  const mergeProgressQuery = useQuery<MergeProgress | null>({
+  const mergeProgressQuery = useQuery<OperationProgress<MergeProgress> | null>({
     queryKey: mergeProgressKey,
     enabled: false,
   })
   const mergeStatusQuery = useQuery({
     queryKey: mergeStatusKey,
     enabled: false,
-    queryFn: () => stackApi.mergeStatus!(),
+    queryFn: async ({ signal }) => {
+      const result = await readOperationProgress(stackApi.mergeStatus!, operationScope, signal)
+      queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
+        mergeProgressKey,
+        (previous) => mergeProgressAfterRead(previous, result),
+      )
+      return result
+    },
   })
-  const progress = progressQuery.data ?? null
-  const mergeProgress = mergeProgressQuery.data ?? null
-  const mergeStatus = mergeStatusQuery.data ?? null
-  const setProgress = (value: PublishProgress | null) =>
-    queryClient.setQueryData(progressKey, value)
+  const progress =
+    request.kind === 'stack' && request.operation === 'publish'
+      ? (progressQuery.data?.progress ?? null)
+      : null
+  const mergeProgress =
+    request.kind === 'stack' && request.operation === 'merge'
+      ? (mergeProgressQuery.data?.progress ?? null)
+      : null
+  const mergeStatus =
+    request.kind === 'stack' && request.operation === 'merge'
+      ? (mergeStatusQuery.data?.progress ?? null)
+      : null
   const mergeStatusError = mergeStatusQuery.error ? workflowError(mergeStatusQuery.error) : null
   const [mergeRunning, setMergeRunning] = React.useState(false)
   const [attempt, setAttempt] = React.useState(0)
@@ -931,6 +981,13 @@ export function WorkflowDialog({
   const preview = previewQuery.data?.kind === 'stack' ? previewQuery.data.value : null
   const surgery = previewQuery.data?.kind === 'surgery' ? previewQuery.data.value : null
   const push = previewQuery.data?.kind === 'forcePush' ? previewQuery.data.value : null
+  const safety = useOperationSafety(
+    stackApi,
+    capturedAuthority?.token,
+    preview || surgery ? { kind: 'stack', token: (preview ?? surgery)!.token } : undefined,
+    busy,
+    safetyRevision,
+  )
   const pr = previewQuery.data?.kind === 'pr' ? previewQuery.data.value : null
   const externalMutation = useMutation({
     mutationFn: (url: string) => window.desktop.openExternal(url),
@@ -948,6 +1005,8 @@ export function WorkflowDialog({
   const [edited, setEdited] = React.useState(false)
   const [closeNotice, setCloseNotice] = React.useState<string | null>(null)
   const hasEditedRef = React.useRef(false)
+  const expectedPrBody = React.useRef<string | undefined>(undefined)
+  const [, refreshBodyBaseline] = React.useReducer((value: number) => value + 1, 0)
   const captured = React.useRef({
     path: snapshot.path,
     head: snapshot.headOid,
@@ -966,8 +1025,17 @@ export function WorkflowDialog({
   // review cannot be edited underneath the action it just started.
   const locked = dispatchLocked || formSubmitting
   const composition = workflowComposition(request)
+  const providerPrBlock = !providerSourceCurrent
+    ? 'The captured provider session changed. Your input remains owned by the original form; reopen its source explicitly.'
+    : snapshot.stackOperation
+      ? 'Finish or abort the captured stack operation before changing PR metadata.'
+      : pr?.canUpdate === true
+        ? null
+        : 'The provider has not established permission to edit this PR.'
   const shapeReason =
-    actionBlockReason(snapshot.capabilities, requestActionType(request)) ??
+    (providerManagement && request.kind === 'pr'
+      ? providerPrBlock
+      : actionBlockReason(snapshot.capabilities, requestActionType(request))) ??
     (request.kind === 'confirm' &&
     (request.action.type === 'stashPop' || request.action.type === 'stashDrop')
       ? stashRemovalBlockReason(snapshot.capabilities)
@@ -994,59 +1062,73 @@ export function WorkflowDialog({
     // Read from the store rather than a render snapshot: the insert preview is always
     // the one for the branch name actually written.
     const requestedName =
-      request.kind === 'surgery' && request.request.kind === 'insert'
+      request.kind === 'surgery' && request.request.kind !== 'remove'
         ? form.getFieldValue('name')
         : null
     setError(null)
     setIdentity(null)
     const load = async (): Promise<WorkflowData> => {
       if (request.kind === 'stack') {
+        if (request.operation === 'merge' && request.pullRequest !== undefined) {
+          if (!stackApi.reviewedMergePreview)
+            throw new Error('Reviewed provider downstack preview is unavailable.')
+          return { kind: 'stack', value: await stackApi.reviewedMergePreview(request.pullRequest) }
+        }
         return {
           kind: 'stack',
           value: await stackApi.stackPreview(request.operation, request.branch),
         }
       }
       if (request.kind === 'surgery') {
+        if (!stackApi.surgeryPreview) throw new Error('Captured surgery preview is unavailable.')
         return {
           kind: 'surgery',
-          value: await window.desktop.surgeryPreview(
-            surgeryRequestFor(request, requestedName ?? ''),
-          ),
+          value: await stackApi.surgeryPreview(surgeryRequestFor(request, requestedName ?? '')),
         }
       }
       if (request.kind === 'forcePush') {
-        return { kind: 'forcePush', value: await window.desktop.pushPreview() }
+        if (!stackApi.pushPreview) throw new Error('Captured push preview is unavailable.')
+        return { kind: 'forcePush', value: await stackApi.pushPreview() }
       }
       if (request.kind === 'pr') {
-        return { kind: 'pr', value: await window.desktop.pullRequest(request.number) }
+        if (!stackApi.pullRequest)
+          throw new Error('Captured pull request management is unavailable.')
+        return { kind: 'pr', value: await stackApi.pullRequest(request.number) }
       }
       return { kind: 'local' }
     }
     void queryClient.fetchQuery({ queryKey: previewKey, queryFn: load, staleTime: 0 }).then(
       (data) => {
         if (!active) return
-        setRejectedIdentities([])
         if (data.kind === 'stack') {
-          // Entered layer choices survive a preview reload; untouched layers are seeded
-          // from the reviewed offer so title, body, draft and base start where Git Stacks
-          // proposes them.
-          form.setFieldValue('layerChoices', (current) =>
-            Object.fromEntries(
+          // Keep authored text, including layers no longer in the fresh offer.
+          // Reload replaces facts, not authorship, and base-write consent must
+          // be explicitly offered again for every freshly reviewed layer.
+          form.setFieldValue('layerChoices', (current) => ({
+            ...current,
+            ...Object.fromEntries(
               (data.value.publish?.layers ?? []).map((layer) => [
                 layer.branch,
-                current[layer.branch] ?? {
-                  title: layer.title,
-                  body: layer.body,
-                  draft: layer.draft,
-                  updateBase: layer.updateBase,
-                },
+                current[layer.branch]
+                  ? {
+                      ...current[layer.branch],
+                      updateBase: attempt > 0 ? false : current[layer.branch].updateBase,
+                    }
+                  : {
+                      title: layer.title,
+                      body: layer.body,
+                      draft: layer.draft,
+                      updateBase: attempt > 0 ? false : layer.updateBase,
+                    },
               ]),
             ),
-          )
+          }))
         } else if (data.kind === 'surgery') {
           if (requestedName !== null && requestedName !== form.getFieldValue('name'))
             queryClient.setQueryData(previewKey, { kind: 'local' })
         } else if (data.kind === 'pr') {
+          if (expectedPrBody.current === undefined || !hasEditedRef.current)
+            expectedPrBody.current = data.value.body
           if (!hasEditedRef.current) {
             form.setFieldValue('prTitle', data.value.title)
             form.setFieldValue('body', data.value.body)
@@ -1071,48 +1153,17 @@ export function WorkflowDialog({
     }
   }, [request, attempt, stackApi, queryScope])
 
-  // A submission that stopped part-way survives a restart; show it before anything
-  // else so a person can resume or dismiss it instead of starting a second one.
+  // The persistent shell owns events and the scoped durable-journal projection.
+  // Reopening recovery reads it without replaying a mutation or erasing confirmed facts.
   React.useEffect(() => {
-    if (request.kind !== 'stack' || request.operation !== 'publish') {
-      setProgress(null)
-      return
-    }
-    let active = true
-    // A running submission pushes its own progress. Reading it on a timer cannot work: that
-    // read queues behind the action producing the steps, so it would only ever report the
-    // state after the whole operation finished.
-    const unsubscribe = stackApi.onSubmitStackProgress?.((value) => {
-      if (active) {
-        void queryClient.cancelQueries({ queryKey: progressKey }).then(() => {
-          if (active) queryClient.setQueryData(progressKey, value)
-        })
-      }
-    })
-    void progressQuery.refetch({ throwOnError: true }).then(
-      () => undefined,
-      () => active && setProgress(null),
+    if (
+      request.kind !== 'stack' ||
+      request.operation !== 'publish' ||
+      !stackApi.submitStackProgress
     )
-    return () => {
-      active = false
-      unsubscribe?.()
-    }
-  }, [request, stackApi, queryScope])
-
-  // A merge waits on GitHub's background result, so the running state is pushed rather than
-  // polled: a read would queue behind the merge that is producing it.
-  React.useEffect(() => {
-    if (request.kind !== 'stack' || request.operation !== 'merge') {
-      queryClient.setQueryData(mergeProgressKey, null)
       return
-    }
-    const unsubscribe = stackApi.onMergeProgress?.((value) =>
-      queryClient.setQueryData(mergeProgressKey, value),
-    )
-    return () => {
-      unsubscribe?.()
-    }
-  }, [request, stackApi, queryScope])
+    void progressQuery.refetch({ throwOnError: true }).catch(() => {})
+  }, [request, stackApi, operationScope])
 
   // What GitHub reported for earlier merge requests is read, never re-requested: a queue that
   // later merged or dropped a pull request, or a request that is still running, is only
@@ -1128,15 +1179,11 @@ export function WorkflowDialog({
     }
   }, [stackApi, mergeStatusQuery.refetch, queryScope])
   React.useEffect(() => {
-    if (request.kind !== 'stack' || request.operation !== 'merge') {
-      queryClient.setQueryData(mergeStatusKey, null)
-      void queryClient.resetQueries({ queryKey: mergeStatusKey })
-      return
-    }
+    if (request.kind !== 'stack' || request.operation !== 'merge' || mergeRunning) return
     void readMergeStatus()
     // A run that ends is read again: its result is what GitHub published, and a read is
     // newer than the progress that run pushed.
-  }, [request, readMergeStatus, mergeProgress, mergeRunning])
+  }, [request, readMergeStatus, mergeRunning])
 
   const title =
     request.kind === 'surgery'
@@ -1185,13 +1232,13 @@ export function WorkflowDialog({
                       : request.kind === 'commitAction'
                         ? `${request.commit.subject} · ${request.commit.oid.slice(0, 10)} → ${captured.current.branch ?? 'current branch'}`
                         : request.kind === 'pr'
-                          ? 'Manage this pull request, or open GitHub for the full review discussion.'
+                          ? 'Manage this captured pull request without changing a checkout.'
                           : request.kind === 'stack' && request.operation === 'restack'
                             ? 'Rebase parent-first using each branch’s recorded boundary. Conflicts pause the stack; your original checkout is restored on completion.'
                             : request.kind === 'stack' && request.operation === 'publish'
                               ? 'Push the reviewed branches, create missing PRs, and update their bases and linked stack navigation.'
                               : request.kind === 'stack' && request.operation === 'sync'
-                                ? 'Fetch and prune the remotes, then replay this stack bottom-to-top onto the trunk it reports. Replayed layers are pushed under the exact remote tips named below, and a conflict pauses the stack for Continue or Abort.'
+                                ? 'Review the explicitly fetched trunk, merged-layer handling, replay, retargeting and captured remote leases. Fetch is a separate Git operation; Sync never fetches while opening a preview. Conflicts pause for explicit Continue or Abort.'
                                 : 'GitHub merges the reviewed pull requests itself, bottom-to-top, and this dialog follows the result. Local branches are never retargeted or deleted for you; restack and publish the rest afterwards.'
 
   const readProgress = async () => {
@@ -1199,17 +1246,26 @@ export function WorkflowDialog({
     try {
       await progressQuery.refetch({ throwOnError: true })
     } catch {
-      setProgress(null)
+      // A failed read is not evidence that saved remote effects disappeared.
     }
   }
 
   // A merge that landed some pull requests and not others is a finished run with a partial
   // outcome. Treating it as a stopped operation would offer a retry that GitHub would reject
   // for the pull requests that are already merged.
-  const mergePartial =
-    finished &&
-    mergeProgress !== null &&
-    mergeProgress.layers.some((layer) => layer.status !== 'merged')
+  const currentMergeLayers = preview?.merge?.layers.map(
+    (target) =>
+      mergeProgress?.layers.find((layer) => layer.pullRequest === target.pullRequest) ??
+      mergeStatus?.layers.find((layer) => layer.pullRequest === target.pullRequest) ?? {
+        status: 'pending' as const,
+      },
+  )
+  const mergeIncomplete = Boolean(
+    finished && currentMergeLayers?.some((layer) => layer.status !== 'merged'),
+  )
+  const mergePartial = Boolean(
+    mergeIncomplete && currentMergeLayers?.some((layer) => layer.status === 'merged'),
+  )
 
   const run = async (action: GitAction, label: string) => {
     if (
@@ -1218,7 +1274,7 @@ export function WorkflowDialog({
       dispatchLocked ||
       captured.current.path !== snapshot.path ||
       shapeReason ||
-      actionBlockReason(snapshot.capabilities, action.type)
+      (providerManagement ? providerPrBlock : actionBlockReason(snapshot.capabilities, action.type))
     )
       return
     const merging =
@@ -1226,7 +1282,12 @@ export function WorkflowDialog({
     const attemptRun = dispatch(async () => {
       if (merging) setMergeRunning(true)
       try {
-        const success = await runAction(action, label)
+        const success = await runAction(
+          action.type === 'updatePr' && pr
+            ? { ...action, expectedBody: expectedPrBody.current ?? pr.body }
+            : action,
+          label,
+        )
         if (!success) {
           // A stopped submission is resumable, so read what it managed to finish
           // before deciding the reviewed preview may or may not run again.
@@ -1254,13 +1315,19 @@ export function WorkflowDialog({
   // The branch name a force consent must match, read from the same submitted values
   // the payload is built from.
   const confirmationTargetFor = (values: WorkflowFormValues): string | null =>
-    request.kind === 'forcePush'
-      ? (push?.branch ?? null)
-      : request.kind === 'stack' && values.allowForce
-        ? request.branch
-        : request.kind === 'surgery' && values.allowForce
-          ? (surgery?.forcePushes[0] ?? null)
-          : null
+    request.kind === 'confirm' && request.destructive
+      ? 'ref' in request.action
+        ? request.action.ref
+        : request.action.type === 'unregisterWorktrees'
+          ? 'REMOVE REGISTRATION'
+          : 'DELETE SELECTED'
+      : request.kind === 'forcePush'
+        ? (push?.branch ?? null)
+        : request.kind === 'stack' && values.allowForce
+          ? request.branch
+          : request.kind === 'surgery' && values.allowForce
+            ? (surgery?.forcePushes[0] ?? null)
+            : null
 
   /**
    * The exact action payload a set of form values describes, or `null` while the
@@ -1284,29 +1351,40 @@ export function WorkflowDialog({
       prDraft,
     } = values
     const confirmationTarget = confirmationTargetFor(values)
-    if (request.kind === 'confirm')
-      return { kind: 'confirm', action: request.action, label: request.label }
+    if (request.kind === 'confirm') {
+      const action =
+        request.action.type === 'deleteBranch' || request.action.type === 'deleteBranches'
+          ? { ...request.action, force: allowForce }
+          : request.action
+      return { kind: 'confirm', action, label: request.label }
+    }
     if (request.kind === 'stack') {
       if (!preview) return null
-      return request.operation === 'publish'
-        ? {
-            kind: 'submit',
-            preview,
-            allowForce,
-            layers: layerChoices,
-            confirmation,
-            confirmationTarget,
-          }
-        : {
-            kind: 'stack',
-            operation: request.operation,
-            preview,
-            allowForce,
-            confirmation,
-            confirmationTarget,
-            mergeMethod,
-            mergeAction,
-          }
+      if (request.operation === 'publish') {
+        const activeChoices: Record<string, PublishLayerChoice> = {}
+        for (const layer of preview.publish?.layers ?? []) {
+          const choice = layerChoices[layer.branch]
+          if (choice) activeChoices[layer.branch] = choice
+        }
+        return {
+          kind: 'submit',
+          preview,
+          allowForce,
+          layers: activeChoices,
+          confirmation,
+          confirmationTarget,
+        }
+      }
+      return {
+        kind: 'stack',
+        operation: request.operation,
+        preview,
+        allowForce,
+        confirmation,
+        confirmationTarget,
+        mergeMethod,
+        mergeAction,
+      }
     }
     if (request.kind === 'surgery') {
       if (!surgery) return null
@@ -1384,55 +1462,69 @@ export function WorkflowDialog({
    * bypassed control cannot dispatch what the reviewed preview forbids.
    */
   const guardFor = (values: WorkflowFormValues): WorkflowBlocker | null =>
-    workflowBlocker({
-      kind: request.kind,
-      busy,
-      loading,
-      loaded,
-      finished,
-      capturedPath: captured.current.path,
-      currentPath: snapshot.path,
-      previewToken: identity,
-      rejectedTokens: rejectedIdentities,
-      previewBlockers:
-        request.kind === 'surgery' ? (surgery?.blockers ?? []) : (preview?.blockers ?? []),
-      confirmationTarget: confirmationTargetFor(values),
-      confirmation: values.confirmation,
-      allowForce: values.allowForce,
-      expectedOidMissing: request.kind === 'forcePush' && !push,
-      requiresName:
-        ['rename', 'parent', 'merge'].includes(request.kind) ||
-        (request.kind === 'surgery' && request.request.kind === 'insert'),
-      name: values.name,
-      requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
-      mainline: values.mainline,
-      requiresMergeMethod:
-        request.kind === 'stack' &&
-        request.operation === 'merge' &&
-        values.mergeAction === 'direct_merge',
-      mergeMethod: values.mergeMethod,
-      requiresLeaseApproval:
-        (preview?.sync?.forcePushes.length ?? 0) > 0 || (surgery?.forcePushes.length ?? 0) > 0,
-      untitledBranches:
-        request.kind === 'stack' && request.operation === 'publish' && publishOffer
-          ? publishOffer.layers
-              .filter((layer) => layer.create && !values.layerChoices[layer.branch]?.title.trim())
-              .map((layer) => layer.branch)
-          : [],
-      pullRequestMissing: request.kind === 'pr' && !pr,
-      pullRequestMerged: request.kind === 'pr' && pr?.state === 'MERGED',
-      pullRequestTitle: values.prTitle,
-    })
+    capturedAuthority && !finished && (!safety.current || !providerSourceCurrent)
+      ? {
+          code: 'preview-stale',
+          message: !providerSourceCurrent
+            ? 'The original provider session changed; authored input remains retained.'
+            : (safety.reason ??
+              'Original approval safety facts changed; inspect a fresh preview explicitly.'),
+        }
+      : workflowBlocker({
+          kind: request.kind,
+          busy,
+          loading,
+          loaded,
+          finished,
+          capturedPath: captured.current.path,
+          currentPath: snapshot.path,
+          previewToken: identity,
+          rejectedTokens: rejectedIdentities,
+          previewBlockers:
+            request.kind === 'surgery' ? (surgery?.blockers ?? []) : (preview?.blockers ?? []),
+          confirmationTarget: confirmationTargetFor(values),
+          confirmation: values.confirmation,
+          allowForce: values.allowForce,
+          expectedOidMissing: request.kind === 'forcePush' && !push,
+          requiresName:
+            ['rename', 'parent', 'merge'].includes(request.kind) ||
+            (request.kind === 'surgery' && request.request.kind !== 'remove'),
+          name: values.name,
+          requiresMainline: request.kind === 'commitAction' && request.commit.parents.length > 1,
+          mainline: values.mainline,
+          requiresMergeMethod:
+            request.kind === 'stack' &&
+            request.operation === 'merge' &&
+            values.mergeAction === 'direct_merge',
+          mergeMethod: values.mergeMethod,
+          requiresLeaseApproval:
+            (preview?.sync?.forcePushes.length ?? 0) > 0 || (surgery?.forcePushes.length ?? 0) > 0,
+          untitledBranches:
+            request.kind === 'stack' && request.operation === 'publish' && publishOffer
+              ? publishOffer.layers
+                  .filter(
+                    (layer) => layer.create && !values.layerChoices[layer.branch]?.title.trim(),
+                  )
+                  .map((layer) => layer.branch)
+              : [],
+          pullRequestMissing: request.kind === 'pr' && !pr,
+          pullRequestMerged: request.kind === 'pr' && pr?.state === 'MERGED',
+          pullRequestTitle: values.prTitle,
+        })
   const blocker = guardFor(values)
-  const failed = Boolean(error || actionError)
+  const failed = Boolean(
+    error ||
+      actionError ||
+      (finished && !mergePartial && currentMergeLayers?.some((layer) => layer.status === 'failed')),
+  )
   const phase = workflowPhase({
     loading,
     busy,
     failed,
     stale,
-    finished: finished && !mergePartial,
+    finished: finished && !mergeIncomplete,
     partial: mergePartial,
-    blocked: Boolean(blocker || shapeReason) && !finished,
+    blocked: mergeIncomplete || (Boolean(blocker || shapeReason) && !finished),
   })
   const actionLabel =
     request.kind === 'surgery'
@@ -1450,7 +1542,7 @@ export function WorkflowDialog({
       : phase === 'submitting'
         ? `${actionLabel} is running. Wait for it to finish before doing anything else here.`
         : phase === 'failed'
-          ? (error ?? (actionError as string))
+          ? (error ?? actionError ?? mergeProgress?.message ?? mergeStatus?.message)
           : phase === 'stale'
             ? 'This preview was already rejected. Reload it to read the current state; the rejected preview will not run again.'
             : phase === 'partial'
@@ -1460,7 +1552,9 @@ export function WorkflowDialog({
                   ? 'Restack the remaining branches onto the updated base, then publish to update their pull requests.'
                   : 'Publish next to update remote branches and PR bases. Rewritten branches require your explicit force-with-lease approval.'
                 : phase === 'blocked'
-                  ? (shapeReason ?? blocker?.message)
+                  ? mergeIncomplete
+                    ? 'The merge is not fully confirmed. Read the reported PR outcomes; accepted, queued and unknown results are not merged.'
+                    : (shapeReason ?? blocker?.message)
                   : undefined
   const destructive = composition === 'destructive'
 
@@ -1481,10 +1575,10 @@ export function WorkflowDialog({
           },
           {
             label: 'Expected remote tip',
-            value: push.remoteOid?.slice(0, 12) ?? 'New branch',
+            value: push.remoteOid ?? 'Absent; create-only',
             code: true,
           },
-          { label: 'Local tip', value: push.localOid.slice(0, 12), code: true },
+          { label: 'Local tip', value: push.localOid, code: true },
         ]
       : request.kind === 'merge' && captured.current.branch
         ? [
@@ -1561,6 +1655,17 @@ export function WorkflowDialog({
             <fieldset className="workflow-fields" disabled={locked || finished}>
               {closeNotice ? <WarningNote>{closeNotice}</WarningNote> : null}
               {contextFacts.length ? <OperationContext facts={contextFacts} /> : null}
+              {capturedAuthority ? (
+                <>
+                  <CapturedOperationContext capture={capturedAuthority} />
+                  <WarningNote>
+                    {capturedAuthority.coordination} Replay may switch only this explicitly chosen
+                    directory among the listed layers and restores its original checkout on
+                    completion; a conflict leaves recovery in this same directory. Other worktrees
+                    are never borrowed, stashed or reset.
+                  </WarningNote>
+                </>
+              ) : null}
               <PhaseStatus phase={phase} message={statusMessage} />
               {request.kind === 'rename' ? (
                 <form.Field name="name">
@@ -1761,11 +1866,19 @@ export function WorkflowDialog({
                 consent and the base changes the moment a fresh read fails, while Resume
                 stayed enabled. The preview-dependent parts stay gated; the saved ones do not.
               */}
-              {request.kind === 'surgery' && request.request.kind === 'insert' ? (
+              {request.kind === 'surgery' && request.request.kind !== 'remove' ? (
                 <>
                   <form.Field name="name">
                     {(field) => (
-                      <Field id="workflow-surgery-name" label="New branch name" required>
+                      <Field
+                        id="workflow-surgery-name"
+                        label={
+                          request.request.kind === 'move'
+                            ? 'New dependency parent branch'
+                            : 'New branch name'
+                        }
+                        required
+                      >
                         <Input
                           data-workflow-first-field=""
                           value={field.state.value}
@@ -1785,8 +1898,8 @@ export function WorkflowDialog({
                     )}
                   </form.Field>
                   <WarningNote>
-                    Reload the preview after naming the branch: the reviewed rewrites, pull request
-                    bases and pushes below are the ones this exact name costs.
+                    Reload the preview after naming the branch or target: the reviewed rewrites,
+                    pull request bases and pushes below belong to that exact choice.
                   </WarningNote>
                 </>
               ) : null}
@@ -1825,12 +1938,12 @@ export function WorkflowDialog({
                           facts={[
                             {
                               label: 'Lease',
-                              value: `origin/${layer.branch} at ${layer.remoteOid?.slice(0, 12) ?? 'absent'}`,
+                              value: `origin/${layer.branch} at ${layer.remoteOid ?? 'absent'}`,
                               code: true,
                             },
                             {
                               label: 'New tip',
-                              value: layer.oid?.slice(0, 12) ?? 'Not written yet',
+                              value: layer.oid ?? 'Not written yet',
                               code: true,
                             },
                           ]}
@@ -1969,12 +2082,12 @@ export function WorkflowDialog({
                         facts={[
                           {
                             label: 'Local trunk tip',
-                            value: syncOffer.trunk.localOid?.slice(0, 12) ?? 'Unavailable',
+                            value: syncOffer.trunk.localOid ?? 'Unavailable',
                             code: true,
                           },
                           {
                             label: 'Fetched trunk tip',
-                            value: syncOffer.trunk.remoteOid?.slice(0, 12) ?? 'Unavailable',
+                            value: syncOffer.trunk.remoteOid ?? 'Unavailable',
                             code: true,
                           },
                           {
@@ -2003,19 +2116,22 @@ export function WorkflowDialog({
                             </span>
                           </div>
                           <p className="workflow-note">{layer.note}</p>
-                          {layer.push === 'force' ? (
-                            <OperationFacts
-                              facts={[
-                                {
-                                  label: 'Lease',
-                                  value: `origin/${layer.branch} at ${
-                                    layer.remoteOid?.slice(0, 12) ?? 'absent'
-                                  }`,
-                                  code: true,
-                                },
-                              ]}
-                            />
-                          ) : null}
+                          <OperationFacts
+                            facts={[
+                              { label: 'Captured layer OID', value: layer.oid, code: true },
+                              { label: 'Replay base OID', value: layer.baseOid, code: true },
+                              {
+                                label: 'Expected remote lease',
+                                value: layer.remoteOid ?? 'Absent; create-only',
+                                code: true,
+                              },
+                              { label: 'Push effect', value: layer.push },
+                              {
+                                label: 'Replay effect',
+                                value: layer.rebase ? 'Rebase this layer' : 'No rebase',
+                              },
+                            ]}
+                          />
                           {layer.blockers.length > 0 ? (
                             <BlockerList items={layer.blockers} />
                           ) : null}
@@ -2067,7 +2183,65 @@ export function WorkflowDialog({
                   ) : null}
                   {request.operation === 'publish' && (publishOffer || recovering) ? (
                     <>
+                      {publishOffer ? (
+                        <OperationFacts
+                          facts={[
+                            {
+                              label: 'Native registration effect',
+                              value: publishOffer.stackAction,
+                            },
+                            {
+                              label: 'Original native resource',
+                              value: publishOffer.stackNumber
+                                ? `#${publishOffer.stackNumber}`
+                                : 'No existing resource',
+                            },
+                            {
+                              label: 'Original membership',
+                              value:
+                                publishOffer.originalMembership
+                                  .map((member) => `#${member.number}`)
+                                  .join(' → ') || 'None',
+                            },
+                            {
+                              label: 'Resulting native order',
+                              value:
+                                publishOffer.resultingOrder.join(' → ') ||
+                                'No native membership write',
+                            },
+                          ]}
+                        />
+                      ) : null}
+                      {publishOffer?.originalMembership.map((member) => (
+                        <OperationContext
+                          key={member.number}
+                          title={`Original member #${member.number}`}
+                          facts={[
+                            { label: 'Provider head', value: member.head },
+                            {
+                              label: 'Provider head OID',
+                              value: member.headOid ?? 'Unknown; not inferred',
+                              code: true,
+                            },
+                            { label: 'Provider base', value: member.base },
+                            { label: 'Provider state', value: member.state },
+                          ]}
+                        />
+                      ))}
                       <PublishProgressPanel progress={progress} />
+                      {progressQuery.data?.source === 'journal-read' && progress ? (
+                        <p className="workflow-note">
+                          Saved journal read. Original operation authority was not recorded. Saved
+                          targets and approvals remain unchanged; Resume is revalidated by the
+                          backend.
+                        </p>
+                      ) : null}
+                      {progressQuery.error ? (
+                        <InlineAlert tone="error">
+                          Recovery read unavailable: {workflowError(progressQuery.error)}. Last
+                          confirmed journal facts remain visible; no mutation was retried.
+                        </InlineAlert>
+                      ) : null}
                       {/*
                         A resumed submission republishes the consent it was given. An
                         unchecked box here would read as "not agreed" while Resume force
@@ -2150,6 +2324,22 @@ export function WorkflowDialog({
                                 key={`layer-${id}`}
                                 label={`${layer.branch} → ${layer.base}`}
                               >
+                                <OperationFacts
+                                  facts={[
+                                    { label: 'Captured local OID', value: layer.oid, code: true },
+                                    {
+                                      label: 'Captured base OID',
+                                      value: layer.baseOid,
+                                      code: true,
+                                    },
+                                    {
+                                      label: 'Expected remote lease',
+                                      value: layer.remoteOid ?? 'Absent; create-only',
+                                      code: true,
+                                    },
+                                    { label: 'Push effect', value: layer.push },
+                                  ]}
+                                />
                                 <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">
                                   {layer.create
                                     ? 'A new pull request is opened with the title, description and readiness chosen below.'
@@ -2193,7 +2383,11 @@ export function WorkflowDialog({
                                 >
                                   <Input
                                     readOnly={!layer.create || recovering}
-                                    value={choice?.title ?? ''}
+                                    value={
+                                      !layer.create && !recovering
+                                        ? layer.title
+                                        : (choice?.title ?? '')
+                                    }
                                     onChange={(event) => setChoice({ title: event.target.value })}
                                   />
                                 </Field>
@@ -2209,6 +2403,26 @@ export function WorkflowDialog({
                                     />
                                   </Field>
                                 ) : null}
+                                {!layer.create &&
+                                !recovering &&
+                                choice &&
+                                (choice.title !== layer.title || choice.body) ? (
+                                  <OperationContext
+                                    title={`Retained authored draft — ${layer.branch}`}
+                                    description="The fresh offer found an existing PR. Original-owner authored text stays retained here; it is not sent to that PR."
+                                    facts={[
+                                      { label: 'Authored title', value: choice.title },
+                                      {
+                                        label: 'Authored body',
+                                        value: choice.body || 'Empty authored body',
+                                      },
+                                      {
+                                        label: 'Authored visibility',
+                                        value: choice.draft ? 'Draft' : 'Ready',
+                                      },
+                                    ]}
+                                  />
+                                ) : null}
                                 {layer.create ? (
                                   <Checkbox
                                     id={`draft-${id}`}
@@ -2223,41 +2437,87 @@ export function WorkflowDialog({
                           })
                         }}
                       </form.Field>
+                      {!recovering
+                        ? Object.entries(values.layerChoices)
+                            .filter(
+                              ([branch]) =>
+                                !publishOffer?.layers.some((layer) => layer.branch === branch),
+                            )
+                            .map(([branch, choice]) => (
+                              <OperationContext
+                                key={`retained-${branch}`}
+                                title={`Retained authored draft — ${branch}`}
+                                description="Outside the fresh offered scope; this retained text is not included in the action."
+                                facts={[
+                                  { label: 'Title', value: choice.title },
+                                  { label: 'Body', value: choice.body || 'Empty authored body' },
+                                  { label: 'Visibility', value: choice.draft ? 'Draft' : 'Ready' },
+                                ]}
+                              />
+                            ))
+                        : null}
                     </>
                   ) : null}
                   {request.operation === 'merge' ? (
-                    <form.Field name="mergeAction">
-                      {(field) => (
-                        <Field
-                          id="workflow-merge-action"
-                          label="How GitHub lands it"
-                          description={
-                            values.mergeAction === 'merge_queue'
-                              ? 'The merge queue runs the repository\u2019s required checks and either merges the group or ejects it. The merge method below is not sent.'
-                              : 'GitHub merges the reviewed pull requests itself, in the background, while this dialog follows the result.'
-                          }
-                        >
-                          <Select
-                            data-workflow-first-field=""
-                            disabled={locked || finished}
-                            value={field.state.value}
-                            onValueChange={(value) => {
-                              markEdited()
-                              field.handleChange(value as MergeAction)
-                            }}
-                            options={(preview?.merge?.actions ?? []).map((action) => ({
-                              value: action,
-                              label:
-                                action === 'merge_queue'
-                                  ? 'Add to the merge queue'
-                                  : action === 'direct_merge'
-                                    ? 'Merge directly, without the queue'
-                                    : 'Let the repository decide (queue when one is configured)',
-                            }))}
-                          />
-                        </Field>
-                      )}
-                    </form.Field>
+                    <>
+                      <OperationFacts
+                        facts={[
+                          {
+                            label: 'Request grouping',
+                            value: preview?.merge?.native
+                              ? 'One native request includes the disclosed members'
+                              : 'Independent requests, base first',
+                          },
+                          {
+                            label: 'Included in selected request',
+                            value:
+                              preview?.merge?.layers
+                                .filter((layer) => layer.includedInRequest)
+                                .map((layer) => `#${layer.pullRequest}`)
+                                .join(' → ') || 'None',
+                          },
+                          {
+                            label: 'Full reviewed downstack',
+                            value:
+                              preview?.merge?.layers
+                                .map((layer) => `#${layer.pullRequest}`)
+                                .join(' → ') || 'Unavailable',
+                          },
+                        ]}
+                      />
+                      <form.Field name="mergeAction">
+                        {(field) => (
+                          <Field
+                            id="workflow-merge-action"
+                            label="How GitHub lands it"
+                            description={
+                              values.mergeAction === 'merge_queue'
+                                ? 'The merge queue runs the repository\u2019s required checks and either merges the group or ejects it. The merge method below is not sent.'
+                                : 'GitHub merges the reviewed pull requests itself, in the background, while this dialog follows the result.'
+                            }
+                          >
+                            <Select
+                              data-workflow-first-field=""
+                              disabled={locked || finished}
+                              value={field.state.value}
+                              onValueChange={(value) => {
+                                markEdited()
+                                field.handleChange(value as MergeAction)
+                              }}
+                              options={(preview?.merge?.actions ?? []).map((action) => ({
+                                value: action,
+                                label:
+                                  action === 'merge_queue'
+                                    ? 'Add to the merge queue'
+                                    : action === 'direct_merge'
+                                      ? 'Merge directly, without the queue'
+                                      : 'Let the repository decide (queue when one is configured)',
+                              }))}
+                            />
+                          </Field>
+                        )}
+                      </form.Field>
+                    </>
                   ) : null}
                   {request.operation === 'merge' && values.mergeAction === 'direct_merge' ? (
                     <form.Field name="mergeMethod">
@@ -2312,10 +2572,34 @@ export function WorkflowDialog({
                     </Button>
                   </div>
                   <p className="workflow-note">
+                    <code>{pr.url}</code>
+                  </p>
+                  <p className="workflow-note">
                     Checks: {pr.checks} · Reviews:{' '}
                     {pr.reviewDecision?.replaceAll('_', ' ').toLowerCase() || 'No decision'} · Merge
                     state: {pr.mergeState?.replaceAll('_', ' ').toLowerCase() || 'Unknown'}
                   </p>
+                  {expectedPrBody.current !== undefined && expectedPrBody.current !== pr.body ? (
+                    <div className="workflow-section">
+                      <WarningNote>
+                        The published body changed while you were composing. Your input is retained;
+                        compare and merge the latest body before acknowledging this version.
+                      </WarningNote>
+                      <Field id="workflow-latest-pr-body" label="Latest published body">
+                        <Textarea id="workflow-latest-pr-body" readOnly value={pr.body} />
+                      </Field>
+                      <Button
+                        disabled={locked || !providerSourceCurrent}
+                        variant="secondary"
+                        onClick={() => {
+                          expectedPrBody.current = pr.body
+                          refreshBodyBaseline()
+                        }}
+                      >
+                        I have compared this published body
+                      </Button>
+                    </div>
+                  ) : null}
                   <form.Field name="prTitle">
                     {(field) => (
                       <Field id="workflow-pr-title" label="Title" required>
@@ -2368,6 +2652,7 @@ export function WorkflowDialog({
                     authority={authority}
                     onPrUpdate={(updated) => {
                       queryClient.setQueryData(previewKey, { kind: 'pr', value: updated })
+                      expectedPrBody.current = updated.body
                       form.setFieldValue('body', updated.body)
                     }}
                     onBodyMutation={(mutation) => {
@@ -2376,39 +2661,28 @@ export function WorkflowDialog({
                           ? { ...current, value: { ...current.value, body: mutation.newBody } }
                           : current,
                       )
+                      expectedPrBody.current = mutation.newBody
                       form.setFieldValue('body', mutation.newBody)
                     }}
                     onMutationBusy={setIssueMutationBusy}
-                    defaultBranch={snapshot.defaultBranch}
-                    disabled={busy || pr.state === 'MERGED'}
+                    defaultBranch={
+                      providerManagement
+                        ? (pr.repositoryDefaultBranch ?? '')
+                        : snapshot.defaultBranch
+                    }
+                    canEditBody={
+                      !providerManagement || (providerSourceCurrent && pr.canUpdate === true)
+                    }
+                    disabled={
+                      busy ||
+                      pr.state === 'MERGED' ||
+                      (providerManagement &&
+                        (!providerSourceCurrent || Boolean(snapshot.stackOperation)))
+                    }
                     hasFormEdits={edited}
                     runAction={runAction}
                     stackApi={stackApi}
                   />
-                  {pr.state === 'OPEN' &&
-                  localBranches.some(
-                    (branch) => branch.name === pr.head && branch.pr?.number === pr.number,
-                  ) ? (
-                    <Button
-                      tooltip={
-                        actionBlockReason(snapshot.capabilities, 'executeStack') ??
-                        'Check the PR’s current head, reviews, checks, and allowed merge methods before merging.'
-                      }
-                      disabled={Boolean(actionBlockReason(snapshot.capabilities, 'executeStack'))}
-                      onClick={() =>
-                        onRequest({ kind: 'stack', operation: 'merge', branch: pr.head })
-                      }
-                    >
-                      Preview merge
-                    </Button>
-                  ) : null}
-                  {pr.state === 'OPEN' &&
-                  !localBranches.some((branch) => branch.pr?.number === pr.number) ? (
-                    <p className="workflow-note">
-                      Check out the PR’s branch to manage it as a local stack. Fork PRs remain
-                      available on GitHub.
-                    </p>
-                  ) : null}
                   {pr.state !== 'MERGED' ? (
                     <div className="pr-lifecycle">
                       {confirmPrState ? (
@@ -2430,16 +2704,20 @@ export function WorkflowDialog({
                               variant="danger"
                               size="sm"
                               disabled={Boolean(
-                                actionBlockReason(
-                                  snapshot.capabilities,
-                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                                ),
+                                providerManagement
+                                  ? providerPrBlock
+                                  : actionBlockReason(
+                                      snapshot.capabilities,
+                                      pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                    ),
                               )}
                               tooltip={
-                                actionBlockReason(
-                                  snapshot.capabilities,
-                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                                ) ??
+                                (providerManagement
+                                  ? providerPrBlock
+                                  : actionBlockReason(
+                                      snapshot.capabilities,
+                                      pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                    )) ??
                                 (pr.state === 'OPEN'
                                   ? 'Close this PR without merging or deleting its branch. Unsaved edits are not applied.'
                                   : 'Reopen this PR on GitHub. Unsaved edits are not applied.')
@@ -2465,17 +2743,21 @@ export function WorkflowDialog({
                           size="sm"
                           variant="ghost"
                           disabled={Boolean(
-                            actionBlockReason(
-                              snapshot.capabilities,
-                              pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                            ),
+                            providerManagement
+                              ? providerPrBlock
+                              : actionBlockReason(
+                                  snapshot.capabilities,
+                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                ),
                           )}
                           onClick={() => setConfirmPrState(true)}
                           tooltip={
-                            actionBlockReason(
-                              snapshot.capabilities,
-                              pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
-                            ) ??
+                            (providerManagement
+                              ? providerPrBlock
+                              : actionBlockReason(
+                                  snapshot.capabilities,
+                                  pr.state === 'OPEN' ? 'closePr' : 'reopenPr',
+                                )) ??
                             (pr.state === 'OPEN'
                               ? 'Review closing this PR without merging. Its branch and commits will remain.'
                               : 'Review reopening this closed PR on GitHub.')
@@ -2488,13 +2770,45 @@ export function WorkflowDialog({
                   ) : null}
                 </>
               ) : null}
+              {request.kind === 'confirm' && request.destructive ? (
+                <form.Field name="confirmation">
+                  {(field) => (
+                    <TypedConfirmation
+                      id="workflow-confirm-selected"
+                      value={field.state.value}
+                      target={confirmationTarget ?? ''}
+                      disabled={locked}
+                      onChange={(value) => {
+                        markEdited()
+                        field.handleChange(value)
+                      }}
+                    />
+                  )}
+                </form.Field>
+              ) : null}
+              {request.kind === 'confirm' &&
+              (request.action.type === 'deleteBranch' ||
+                request.action.type === 'deleteBranches') ? (
+                <form.Field name="allowForce">
+                  {(field) => (
+                    <Checkbox
+                      checked={field.state.value}
+                      onCheckedChange={(value) => {
+                        markEdited()
+                        field.handleChange(value === true)
+                      }}
+                      label="Explicitly allow deletion of unmerged local tips; protected default, current and any-worktree branches still cannot be deleted. No remote branch or directory is removed."
+                    />
+                  )}
+                </form.Field>
+              ) : null}
             </fieldset>
 
             {/* Outside the fieldset on purpose: a finished run locks every control that
                 dispatches, and reading what GitHub did afterwards is not a dispatch. */}
             {request.kind === 'stack' &&
             request.operation === 'merge' &&
-            (mergeProgress || mergeStatus) ? (
+            (mergeProgress || mergeStatus || mergeStatusError) ? (
               <div className="grid gap-2">
                 {mergeStatusError ? (
                   <InlineAlert tone="error">
@@ -2502,31 +2816,46 @@ export function WorkflowDialog({
                     until a read succeeds.
                   </InlineAlert>
                 ) : null}
+                {mergeStatusQuery.data?.source === 'journal-read' ? (
+                  <p className="workflow-note">
+                    Saved merge journal read. Original operation authority was not recorded; this
+                    read requested no merge.
+                  </p>
+                ) : null}
                 {/* A run in flight speaks for itself. Once it returns, a read is newer
                           than the progress it pushed, and a read that arrives later is newer
                           still, so the read-back is what the panel shows; the run's own result
                           stands only until a read answers. */}
-                {mergeProgress && (mergeRunning || !mergeStatus) ? (
-                  <MergeOutcomePanel progress={mergeProgress} />
-                ) : (
+                {mergeProgress ? (
+                  <MergeOutcomePanel
+                    progress={mergeProgress}
+                    label={
+                      mergeProgressQuery.data?.source === 'journal-read'
+                        ? 'What GitHub reports now with retained captured targets'
+                        : undefined
+                    }
+                  />
+                ) : mergeStatus ? (
                   <MergeOutcomePanel
                     label={`What GitHub reports now \u2014 ${mergeStatus!.layers.length} pull request${
                       mergeStatus!.layers.length === 1 ? '' : 's'
                     } from this and earlier merge requests`}
                     progress={{
                       action: 'default',
-                      status: mergeStatus!.layers.some((layer) => layer.status === 'failed')
+                      status: mergeStatus.layers.some((layer) => layer.status === 'failed')
                         ? 'failed'
-                        : mergeStatus!.layers.some((layer) => layer.status === 'pending')
-                          ? 'running'
-                          : mergeStatus!.layers.some((layer) => layer.status === 'enqueued')
+                        : mergeStatus.layers.every((layer) => layer.status === 'merged')
+                          ? 'succeeded'
+                          : mergeStatus.layers.every(
+                                (layer) => layer.status === 'merged' || layer.status === 'enqueued',
+                              )
                             ? 'queued'
-                            : 'succeeded',
+                            : 'running',
                       layers: mergeStatus!.layers,
                       message: mergeStatus!.message,
                     }}
                   />
-                )}
+                ) : null}
                 <div>
                   <Button type="button" onClick={() => void readMergeStatus()}>
                     Refresh what GitHub reports
@@ -2536,16 +2865,40 @@ export function WorkflowDialog({
             ) : null}
             {!loading &&
             (((error || actionError) && previewKinds.includes(request.kind)) ||
-              (request.kind === 'surgery' && !surgery)) ? (
+              (request.kind === 'surgery' && !surgery) ||
+              (capturedAuthority &&
+                !safety.current &&
+                (request.kind === 'stack' || request.kind === 'surgery'))) ? (
               <Button
                 variant="secondary"
-                disabled={busy}
+                disabled={busy || !providerSourceCurrent}
                 onClick={() => {
+                  if (!providerSourceCurrent) return
+                  if (identity)
+                    setRejectedIdentities((previous) =>
+                      previous.includes(identity) ? previous : [...previous, identity],
+                    )
+                  setIdentity(null)
+                  form.setFieldValue('allowForce', false)
+                  form.setFieldValue('confirmation', '')
+                  form.setFieldValue('closePullRequests', false)
+                  form.setFieldValue('layerChoices', (current) =>
+                    Object.fromEntries(
+                      Object.entries(current).map(([branch, choice]) => [
+                        branch,
+                        { ...choice, updateBase: false },
+                      ]),
+                    ),
+                  )
                   setError(null)
                   onClearActionError()
                   setAttempt((value) => value + 1)
                 }}
-                tooltip="Read the latest repository and GitHub state to replace this preview. No Git changes are made."
+                tooltip={
+                  providerSourceCurrent
+                    ? 'Explicitly inspect the same original owner. Authored text stays; force and base-write approvals must be given again. No Git changes are made.'
+                    : 'The original provider retired. Original-owner input stays retained; this form cannot move to the replacement principal.'
+                }
               >
                 Reload preview
               </Button>
@@ -2592,7 +2945,7 @@ export function WorkflowDialog({
                     Dismiss submission
                   </Button>
                   <Button
-                    variant="accent"
+                    variant="default"
                     disabled={busy || Boolean(resumeBlocked)}
                     loading={busy}
                     onClick={() => run({ type: 'submitStackRetry' }, 'Resume submission')}
@@ -2608,7 +2961,7 @@ export function WorkflowDialog({
               ) : (
                 <Button
                   type="submit"
-                  variant={destructive ? 'danger' : 'accent'}
+                  variant={destructive ? 'danger' : 'default'}
                   disabled={Boolean(blocker || shapeReason || issueMutationBusy || formSubmitting)}
                   loading={busy || formSubmitting}
                   tooltip={shapeReason ?? (blocker ? blocker.message : description)}
@@ -2619,6 +2972,11 @@ export function WorkflowDialog({
             </WorkflowActions>
           </WorkflowFrame>
         </form>
+        {capturedAuthority && (busy || formSubmitting) ? (
+          <Button variant="secondary" onClick={onClose}>
+            Hide running operation — continue in persistent Operations status
+          </Button>
+        ) : null}
       </DialogContent>
     </Dialog>
   )

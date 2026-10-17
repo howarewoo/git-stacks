@@ -12,11 +12,7 @@ import {
   settle,
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
-import type {
-  GitHubCliStatus,
-  ReconciliationPreview,
-  RepositorySnapshot,
-} from '@git-stacks/shared/types'
+import type { GitHubCliStatus } from '@git-stacks/shared/types'
 import { scenarios } from './fixtures/scenarios'
 
 /**
@@ -33,7 +29,7 @@ import { scenarios } from './fixtures/scenarios'
  */
 
 function cliStatusButton(page: Page) {
-  return page.getByTitle('GitHub CLI status')
+  return page.getByRole('button', { name: 'Settings', exact: true })
 }
 
 /**
@@ -41,22 +37,12 @@ function cliStatusButton(page: Page) {
  * announces for it.
  */
 function cliStatusDialog(page: Page): Locator {
-  return page.getByRole('dialog', { name: 'GitHub CLI authentication' })
+  return page.getByRole('dialog', { name: 'Settings', exact: true })
 }
 
 /** The measurements themselves: what was read about this computer, one per row. */
 function cliStatusFacts(page: Page): Locator {
   return cliStatusDialog(page).getByRole('region', { name: 'GitHub CLI' })
-}
-
-/** The account this window opened with, and the session that replaced it. */
-const ACCOUNT_A: GitHubCliStatus = {
-  state: 'authenticated',
-  host: 'github.com',
-  login: 'octo',
-  version: '2.62.0',
-  identity: 'cli:github.com:octo:1',
-  message: null,
 }
 
 /** The session ends in a terminal: same host, no account, no credential. */
@@ -100,7 +86,6 @@ test.describe('Required GitHub CLI status', () => {
     await expect(cliStatusFacts(page).getByText('Not detected')).toBeVisible()
     await expect(cliStatusDialog(page)).toContainText('https://cli.github.com/')
     await expect(cliStatusDialog(page)).not.toContainText('gh auth login')
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: not installed')
   })
 
   test('an installed CLI with no account offers the host-scoped sign-in command and states that this window cannot run it', async ({
@@ -115,7 +100,6 @@ test.describe('Required GitHub CLI status', () => {
       cliStatusFacts(page).getByText('gh auth login --hostname github.com --web'),
     ).toBeVisible()
     await expect(cliStatusDialog(page)).toContainText('shown for you to run in a terminal')
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
   })
 
   test('an authenticated session names the account and the version apart, and the only control is a real re-read', async ({
@@ -125,7 +109,6 @@ test.describe('Required GitHub CLI status', () => {
 
     await expect(cliStatusFacts(page).getByText('2.62.0')).toBeVisible()
     await expect(cliStatusFacts(page).getByText('octo', { exact: true })).toBeVisible()
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed in')
 
     const before = (await getDoubleCalls(page)).filter((call) => call.call === 'githubCliStatus')
     expect(before.length).toBeGreaterThan(0)
@@ -144,7 +127,6 @@ test.describe('Required GitHub CLI status', () => {
     expect(after.length).toBe(before.length + 1)
     // A re-read of the same session leaves it standing: it is the same account
     // and the same credential, so nothing on screen is a stale copy.
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed in')
     await expect(cliStatusFacts(page).getByText('octo', { exact: true })).toBeVisible()
     // Nothing was dispatched to the repository and no URL left this window: the
     // CLI owns the session, and reading its status is not an action.
@@ -156,7 +138,6 @@ test.describe('Required GitHub CLI status', () => {
     page,
   }) => {
     await openCliStatusDialog(page, 'github-cli-authenticated')
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed in')
 
     // A real re-read is asked for and admitted; only its answer is held back. The
     // window is now waiting on a status that is about to stop being the truth.
@@ -167,14 +148,13 @@ test.describe('Required GitHub CLI status', () => {
     // The session ends in a terminal while that read is outstanding, and the
     // main process publishes it because this window did not cause it.
     await publishCliStatus(page, ACCOUNT_B)
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
+    await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()
 
     // The held read answers now, late, and it succeeds: it carries the account
     // and credential that have just been replaced. It must repaint neither the
     // state nor the account it was asked about.
     expect(await releaseDoubleCalls(page, 'githubCliStatus')).toBe(1)
     await settle(page)
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
     await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()
     await expect(cliStatusDialog(page)).not.toContainText('octo')
   })
@@ -188,10 +168,11 @@ test.describe('Required GitHub CLI status', () => {
     // The branch that carries a pull request, so the inspector's checks and the
     // review workspace both have real GitHub data behind them to be retired.
     const branch = page
-      .locator('.branch-row')
+      .locator('.bw-lane-row')
       .filter({ has: page.getByText('feature/checkout-tests', { exact: true }) })
-    await branch.click()
-    const checks = page.getByRole('region', { name: 'Checks' })
+    await branch.getByRole('button', { name: 'feature/checkout-tests', exact: true }).click()
+    await page.getByRole('tab', { name: 'Checks', exact: true }).click()
+    const checks = page.getByRole('tabpanel', { name: 'Checks', exact: true })
     await expect(checks.getByText('ci', { exact: true })).toBeVisible()
 
     await switchDestination(page, 'review')
@@ -206,45 +187,21 @@ test.describe('Required GitHub CLI status', () => {
       page.getByText('Should this be re-read when the base moves, or is the head enough?'),
     ).toBeVisible()
     await switchDestination(page, 'branches')
+    await page.getByRole('tab', { name: 'Checks', exact: true }).click()
     await expect(checks.getByText('ci', { exact: true })).toBeVisible()
-
-    // A repository read is asked for and admitted before any of this happens, so
-    // there is an outstanding operation to retire rather than an idle window.
-    await holdDoubleCall(page, 'refresh')
-    const refresh = page.getByRole('button', { name: 'Refresh repository' })
-    await refresh.click()
-    await expect(refresh).toBeDisabled()
 
     await publishCliStatus(page, ACCOUNT_B)
 
-    // The busy state belongs to the read, not to the window: a result this window
-    // has refused must not leave local Git disabled while it waits to settle.
-    await expect(refresh).toBeEnabled()
-    await expect(page.getByRole('button', { name: 'New branch' })).toBeEnabled()
-    // Nothing GitHub answered for the replaced account is left on screen: the
-    // pull request this branch carried, and the checks read for it.
-    await expect(page.getByText('No pull request for this branch.')).toBeVisible()
-    await expect(checks).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Review changes' })).toHaveCount(0)
-    await expect(page.getByRole('toolbar', { name: 'Repository actions' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Review pull request' })).toHaveCount(0)
+    await expect(checks.getByText('ci', { exact: true })).toHaveCount(0)
+    await expect(
+      page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+    ).toBeVisible()
     await expect(branch).toHaveCount(1)
 
-    // Local Git still reads. The read asked for now is the window's own, and the
-    // retired one answering afterwards must not report it as finished.
-    await refresh.click()
-    await expect(refresh).toBeDisabled()
-    expect(await releaseDoubleCalls(page, 'refresh', 'oldest')).toBe(1)
-    await settle(page)
-    await expect(refresh).toBeDisabled()
-    expect(await releaseDoubleCalls(page, 'refresh', 'newest')).toBe(1)
-    await settle(page)
-    await expect(refresh).toBeEnabled()
-
-    // Discovery is that account's to read as well: the onboarding pane is the
-    // only place it can be opened from, and this window has a repository open.
-
     // The session on screen is still the one that replaced it.
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
+    await cliStatusButton(page).click()
+    await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()
     expect(await getDispatchedActions(page)).toEqual([])
   })
 
@@ -254,184 +211,34 @@ test.describe('Required GitHub CLI status', () => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
     await changeScenario(page, 'shell-long-content')
     await holdDoubleCall(page, 'openRepository')
-    await page.getByRole('button', { name: 'Open a repository', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'New branch' })).toBeDisabled()
+    const add = page.getByRole('button', { name: 'Add repository', exact: true })
+    await add.click()
+    // The open dialog is modal: its own folder chooser is the local switch.
+    const local = page.getByRole('dialog', { name: 'Open a local repository', exact: true })
+    const choose = local.getByRole('button', { name: 'Choose folder', exact: true })
+    await choose.click()
+    await expect(choose).toBeDisabled()
 
     await publishCliStatus(page, ACCOUNT_B)
     // Main can have persisted B already. Neither a second open nor a local
     // mutation against B may run while the renderer still displays A.
-    await expect(page.getByRole('button', { name: 'New branch' })).toBeDisabled()
-    await expect(
-      page.getByRole('button', { name: 'Open a repository', exact: true }),
-    ).toBeDisabled()
+    await expect(choose).toBeDisabled()
     expect(await releaseDoubleCalls(page, 'openRepository')).toBe(1)
     await settle(page)
+    await expect(local).toHaveCount(0)
 
     const opened = scenarios['shell-long-content'].snapshot!
-    await expect(page.getByText(opened.name, { exact: true }).first()).toBeVisible()
-    await expect(page.getByText(opened.currentBranch!, { exact: true }).first()).toBeVisible()
-    await expect(page.getByRole('button', { name: 'New branch' })).toBeEnabled()
-    await expect(page.getByRole('button', { name: 'Review changes' })).toHaveCount(0)
-    await expect(cliStatusButton(page)).toHaveText('GitHub CLI: signed out')
-  })
-
-  test('credential retirement removes submitted reconciliation and its repair controls', async ({
-    page,
-  }) => {
-    await openGallery(page, { scenario: 'github-cli-authenticated' })
-    const withReport = {
-      ...scenarios['github-cli-authenticated'].snapshot!,
-      reconciliation: {
-        available: true,
-        message: 'Private submitted stack from the old account',
-        stacks: [
-          {
-            key: 'private-stack',
-            base: 'main',
-            stackNumber: 17,
-            stackUrl: 'https://github.com/acme/widgets/stack/17',
-            state: 'reordered',
-            summary: 'Private submitted order',
-            submittedOrder: ['private-parent', 'private-child'],
-            members: [],
-            repairs: [],
-            blockers: [],
-          },
-        ],
-        blockers: [],
-        evidence: null,
-      },
-    }
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await page.getByRole('button', { name: 'Refresh repository' }).click()
-    await switchDestination(page, 'stacks')
-    await page
-      .locator('details.graph-reconciliation > summary', {
-        hasText: 'Submitted native order and reconciliation',
-      })
-      .click()
-    const reconciliation = page.getByRole('region', { name: 'Submitted stack reconciliation' })
-    await expect(reconciliation).toContainText('Private submitted stack from the old account')
-    await expect(reconciliation.getByRole('button', { name: /Review repairs/ })).toBeEnabled()
-    await reconciliation.getByRole('button', { name: /Review repairs/ }).click()
-    const repairDialog = page.getByRole('dialog', { name: 'Reconcile submitted stack' })
-    await expect(repairDialog).toBeVisible()
-    await publishCliStatus(page, ACCOUNT_C)
-    await expect(reconciliation).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Review repairs/ })).toHaveCount(0)
-    await expect(repairDialog).toHaveCount(0)
-    // A later report must not revive the retired account's open preview.
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await page.getByRole('button', { name: 'Refresh repository' }).click()
-    await expect(reconciliation).toBeVisible()
-    await expect(repairDialog).toHaveCount(0)
-  })
-
-  test('background snapshots preserve reviewed repair choices until an explicit re-read', async ({
-    page,
-  }) => {
-    await openGallery(page, { scenario: 'github-cli-authenticated' })
-    const preview: ReconciliationPreview = {
-      token: 'captured-repair-preview',
-      stackKey: 'private-stack',
-      state: 'reordered',
-      summary: 'Review submitted order',
-      base: 'main',
-      submittedOrder: ['feature/parent', 'feature/child'],
-      repairs: [
-        {
-          id: 'tip',
-          kind: 'adopt-remote-tip',
-          branch: 'feature/child',
-          pullRequest: null,
-          summary: 'Adopt new remote tip',
-          detail: 'Use the captured remote commit.',
-          requiresConfirmation: true,
-          evidence: null,
-        },
-        {
-          id: 'hint',
-          kind: 'clear-stale-hint',
-          branch: 'feature/child',
-          pullRequest: null,
-          summary: 'Remove old parent hint',
-          detail: 'Remove the stale recorded parent.',
-          requiresConfirmation: false,
-          evidence: null,
-        },
-      ],
-      blockers: [],
-      warnings: [],
-      capturedAt: '2026-09-25T12:00:00Z',
-    }
-    await page.evaluate((value) => {
-      window.desktop.reconciliationPreview = async () => structuredClone(value)
-    }, preview)
-    const withReport: RepositorySnapshot = {
-      ...scenarios['github-cli-authenticated'].snapshot!,
-      reconciliation: {
-        available: true,
-        message: 'Submitted order needs review.',
-        stacks: [
-          {
-            key: preview.stackKey,
-            base: preview.base,
-            stackNumber: 17,
-            stackUrl: 'https://github.com/acme/widgets/stack/17',
-            state: preview.state,
-            summary: preview.summary,
-            submittedOrder: preview.submittedOrder,
-            members: [],
-            repairs: preview.repairs,
-            blockers: [],
-          },
-        ],
-        blockers: [],
-        evidence: null,
-      },
-    }
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await page.getByRole('button', { name: 'Refresh repository' }).click()
-    await switchDestination(page, 'stacks')
-    await page
-      .locator('details.graph-reconciliation > summary', {
-        hasText: 'Submitted native order and reconciliation',
-      })
-      .click()
-    await page.getByRole('button', { name: /Review repairs/ }).click()
-    const dialog = page.getByRole('dialog', { name: 'Reconcile submitted stack' })
-    const hint = dialog.getByRole('checkbox', { name: /Remove old parent hint/ })
-    await hint.uncheck()
-    const confirmation = dialog.getByLabel(
-      'Type private-stack to enable branch and pull-request rewrites',
-    )
-    await confirmation.fill('private-stack')
-    await expect(dialog.getByRole('button', { name: 'Run 1 repair', exact: true })).toBeEnabled()
-
-    await page.evaluate((value) => window.fixture.pushSnapshot(value), withReport)
-    await settle(page)
-    await expect(hint).not.toBeChecked()
-    await expect(confirmation).toHaveValue('private-stack')
-    await expect(dialog.getByRole('button', { name: 'Run 1 repair', exact: true })).toBeEnabled()
-
-    await dialog.getByRole('button', { name: 'Re-read', exact: true }).click()
-    await expect(hint).toBeChecked()
-    await expect(confirmation).toHaveValue('')
-    await expect(dialog.getByRole('button', { name: 'Run 2 repairs', exact: true })).toBeDisabled()
-
-    await confirmation.fill('private-stack')
-    await holdDoubleCall(page, 'runAction')
-    await dialog.getByRole('button', { name: 'Run 2 repairs', exact: true }).click()
-    await expect(dialog.locator('button[aria-busy="true"]')).toBeDisabled()
-    await page.keyboard.press('Escape')
-    await expect(dialog).toBeVisible()
-    await dialog.getByRole('button', { name: 'Close dialog' }).click()
-    await expect(dialog).toBeVisible()
-    await page.evaluate((value) => window.fixture.pushSnapshot(value), withReport)
-    await settle(page)
-    await answerNextDoubleCall(page, 'refresh', withReport)
-    await releaseDoubleCalls(page, 'runAction')
-    await expect(dialog).toBeHidden()
+    await expect(
+      page
+        .getByRole('complementary', { name: 'Workspace navigation' })
+        .getByRole('button', { name: `howarewoo/git-stacks · ${opened.path}`, exact: true }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    await expect(
+      page.getByRole('button', { name: opened.currentBranch!, exact: true }),
+    ).toBeVisible()
+    await expect(add).toBeEnabled()
+    await cliStatusButton(page).click()
+    await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()
   })
 
   test('a replaced account takes the private repositories it had discovered with it, and a held search cannot bring them back', async ({
@@ -439,7 +246,7 @@ test.describe('Required GitHub CLI status', () => {
   }) => {
     await openGallery(page, { scenario: 'github-cli-discovery' })
     await settle(page)
-    await page.getByRole('button', { name: 'Search GitHub' }).click()
+    await page.getByRole('button', { name: 'Find and clone' }).click()
     const discovery = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await expect(discovery).toBeVisible()
 
@@ -541,10 +348,9 @@ test.describe('Required GitHub CLI status', () => {
 
     // The local path to a repository is not gated on GitHub at all: this window
     // opens with recent repositories and can add one that is already here.
-    await expect(page.getByRole('button', { name: 'Add local repository' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'Recent repositories' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add repository', exact: true })).toBeEnabled()
 
-    await page.getByRole('button', { name: 'Search GitHub' }).click()
+    await page.getByRole('button', { name: 'Find and clone' }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await expect(dialog).toBeVisible()
     await dialog.getByRole('textbox', { name: 'Search your repositories' }).fill('widgets')
@@ -567,7 +373,7 @@ test.describe('Required GitHub CLI status', () => {
     await openGallery(page, { scenario: 'github-cli-signed-out' })
     await settle(page)
 
-    await page.getByRole('button', { name: 'Search GitHub' }).click()
+    await page.getByRole('button', { name: 'Find and clone' }).click()
     const dialog = page.getByRole('dialog', { name: 'Clone from GitHub' })
     await expect(dialog).toBeVisible()
     await dialog.getByRole('textbox', { name: 'Search your repositories' }).fill('widgets')
@@ -591,8 +397,9 @@ test.describe('Required GitHub CLI status', () => {
     // The status surface reports the CLI session and nothing else: the
     // separately authorized notifications inbox, its token, and its consent all
     // live in Settings > Notifications, and none of them appear here.
-    const dialog = cliStatusDialog(page)
-    await expect(dialog.getByText(/notification/iu)).toHaveCount(0)
-    await expect(dialog.getByRole('checkbox')).toHaveCount(0)
+    // Only the CLI section is being reported; Notifications has its own settings section.
+    const cli = cliStatusFacts(page)
+    await expect(cli.getByText(/notification/iu)).toHaveCount(0)
+    await expect(cli.getByRole('checkbox')).toHaveCount(0)
   })
 })

@@ -3,11 +3,13 @@ import { promisify } from 'node:util'
 import { MAX_BUFFER } from './git-core'
 import { isRecord } from '@git-stacks/shared/guards'
 import { canonicalHostName } from '@git-stacks/shared/host'
+import { cliAuthority } from '@git-stacks/shared/operation-scope'
 import type { GitHubCliState, GitHubCliStatus } from '@git-stacks/shared/types'
 import {
   GitHubTransportError,
   hostScopedEnvironment,
   type GitHubTransport,
+  type GitHubCredentialSession,
 } from './github-transport'
 import { githubHostContext, hostTransport, type GitHubHostContext } from './github-host'
 
@@ -294,7 +296,7 @@ export interface GitHubCliReadResult {
  */
 export type GitHubCliProvingTransport = Pick<
   GitHubTransport,
-  'credentialAuthority' | 'destinationHost'
+  'credentialAuthority' | 'destinationHost' | 'pinCredential'
 > &
   Required<Pick<GitHubTransport, 'graphqlWithAuthority'>>
 
@@ -515,6 +517,32 @@ export class GitHubCliStatusService {
     return this.status
   }
 
+  /** Compare the session's own snapshot with the private proof, never a second resolution. */
+  async pinCredential(expectedAuthority: string): Promise<GitHubCredentialSession> {
+    const authority = this.authority
+    const matches = () =>
+      !this.retired &&
+      authority !== null &&
+      this.authority === authority &&
+      this.status.state === 'authenticated' &&
+      cliAuthority(this.host, this.status) === expectedAuthority
+    const refused = () =>
+      new GitHubTransportError({
+        kind: 'unauthorized',
+        detail: 'The captured provider or account changed; no pull request management was sent.',
+      })
+    if (!matches()) throw refused()
+    const transport =
+      this.options.transport ?? hostTransport(this.context, this.options.env ?? process.env)
+    if (!transport.pinCredential) throw refused()
+    const session = await transport.pinCredential({
+      signal: this.controller.signal,
+      timeoutMs: this.options.timeoutMs ?? READ_TIMEOUT_MS,
+    })
+    if (!matches() || session.authority !== authority) throw refused()
+    return session
+  }
+
   /**
    * Stops this service publishing anything else. A read still in flight answers
    * its caller, but the answer describes a host or a credential this app has
@@ -691,6 +719,13 @@ export class GitHubCliStatusService {
 }
 
 const services = new Map<string, GitHubCliStatusService>()
+const statusListeners = new Set<(status: GitHubCliStatus) => void>()
+
+/** Observes every host service, including services created before subscription. */
+export function onGitHubCliStatusChange(listener: (status: GitHubCliStatus) => void): () => void {
+  statusListeners.add(listener)
+  return () => statusListeners.delete(listener)
+}
 
 /**
  * The status service for one host, so a refresh and a window that asks at the
@@ -703,7 +738,13 @@ export function gitHubCliStatusService(
   const key = canonicalHostName(host)
   const existing = services.get(key)
   if (existing) return existing
-  const created = new GitHubCliStatusService(key, options)
+  const created = new GitHubCliStatusService(key, {
+    ...options,
+    onChange: (status) => {
+      options.onChange?.(status)
+      for (const listener of statusListeners) listener(status)
+    },
+  })
   services.set(key, created)
   return created
 }

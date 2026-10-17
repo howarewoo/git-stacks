@@ -34,12 +34,31 @@ interface RepositoryLane {
 export class RepositoryScheduler {
   private readonly lanes = new Map<string, RepositoryLane>()
   private readonly readConcurrency: number
+  private readonly domains = new Map<string, string>()
+
+  /** Bind discovered linked paths to the common-local identity, never a provider URL. */
+  async bind(repository: string, commonLocalId: string): Promise<void> {
+    const previous = this.domains.get(repository) ?? repository
+    if (previous === commonLocalId) return
+    await this.mutate(commonLocalId, async () => {
+      if (this.domains.get(repository) === commonLocalId) return
+      await this.mutate(previous, async () => {
+        const lane = this.lanes.get(previous)
+        if (lane && (lane.mutations.length || lane.waiting.length))
+          throw new Error(
+            'Previous local authority still has queued work; retry capture after it settles.',
+          )
+        this.domains.set(repository, commonLocalId)
+      })
+    })
+  }
 
   constructor(readConcurrency = DEFAULT_READ_CONCURRENCY) {
     this.readConcurrency = Math.max(1, readConcurrency)
   }
 
   private lane(repository: string): RepositoryLane {
+    repository = this.domains.get(repository) ?? repository
     const existing = this.lanes.get(repository)
     if (existing) return existing
     const lane: RepositoryLane = {
@@ -58,12 +77,13 @@ export class RepositoryScheduler {
 
   /** True while any mutation holds or awaits this repository's lane. */
   busy(repository: string): boolean {
+    repository = this.domains.get(repository) ?? repository
     const lane = this.lanes.get(repository)
     return Boolean(lane && (lane.mutationActive || lane.mutations.length > 0))
   }
 
   pendingReads(repository: string): number {
-    return this.lanes.get(repository)?.waiting.length ?? 0
+    return this.lanes.get(this.domains.get(repository) ?? repository)?.waiting.length ?? 0
   }
 
   /**
@@ -146,6 +166,7 @@ export class RepositoryScheduler {
    * so work that must not overlap a Git command can start immediately.
    */
   quiesce(repository: string): Promise<void> {
+    repository = this.domains.get(repository) ?? repository
     const lane = this.lanes.get(repository)
     if (!lane) return Promise.resolve()
     this.endReads(lane)

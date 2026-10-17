@@ -13,6 +13,7 @@ import type {
   StackStep,
 } from '@git-stacks/shared/types'
 import { PHASE_PRESENTATION, type WorkflowComposition, type WorkflowPhase } from './workflow-policy'
+import type { OperationCapture } from '@git-stacks/shared/operation-scope'
 
 /**
  * The three reusable compositions named in the design brief — ordinary form,
@@ -114,6 +115,33 @@ export function OperationContext({
   )
 }
 
+export function CapturedOperationContext({ capture }: { capture: OperationCapture }) {
+  return (
+    <OperationContext
+      facts={[
+        { label: 'Common-local repository', value: capture.repositoryId, code: true },
+        { label: 'Execution directory', value: capture.worktreePath, code: true },
+        { label: 'Worktree authority', value: capture.worktreeId, code: true },
+        { label: 'Captured HEAD', value: capture.headOid ?? 'Unborn', code: true },
+        ...(capture.operationCommitOid
+          ? [{ label: 'Exact paused commit', value: capture.operationCommitOid, code: true }]
+          : []),
+        {
+          label: 'Provider remote',
+          value: capture.scope.remoteUrl ?? 'No configured remote',
+          code: true,
+        },
+        { label: 'Captured provider authority', value: capture.scope.authority, code: true },
+        {
+          label: 'HEAD/index/status/ref/dependency fingerprint',
+          value: capture.fingerprint,
+          code: true,
+        },
+      ]}
+    />
+  )
+}
+
 export function OperationFacts({
   facts,
   className,
@@ -134,7 +162,7 @@ export function OperationFacts({
           <dd
             className={cn(
               'm-0 min-w-0 break-words text-xs text-[var(--gs-semantic-text-primary)]',
-              fact.code && 'font-mono',
+              fact.code && 'font-mono break-all',
             )}
           >
             {fact.value}
@@ -182,21 +210,47 @@ export function OperationSteps({
             </strong>
             <span className="text-xs text-[var(--gs-semantic-text-secondary)]">
               into {step.parent} · {step.commits} commit{step.commits === 1 ? '' : 's'} ·{' '}
-              <code className="font-mono">{step.oid.slice(0, 10)}</code>
+              <code className="break-all font-mono">{step.oid}</code>
             </span>
+            <OperationFacts
+              facts={[
+                {
+                  label: 'Replay base OID',
+                  value: step.baseOid ?? 'Unknown; not inferred',
+                  code: true,
+                },
+              ]}
+            />
             {step.note ? (
               <p className="m-0 text-xs text-[var(--gs-semantic-text-secondary)]">{step.note}</p>
             ) : null}
           </div>
           {step.pr ? (
-            <span className="col-span-2 col-start-2 flex flex-wrap items-center gap-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
+            <div className="col-span-2 col-start-2 flex flex-wrap items-center gap-2 text-[length:var(--gs-semantic-type-metadata-size)] leading-[var(--gs-semantic-type-metadata-line)] text-[var(--gs-semantic-text-secondary)]">
               <Badge variant={step.pr.state === 'OPEN' ? 'secondary' : 'outline'}>
                 {step.pr.draft ? 'draft' : step.pr.state.toLowerCase()}
               </Badge>
               <span>
                 #{step.pr.number} · {step.pr.head} → {step.pr.base}
               </span>
-            </span>
+              <OperationFacts
+                facts={[
+                  {
+                    label: 'Provider head OID',
+                    value: step.pr.headOid ?? 'Unknown; not inferred',
+                    code: true,
+                  },
+                  {
+                    label: 'Provider base OID',
+                    value: step.pr.baseOid ?? 'Unknown; not inferred',
+                    code: true,
+                  },
+                  { label: 'Checks', value: step.pr.checks },
+                  { label: 'Review decision', value: step.pr.reviewDecision ?? 'Unknown' },
+                  { label: 'Merge state', value: step.pr.mergeState ?? 'Unknown' },
+                ]}
+              />
+            </div>
           ) : null}
         </li>
       ))}
@@ -411,6 +465,7 @@ const mergeLayerPresentation: Record<
   pending: { label: 'running', tone: 'info' },
   merged: { label: 'merged', tone: 'success' },
   enqueued: { label: 'enqueued', tone: 'info' },
+  unconfirmed: { label: 'outcome unconfirmed', tone: 'warning' },
   'not-requested': { label: 'not requested', tone: 'info' },
   'not-merged': { label: 'not merged', tone: 'warning' },
   failed: { label: 'failed', tone: 'danger' },

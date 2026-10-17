@@ -1,3 +1,8 @@
+import { executeNativeOperation } from './native-operation'
+import { executeWorktreeLifecycle } from './worktree-lifecycle'
+import { recordOperationResult } from './operation-authority'
+import { validateOperationEffect } from './inspection-context'
+import type { InspectionWorktreeStatus } from '@git-stacks/shared/inspection'
 import { spawn } from 'node:child_process'
 
 import * as path from 'node:path'
@@ -120,6 +125,8 @@ import {
 import {
   getGitHubData,
   getGitHubIssues,
+  withTrackedPullRequests,
+  retireTrackedGitHubPayloads,
   unavailableGitHubResult,
   type GitHubResult,
 } from './github'
@@ -131,6 +138,7 @@ import {
   recoverStaleBranchLocks,
   runStackAction,
   validateStackAction,
+  skipStackOperation,
 } from './stacks'
 import { buildReconciliationReport } from './reconciliation'
 
@@ -204,6 +212,26 @@ function validateAction(value: unknown): GitAction {
   }
 
   switch (value.type) {
+    case 'unregisterWorktrees':
+      throw new Error(
+        'Registration changes require the captured main-process registration authority.',
+      )
+    case 'executeNativeOperation':
+      if (value.confirmed !== true)
+        throw new Error('Native membership change confirmation is required.')
+      return {
+        type: 'executeNativeOperation',
+        token: requireString(value.token, 'native preview token', 256),
+        confirmed: true,
+      }
+    case 'executeWorktreeLifecycle':
+      if (value.coordinationConfirmed !== true)
+        throw new Error('External-tool coordination confirmation is required.')
+      return {
+        type: 'executeWorktreeLifecycle',
+        token: requireString(value.token, 'lifecycle preview token', 256),
+        coordinationConfirmed: true,
+      }
     case 'switch':
       if (value.carry !== undefined && typeof value.carry !== 'boolean')
         throw new Error('carry must be a boolean')
@@ -686,14 +714,32 @@ if [ "$1" = "prepared" ]; then
   matched=false
   mismatch=false
   unexpected=false
+  target_new=
+  companion=false
+  companion_old=
+  companion_new=
   while IFS=' ' read -r old new ref; do
     if [ "$ref" = "$GIT_STACKS_EXPECTED_HEAD_REF" ]; then
       matched=true
+      if [ -n "$target_new" ]; then unexpected=true; fi
+      target_new=$new
       if [ "$old" != "$GIT_STACKS_EXPECTED_HEAD_OLD" ]; then mismatch=true; fi
-    elif [ "\${ref#refs/heads/}" != "$ref" ] || { [ "$ref" = "HEAD" ] && [ "$GIT_STACKS_EXPECTED_HEAD_REF" != "HEAD" ]; }; then
+    elif [ "$ref" = "HEAD" ]; then
+      if [ "$companion" = true ]; then unexpected=true; fi
+      companion=true
+      companion_old=$old
+      companion_new=$new
+    elif [ "\${ref#refs/}" != "$ref" ]; then
       unexpected=true
     fi
   done < "$input"
+  # Older Git reports the symbolic HEAD alongside its branch; authorize only
+  # the identical old/new pair in this same prepared transaction.
+  if [ "$companion" = true ]; then
+    if [ "$matched" != true ] || [ "$companion_old" != "$GIT_STACKS_EXPECTED_HEAD_OLD" ] || [ "$companion_new" != "$target_new" ]; then
+      unexpected=true
+    fi
+  fi
   if [ "$mismatch" = true ] || [ "$unexpected" = true ]; then
     echo "$GIT_STACKS_EXPECTED_HEAD_ERROR" >&2
     rm -f "$input"
@@ -3336,6 +3382,7 @@ async function replaceCheckedFile(
 
   try {
     await assertParents()
+    await validateOperationEffect()
     await fs.mkdir(stagingDirectory, { mode: 0o700 })
     const stagingInfo = await fs.lstat(stagingDirectory)
     if (stagingInfo.isSymbolicLink() || !stagingInfo.isDirectory()) {
@@ -3348,11 +3395,13 @@ async function replaceCheckedFile(
       const sourceInfo = await fs.stat(sourcePath)
       if (!sourceInfo.isFile()) throw new Error('The replacement path is not a regular file')
       await assertLocations()
+      await validateOperationEffect()
       await fs.copyFile(sourcePath, replacementPath!, fsConstants.COPYFILE_EXCL)
       await assertLocations()
       await fs.chmod(replacementPath!, sourceInfo.mode & 0o777)
     } else if (content !== undefined) {
       await assertLocations()
+      await validateOperationEffect()
       await fs.writeFile(replacementPath!, content, {
         encoding: 'utf8',
         mode: expected.stat ? expected.stat.mode & 0o777 : 0o666,
@@ -3400,6 +3449,7 @@ async function replaceCheckedFile(
     if (originalIdentity) {
       await assertLocations()
       try {
+        await validateOperationEffect()
         await fs.rename(targetPath, backupPath)
         movedOriginal = true
       } catch (error) {
@@ -3432,6 +3482,7 @@ async function replaceCheckedFile(
         throw new Error('A concurrent file appeared during the action')
       }
       try {
+        await validateOperationEffect()
         await fs.link(replacementPath, targetPath)
       } catch (error) {
         if (movedOriginal && (error as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -3455,6 +3506,7 @@ async function replaceCheckedFile(
         throw new Error('The quarantined original changed during the action')
       }
       await assertLocations()
+      await validateOperationEffect()
       await fs.unlink(backupPath)
       movedOriginal = false
     }
@@ -3955,9 +4007,10 @@ export async function getConflictView(
   repoPath: string,
   requestedPath: string,
   toolOverride?: string | null,
+  readOnly = false,
 ): Promise<ConflictFile> {
   const root = await resolveRepository(repoPath)
-  await recoverFileActionJournals(root)
+  if (!readOnly) await recoverFileActionJournals(root)
   const entry = changedEntry(await getStatus(root), requirePathInput(requestedPath, 'path'))
   if (!entry.conflicted) throw new Error('The selected file has no unresolved conflict')
   const relativePath = entry.path
@@ -4142,6 +4195,7 @@ async function stageCheckedConflict(
     await lock.sync()
     await lock.close()
     lock = null
+    await validateOperationEffect()
     await fs.rename(lockPath, indexPath)
     ownsLock = false
   } finally {
@@ -4478,6 +4532,7 @@ export async function runStageHunk(
     if (indexMode !== null) await fs.chmod(tempIndexPath, indexMode)
     await lockHandle.close()
     lockHandle = null
+    await validateOperationEffect()
     await fs.rename(tempIndexPath, realIndexPath)
   } finally {
     if (lockHandle) {
@@ -4682,10 +4737,10 @@ function knownAncestor(
 }
 /**
  * How a snapshot obtains its GitHub half. `live` always asks GitHub, `reuse`
- * renders this repository's last confirmed payload without a request, and
- * `on-failure` asks GitHub but keeps that payload when the answer is lost.
+ * renders qualified confirmed provider knowledge without a metadata request,
+ * `select` reuses it or joins an initial read, and `on-failure` retains it offline.
  */
-export type SnapshotGitHubRemote = 'live' | 'reuse' | 'on-failure'
+export type SnapshotGitHubRemote = 'live' | 'reuse' | 'on-failure' | 'select'
 
 interface ConfirmedGitHubPayload {
   originUrl: string | null
@@ -4709,6 +4764,52 @@ let confirmedReadOrder = 0
 
 const MAX_CONFIRMED_PAYLOADS = 8
 const confirmedPayloads = new Map<string, ConfirmedGitHubPayload>()
+const payloadAuthorities = new Map<string, { originUrl: string | null; key: string }>()
+type RemotePayloadRead = [GitHubResult, { issues: RepositoryIssue[]; message: string }]
+const pendingPayloads = new Map<string, { work: Promise<RemotePayloadRead> }>()
+
+/** Detaches a local selection without cancelling its independently owned provider read. */
+function waitForPayload(
+  work: Promise<RemotePayloadRead>,
+  signal?: AbortSignal,
+): Promise<RemotePayloadRead> {
+  if (!signal) return work
+  const { promise, resolve, reject } = Promise.withResolvers<RemotePayloadRead>()
+  const onAbort = () => {
+    signal.removeEventListener('abort', onAbort)
+    reject(new CommandCancelled())
+  }
+  work.then(
+    (value) => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(value)
+    },
+    (error: unknown) => {
+      signal.removeEventListener('abort', onAbort)
+      reject(error)
+    },
+  )
+  signal.addEventListener('abort', onAbort, { once: true })
+  if (signal.aborted) onAbort()
+  return promise
+}
+
+async function payloadAuthority(originUrl: string | null): Promise<string | null> {
+  const remote = parseRemote(originUrl)
+  const host = remoteHostContext(remote)
+  if (!remote || !host) return null
+  try {
+    const authority = await hostTransport(host).credentialAuthority()
+    return JSON.stringify([
+      host.host,
+      remote.fullName.toLowerCase(),
+      authority,
+      confirmedPayloadGeneration,
+    ])
+  } catch {
+    return null
+  }
+}
 
 /**
  * The generation of the credential these confirmed payloads belong to. A
@@ -4727,6 +4828,9 @@ let confirmedPayloadGeneration = 0
 export function retireConfirmedGitHubPayloads(): void {
   confirmedPayloadGeneration += 1
   confirmedPayloads.clear()
+  retireTrackedGitHubPayloads()
+  payloadAuthorities.clear()
+  pendingPayloads.clear()
 }
 
 /**
@@ -4766,19 +4870,71 @@ export function confirmedGitHubPayload(
   root: string,
   originUrl?: string | null,
 ): ConfirmedGitHubPayload | null {
-  const cached = confirmedPayloads.get(root) ?? null
+  const binding = payloadAuthorities.get(root)
+  if (!binding || (originUrl !== undefined && binding.originUrl !== originUrl)) return null
+  const cached = confirmedPayloads.get(binding.key) ?? null
   if (!cached) return null
   // A payload a replaced credential confirmed is not an answer for this one.
   if (cached.generation !== confirmedPayloadGeneration) {
-    confirmedPayloads.delete(root)
-    return null
-  }
-  if (originUrl !== undefined && cached.originUrl !== originUrl) {
-    confirmedPayloads.delete(root)
+    confirmedPayloads.delete(binding.key)
     return null
   }
   return cached
 }
+async function classifyInspectionFiles(root: string, files: ChangedFile[]) {
+  if (!files.length) return
+  const classification = [
+    getIndexEntries(
+      root,
+      files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
+    ),
+    getHeadGitlinks(
+      root,
+      files.map((file) => file.path),
+    ),
+  ] as const
+  const [indexEntries, headGitlinks] = await Promise.all(classification).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(classification)
+      throw error
+    },
+  )
+  for (const file of files) {
+    const entry = indexEntries.get(file.path)
+    if (entry?.submodule || headGitlinks.has(file.path)) file.submodule = true
+    if (entry?.sparseExcluded) file.sparseExcluded = true
+  }
+}
+
+/** Selected-directory status never assembles a branch graph or starts journal recovery. */
+export async function getWorktreeInspectionStatus(
+  repoPath: string,
+  signal?: AbortSignal,
+): Promise<InspectionWorktreeStatus> {
+  const root = await resolveRepository(repoPath, signal)
+  const reads = [
+    listStatus(root, signal),
+    getCurrentBranch(root, signal),
+    currentHeadOid(root, signal),
+  ] as const
+  const [status, currentBranch, headOid] = await Promise.all(reads).catch(
+    async (error: unknown) => {
+      await Promise.allSettled(reads)
+      throw error
+    },
+  )
+  await classifyInspectionFiles(root, status.files)
+  signal?.throwIfAborted()
+  return {
+    path: root,
+    currentBranch,
+    headOid,
+    files: status.files,
+    filesTruncated: status.truncated,
+    observedAt: new Date().toISOString(),
+  }
+}
+
 export async function getSnapshot(
   repoPath: string,
   signal?: AbortSignal,
@@ -4790,6 +4946,7 @@ export async function getSnapshot(
   // nothing and found its confirmed answer had been retired, so it consults no
   // confirmed payload at all and is assembled from the local work alone.
   localOnly = false,
+  readOnly = false,
 ): Promise<RepositorySnapshot> {
   // Claimed on entry, not at the GitHub read: local Git work differs per read,
   // so arrival at the request is not the order the reads began in.
@@ -4800,9 +4957,11 @@ export async function getSnapshot(
   const generation = confirmedPayloadGeneration
 
   const root = await resolveRepository(repoPath, signal)
-  await recoverStashDropForRepository(root)
-  await recoverFileActionJournals(root)
-  await recoverStaleBranchLocks(root)
+  if (!readOnly) {
+    await recoverStashDropForRepository(root)
+    await recoverFileActionJournals(root)
+    await recoverStaleBranchLocks(root)
+  }
   const capabilities = await getRepositoryCapabilities(root)
   // A bare repository has no index to compare against a worktree.
   const noWorkingTree = { files: [] as ChangedFile[], truncated: false }
@@ -4862,27 +5021,7 @@ export async function getSnapshot(
   // The index and the HEAD tree are independent reads, so they run together
   // rather than one after the other. A rejected read must not leave its sibling
   // running, so every read is awaited before the rejection escapes.
-  const classification = [
-    getIndexEntries(
-      root,
-      files.flatMap((file) => (file.originalPath ? [file.path, file.originalPath] : [file.path])),
-    ),
-    getHeadGitlinks(
-      root,
-      files.map((file) => file.path),
-    ),
-  ] as const
-  const [indexEntries, headGitlinks] = await Promise.all(classification).catch(
-    async (error: unknown) => {
-      await Promise.allSettled(classification)
-      throw error
-    },
-  )
-  for (const file of files) {
-    const entry = indexEntries.get(file.path)
-    if (entry?.submodule || headGitlinks.has(file.path)) file.submodule = true
-    if (entry?.sparseExcluded) file.sparseExcluded = true
-  }
+  await classifyInspectionFiles(root, files)
 
   const localRefs = refs.filter((ref) => ref.refname.startsWith('refs/heads/') && !ref.symref)
   const remoteRefs = refs.filter((ref) => ref.refname.startsWith('refs/remotes/') && !ref.symref)
@@ -4931,6 +5070,18 @@ export async function getSnapshot(
   // itself, which is what the person asked of it and the only thing this app can
   // show without an account. That also means it cannot be overtaken the same way
   // again: there is nothing here for a second replacement to take away.
+  const authority = localOnly ? null : await payloadAuthority(originUrl)
+  if (authority) {
+    payloadAuthorities.delete(root)
+    payloadAuthorities.set(root, { originUrl, key: authority })
+    while (payloadAuthorities.size > MAX_CONFIRMED_PAYLOADS) {
+      const oldest = payloadAuthorities.keys().next()
+      if (oldest.done) break
+      payloadAuthorities.delete(oldest.value)
+    }
+  } else {
+    payloadAuthorities.delete(root)
+  }
   const confirmed = localOnly ? null : confirmedGitHubPayload(root, originUrl)
   // The generation this payload was confirmed under, read beside it and not at
   // the read's entry: this read may have outlived one credential already, and the
@@ -4943,26 +5094,67 @@ export async function getSnapshot(
   // rather than emptying the pull-request and stack workspace.
   // A local refresh ('reuse') must never hit the network, even when no confirmed
   // payload exists yet: it preserves local independence and spends zero GitHub quota.
-  const live =
-    remote === 'reuse'
-      ? null
-      : await Promise.all([
-          getGitHubData(root, originUrl, signal),
-          getGitHubIssues(root, originUrl, signal),
-        ])
+  let live: RemotePayloadRead | null = null
+  if (remote !== 'reuse' && !(remote === 'select' && confirmed)) {
+    const pending = authority && remote === 'select' ? pendingPayloads.get(authority) : undefined
+    if (pending) {
+      live = await waitForPayload(pending.work, signal)
+    } else {
+      let work: Promise<RemotePayloadRead> = Promise.all([
+        getGitHubData(root, originUrl, remote === 'select' ? undefined : signal, false),
+        getGitHubIssues(root, originUrl, remote === 'select' ? undefined : signal),
+      ])
+      // Selection owns only its local read, never a shared provider request.
+      // Scheduled refresh and preflight retain their own cancellable live read.
+      if (remote === 'select') {
+        // Confirmation belongs to the provider work, not its first local waiter.
+        // Keep its sequence and credential fence even if every selection detaches.
+        work = work
+          .then(async (payload) => {
+            if (authority && authority !== (await payloadAuthority(originUrl)))
+              throw new CommandCancelled()
+            if (payload[0].available) {
+              rememberConfirmedPayload(
+                authority ?? root,
+                {
+                  originUrl,
+                  data: payload[0],
+                  issues:
+                    payload[1].message === '' ? payload[1] : (confirmed?.issues ?? payload[1]),
+                  fetchedAt: confirmedAt,
+                  read,
+                  generation,
+                },
+                generation,
+              )
+            }
+            return payload
+          })
+          .finally(() => {
+            if (authority && pendingPayloads.get(authority)?.work === work)
+              pendingPayloads.delete(authority)
+          })
+      }
+      if (authority && remote === 'select' && pendingPayloads.size < MAX_CONFIRMED_PAYLOADS) {
+        pendingPayloads.set(authority, { work })
+      }
+      live = remote === 'select' ? await waitForPayload(work, signal) : await work
+    }
+    if (authority && authority !== (await payloadAuthority(originUrl))) throw new CommandCancelled()
+  }
   const answered = live !== null && live[0].available
   // The inbox is a second read with its own outcome. A pull-request answer
   // says nothing about it: an issue read that failed carries its reason in its
   // message, and an empty list is then unknown, not "there are no issues".
   const issuesAnswered = live !== null && live[1].message === ''
-  if (answered) {
+  if (remote !== 'select' && live !== null && answered) {
     // A failed issue read never becomes the confirmed inbox, so the last
     // confirmed one survives a refresh that could not reach the issues. The
     // generation is this read's own: a credential replaced while it ran means
     // these answers describe pull requests and issues that are not this
     // account's, so nothing about them is kept.
     rememberConfirmedPayload(
-      root,
+      authority ?? root,
       {
         originUrl,
         data: live[0],
@@ -4984,13 +5176,22 @@ export async function getSnapshot(
   const fallbackIssues = confirmed
     ? confirmed.issues
     : { issues: [] as RepositoryIssue[], message: '' }
-  const github = answered
-    ? live![0]
-    : mayFallBack
-      ? fallbackData
-      : live
-        ? live[0]
-        : unavailableGitHubResult('GitHub could not be read')
+  const providerData =
+    live !== null && answered
+      ? live[0]
+      : mayFallBack
+        ? fallbackData
+        : live
+          ? live[0]
+          : unavailableGitHubResult('GitHub could not be read')
+  const github = await withTrackedPullRequests(
+    root,
+    originUrl,
+    providerData,
+    signal,
+    answered,
+    mayFallBack,
+  )
   // Without a confirmed inbox, keep the issues last confirmed and say why this
   // read could not refresh them, rather than passing off an empty list as one.
   const issueData =
@@ -5001,18 +5202,23 @@ export async function getSnapshot(
           ? live[1]
           : fallbackIssues
       : live[1]
-  const githubFailure = live === null ? null : (live[0].failure ?? null)
-  const githubStale: RepositorySnapshot['githubStale'] = answered
-    ? null
-    : {
-        reason:
-          mayFallBack && confirmed
-            ? remote === 'reuse'
-              ? 'A GitHub refresh is not due yet; showing the last confirmed state'
-              : 'GitHub could not be read; showing the last confirmed state'
-            : github.message,
-        fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
-      }
+  const githubFailure = github.failure ?? (live === null ? null : (live[0].failure ?? null))
+  const githubStale: RepositorySnapshot['githubStale'] =
+    answered && github.available
+      ? null
+      : {
+          reason:
+            !github.available && answered
+              ? github.message
+              : mayFallBack && confirmed
+                ? live === null
+                  ? remote === 'select'
+                    ? 'Showing qualified provider knowledge from the last confirmed read'
+                    : 'A GitHub refresh is not due yet; showing the last confirmed state'
+                  : 'GitHub could not be read; showing the last confirmed state'
+                : github.message,
+          fetchedAt: confirmed?.fetchedAt ?? confirmedAt,
+        }
   const localPullRequests = new Map<string, PullRequest>()
   github.pullRequests.forEach((pullRequest, index) => {
     if (github.sameRepository(index) && !localPullRequests.has(pullRequest.head)) {
@@ -5133,6 +5339,7 @@ export async function getSnapshot(
     return true
   })
   for (const branch of branches) {
+    branch.parentRef = parentOf(branch)?.refname ?? null
     if (branch.parent && !parentOf(branch)) branch.needsRestack = Boolean(branch.parentTip)
   }
   const behind = takeBudget(comparable)
@@ -5235,6 +5442,9 @@ export async function getSnapshot(
   snapshot.reconciliation = await buildReconciliationReport(root, snapshot, configParents)
   if (signal?.aborted) throw new CommandCancelled()
   if (staleCredential()) throw new CommandCancelled()
+  if ((await getOriginUrl(root, signal)) !== originUrl) throw new CommandCancelled()
+  const authorityRetired = authority !== null && authority !== (await payloadAuthority(originUrl))
+  if (live !== null && authorityRetired) throw new CommandCancelled()
   // The account behind a confirmed payload can also be replaced while that last
   // local report was being built. Retirement drops the payload, and a payload
   // already read into this snapshot cannot be recalled: the accessor refused a
@@ -5249,7 +5459,7 @@ export async function getSnapshot(
     !localOnly &&
     live === null &&
     confirmed !== null &&
-    confirmedGeneration !== confirmedPayloadGeneration
+    (confirmedGeneration !== confirmedPayloadGeneration || authorityRetired)
   ) {
     // The payload this read would hand over was confirmed by an account that has
     // since been replaced, and an answer already taken cannot be recalled by
@@ -5259,7 +5469,7 @@ export async function getSnapshot(
     // assembled once, with the replaced account's answers never consulted. A
     // commit that succeeded is not undone by an account changing while it was
     // measured, and the retry reads it for itself exactly once.
-    return getSnapshot(repoPath, signal, branchBudget, 'reuse', true)
+    return getSnapshot(repoPath, signal, branchBudget, 'reuse', true, readOnly)
   }
   return snapshot
 }
@@ -5481,7 +5691,8 @@ async function ensureStackWriteAllowed(repoPath: string, action: GitAction): Pro
     action.type === 'resolveConflict' ||
     action.type === 'conflictMergeTool' ||
     action.type === 'stackContinue' ||
-    action.type === 'stackAbort'
+    action.type === 'stackAbort' ||
+    action.type === 'operationSkip'
   ) {
     return
   }
@@ -5816,6 +6027,22 @@ export async function runAction(
     }
     await ensureStackWriteAllowed(root, action)
     switch (action.type) {
+      case 'unregisterWorktrees':
+        throw new Error(
+          'Registration changes require the captured main-process registration authority.',
+        )
+      case 'executeNativeOperation':
+        return executeNativeOperation(root, action.token, action.confirmed)
+      case 'executeWorktreeLifecycle': {
+        const worktreeLifecycle = await executeWorktreeLifecycle(
+          root,
+          action.token,
+          action.coordinationConfirmed,
+          (progress) =>
+            recordOperationResult({ message: progress.message, worktreeLifecycle: progress }),
+        )
+        return { message: worktreeLifecycle.message, worktreeLifecycle }
+      }
       case 'stage':
       case 'unstage':
         return runStage(root, action.type, action.paths)
@@ -5882,7 +6109,9 @@ export async function runAction(
       case 'operationContinue':
         return runOperation(root, 'continue')
       case 'operationSkip':
-        return runOperation(root, 'skip')
+        return (await getStackProgress(root))
+          ? skipStackOperation(root)
+          : runOperation(root, 'skip')
       case 'operationAbort':
         return runOperation(root, 'abort')
       case 'discardFile':

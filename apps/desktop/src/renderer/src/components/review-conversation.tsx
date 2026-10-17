@@ -1,15 +1,18 @@
+import type { ReviewComposerDraft } from '@git-stacks/shared/review-threads'
 import * as React from 'react'
 import { useForm, useSelector, type ReactFormExtendedApi } from '@tanstack/react-form'
 import { useMutation } from '@tanstack/react-query'
 import { CheckCircle2, CircleDot, MessageSquarePlus, Trash2, TriangleAlert } from 'lucide-react'
 
 import type { ReviewFileSet, ReviewLineRef } from '@git-stacks/shared/review'
+import { sameReviewComparison } from '@git-stacks/shared/review'
 import type {
   ReviewDraft,
   ReviewDraftRecord,
   ReviewDraftResolution,
   ReviewEvent,
   ReviewPermissions,
+  ReviewOwner,
   ReviewThread,
   ReviewThreadRead,
 } from '@git-stacks/shared/review-threads'
@@ -116,14 +119,7 @@ function isUncertainOutcome(cause: unknown): boolean {
   return name === 'ReviewOutcomeUnknownError' || name === 'ReviewWriteUncertainError'
 }
 
-/**
- * What one submit carries that no draft holds: the decision and its summary.
- * Draft journals stay repository-owned; active editor values stay local.
- */
 type ReviewSubmitValues = { event: ReviewEvent; summary: string }
-
-/** A fresh review: a plain comment with no words of its own yet. */
-const REVIEW_SUBMIT_DEFAULTS: ReviewSubmitValues = { event: 'COMMENT', summary: '' }
 
 /** The submit form as it reaches the bar that renders its fields. */
 type ReviewSubmitForm = ReactFormExtendedApi<
@@ -154,6 +150,8 @@ export interface ReviewConversationProps {
   onSelect: (selection: ReviewSelection) => void
   onClearSelection: () => void
   onDraftChange: (drafts: ReviewDraft[]) => void
+  onComposerChange: (composer: ReviewComposerDraft) => void
+  canCompose: boolean
   onReload: () => void
   frozenReason?: string | null
 }
@@ -172,6 +170,8 @@ export function ReviewConversation({
   onClearSelection,
   onDraftChange,
   onReload,
+  onComposerChange,
+  canCompose,
   frozenReason = null,
 }: ReviewConversationProps) {
   const [error, setError] = React.useState<string | null>(null)
@@ -221,12 +221,33 @@ export function ReviewConversation({
   // this component's own state as well as the backend's: while it is set, the
   // button stays dead even though the drafts and the error are still here.
   const [uncertain, setUncertain] = React.useState(false)
+  const composerEdited = React.useRef(false)
+  const composer = getDrafts()?.composer
+  const persistComposer = () => {
+    composerEdited.current = true
+    const previous = getDrafts()?.composer
+    const summary = form.getFieldValue('summary')
+    const event = form.getFieldValue('event')
+    onComposerChange({
+      id:
+        previous && previous.summary === summary && previous.event === event
+          ? previous.id
+          : newReviewDraftId(),
+      summary,
+      event,
+      replies: previous?.replies ?? [],
+    })
+  }
 
   const form: ReviewSubmitForm = useForm({
-    defaultValues: REVIEW_SUBMIT_DEFAULTS,
+    defaultValues: { summary: composer?.summary ?? '', event: composer?.event ?? 'COMMENT' },
     onSubmit: async ({ value, formApi }): Promise<void> => {
       const pending = (getDrafts()?.drafts ?? []).filter((draft) => draft.body.trim() !== '')
-      if (!desktop?.reviewSubmit || pending.length === 0) return
+      if (
+        !desktop?.reviewSubmit ||
+        (pending.length === 0 && value.event === 'COMMENT' && value.summary.trim() === '')
+      )
+        return
       if (blockedByStale || uncertain || Boolean(frozenReason) || submitLock.current) return
       if (!files) {
         setError('The diff has to be loaded before a review can be sent.')
@@ -237,25 +258,35 @@ export function ReviewConversation({
       setNotice(null)
       try {
         const result = await submitMutation.mutateAsync({
+          repo: getDrafts()!.repo,
+          viewer: getDrafts()!.viewer,
           event: value.event,
           body: value.summary,
+          compositionId: getDrafts()?.composer?.id,
           // The whole intended review, including anything the backend will refuse.
           // It decides atomicity itself; the view must not decide it by omission.
           drafts: pending,
           // The comparison the diff on screen was read at, so a pull request that
           // moved since is refused rather than re-anchored onto a new revision.
-          comparison: files.comparison,
+          comparison: getDrafts()?.comparison ?? files.comparison,
         })
         if (!live.current) return
         setUncertain(false)
-        // Only the summary that reached GitHub is retired. A refused write keeps
-        // the body in the box so it can be corrected and sent again.
-        formApi.setFieldValue('summary', '')
+        const confirmed = result.deliveredComposition
+        const cleared =
+          confirmed !== undefined &&
+          confirmed.id === getDrafts()?.composer?.id &&
+          confirmed.summary === value.summary &&
+          confirmed.event === value.event
+        if (cleared) {
+          formApi.setFieldValue('summary', '')
+          formApi.setFieldValue('event', 'COMMENT')
+        }
         onReload()
         setNotice(
-          `Sent one ${REVIEW_EVENT_LABELS[value.event].toLowerCase()} review with ${intended.length} comment${
-            intended.length === 1 ? '' : 's'
-          }${result.state ? `; GitHub recorded it as ${result.state}` : ''}.`,
+          cleared
+            ? `GitHub confirmed this ${REVIEW_EVENT_LABELS[value.event].toLowerCase()} review${result.state ? ` as ${result.state}` : ''}.`
+            : 'Recovered confirmed earlier review content. Your newer overall summary and decision remain unsent.',
         )
       } catch (cause) {
         if (!live.current) return
@@ -269,6 +300,11 @@ export function ReviewConversation({
       }
     },
   })
+  React.useEffect(() => {
+    if (composerEdited.current) return
+    form.setFieldValue('summary', composer?.summary ?? '')
+    form.setFieldValue('event', composer?.event ?? 'COMMENT')
+  }, [composer, form])
   const sending = submitMutation.isPending
 
   // Draft identities are minted where a draft is composed, not derived from
@@ -330,7 +366,7 @@ export function ReviewConversation({
         drafts={draftList}
         byId={byId}
         staleCount={stale.length}
-        disabled={sending || Boolean(frozenReason)}
+        disabled={sending}
         onChangeBody={(id, body) =>
           onDraftChange(
             (getDrafts()?.drafts ?? []).map((draft) =>
@@ -345,6 +381,8 @@ export function ReviewConversation({
 
       <SubmitBar
         form={form}
+        onComposerEdit={persistComposer}
+        canCompose={canCompose}
         permissions={permissions}
         intendedCount={intended.length}
         staleCount={stale.length}
@@ -370,6 +408,9 @@ export function ReviewConversation({
         error={readError}
         onReload={onReload}
         onSelect={onSelect}
+        saved={getDrafts()}
+        onComposerChange={onComposerChange}
+        canCompose={canCompose}
       />
     </section>
   )
@@ -521,12 +562,16 @@ function SubmitBar({
   intendedCount,
   staleCount,
   uncertain,
+  onComposerEdit,
+  canCompose,
 }: {
   form: ReviewSubmitForm
   permissions: ReviewPermissions | null
   intendedCount: number
   staleCount: number
   uncertain: boolean
+  onComposerEdit: () => void
+  canCompose: boolean
 }) {
   const busy = useSelector(form.store, (state) => state.isSubmitting)
   const summaryReasonId = React.useId()
@@ -566,7 +611,9 @@ function SubmitBar({
               // going dead.
               const disabled =
                 busy ||
-                intendedCount === 0 ||
+                (intendedCount === 0 &&
+                  event.state.value === 'COMMENT' &&
+                  summary.state.value.trim() === '') ||
                 blocked !== null ||
                 summaryProblem !== null ||
                 staleCount > 0 ||
@@ -578,8 +625,10 @@ function SubmitBar({
                   : (summaryProblem ??
                     (staleCount > 0
                       ? `${staleCount} pending comment${staleCount === 1 ? '' : 's'} no longer names a line in this diff, so the whole review is held. Reopen it or remove ${staleCount === 1 ? 'it' : 'them'} first.`
-                      : intendedCount === 0
-                        ? 'Write at least one pending comment first.'
+                      : intendedCount === 0 &&
+                          event.state.value === 'COMMENT' &&
+                          summary.state.value.trim() === ''
+                        ? 'Write a review summary or pending comment first.'
                         : `Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one ${
                             REVIEW_EVENT_LABELS[event.state.value]
                           } review.`)))
@@ -591,10 +640,13 @@ function SubmitBar({
                       aria-label="Review summary"
                       aria-describedby={summaryReasonId}
                       aria-invalid={summaryProblem !== null}
-                      disabled={busy}
+                      disabled={busy || !canCompose}
                       name={summary.name}
                       onBlur={summary.handleBlur}
-                      onChange={(changeEvent) => summary.handleChange(changeEvent.target.value)}
+                      onChange={(changeEvent) => {
+                        summary.handleChange(changeEvent.target.value)
+                        onComposerEdit()
+                      }}
                       placeholder="Optional for a comment; required when requesting changes."
                       rows={2}
                       value={summary.state.value}
@@ -607,6 +659,7 @@ function SubmitBar({
                       // The group is string-typed, so the cast is narrowed back
                       // to the three decisions the radio rows actually offer.
                       event.handleChange(next as ReviewEvent)
+                      onComposerEdit()
                     }}
                     value={event.state.value}
                   >
@@ -618,7 +671,7 @@ function SubmitBar({
                             'review-submit-event',
                             candidateReason && 'review-submit-event-blocked',
                           )}
-                          disabled={busy}
+                          disabled={busy || !canCompose}
                           key={candidate}
                           title={candidateReason ?? REVIEW_EVENT_LABELS[candidate]}
                           value={candidate}
@@ -630,14 +683,13 @@ function SubmitBar({
                   </RadioGroup>
                   <Button
                     disabled={disabled}
+                    loading={busy}
                     size="sm"
                     tooltip={reason}
                     type="submit"
                     variant="accent"
                   >
-                    {busy
-                      ? 'Sending…'
-                      : `Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one review`}
+                    {`Submit ${intendedCount} comment${intendedCount === 1 ? '' : 's'} as one review`}
                   </Button>
                   <p className="review-submit-reason" id={summaryReasonId}>
                     {reason}
@@ -660,6 +712,9 @@ function ThreadList({
   error,
   onReload,
   onSelect,
+  saved,
+  onComposerChange,
+  canCompose,
 }: {
   desktop: DesktopAPI | undefined
   number: number
@@ -668,11 +723,27 @@ function ThreadList({
   error: string | null
   onReload: () => void
   onSelect: (selection: ReviewSelection) => void
+  saved: ReviewDraftRecord | null
+  onComposerChange: (composer: ReviewComposerDraft) => void
+  canCompose: boolean
 }) {
+  const composer = saved?.composer
   const threads = read?.threads.threads ?? []
   const window_ = useListWindow(threads, LIST_PAGE_SIZE)
+  const retainedComparisonChanged = Boolean(
+    saved &&
+      read &&
+      !sameReviewComparison(saved.comparison, read.threads.comparison) &&
+      (saved.drafts.length ||
+        composer?.summary ||
+        (composer?.event && composer.event !== 'COMMENT') ||
+        composer?.replies.length),
+  )
   const [replyFor, setReplyFor] = React.useState<string | null>(null)
   const queryIdentity = React.useContext(ReviewQueryIdentity)
+  const replyEdited = React.useRef(false)
+  const [discardFor, setDiscardFor] = React.useState<string | null>(null)
+  const [copyNotice, setCopyNotice] = React.useState<string | null>(null)
   const actionLock = React.useRef(false)
   const live = React.useRef(true)
   React.useEffect(() => {
@@ -683,17 +754,24 @@ function ThreadList({
   }, [])
   const replyMutation = useMutation({
     mutationKey: [...queryIdentity, 'reply', read?.threads.comparison],
-    mutationFn: ({ threadId, body }: { threadId: string; body: string }) =>
-      desktop!.reviewReply!(number, threadId, body),
+    mutationFn: ({
+      threadId,
+      body,
+      owner,
+    }: {
+      threadId: string
+      body: string
+      owner: ReviewOwner
+    }) => desktop!.reviewReply!(number, threadId, body, owner),
     retry: false,
   })
   const resolveMutation = useMutation({
     mutationKey: [...queryIdentity, 'resolve', read?.threads.comparison],
-    mutationFn: (thread: ReviewThread) =>
-      desktop!.reviewSetResolved!(number, thread.id, !thread.resolved),
+    mutationFn: ({ thread, owner }: { thread: ReviewThread; owner: ReviewOwner }) =>
+      desktop!.reviewSetResolved!(number, thread.id, !thread.resolved, owner),
     retry: false,
   })
-  const busy = resolveMutation.isPending ? (resolveMutation.variables?.id ?? null) : null
+  const busy = resolveMutation.isPending ? (resolveMutation.variables?.thread.id ?? null) : null
   const [actionError, setActionError] = React.useState<string | null>(null)
 
   // Threads whose last write left GitHub's answer unknown. A reply is its own
@@ -706,11 +784,25 @@ function ThreadList({
     onSubmitMeta: { threadId: '' },
     onSubmit: async ({ value, formApi, meta }): Promise<void> => {
       const threadId = meta.threadId
-      if (!desktop?.reviewReply || uncertain.has(threadId) || actionLock.current) return
+      if (
+        !desktop?.reviewReply ||
+        !canCompose ||
+        state !== 'ready' ||
+        !threads.some((thread) => thread.id === threadId && thread.viewerCanReply) ||
+        (saved?.composer?.replies.some((reply) => reply.threadId === threadId) &&
+          (!read ||
+            !sameReviewComparison(saved.comparison, read.threads.comparison) ||
+            saved.repo !== read.owner.repo ||
+            saved.viewer !== read.owner.viewer)) ||
+        !read?.owner.viewer ||
+        uncertain.has(threadId) ||
+        actionLock.current
+      )
+        return
       actionLock.current = true
       setActionError(null)
       try {
-        await replyMutation.mutateAsync({ threadId, body: value.body })
+        await replyMutation.mutateAsync({ threadId, body: value.body, owner: read.owner })
         if (!live.current) return
         // Only what GitHub accepted is cleared: a refused write keeps the words
         // in the box so the same reply can be corrected and sent again.
@@ -728,14 +820,165 @@ function ThreadList({
       }
     },
   })
+  React.useEffect(() => {
+    if (!canCompose || !replyFor || replyEdited.current) return
+    replyForm.setFieldValue(
+      'body',
+      composer?.replies.find((reply) => reply.threadId === replyFor)?.body ?? '',
+    )
+  }, [canCompose, composer, replyFor, replyForm])
+
+  const changeReply = (threadId: string, body: string) => {
+    replyEdited.current = true
+    onComposerChange({
+      id: composer?.id ?? newReviewDraftId(),
+      summary: composer?.summary ?? '',
+      event: composer?.event ?? 'COMMENT',
+      replies: [
+        ...(composer?.replies ?? []).filter((reply) => reply.threadId !== threadId),
+        { threadId, body },
+      ],
+    })
+  }
+
   const replying = replyMutation.isPending
+  const retainedReplies =
+    saved && composer?.replies.length ? (
+      <section aria-label="Saved unsent thread replies">
+        <strong>Saved unsent replies</strong>
+        <p className="code-region-meta">
+          Saved by {saved.viewer} in {saved.repo} · head{' '}
+          {saved.comparison.headOid?.slice(0, 8) ?? 'unknown'} · base{' '}
+          {saved.comparison.baseOid?.slice(0, 8) ?? 'unknown'}. Text stays on its original thread
+          and comparison.
+        </p>
+        <ul className="review-thread-list">
+          {composer.replies.map((reply) => {
+            const visible =
+              state === 'ready' && window_.visible.some((thread) => thread.id === reply.threadId)
+            const confirmed =
+              state === 'ready' && threads.some((thread) => thread.id === reply.threadId)
+            return (
+              <li className="review-thread" key={reply.threadId}>
+                <strong>Thread {reply.threadId}</strong>
+                {!confirmed ? (
+                  <p className="code-region-meta">
+                    GitHub has not confirmed this thread in the current read. Sending is
+                    unavailable; retained text can still be copied, edited, or explicitly discarded.
+                  </p>
+                ) : !read || !sameReviewComparison(saved.comparison, read.threads.comparison) ? (
+                  <p className="code-region-meta">
+                    This reply retains an earlier comparison. It will not be moved to the current
+                    revision.
+                  </p>
+                ) : null}
+                {replyFor === reply.threadId && !visible ? (
+                  <replyForm.Field name="body">
+                    {(body) => (
+                      <Textarea
+                        aria-label={`Retained reply to thread ${reply.threadId}`}
+                        disabled={!canCompose || replying}
+                        onBlur={body.handleBlur}
+                        onChange={(event) => {
+                          body.handleChange(event.target.value)
+                          changeReply(reply.threadId, event.target.value)
+                        }}
+                        rows={3}
+                        value={body.state.value}
+                      />
+                    )}
+                  </replyForm.Field>
+                ) : replyFor !== reply.threadId ? (
+                  <Textarea
+                    aria-label={`Saved reply to thread ${reply.threadId}`}
+                    readOnly
+                    rows={3}
+                    value={reply.body}
+                  />
+                ) : null}
+                <div className="review-thread-actions">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!canCompose || replying}
+                    onClick={() => {
+                      replyEdited.current = false
+                      replyForm.setFieldValue('body', reply.body)
+                      setReplyFor(reply.threadId)
+                    }}
+                  >
+                    Edit saved reply
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(reply.body)
+                        setCopyNotice('Saved reply copied.')
+                      } catch {
+                        setCopyNotice(
+                          'Clipboard unavailable. Select and copy the retained reply text.',
+                        )
+                      }
+                    }}
+                  >
+                    Copy saved reply
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={!canCompose || replying}
+                    onClick={() => setDiscardFor(reply.threadId)}
+                  >
+                    Discard saved reply
+                  </Button>
+                </div>
+                {discardFor === reply.threadId ? (
+                  <div role="group" aria-label={`Confirm discard for thread ${reply.threadId}`}>
+                    <p>
+                      Discard this unsent reply from {saved.viewer} in {saved.repo}, on its original
+                      head and base? No GitHub comment is removed.
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={!canCompose || replying}
+                      onClick={() => {
+                        onComposerChange({
+                          ...composer,
+                          replies: composer.replies.filter(
+                            (entry) => entry.threadId !== reply.threadId,
+                          ),
+                        })
+                        if (replyFor === reply.threadId) {
+                          setReplyFor(null)
+                          replyForm.resetField('body')
+                        }
+                        setDiscardFor(null)
+                      }}
+                    >
+                      Confirm discard saved reply
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setDiscardFor(null)}>
+                      Cancel
+                    </Button>
+                  </div>
+                ) : null}
+              </li>
+            )
+          })}
+        </ul>
+        {copyNotice ? <p role="status">{copyNotice}</p> : null}
+      </section>
+    ) : null
 
   const toggleResolved = async (thread: ReviewThread) => {
-    if (!desktop?.reviewSetResolved || actionLock.current) return
+    if (!desktop?.reviewSetResolved || !read?.owner.viewer || actionLock.current) return
     actionLock.current = true
     setActionError(null)
     try {
-      await resolveMutation.mutateAsync(thread)
+      await resolveMutation.mutateAsync({ thread, owner: read.owner })
       if (live.current) onReload()
     } catch (cause) {
       if (live.current) setActionError(readableError(cause))
@@ -746,14 +989,18 @@ function ThreadList({
 
   if (state === 'loading') {
     return (
-      <p className="section-empty" role="status">
-        Loading the conversation from GitHub…
-      </p>
+      <>
+        {retainedReplies}
+        <p className="section-empty" role="status">
+          Loading the conversation from GitHub…
+        </p>
+      </>
     )
   }
   if (state === 'failed' || !read) {
     return (
       <div className="review-conversation-threads">
+        {retainedReplies}
         <p className="section-empty">
           {error ?? 'The conversation could not be read from GitHub.'}
         </p>
@@ -766,6 +1013,7 @@ function ThreadList({
 
   return (
     <div className="review-conversation-threads">
+      {retainedReplies}
       <div className="review-conversation-threads-head">
         <strong>Submitted</strong>
         {read.threads.truncated ? (
@@ -780,7 +1028,11 @@ function ThreadList({
         </InlineAlert>
       ) : null}
       {threads.length === 0 ? (
-        <p className="section-empty">GitHub holds no review comments on this pull request yet.</p>
+        <p className="section-empty">
+          {read.threads.truncated || read.threads.totalCount > 0
+            ? 'No submitted threads were returned in this incomplete read. It does not establish that the conversation is empty.'
+            : 'GitHub holds no review comments on this pull request yet.'}
+        </p>
       ) : (
         <>
           <ul className="review-thread-list" aria-label="Submitted review threads">
@@ -802,7 +1054,11 @@ function ThreadList({
                 <div className="review-thread-actions">
                   {thread.viewerCanResolve && !thread.resolved ? (
                     <Button
-                      disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                      disabled={
+                        !read.owner.viewer ||
+                        busy === thread.id ||
+                        (replying && replyFor === thread.id)
+                      }
                       size="sm"
                       variant="secondary"
                       onClick={() => void toggleResolved(thread)}
@@ -812,7 +1068,11 @@ function ThreadList({
                   ) : null}
                   {thread.viewerCanUnresolve && thread.resolved ? (
                     <Button
-                      disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                      disabled={
+                        !read.owner.viewer ||
+                        busy === thread.id ||
+                        (replying && replyFor === thread.id)
+                      }
                       size="sm"
                       variant="secondary"
                       onClick={() => void toggleResolved(thread)}
@@ -822,10 +1082,32 @@ function ThreadList({
                   ) : null}
                   {thread.viewerCanReply ? (
                     <Button
-                      disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                      disabled={
+                        !canCompose ||
+                        (retainedComparisonChanged &&
+                          !composer?.replies.some((reply) => reply.threadId === thread.id)) ||
+                        !read.owner.viewer ||
+                        busy === thread.id ||
+                        (replying && replyFor === thread.id)
+                      }
                       size="sm"
                       variant="ghost"
-                      onClick={() => setReplyFor(replyFor === thread.id ? null : thread.id)}
+                      onClick={() => {
+                        if (
+                          !canCompose ||
+                          (retainedComparisonChanged &&
+                            !composer?.replies.some((reply) => reply.threadId === thread.id))
+                        )
+                          return
+                        replyEdited.current = false
+                        if (replyFor !== thread.id)
+                          replyForm.setFieldValue(
+                            'body',
+                            composer?.replies.find((reply) => reply.threadId === thread.id)?.body ??
+                              '',
+                          )
+                        setReplyFor(replyFor === thread.id ? null : thread.id)
+                      }}
                     >
                       Reply
                     </Button>
@@ -845,18 +1127,37 @@ function ThreadList({
                         <>
                           <Textarea
                             aria-label={`Reply to ${reviewThreadLabel(thread)}`}
-                            disabled={busy === thread.id || (replying && replyFor === thread.id)}
+                            disabled={
+                              !canCompose ||
+                              busy === thread.id ||
+                              (replying && replyFor === thread.id)
+                            }
                             name={body.name}
                             onBlur={body.handleBlur}
-                            onChange={(changeEvent) => body.handleChange(changeEvent.target.value)}
+                            onChange={(changeEvent) => {
+                              const text = changeEvent.target.value
+                              body.handleChange(text)
+                              changeReply(thread.id, text)
+                            }}
                             placeholder="Reply to this thread"
                             rows={3}
                             value={body.state.value}
                           />
                           <Button
                             disabled={
-                              replying || body.state.value.trim() === '' || uncertain.has(thread.id)
+                              !read.owner.viewer ||
+                              !canCompose ||
+                              Boolean(
+                                saved?.composer?.replies.some(
+                                  (reply) => reply.threadId === thread.id,
+                                ) &&
+                                  !sameReviewComparison(saved.comparison, read.threads.comparison),
+                              ) ||
+                              replying ||
+                              body.state.value.trim() === '' ||
+                              uncertain.has(thread.id)
                             }
+                            loading={replying}
                             size="sm"
                             tooltip={
                               uncertain.has(thread.id)
@@ -866,7 +1167,7 @@ function ThreadList({
                             type="submit"
                             variant="accent"
                           >
-                            {replying ? 'Sending…' : 'Send reply'}
+                            Send reply
                           </Button>
                         </>
                       )}

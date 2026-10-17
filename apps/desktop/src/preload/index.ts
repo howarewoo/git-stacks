@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { OperationProgress } from '@git-stacks/shared/operation-scope'
 import type {
   DesktopAPI,
   GitHubCliStatus,
@@ -49,6 +50,21 @@ const desktop: DesktopAPI = {
   recentRepositories: () => ipcRenderer.invoke('repositories:recent'),
   openRepository: (path) => ipcRenderer.invoke('repositories:open', path),
   addRepository: (path) => ipcRenderer.invoke('repositories:add', path),
+  worktreeInventory: (request) => ipcRenderer.invoke('repositories:inventory', request),
+  inspect: (context, operation, args, requestId) =>
+    ipcRenderer.invoke('inspection:request', context, operation, args, requestId),
+  captureOperation: (context) => ipcRenderer.invoke('operation:capture', context),
+  operationSafety: (token, preview) => ipcRenderer.invoke('operation:safety', token, preview),
+  executeOperation: (token, action) => ipcRenderer.invoke('operation:execute', token, action),
+  operationRecords: () => ipcRenderer.invoke('operation:records'),
+  worktreeLifecyclePreview: (request) =>
+    ipcRenderer.invoke('repository:worktree-lifecycle-preview', request),
+  nativeOperationPreview: (request) =>
+    ipcRenderer.invoke('repository:native-operation-preview', request),
+  onWorktreeInventory: (listener) => subscribe('repositories:inventory-updated', listener),
+  cancelInventory: (requestId) => ipcRenderer.invoke('repositories:inventory-cancel', requestId),
+  adoptWorktrees: (ids, requestId) =>
+    ipcRenderer.invoke('repositories:adopt-worktrees', ids, requestId),
   searchRepositories: (request) => ipcRenderer.invoke('repositories:search', request),
   gitEnvironment: (requestId) => ipcRenderer.invoke('git-environment', requestId),
   cloneRepository: (request) => ipcRenderer.invoke('repositories:clone', request),
@@ -62,6 +78,7 @@ const desktop: DesktopAPI = {
     }
   },
   refresh: () => ipcRenderer.invoke('repository:refresh'),
+  repositoryOperationScope: () => ipcRenderer.invoke('repository:operation-scope'),
   prIndex: (options) => ipcRenderer.invoke('repository:pr-index', options),
   onPrIndex: (listener: (index: PullRequestIndex) => void) =>
     subscribe('repository:pr-index', listener),
@@ -73,16 +90,23 @@ const desktop: DesktopAPI = {
   commitDiff: (oid, requestId) => ipcRenderer.invoke('repository:commit-diff', oid, requestId),
   pushPreview: () => ipcRenderer.invoke('repository:push-preview'),
   stackPreview: (kind, branch) => ipcRenderer.invoke('repository:stack-preview', kind, branch),
+  reviewedMergePreview: (number) => ipcRenderer.invoke('repository:reviewed-merge-preview', number),
   surgeryPreview: (request) => ipcRenderer.invoke('repository:surgery-preview', request),
   submitStackProgress: () => ipcRenderer.invoke('repository:submit-stack-progress'),
-  onSubmitStackProgress: (listener: (progress: PublishProgress | null) => void) =>
+  onSubmitStackProgress: (listener: (event: OperationProgress<PublishProgress>) => void) =>
     subscribe('submit-stack-progress', listener),
-  onMergeProgress: (listener: (progress: MergeProgress | null) => void) =>
+  onMergeProgress: (listener: (event: OperationProgress<MergeProgress>) => void) =>
     subscribe('merge-progress', listener),
   mergeStatus: () => ipcRenderer.invoke('repository:merge-status'),
   reconciliationPreview: (stackKey) =>
     ipcRenderer.invoke('repository:reconciliation-preview', stackKey),
   pullRequest: (number) => ipcRenderer.invoke('repository:pull-request', number),
+  pullRequestPage: (state, cursor) =>
+    ipcRenderer.invoke('repository:pull-request-page', state, cursor),
+  pullRequestLayer: (sourceNumber, memberNumber, requestId) =>
+    ipcRenderer.invoke('repository:pull-request-layer', sourceNumber, memberNumber, requestId),
+  pullRequestAction: (action, expectedScope) =>
+    ipcRenderer.invoke('repository:pull-request-action', action, expectedScope),
   searchIssues: (query, requestId) =>
     ipcRenderer.invoke('repository:search-issues', query, requestId),
   pullRequestIssueLinks: (number) =>
@@ -96,24 +120,29 @@ const desktop: DesktopAPI = {
   reviewCommits: (number, requestId) =>
     ipcRenderer.invoke('repository:review-commits', number, requestId),
   reviewViewed: (number) => ipcRenderer.invoke('repository:review-viewed', number),
-  reviewSetViewed: (record) => ipcRenderer.invoke('repository:review-set-viewed', record),
+  reviewSetViewed: (record, owner) =>
+    ipcRenderer.invoke('repository:review-set-viewed', record, owner),
   reviewThreads: (number, requestId) =>
     ipcRenderer.invoke('repository:review-threads', number, requestId),
   reviewDrafts: (number) => ipcRenderer.invoke('repository:review-drafts', number),
+  reviewDraftRecovery: (selected) =>
+    ipcRenderer.invoke('repository:review-draft-recovery', selected),
   reviewResolveDrafts: (number, drafts) =>
     ipcRenderer.invoke('repository:review-resolve-drafts', number, drafts),
-  reviewSetDrafts: (record) => ipcRenderer.invoke('repository:review-set-drafts', record),
+  reviewSetDrafts: (record, expectedUpdatedAt) =>
+    ipcRenderer.invoke('repository:review-set-drafts', record, expectedUpdatedAt),
   reviewSubmit: (number, submission) =>
     ipcRenderer.invoke('repository:review-submit', number, submission),
-  reviewReply: (number, threadId, body) =>
-    ipcRenderer.invoke('repository:review-reply', number, threadId, body),
-  reviewSetResolved: (number, threadId, resolved) =>
-    ipcRenderer.invoke('repository:review-resolve', number, threadId, resolved),
+  reviewReply: (number, threadId, body, owner) =>
+    ipcRenderer.invoke('repository:review-reply', number, threadId, body, owner),
+  reviewSetResolved: (number, threadId, resolved, owner) =>
+    ipcRenderer.invoke('repository:review-resolve', number, threadId, resolved, owner),
   reviewHistory: (number, requestId) =>
     ipcRenderer.invoke('repository:review-history', number, requestId),
   reviewHistoryDiff: (number, fromOid, requestId) =>
     ipcRenderer.invoke('repository:review-history-diff', number, fromOid, requestId),
-  reviewClearHistory: (number) => ipcRenderer.invoke('repository:review-clear-history', number),
+  reviewClearHistory: (number, owner) =>
+    ipcRenderer.invoke('repository:review-clear-history', number, owner),
   pullRequestChecks: (number, options) =>
     ipcRenderer.invoke('repository:pull-request-checks', number, options),
   rerunPullRequestCheck: (number, runId) =>

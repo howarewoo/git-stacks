@@ -11,6 +11,7 @@ import type {
 import {
   blockedRestackPreview,
   failedMergeStatus,
+  mergeStatus,
   openPullRequest,
   pausedRestackProgress,
   restackPreview,
@@ -27,7 +28,7 @@ import {
   stagedOnlyChanges,
   unstagedOnlyChanges,
 } from '../../../src/renderer/src/design-system/data-fixtures'
-import { EMPTY_SNAPSHOT_LIMITS } from '@git-stacks/shared/performance'
+import { EMPTY_SNAPSHOT_LIMITS, LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 import { DEFAULT_SETTINGS } from '@git-stacks/shared/settings'
 import type { NotificationInbox } from '@git-stacks/shared/notifications'
 import {
@@ -51,6 +52,7 @@ import type { FixtureScenario } from './types'
 import type { ScenarioName } from './manifest'
 import { reviewRail, stackMember } from './review'
 import { graphIndex, graphSnapshot } from './graph'
+import { snapshotInventory } from './inventory'
 
 /**
  * Deterministic snapshot data for every gallery scenario. Repository shapes are reused from
@@ -88,6 +90,7 @@ function local(seed: BranchSeed): Branch {
     subject: `Update ${seed.name}`,
     updatedAt: UPDATED,
     parent: null,
+    parentRef: seed.parent ? `refs/heads/${seed.parent}` : null,
     parentBehind: 0,
     pr: null,
     oid: oid(`local:${seed.name}`),
@@ -294,6 +297,36 @@ function repository(overrides: Partial<RepositorySnapshot> = {}): RepositorySnap
     ...overrides,
   }
 }
+
+const uncachedNativePullRequests: PullRequest[] = Array.from(
+  { length: LIST_PAGE_SIZE + 1 },
+  (_, index) => ({
+    ...reviewStackPullRequests[0],
+    number: 501 + index,
+    title: `Provider-confirmed native layer ${501 + index}`,
+    url: `https://github.com/howarewoo/git-stacks/pull/${501 + index}`,
+    head: `feature/uncached-native-${index + 1}`,
+    base: index === 0 ? 'main' : `feature/uncached-native-${index}`,
+    headOid: oid(`uncached-native-${index + 1}`),
+    baseOid: oid(`uncached-native-${index}`),
+    state: index === LIST_PAGE_SIZE ? 'MERGED' : 'OPEN',
+    draft: false,
+    stack: {
+      stackNumber: 42,
+      position: index + 1,
+      size: LIST_PAGE_SIZE + 1,
+      base: 'main',
+      open: true,
+      url: 'https://github.com/howarewoo/git-stacks/stacks/42',
+    },
+  }),
+)
+const uncachedNativeSnapshot = repository({
+  branches: [mainBranch],
+  currentBranch: 'main',
+  pullRequests: uncachedNativePullRequests,
+  nativeStacks: nativeReviewFixture(uncachedNativePullRequests),
+})
 
 /** Connected baseline: one stacked branch with a draft pull request and a clean tree. */
 const connected = repository()
@@ -569,13 +602,15 @@ const shiftedStashes: Stash[] = [
 ]
 
 /** The one open, mergeable pull request, reused by the merge read-back scenario. */
+const lifecycleOpenPr = { ...pullRequestFixtures[0], head: 'feature/lifecycle-open' }
+
 const lifecycleOpenBranch = local({
   name: 'feature/lifecycle-open',
   current: true,
   parent: 'main',
   parentTip: oid('local:main'),
   ahead: 1,
-  pr: pullRequestFixtures[0],
+  pr: lifecycleOpenPr,
   subject: 'Open pull request branch',
 })
 
@@ -1500,6 +1535,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       'An authenticated GitHub CLI account for github.com, with the version reported apart from the authentication.',
     snapshot: connected,
     recentRepositories,
+    mergeStatus,
     githubCliStatus: {
       state: 'authenticated',
       host: 'github.com',
@@ -1522,6 +1558,31 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       version: '2.62.0',
       identity: 'cli:github.com:octo:1',
       message: null,
+    },
+  },
+  'github-cli-cross-host-operation': {
+    name: 'github-cli-cross-host-operation',
+    summary: 'Public-host Settings and enterprise-origin operation progress use separate accounts.',
+    snapshot: { ...connected, remoteUrl: 'git@ghe.example.com:octo/git-stacks.git' },
+    recentRepositories,
+    mergeStatus,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'octo',
+      version: '2.62.0',
+      identity: 'cli:github.com:octo:1',
+      message: null,
+    },
+    githubCliStatuses: {
+      'ghe.example.com': {
+        state: 'authenticated',
+        host: 'ghe.example.com',
+        login: 'account1',
+        version: '2.62.0',
+        identity: 'cli:ghe.example.com:account1:1',
+        message: null,
+      },
     },
   },
   'shell-loading': {
@@ -1712,6 +1773,14 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       nativeStacks: nativeReviewFixture(reviewStackPullRequests),
     }),
     recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'acme-viewer',
+      version: '2.62.0',
+      identity: 'cli:github.com:acme-viewer:review-fixture',
+      message: null,
+    },
   },
   'review-long-stack': {
     name: 'review-long-stack',
@@ -1724,6 +1793,27 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       nativeStacks: nativeReviewFixture(longReviewStackPullRequests),
     }),
     recentRepositories,
+  },
+  'review-uncached-native-layer': {
+    name: 'review-uncached-native-layer',
+    summary:
+      'Complete submitted native membership includes a merged top layer beyond the bounded PR inventory, without a local branch or worktree.',
+    snapshot: uncachedNativeSnapshot,
+    inventory: snapshotInventory([
+      {
+        ...uncachedNativeSnapshot,
+        pullRequests: uncachedNativePullRequests.slice(0, LIST_PAGE_SIZE),
+      },
+    ]),
+    recentRepositories,
+    githubCliStatus: {
+      state: 'authenticated',
+      host: 'github.com',
+      login: 'acme-viewer',
+      version: '2.62.0',
+      identity: 'cli:github.com:acme-viewer:uncached-native-fixture',
+      message: null,
+    },
   },
   'review-stack-partial': {
     name: 'review-stack-partial',
@@ -1844,7 +1934,6 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       pullRequests: reviewStackPullRequests,
     }),
     recentRepositories,
-    reviewHeadOid: 'ffffeee',
     reviewPermissions: { blocked: 'COMMENT' },
   },
   'review-own-pull-request': {
@@ -1857,7 +1946,6 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       pullRequests: reviewStackPullRequests,
     }),
     recentRepositories,
-    reviewHeadOid: 'ffffeee',
     reviewPermissions: { isAuthor: true },
   },
   'pull-requests-lifecycle': {
@@ -1867,13 +1955,14 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
       branches: lifecycleBranches,
       currentBranch: 'feature/lifecycle-open',
       pullRequests: [
-        pullRequestFixtures[0],
+        lifecycleOpenPr,
         pullRequestFixtures[1],
         pullRequestFixtures[2],
         pullRequestFixtures[3],
       ],
     }),
     recentRepositories,
+    mergeStatus,
   },
   'pull-requests-checks': {
     name: 'pull-requests-checks',
@@ -1978,7 +2067,7 @@ export const scenarios: Record<ScenarioName, FixtureScenario> = {
     snapshot: repository({
       branches: [mainBranch, lifecycleOpenBranch],
       currentBranch: 'feature/lifecycle-open',
-      pullRequests: [pullRequestFixtures[0]],
+      pullRequests: [lifecycleOpenPr],
     }),
     recentRepositories,
     mergeStatus: failedMergeStatus,

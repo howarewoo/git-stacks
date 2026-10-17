@@ -39,6 +39,7 @@ export const SETTING_KEYS = [
   'git.fetchIntervalSeconds',
   'appearance.theme',
   'appearance.reduceMotion',
+  'appearance.density',
   'privacy.includeLocalPaths',
   'updates.channel',
   'shortcuts',
@@ -165,6 +166,10 @@ export function validateSettings(value: unknown): {
       appearance.reduceMotion,
       booleanField(appearance.reduceMotion, DEFAULT_SETTINGS.appearance.reduceMotion),
     ] as const,
+    'appearance.density': [
+      appearance.density,
+      oneOf<'compact' | 'standard'>(appearance.density, ['compact', 'standard'], 'compact'),
+    ] as const,
     'privacy.includeLocalPaths': [
       privacy.includeLocalPaths,
       booleanField(privacy.includeLocalPaths, DEFAULT_SETTINGS.privacy.includeLocalPaths),
@@ -187,6 +192,7 @@ export function validateSettings(value: unknown): {
   const mergeMethod = fields['git.defaultMergeMethod'][1].value
   const theme = fields['appearance.theme'][1].value
   const reduceMotion = fields['appearance.reduceMotion'][1].value
+  const density = fields['appearance.density'][1].value
   const includeLocalPaths = fields['privacy.includeLocalPaths'][1].value
   const notificationsEnabled = fields['notifications.enabled'][1].value
   const updateChannel = fields['updates.channel'][1].value
@@ -246,7 +252,7 @@ export function validateSettings(value: unknown): {
       },
       github: { host: githubHost },
       notifications: { enabled: notificationsEnabled },
-      appearance: { theme, reduceMotion },
+      appearance: { theme, reduceMotion, density },
       privacy: { includeLocalPaths },
       updates: { channel: updateChannel },
       shortcuts,
@@ -427,6 +433,9 @@ function restoreKey(target: AppSettings, current: AppSettings, key: string): voi
       return
     case 'appearance.reduceMotion':
       target.appearance.reduceMotion = current.appearance.reduceMotion
+      return
+    case 'appearance.density':
+      target.appearance.density = current.appearance.density
       return
     case 'privacy.includeLocalPaths':
       target.privacy.includeLocalPaths = current.privacy.includeLocalPaths
