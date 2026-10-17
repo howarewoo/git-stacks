@@ -1228,18 +1228,24 @@ async function main() {
     await shot('10-after-raced-reset-and-channel')
 
     // Settings opt-out for automaticChecks persists and manual check remains available.
-    await evaluate(() => window.desktop.updateSettings({ updates: { automaticChecks: false } }))
+    // Channel is explicitly reset to stable for restart assertions because the fixture publishes stable.
+    await evaluate(() =>
+      window.desktop.updateSettings({ updates: { automaticChecks: false, channel: 'stable' } }),
+    )
     const storedAfterOptOut = JSON.parse(readFileSync(join(userData, 'settings.json'), 'utf8'))
     assert(
       storedAfterOptOut.updates.automaticChecks === false,
       'automaticChecks opt-out persisted in settings.json',
     )
+    assert(
+      storedAfterOptOut.updates.channel === 'stable',
+      'channel set back to stable for restart fixture',
+    )
     const manualCheck = await evaluate(() => window.desktop.checkForUpdates())
     assert(
-      manualCheck.channel === 'beta',
-      'manual check remains functional after automatic checks opt-out',
+      manualCheck.channel === 'stable',
+      'manual check remains functional on stable after automatic checks opt-out',
     )
-
     // Stop the running app to prove opt-out persists and prevents background checks on a fresh launch.
     await stop()
     const requestsBeforeRestart = release.requests.length

@@ -3657,6 +3657,7 @@ app
       service: updateService,
       getSettings: async () => currentSettings ?? (await readSettingsFile(settingsFile())).settings,
       powerMonitor,
+      isFenced: () => installFence.isFenced,
     })
     updateScheduler.start()
     const preference = await readGitRuntimePreference(settingsFile()).catch(() => false)

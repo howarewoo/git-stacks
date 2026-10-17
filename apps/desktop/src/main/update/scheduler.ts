@@ -19,6 +19,8 @@ export interface UpdateSchedulerOptions {
     on(event: string, listener: () => void): unknown
     removeListener?(event: string, listener: () => void): unknown
   }
+  /** Optional guard returning true if an update installation fence is currently active. */
+  isFenced?: () => boolean
 }
 
 /**
@@ -104,6 +106,9 @@ export class UpdateScheduler {
     }
 
     if (!this.options.service.isConfigured()) {
+      return null
+    }
+    if (this.options.isFenced?.()) {
       return null
     }
 

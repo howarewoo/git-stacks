@@ -19,6 +19,7 @@ import { once } from 'node:events'
 import { test } from 'node:test'
 import { UpdateService, type UpdateServiceOptions } from '../src/main/update/service'
 import { UpdateScheduler } from '../src/main/update/scheduler'
+import { InstallAdmissionFence } from '../src/main/update/admission'
 import { privateInstallHandoff, type StagedUpdate } from '../src/main/update/artifact'
 import { beginHandoff } from '../src/main/update/install'
 import type { UpdateChannel } from '@git-stacks/shared/update'
@@ -1524,6 +1525,64 @@ test('the scheduler skips (does not queue) while a channel change owns the updat
   assert.equal(app.service.isBusy(), false, 'service is idle after channel change settles')
 })
 
+test('scheduler skips automatic check while install admission fence is active, preserving candidate and network count, and resumes after release', async (t) => {
+  const feed = await startFeed()
+  t.after(() => feed.close())
+  feed.set({ version: '0.2.0', sequence: 1, bytes: ARTIFACT, channel: 'stable' })
+  const app = harnessFor(feed.base)
+  await app.service.start('stable')
+
+  // Check and download to have a verified staged candidate
+  const checked = await app.service.check()
+  assert.equal(checked.phase, 'available')
+  const downloaded = await app.service.download()
+  assert.equal(downloaded.phase, 'downloaded')
+  assert.equal(downloaded.readyToInstall, true)
+  const requestsBeforeFence = feed.requests.length
+
+  const fence = new InstallAdmissionFence()
+  fence.admit()
+  assert.equal(fence.isFenced, true)
+
+  const settingsGate = gate()
+  const scheduler = new UpdateScheduler({
+    service: app.service,
+    getSettings: async () => {
+      // Models a deferred settings read during which the fence remains active
+      await settingsGate.wait
+      return structuredClone(DEFAULT_SETTINGS)
+    },
+    initialDelayMs: 100000,
+    intervalMs: 100000,
+    isFenced: () => fence.isFenced,
+  })
+  scheduler.start()
+  t.after(() => scheduler.stop())
+
+  const triggerPromise = scheduler.trigger()
+  settingsGate.open()
+  const skipped = await triggerPromise
+
+  assert.equal(skipped, null, 'scheduler skipped because install fence was active')
+  assert.equal(
+    feed.requests.length,
+    requestsBeforeFence,
+    'no network requests while install fence is active',
+  )
+  assert(app.service.status().phase === 'downloaded', 'staged candidate preserved while fenced')
+
+  // Release fence to allow subsequent scheduled checks
+  fence.release()
+  assert.equal(fence.isFenced, false)
+
+  const eligibleAfterRelease = await scheduler.trigger()
+  assert.notEqual(
+    eligibleAfterRelease,
+    null,
+    'scheduler is eligible again once install fence is released',
+  )
+})
+
 test('optout in settings prevents automatic check from making any HTTP request', async (t) => {
   const feed = await startFeed()
   t.after(() => feed.close())
@@ -1576,15 +1635,20 @@ test('scheduler cadence is due-aware, coalesces resume without duplicate timer c
   t.after(() => scheduler.stop())
 
   // Initial delay runs the first check
-  await new Promise((r) => setTimeout(r, 40))
+  while (app.service.status().phase === 'checking' || app.service.status().phase === 'idle') {
+    await new Promise((r) => setTimeout(r, 10))
+  }
   assert.equal(app.service.status().phase, 'available', 'initial check ran after initial delay')
   const reqsAfterInitial = feed.requests.length
 
   // Advance time by 25h and trigger resume: overdue check runs once
   currentTime += 25 * 60 * 60 * 1000
+  const beforeResumeRequests = feed.requests.length
   powerEmitter.emit('resume')
-  await new Promise((r) => setTimeout(r, 20))
-  assert.ok(feed.requests.length > reqsAfterInitial, 'overdue check ran after resume')
+  while (feed.requests.length === beforeResumeRequests) {
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  assert.ok(feed.requests.length > beforeResumeRequests, 'overdue check ran after resume')
   const reqsAfterResume = feed.requests.length
 
   // Second immediate resume without elapsed time does not check
