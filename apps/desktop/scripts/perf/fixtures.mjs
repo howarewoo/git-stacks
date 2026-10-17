@@ -1,6 +1,14 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { devNull } from 'node:os'
+
+const fixtureGitEnvironment = {
+  ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/.test(key))),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: devNull,
+  GIT_TEMPLATE_DIR: '',
+}
 
 /**
  * Benchmark fixtures are generated locally with the `git` on the machine. No
@@ -16,8 +24,9 @@ export const FIXTURE_SIZES = {
 }
 
 function git(cwd, args, input) {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execFileSync('git', ['-c', `core.hooksPath=${devNull}`, '-C', cwd, ...args], {
     encoding: 'utf8',
+    env: fixtureGitEnvironment,
     input,
     maxBuffer: 1024 * 1024 * 256,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -135,4 +144,57 @@ export function buildAll(root) {
     longHistory: buildLongHistory(root),
     largePullRequest: buildLargePullRequest(root),
   }
+}
+
+/** Real local-only scale fixture; directories and refs are created only under our temp root. */
+export function buildLaneFixture(root, size, worktreeCount = 120) {
+  const repo = join(root, `lanes-${size}`)
+  mkdirSync(repo, { recursive: true })
+  git(repo, ['init', '-b', 'main'])
+  git(repo, ['config', 'user.name', 'Git Stacks benchmark'])
+  git(repo, ['config', 'user.email', 'benchmark@example.invalid'])
+  writeFileSync(join(repo, 'README.md'), 'lane scale fixture\n')
+  git(repo, ['add', 'README.md'])
+  git(repo, ['commit', '-m', 'Base'])
+  const head = git(repo, ['rev-parse', 'HEAD']).trim()
+  const records = []
+  const parents = []
+  for (let index = 0; index < size; index++) {
+    const parent =
+      index === 0 || index % 250 === 0
+        ? null
+        : index < 100
+          ? index - 1
+          : index < 180
+            ? 40
+            : index % 10
+              ? index - 1
+              : 20
+    const message = `Lane ${index}\n`
+    records.push(
+      `commit refs/heads/feature/lane-${index}\nmark :${index + 1}\ncommitter Benchmark <benchmark@example.invalid> ${1700000000 + index} +0000\ndata ${Buffer.byteLength(message)}\n${message}from ${parent === null ? head : `:${parent + 1}`}\n`,
+    )
+    parents.push(
+      `[branch "feature/lane-${index}"]\n\tparent = ${parent === null ? 'main' : `feature/lane-${parent}`}\n`,
+    )
+  }
+  git(repo, ['fast-import', '--quiet'], records.join('\n'))
+  // Configuration is fixture construction, not application browsing or an implicit repair.
+  const config = git(repo, ['rev-parse', '--git-path', 'config']).trim()
+  appendFileSync(join(repo, config), parents.join(''))
+  git(repo, ['update-ref', 'refs/remotes/fixture/remote-only', head])
+  for (let index = 1; index < worktreeCount; index++) {
+    const path = join(root, `lanes-${size}-contexts`, `topic ${index} 雪`)
+    git(repo, [
+      'worktree',
+      'add',
+      '--quiet',
+      ...(index === worktreeCount - 1 ? ['--detach'] : []),
+      path,
+      `feature/lane-${index}`,
+    ])
+    if (index % 17 === 0)
+      writeFileSync(join(path, 'external-edit.txt'), `Fixture external edit ${index}\n`)
+  }
+  return repo
 }

@@ -14,12 +14,16 @@ import {
   HISTORY_BUDGET_MS,
   INTERACTION_BUDGET_MS,
   SNAPSHOT_BRANCH_BUDGET,
+  LIST_PAGE_SIZE,
+  LANE_ROW_PAGE_SIZE,
+  type BenchmarkReport,
   SNAPSHOT_BUDGET_MS,
   STARTUP_BUDGET_MS,
   type BenchmarkMeasurement,
 } from '@git-stacks/shared/performance'
 import { buildAll, FIXTURE_SIZES } from './fixtures.mjs'
 import { measureDesktop } from './desktop-interaction.mjs'
+import { runLaneEnvelope } from './lane-envelope.mjs'
 
 /**
  * Measures the launch-to-painted desktop, actual input-to-painted UI, snapshot,
@@ -48,6 +52,10 @@ async function main() {
   const keep = process.argv.includes('--keep')
   const workspace = mkdtempSync(join(tmpdir(), 'git-stacks-bench-'))
   try {
+    if (process.argv.includes('--lanes-only')) {
+      await runLaneEnvelope(repoRoot, workspace, out)
+      return
+    }
     const fixtureStarted = Date.now()
     const repos = buildAll(workspace)
     process.stdout.write(
@@ -81,7 +89,7 @@ async function main() {
     record('startup', 'many-refs-desktop', STARTUP_BUDGET_MS, desktop.startupMs, {
       branches: FIXTURE_SIZES.refs + 1,
       differingTips: FIXTURE_SIZES.refs,
-      visibleRows: 200,
+      visibleRows: LANE_ROW_PAGE_SIZE,
     })
     record('interaction', 'many-refs-desktop', INTERACTION_BUDGET_MS, desktop.interactionMs, {
       branches: FIXTURE_SIZES.refs + 1,
@@ -124,7 +132,7 @@ async function main() {
 
     const listItems = Array.from({ length: 50_000 }, (_, index) => index)
     const list = await elapsed(async () => {
-      for (let index = 0; index < 50; index += 1) windowSlice(listItems, 200)
+      for (let index = 0; index < 50; index += 1) windowSlice(listItems, LIST_PAGE_SIZE)
       renderToStaticMarkup(
         React.createElement(DiffView, { text: diff.value.text, truncated: diff.value.truncated }),
       )
@@ -140,7 +148,7 @@ async function main() {
       platform: `${process.platform}-${process.arch}`,
       generatedAt: new Date().toISOString(),
       measurements,
-    }
+    } satisfies BenchmarkReport
     writeFileSync(join(out, 'latest.json'), `${JSON.stringify(report, null, 2)}\n`)
     const trend = existsSync(join(out, 'trend.jsonl'))
       ? readFileSync(join(out, 'trend.jsonl'), 'utf8')
@@ -164,6 +172,7 @@ async function main() {
     )
     writeFileSync(join(out, 'trend.jsonl'), `${trend.slice(-200).join('\n')}\n`)
     process.stdout.write(`trend data written to ${join(out, 'trend.jsonl')}\n`)
+    if (process.argv.includes('--lanes')) await runLaneEnvelope(repoRoot, workspace, out)
 
     const over = measurements.filter((entry) => entry.elapsedMs > entry.budgetMs)
     if (over.length > 0) {

@@ -489,7 +489,6 @@ export async function confirmRecordedMerge(
     await saveRecord(record.capture, record)
   }
 }
-
 /** No replay, repair, journal retirement or account substitution on a status read. */
 export async function readOperationRecords(root: string): Promise<OperationRecord[]> {
   const repository = await discoverWorktrees(root)

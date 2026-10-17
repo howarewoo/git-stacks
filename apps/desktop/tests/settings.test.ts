@@ -161,6 +161,33 @@ test('a stored shortcut chord that no action can dispatch falls back to the defa
   )
 })
 
+test('retired destination bindings import once without rewriting stored bytes or replacing canonical choices', async () => {
+  await withTempDir(async (dir) => {
+    const file = join(dir, 'settings.json')
+    const stored = JSON.stringify({
+      shortcuts: { 'view.prInbox': 'Alt+a', 'view.diagnostics': 'Alt+s' },
+    })
+    await writeFile(file, stored)
+    const read = await readSettingsFile(file)
+    assert.equal(read.settings.shortcuts['view.attention'], 'Alt+a')
+    assert.equal(read.settings.shortcuts['view.settings'], 'Alt+s')
+    assert.equal(await readFile(file, 'utf8'), stored)
+    await writeFile(
+      file,
+      JSON.stringify({
+        shortcuts: { 'view.prInbox': 'Alt+a', 'view.attention': 'Alt+n' },
+      }),
+    )
+    assert.equal((await readSettingsFile(file)).settings.shortcuts['view.attention'], 'Alt+n')
+    const imported = applyPatch(DEFAULT_SETTINGS, {
+      legacyShortcutImport: { 'view.prInbox': 'Alt+a', 'view.diagnostics': 'Alt+s' },
+    })
+    assert.equal(imported.settings.shortcuts['view.attention'], 'Alt+a')
+    assert.equal(imported.settings.shortcuts['view.settings'], 'Alt+s')
+    assert.equal(Object.hasOwn(imported.settings.shortcuts, 'view.prInbox'), false)
+  })
+})
+
 test('a patch keeps the fields it does not mention', () => {
   const current: AppSettings = {
     ...structuredClone(DEFAULT_SETTINGS),

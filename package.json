@@ -26,8 +26,6 @@
     "test:controls": "turbo run test:controls --",
     "test:desktop": "turbo run test:desktop --",
     "test:update-flow": "turbo run test:update-flow --",
-    "test:palette:electron": "turbo run test:palette:electron --",
-    "test:inbox:electron": "turbo run test:inbox:electron --",
     "tokens:generate": "turbo run tokens:generate --",
     "tokens:check": "turbo run tokens:check --",
     "package": "turbo run package --",

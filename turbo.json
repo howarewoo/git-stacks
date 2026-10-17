@@ -115,7 +115,7 @@
     },
     "test:controls": {
       "cache": false,
-      "dependsOn": ["build", "build:gallery"]
+      "dependsOn": ["build:gallery"]
     },
     "test:ui": {
       "cache": false,
@@ -128,14 +128,6 @@
     "test:visual:update": {
       "cache": false,
       "dependsOn": ["build:gallery"]
-    },
-    "test:palette:electron": {
-      "cache": false,
-      "dependsOn": ["build"]
-    },
-    "test:inbox:electron": {
-      "cache": false,
-      "dependsOn": ["build"]
     },
     "test:desktop": {
       "cache": false,

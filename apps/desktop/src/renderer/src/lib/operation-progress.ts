@@ -92,9 +92,9 @@ export function mergeProgressAfterRead(
   }
 }
 
-/** Captured operations keep their journal projection independently of the visible surface. */
+/** The captured owner, not a visible dialog, owns journal reads and zero-lifetime caches. */
 export function useOperationProgressProjection(
-  desktop: DesktopAPI | null,
+  api: DesktopAPI | null,
   scope: OperationScope | null,
 ) {
   const queryClient = useQueryClient()
@@ -109,53 +109,34 @@ export function useOperationProgressProjection(
           },
     [scope],
   )
-  // Zero-lifetime caches stay observed for the captured owner's lifetime, not the dialog's.
   useQuery({ queryKey: keys.publication, enabled: false })
   useQuery({ queryKey: keys.merge, enabled: false })
   useQuery({ queryKey: keys.mergeProgress, enabled: false })
   React.useEffect(() => {
-    if (!scope) return
-    const { publication: publicationKey, merge: mergeKey, mergeProgress: mergeProgressKey } = keys
+    if (!scope || !api) return
     let active = true
-    let publicationRevision = 0
-    let mergeRevision = 0
-    const unsubscribePublication = desktop?.onSubmitStackProgress?.((event) => {
-      if (!active || !sameOperationScope(event.scope, scope)) return
-      const revision = ++publicationRevision
-      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true }).then(() => {
-        if (active && revision === publicationRevision)
-          queryClient.setQueryData(publicationKey, event)
-      })
-    })
-    const unsubscribeMerge = desktop?.onMergeProgress?.((event) => {
-      if (!active || !sameOperationScope(event.scope, scope)) return
-      const revision = ++mergeRevision
-      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true }).then(() => {
-        if (active && revision === mergeRevision)
-          queryClient.setQueryData(mergeProgressKey, event.progress === null ? null : event)
-      })
-    })
-    if (desktop?.submitStackProgress) {
+    const unsubscribe = subscribeOperationProgress(api, queryClient, scope)
+    if (api.submitStackProgress) {
       void queryClient
         .fetchQuery({
-          queryKey: publicationKey,
+          queryKey: keys.publication,
           queryFn: async ({ signal }) => {
-            const value = await readOperationProgress(desktop.submitStackProgress!, scope, signal)
+            const value = await readOperationProgress(api.submitStackProgress!, scope, signal)
             if (!active || signal.aborted) throw new Error('Retired publication read')
             return value
           },
         })
         .catch(() => {})
     }
-    if (desktop?.mergeStatus) {
+    if (api.mergeStatus) {
       void queryClient
         .fetchQuery({
-          queryKey: mergeKey,
+          queryKey: keys.merge,
           queryFn: async ({ signal }) => {
-            const value = await readOperationProgress(desktop.mergeStatus!, scope, signal)
+            const value = await readOperationProgress(api.mergeStatus!, scope, signal)
             if (!active || signal.aborted) throw new Error('Retired merge read')
             queryClient.setQueryData<OperationProgress<MergeProgress> | null>(
-              mergeProgressKey,
+              keys.mergeProgress,
               (previous) => mergeProgressAfterRead(previous, value),
             )
             return value
@@ -165,13 +146,11 @@ export function useOperationProgressProjection(
     }
     return () => {
       active = false
-      unsubscribePublication?.()
-      unsubscribeMerge?.()
-      void queryClient.cancelQueries({ queryKey: publicationKey, exact: true })
-      void queryClient.cancelQueries({ queryKey: mergeKey, exact: true })
-      queryClient.removeQueries({ queryKey: publicationKey, exact: true })
-      queryClient.removeQueries({ queryKey: mergeKey, exact: true })
-      queryClient.removeQueries({ queryKey: mergeProgressKey, exact: true })
+      unsubscribe()
+      void queryClient.cancelQueries({ queryKey: keys.publication, exact: true })
+      void queryClient.cancelQueries({ queryKey: keys.merge, exact: true })
+      // The zero-lifetime cache retires when its last observer does. Do not
+      // remove keys still observed by this same captured owner or recovery.
     }
-  }, [desktop, queryClient, scope, keys])
+  }, [api, queryClient, scope, keys])
 }

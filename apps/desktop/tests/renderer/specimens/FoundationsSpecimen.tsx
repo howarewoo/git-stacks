@@ -1,8 +1,6 @@
 import * as React from 'react'
 import { Check, ChevronDown, MoreHorizontal, RefreshCw } from 'lucide-react'
-import { Badge } from '../components/ui/badge'
-import { Button, IconButton } from '../components/ui/button'
-import { Checkbox } from '../components/ui/checkbox'
+import { Badge, Button, IconButton, Checkbox } from '@git-stacks/ui'
 import {
   Dialog,
   DialogContent,
@@ -11,14 +9,18 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from '../components/ui/dialog'
-import { DropdownMenu } from '../components/ui/dropdown-menu'
-import { Field } from '../components/ui/field'
-import { Input } from '../components/ui/input'
-import { SegmentedControl } from '../components/ui/segmented-control'
-import { Select } from '../components/ui/select'
-import { Textarea } from '../components/ui/textarea'
-import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip'
+} from '@git-stacks/ui'
+import {
+  DropdownMenu,
+  Field,
+  Input,
+  SegmentedControl,
+  Select,
+  Textarea,
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@git-stacks/ui'
 import {
   EmptyState,
   InlineAlert,
@@ -27,7 +29,7 @@ import {
   SurfaceDescription,
   SurfaceHeader,
   SurfaceTitle,
-} from '../components/ui/surface'
+} from '@git-stacks/ui'
 
 export function FoundationsSpecimen() {
   const [query, setQuery] = React.useState('feature/tokens')

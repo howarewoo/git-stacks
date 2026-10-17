@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:net'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import electron from 'electron'
+import { LANE_ROW_PAGE_SIZE } from '@git-stacks/shared/performance'
 
 const deadlineMs = 30_000
 const requestTimeoutMs = 10_000
@@ -20,7 +21,7 @@ async function freePort() {
   return port
 }
 
-async function pageTarget(port, child, getError, pageOrigin) {
+async function pageTarget(port, child, getError, pageOrigin, type = 'page') {
   const deadline = Date.now() + deadlineMs
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Electron exited before startup: ${getError()}`)
@@ -29,7 +30,7 @@ async function pageTarget(port, child, getError, pageOrigin) {
         signal: AbortSignal.timeout(1000),
       })
       const pages = await response.json()
-      const page = pages.find((entry) => entry.type === 'page' && entry.url.startsWith(pageOrigin))
+      const page = pages.find((entry) => entry.type === type && entry.url.startsWith(pageOrigin))
       if (page?.webSocketDebuggerUrl) return page.webSocketDebuggerUrl
     } catch {
       // The DevTools listener is not yet accepting connections.
@@ -158,22 +159,48 @@ async function click(client, selector) {
 }
 
 /** Launch-to-painted repository and real search input-to-painted filtered result. */
-export async function measureDesktop(repoRoot, fixture) {
+export async function measureDesktop(repoRoot, fixture, options = {}) {
+  if (process.env.ELECTRON_DISABLE_SANDBOX)
+    throw new Error(
+      'Native benchmark refuses ELECTRON_DISABLE_SANDBOX; use a supported sandbox environment.',
+    )
   const userData = mkdtempSync(join(tmpdir(), 'git-stacks-desktop-bench-'))
   const port = await freePort()
+  const mainPort = options.observe ? await freePort() : null
+  mkdirSync(join(userData, 'gh'), { recursive: true })
+  writeFileSync(join(userData, 'gitconfig'), '')
+  // The production series never adopts a development renderer, host session,
+  // credential, trust override or injected Node/Electron/library runtime.
+  const unsafeInherited =
+    /^(GIT_|GH_|GITHUB_|GIT_STACKS_|SSH_|NODE_|ELECTRON_|LD_|DYLD_)|^SSLKEYLOGFILE$|^KRB5CCNAME$|(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY|SESSION)/iu
+  const ownedEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !unsafeInherited.test(key)),
+  )
   const started = performance.now()
+  const branchCount = options.branchCount ?? 3001
+  const target = options.target ?? 'feature/branch-2999'
+  const rowLimit = options.rowLimit ?? LANE_ROW_PAGE_SIZE
   const child = spawn(
     electron,
-    ['--disable-gpu', `--remote-debugging-port=${port}`, join(repoRoot, 'out/main/index.js')],
+    [
+      '--disable-gpu',
+      `--remote-debugging-port=${port}`,
+      ...(mainPort ? [`--inspect=127.0.0.1:${mainPort}`] : []),
+      join(repoRoot, 'out/main/index.js'),
+    ],
     {
       cwd: repoRoot,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'ignore', 'pipe'],
       env: {
-        ...process.env,
-        ELECTRON_RENDERER_URL: process.env.ELECTRON_RENDERER_URL ?? '',
+        ...ownedEnvironment,
         GIT_STACKS_REPO: fixture,
         GIT_STACKS_USER_DATA: userData,
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: join(userData, 'gitconfig'),
+        GIT_TERMINAL_PROMPT: '0',
+        GH_CONFIG_DIR: join(userData, 'gh'),
+        GIT_STACKS_BENCH_READ_COUNTS: options.observe ? '1' : '0',
       },
     },
   )
@@ -183,18 +210,12 @@ export async function measureDesktop(repoRoot, fixture) {
     errors = (errors + text).slice(-8192)
   })
   let client
+  let mainClient
   try {
-    client = await connect(
-      await pageTarget(
-        port,
-        child,
-        () => errors,
-        process.env.ELECTRON_RENDERER_URL || 'app://git-stacks',
-      ),
-    )
+    client = await connect(await pageTarget(port, child, () => errors, 'app://git-stacks'))
     await until(
       client,
-      "document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('3001 matches · 0 context · 2801 unmounted') && document.querySelectorAll('.bw-lane-row').length === 200",
+      `document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('${branchCount} matches · 0 context · ${Math.max(0, branchCount - rowLimit)} unmounted') && document.querySelectorAll('.bw-lane-row').length === ${Math.min(branchCount, rowLimit)}`,
     )
     await evaluate(
       client,
@@ -213,10 +234,10 @@ export async function measureDesktop(repoRoot, fixture) {
         control.addEventListener('input', () => {
           const started = performance.now();
           const observer = new MutationObserver(() => {
-            if (!document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('1 matches · 0 context · 0 unmounted')) return;
-            if (document.querySelectorAll('.bw-lane-row').length !== 1) return;
-            const row = document.querySelector('.bw-lane-row');
-            if (!row?.textContent?.includes('feature/branch-2999')) return;
+            if (!document.querySelector('.bw-main .bw-panel-bottom')?.textContent?.startsWith('1 matches ·')) return;
+            const rows = [...document.querySelectorAll('.bw-lane-row')];
+            if (!rows.length || rows.length > ${rowLimit}) return;
+            if (!rows.some(row => row.querySelector('.bw-branch-name')?.textContent === ${JSON.stringify(target)})) return;
             observer.disconnect();
             requestAnimationFrame(() => requestAnimationFrame(() => {
               clearTimeout(timeout);
@@ -227,14 +248,25 @@ export async function measureDesktop(repoRoot, fixture) {
         }, { capture: true, once: true });
       }); true`,
     )
-    await client.send('Input.insertText', { text: 'feature/branch-2999' })
+    await client.send('Input.insertText', { text: target })
     const interactionMs = await evaluate(client, 'globalThis.__perfInteraction', true)
     if (typeof interactionMs !== 'number' || !Number.isFinite(interactionMs)) {
       throw new Error('Renderer did not return an interaction duration')
     }
-    return { startupMs, interactionMs }
+    const readCounts = async () => {
+      mainClient ??= await connect(await pageTarget(mainPort, child, () => errors, '', 'node'))
+      const counts = await evaluate(mainClient, 'globalThis.__gitStacksBenchmarkCounts()')
+      if (!counts || !counts.requests || !counts.inspections)
+        throw new Error('Owned main-process request counters were not available.')
+      return counts
+    }
+    const lane = options.observe
+      ? await options.observe({ client, evaluate, until, click, readCounts })
+      : null
+    return { startupMs, interactionMs, lane }
   } finally {
     client?.close()
+    mainClient?.close()
     if (child.exitCode === null && child.pid) {
       try {
         if (process.platform === 'win32') child.kill('SIGTERM')

@@ -1,6 +1,6 @@
 /*
  * Gallery-only stylesheet. These rules style the specimen wrapper layouts that live in
- * src/renderer/src/design-system, so the production renderer bundle never ships them.
+ * tests/renderer/specimens, so the production renderer bundle never ships them.
  * Moved verbatim out of src/renderer/src/styles.css; keep production class rules there.
  */
 

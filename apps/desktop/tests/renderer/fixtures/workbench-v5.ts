@@ -331,7 +331,8 @@ export function workbenchV5Fixture(degraded = false): BranchWorkbenchSnapshot {
         trunk: primary,
         refKind: state === 'remote' ? 'remote' : 'local',
         worktreesKnown: !unknown,
-        bulkEligible: !unknown && state !== 'remote' && dirty === 0 && state !== 'conflict',
+        bulkEligible:
+          !primary && !unknown && state !== 'remote' && dirty === 0 && state !== 'conflict',
         worktrees:
           state === 'remote'
             ? []

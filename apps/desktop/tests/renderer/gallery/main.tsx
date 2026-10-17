@@ -3,11 +3,10 @@ import { createRoot } from 'react-dom/client'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { createRendererQueryClient } from '../../../src/renderer/src/lib/query-client'
 import App from '../../../src/renderer/src/App'
-import { RepositoryHoverCardProvider } from '../../../src/renderer/src/components/repository-hover-cards'
 import { TooltipProvider } from '../../../src/renderer/src/components/ui/tooltip'
-import { DataSurfacesSpecimen } from '../../../src/renderer/src/design-system/DataSurfacesSpecimen'
-import { DialogSpecimen } from '../../../src/renderer/src/design-system/DialogSpecimen'
-import { FoundationsSpecimen } from '../../../src/renderer/src/design-system/FoundationsSpecimen'
+import { DialogSpecimen } from '../specimens/DialogSpecimen'
+import { FoundationsSpecimen } from '../specimens/FoundationsSpecimen'
+import { WorkflowRecoverySpecimen } from '../specimens/WorkflowRecoverySpecimen'
 import { installFixtureControl } from '../fixtures/control'
 import { InventoryConsumer } from './inventory-consumer'
 import { WorkbenchV5Gallery } from './workbench-v5'
@@ -108,13 +107,14 @@ function renderRoute(route: GalleryRouteId, remountKey: string) {
       return <WorkbenchV5Gallery key={remountKey} />
     case 'index':
       return <GalleryIndex key={remountKey} scenario={remountKey} />
-    case 'controls':
     case 'foundations':
       return <FoundationsSpecimen key={remountKey} />
-    case 'shell':
-      return <WorkbenchV5Gallery key={remountKey} />
-    case 'data':
-      return <DataSurfacesSpecimen key={remountKey} />
+    case 'recovery':
+      return (
+        <WorkflowRecoverySpecimen
+          mode={new URLSearchParams(window.location.search).get('mode') ?? 'saved'}
+        />
+      )
     case 'dialog':
       return <DialogSpecimen key={remountKey} />
     default:
@@ -165,7 +165,7 @@ function Gallery() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delay={450} timeout={150}>
-        <RepositoryHoverCardProvider>{renderRoute(route, scenario)}</RepositoryHoverCardProvider>
+        {renderRoute(route, scenario)}
       </TooltipProvider>
     </QueryClientProvider>
   )

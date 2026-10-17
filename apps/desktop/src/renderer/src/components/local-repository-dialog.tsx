@@ -24,7 +24,7 @@ export function LocalRepositoryDialog({
   desktop: DesktopAPI
   open: boolean
   onOpenChange: (open: boolean) => void
-  onOpened: (snapshot: RepositorySnapshot) => void
+  onOpened: (snapshot: RepositorySnapshot) => Promise<void>
   onClone: () => void
 }) {
   const recent = useQuery({
@@ -49,7 +49,7 @@ export function LocalRepositoryDialog({
         setError('Opening was cancelled; no repository was added.')
         return
       }
-      onOpened(result)
+      await onOpened(result)
       onOpenChange(false)
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error))

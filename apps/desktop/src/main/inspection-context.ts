@@ -15,6 +15,7 @@ export const inspectionAuthority = new AsyncLocalStorage<{
 
 /** An engine can add evolved target facts without replacing original owner authority. */
 export const operationEffectGuard = new AsyncLocalStorage<() => Promise<void>>()
+
 export function assertInspectionOrigin(origin: string | null, resolved = false): void {
   const captured = inspectionAuthority.getStore()
   if (!captured) return

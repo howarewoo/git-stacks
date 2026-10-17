@@ -9,12 +9,8 @@ export const GALLERY_ROUTES = {
   app: '#/app',
   /** Human-browsable index of every scenario and route. */
   index: '#/index',
-  /** Foundations specimen (legacy id kept for the existing Electron smoke script). */
-  controls: '#/design-system-controls',
-  /** Foundations specimen under its original id. */
   foundations: '#/design-system-specimen',
-  shell: '#/design-system-shell-specimen',
-  data: '#/design-system-data-specimen',
+  recovery: '#/workflow-recovery',
   dialog: '#/design-system-dialog-specimen',
   inventory: '#/inventory-consumer',
   workbenchV5: '#/workbench-v5',
@@ -29,6 +25,11 @@ export const SCENARIO_NAMES = [
   'shell-connected',
   'shell-long-content',
   'shell-offline',
+  'cutover-reference',
+  'cutover-inspection',
+  'cutover-250',
+  'cutover-1000',
+  'cutover-5000',
   // Required GitHub CLI status
   'github-cli-missing',
   'github-cli-signed-out',
@@ -52,8 +53,6 @@ export const SCENARIO_NAMES = [
   'graph-unsupported',
   'graph-stale',
   'graph-index-unavailable',
-  'graph-preferences',
-  'graph-preferences-held',
   // Working changes
   'files-clean',
   'files-staged',

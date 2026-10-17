@@ -1,17 +1,13 @@
 import * as React from 'react'
-import { Button } from '../components/ui/button'
-import { Field } from '../components/ui/field'
-import { Input } from '../components/ui/input'
-import { Select } from '../components/ui/select'
-import { Checkbox } from '../components/ui/checkbox'
+import { Button, Field, Input, Select, Checkbox } from '@git-stacks/ui'
 import {
   TypedConfirmation,
   WarningNote,
   WorkflowActions,
   WorkflowFrame,
-} from '../components/workflow-composition'
-import { workflowBlocker } from '../components/workflow-policy'
-import { workflowAction } from '../components/workflow-action'
+} from '../../../src/renderer/src/components/workflow-composition'
+import { workflowBlocker } from '../../../src/renderer/src/components/workflow-policy'
+import { workflowAction } from '../../../src/renderer/src/components/workflow-action'
 import { guardedBranch, liveGuardBase, publishPreview } from './DialogSpecimenData'
 
 /**

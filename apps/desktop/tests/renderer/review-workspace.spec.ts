@@ -192,7 +192,7 @@ for (const size of [
   }
 }
 
-test('a queued repository preparation retains reading and composition while comparison safety remains immediate', async ({
+test('a refreshed head/base retains reading and composition while comparison safety remains immediate', async ({
   page,
 }) => {
   await openLongReview(page, { width: 1000, height: 700 })
@@ -217,13 +217,12 @@ test('a queued repository preparation retains reading and composition while comp
     element.scrollTop = 200
   })
   const scroll = await region.evaluate((element) => element.scrollTop)
-  // Preparing a qualified operation checks its provider baseline asynchronously.
-  // Inspection remains usable while that captured operation preparation is pending.
+  const refreshes = (await getDoubleCalls(page)).filter((call) => call.call === 'refresh').length
   await holdDoubleCall(page, 'refresh')
   await page.getByRole('button', { name: 'Manage pull request', exact: true }).click()
   await expect
-    .poll(() => page.evaluate(() => window.fixture.pending.includes('refresh')))
-    .toBe(true)
+    .poll(async () => (await getDoubleCalls(page)).filter((call) => call.call === 'refresh').length)
+    .toBe(refreshes + 1)
   await answerNextDoubleCall(page, 'reviewFiles', {
     ...reviewFileSet(42, 'new-head-observed-while-busy'),
     files: [
@@ -260,8 +259,8 @@ test('a queued repository preparation retains reading and composition while comp
     page.locator('.review-submit').getByRole('button', { name: /Submit/ }),
   ).toBeDisabled()
   expect((await getDoubleCalls(page)).filter((entry) => entry.call === 'reviewSubmit')).toEqual([])
-  await page.evaluate(() => window.fixture.unhold('refresh'))
   await releaseDoubleCalls(page, 'refresh')
+  await settle(page)
 })
 
 test('a refreshed comparison never launders a saved comment onto the new head', async ({
@@ -363,6 +362,12 @@ test('context switches preserve code scroll, selected line, whitespace mode and 
         }),
       ).toBeVisible()
     }
+  }
+  for (const destination of ['attention', 'activity', 'branches'] as const) {
+    await switchDestination(page, destination)
+    await expect(page.locator('.review-view')).not.toBeVisible()
+    await switchDestination(page, 'review')
+    await expect(page.locator('.review-view')).toBeVisible()
   }
   await expect(page.getByRole('checkbox', { name: 'Hide whitespace' })).toBeChecked()
   expect(await region.evaluate((element) => element.scrollTop)).toBe(top)

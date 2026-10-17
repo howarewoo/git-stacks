@@ -16,7 +16,7 @@ import type { MergeProgress } from '@git-stacks/shared/types'
 import {
   liveGuardBase,
   publishPreview as specimenPublishPreview,
-} from '../src/renderer/src/design-system/DialogSpecimenData'
+} from './renderer/specimens/DialogSpecimenData'
 import { workflowAction } from '../src/renderer/src/components/workflow-action'
 import { workflowBlocker } from '../src/renderer/src/components/workflow-policy'
 

@@ -5,9 +5,9 @@
  * Launches the real electron-builder output against a disposable environment (temporary Chromium
  * user data, temporary Git and gh configuration, temporary Git repository with a local bare
  * "remote") and drives the shipped renderer UI: packaging, window chrome, real 200% zoom,
- * sandbox/preload wiring, external-link guarding, and representative Git operations (fetch, branch
- * creation, stage/commit, stash/pop, merge-conflict resolution, merge abort). Every Git assertion
- * is checked against the real `git` binary on the disposable repository, never the app snapshot.
+ * sandbox/preload wiring, external-link guarding, captured Fetch, linked worktree creation,
+ * and read-only Unicode file inspection. Every Git assertion is checked against the real `git`
+ * binary on the disposable repository, never the app snapshot.
  *
  * The IPC boundary is exercised the same way: a second window this smoke owns, and the shipped
  * window's own main frame at a foreign origin, both send real requests through the shipped preload
@@ -822,10 +822,6 @@ const READ_ONLY_PROBE = `(async () => {
       return { label, resolved: false, message: String(error?.message ?? error) }
     }
   }
-  const expectedScope = {
-    repositoryPath: '/synthetic/graph-smoke', host: 'github.com',
-    repository: 'smoke-owner/graph-smoke', account: 'smoke-account',
-  }
   return {
     href: location.href,
     bridge: typeof window.desktop?.recentRepositories,
@@ -833,12 +829,6 @@ const READ_ONLY_PROBE = `(async () => {
       await report('recentRepositories', () => window.desktop.recentRepositories()),
       await report('worktreeInventory', () => window.desktop.worktreeInventory({ requestId: 'sender-inventory-smoke' })),
       await report('refresh', () => window.desktop.refresh()),
-      await report('graphPreferences', () => window.desktop.graphPreferences()),
-      await report('saveGraphPreferences', () => window.desktop.saveGraphPreferences({
-        preset: 'all-open', text: 'boundary smoke', author: '', status: 'all',
-        collapse: false, name: 'Boundary smoke',
-      }, expectedScope)),
-      await report('resetGraphPreferences', () => window.desktop.resetGraphPreferences(expectedScope)),
       await report('prIndexRefresh', () => window.desktop.prIndex({ refresh: true })),
     ],
   }
@@ -1202,54 +1192,12 @@ async function stopSubframes(page) {
   })
 }
 
-function escapeForRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 function ui(page) {
-  const button = (name) => page.getByRole('button', { name, exact: true })
   return {
     page,
-    button,
     nav: (label) =>
-      page
-        .getByRole('navigation', { name: 'Workspace destinations' })
-        .getByRole('button', { name: new RegExp(`^${label}(?: \\d+)?$`) }),
-    success: () => page.locator('.global-banner[aria-live="polite"]'),
-    operation: () => page.locator('section[aria-label="Git operation status"]'),
-    branch: (name, current = false) =>
-      page
-        .getByRole('tree', { name: 'Repository branches' })
-        .getByRole('treeitem', {
-          name: new RegExp(`^${escapeForRegExp(name)}${current ? ', current branch' : ''}(,|$)`),
-        })
-        .first(),
-    dialog: () => page.getByRole('dialog'),
-    staged: () => page.locator('section[aria-labelledby="staged-heading"]'),
-    unstaged: () => page.locator('section[aria-labelledby="unstaged-heading"]'),
+      page.locator('.bw-sidebar').getByRole('button', { name: new RegExp(`^${label}`) }),
   }
-}
-
-async function withNotice(locators, action, matcher) {
-  for (const label of ['Dismiss notice', 'Dismiss action error', 'Dismiss error']) {
-    const dismiss = locators.page.getByRole('button', { name: label, exact: true })
-    if (await dismiss.isVisible().catch(() => false)) await dismiss.click().catch(() => {})
-  }
-  await action()
-  const banner = locators.success()
-  await banner.waitFor()
-  const reported = text(await banner.innerText())
-  assert(reported.length > 0, 'The success banner was empty')
-  assert(matcher.test(reported), `The app reported "${reported}"`)
-  await expect(locators.button('Refresh repository')).toBeEnabled({ timeout: UI_TIMEOUT })
-  return reported
-}
-
-/** The app only sees outside-the-app changes after the repository is refreshed. */
-async function refreshSnapshot(locators) {
-  const refresh = locators.button('Refresh repository')
-  await refresh.click()
-  await expect(refresh).toBeEnabled({ timeout: UI_TIMEOUT })
 }
 
 async function gotoView(locators, label) {
@@ -1258,60 +1206,32 @@ async function gotoView(locators, label) {
   if ((await target.getAttribute('aria-current')) !== 'page') await target.click()
 }
 
-async function selectBranch(locators, name) {
-  await locators.branch(name).click()
-  const heading = locators.page.locator('#branch-inspector .details-header h2')
-  await heading.waitFor()
-  assertEqual(
-    text(await heading.innerText()),
-    name,
-    'The details pane did not follow the selection',
-  )
+async function capturedContext(page, repositoryPath) {
+  return page.evaluate(async (path) => {
+    const inventory = await window.desktop.worktreeInventory({
+      requestId: 'packaged-captured-context',
+    })
+    const repository = inventory.repositories.find((repo) =>
+      repo.worktrees.some((tree) => tree.path === path),
+    )
+    const tree = repository?.worktrees.find((tree) => tree.path === path)
+    if (!repository || !tree) throw new Error('Exact owned fixture directory was not discovered.')
+    return {
+      repositoryId: repository.identity.id,
+      worktreeId: tree.id,
+      ...(tree.refId ? { refId: tree.refId } : {}),
+    }
+  }, repositoryPath)
 }
 
-async function switchToBranch(workspace, locators, name) {
-  await gotoView(locators, 'Branches')
-  await selectBranch(locators, name)
-  const button = locators.button('Switch to this branch')
-  await button.waitFor()
-  assert(!(await button.isDisabled()), `"Switch to this branch" stayed disabled for ${name}`)
-  await withNotice(locators, () => button.click(), /^Switched to /)
-  assertEqual(head(workspace), name, 'git HEAD after switching branches')
-}
-
-/** Stages and commits through the shipped form. */
-async function commitThroughUi(workspace, locators, message) {
-  await refreshSnapshot(locators)
-  await gotoView(locators, 'Working changes')
-  const stageAll = locators.button('Stage all')
-  await expect(stageAll).toBeEnabled({ timeout: UI_TIMEOUT })
-  await withNotice(locators, () => stageAll.click(), /^Staged \d+ path/)
-  const field = locators.page.getByRole('textbox', { name: 'Commit message' })
-  await field.waitFor()
-  await field.fill(message)
-  const commit = locators.button('Commit')
-  assert(!(await commit.isDisabled()), '"Commit" stayed disabled with staged changes and a message')
-  await withNotice(locators, () => commit.click(), /^Committed staged changes/)
-  assertEqual(git(workspace, ['log', '-1', '--pretty=%s']), message, 'The new commit subject')
-  assertEqual(porcelain(workspace), '', 'The working tree after committing')
-}
-
-async function mergeThroughUi(locators, branch) {
-  await locators.button('More Git actions').click()
-  await locators.page.getByRole('menuitem', { name: /Merge into current branch/ }).click()
-  const dialog = locators.dialog()
-  await dialog.waitFor()
-  await dialog.getByRole('combobox', { name: 'Branch to merge', exact: true }).click()
-  await locators.page.getByRole('option', { name: branch, exact: true }).click()
-  const submit = dialog.getByRole('button', { name: 'Merge into current branch', exact: true })
-  await submit.waitFor()
-  assert(!(await submit.isDisabled()), 'The merge dialog stayed disabled after choosing a branch')
-  await submit.click()
-}
-
-const commitFromGit = (workspace, message) => {
-  git(workspace, ['add', '-A'])
-  git(workspace, ['commit', '--quiet', '-m', message])
+async function openCliSettings(page) {
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Settings', exact: true })
+  await dialog
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('button', { name: 'GitHub CLI', exact: true })
+    .click()
+  return dialog
 }
 
 const viewport = (page) =>
@@ -1319,7 +1239,7 @@ const viewport = (page) =>
     innerWidth: window.innerWidth,
     scale: window.visualViewport ? Number(window.visualViewport.scale.toFixed(3)) : null,
     devicePixelRatio: window.devicePixelRatio,
-    shell: Math.round(document.querySelector('.app-shell')?.getBoundingClientRect().width ?? 0),
+    shell: Math.round(document.querySelector('.bw-app')?.getBoundingClientRect().width ?? 0),
   }))
 
 async function waitForViewport(page, expectedWidth, timeout = 15_000) {
@@ -1850,7 +1770,7 @@ async function run(options) {
         }
         assert(zoomed.shell > 0, 'The app shell disappeared at 200% zoom')
         assert(
-          await page.locator('.titlebar-brand').isVisible(),
+          await page.locator('.bw-brand').isVisible(),
           'The title bar brand vanished at 200% zoom',
         )
       } finally {
@@ -1912,8 +1832,8 @@ async function run(options) {
       // main process only through callable bridge members, with no Node globals
       // and no direct module access. Which members the bridge offers is the
       // product's business, not a fixed inventory to re-pin; that the bridge
-      // actually works is proved by the repository, commit, and conflict steps
-      // below, which all drive it and assert their Git effects.
+      // actually works is proved by the captured Fetch, linked worktree and
+      // read-only inspection steps below, which assert real repository state.
       for (const [key, value] of Object.entries(renderer.types)) {
         assertEqual(value, 'function', `window.desktop.${key} is not callable`)
       }
@@ -2079,26 +1999,29 @@ async function run(options) {
       return `${rejections.length} rejected URLs, 1 allowed URL intercepted, no browser launched`
     })
 
-    await check('opens the disposable repository from the onboarding list', async () => {
-      const entry = page.locator('.onboarding-recent', { hasText: FIXTURE })
-      await entry.waitFor()
-      assertEqual(
-        text(await entry.locator('small').innerText()),
-        workspace.repo,
-        'The onboarding entry path',
-      )
-      await entry.click()
-      await page.locator('.toolbar[role="toolbar"]').waitFor()
-      assert(
-        (await page.locator('.titlebar-context').innerText()).includes(FIXTURE),
-        'The title bar never showed the opened repository',
-      )
-      const opened = await page.evaluate(async () => (await window.desktop.refresh()).path)
-      assertEqual(opened, canonicalRepo, 'The opened repository path reported by the app')
-      assertEqual(head(workspace), 'main', 'git HEAD after opening the repository')
-      assertEqual(porcelain(workspace), '', 'The fixture started with a dirty tree')
-      return `opened ${opened}`
-    })
+    await check(
+      'the disposable repository is selected through the actual Workbench sidebar without checkout',
+      async () => {
+        const entry = page.locator('.bw-repo').first()
+        await entry.waitFor()
+        assertEqual(
+          await entry.getAttribute('title'),
+          canonicalRepo,
+          'Qualified sidebar fixture path',
+        )
+        await entry.click()
+        await page.locator('.bw-main').waitFor()
+        const context = await capturedContext(page, canonicalRepo)
+        const opened = await page.evaluate(
+          async (context) => (await window.desktop.inspect(context, 'refresh', [])).path,
+          context,
+        )
+        assertEqual(opened, canonicalRepo, 'Captured selected repository path')
+        assertEqual(head(workspace), 'main', 'Selection changed Git HEAD')
+        assertEqual(porcelain(workspace), '', 'Selection changed the index or directory')
+        return `actual sidebar and captured inspection selected ${opened} without checkout`
+      },
+    )
 
     await check('GitHub stays unavailable without a CLI, and local Git still works', async () => {
       // This run owns the CLI on PATH and has not written one yet, so the machine
@@ -2106,12 +2029,6 @@ async function run(options) {
       // pointed at is this run's own, and is reachable: what is missing is the
       // CLI, so nothing can be asked for a credential with which to reach it.
       await gotoView(locators, 'Pull requests')
-      const banner = page.locator('.gh-banner[role="status"]')
-      await banner.waitFor()
-      assert(
-        (await banner.innerText()).includes('GitHub data unavailable'),
-        'The pull request view did not report GitHub as unavailable',
-      )
       const absent = await page.evaluate(async () => await window.desktop.githubCliStatus())
       assertEqual(
         absent === null ? 'none' : absent.state,
@@ -2128,20 +2045,21 @@ async function run(options) {
         0,
         'The app reached its API without a CLI to authenticate the request with',
       )
+      const context = await capturedContext(page, canonicalRepo)
       const pullRequests = await page.evaluate(
-        async () => (await window.desktop.refresh()).pullRequests,
+        async (context) => (await window.desktop.inspect(context, 'refresh', [])).pullRequests,
+        context,
       )
       assertEqual(
         pullRequests.length,
         0,
         'Pull requests appeared without an authenticated gh session',
       )
-      const footer = page.locator('button[title="GitHub CLI status"]')
-      await footer.waitFor()
-      assert(
-        (await footer.innerText()).includes('not installed'),
-        `The GitHub CLI footer did not report the CLI as absent: ${await footer.innerText()}`,
+      const dialog = await openCliSettings(page)
+      await expect(dialog.getByRole('region', { name: 'GitHub CLI' })).toContainText(
+        'not installed',
       )
+      await page.keyboard.press('Escape')
       await gotoView(locators, 'Branches')
       assertEqual(
         git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD']),
@@ -2226,18 +2144,8 @@ async function run(options) {
             assert(!secret.test(text), `The status carried credential-shaped text: ${text}`)
           }
         }
-        // The footer is a state indicator and names the state the read
-        // established. Which account that state belongs to was proved through the
-        // bridge above and again by the credential the API received, and the dialog
-        // is the surface that names the account in full.
-        const footer = page.locator('button[title="GitHub CLI status"]')
-        await footer.waitFor()
-        assert(
-          (await footer.innerText()).includes('signed in'),
-          `The GitHub CLI footer did not report the state it read: ${await footer.innerText()}`,
-        )
-        await footer.click()
-        const dialog = page.locator('[role="dialog"]').filter({ hasText: 'GitHub account' })
+        // The current consumer is the shared GitHub CLI section in Settings.
+        const dialog = await openCliSettings(page)
         await dialog.waitFor()
         assert(
           (await dialog.innerText()).includes('smoke-account'),
@@ -2267,199 +2175,6 @@ async function run(options) {
           }
           return 'null, missing flag, non-boolean flag and renderer authority fields refused'
         })
-        await check('graph preferences roundtrip through trusted scoped native IPC', async () => {
-          const originalOrigin = git(workspace, ['remote', 'get-url', 'origin'])
-          const preferences = {
-            preset: 'review-requested',
-            text: 'native smoke',
-            author: 'smoke-account',
-            status: 'ready',
-            collapse: true,
-            name: 'Native smoke view',
-          }
-          const scope = {
-            repositoryPath: canonicalRepo,
-            host: 'github.com',
-            repository: 'smoke-owner/graph-smoke',
-            account: 'smoke-account',
-          }
-          // Only the origin metadata changes. No fetch/push runs until the disposable local
-          // origin is restored; all account reads still reach this run's controlled API.
-          git(workspace, [
-            'remote',
-            'set-url',
-            'origin',
-            'https://github.com/smoke-owner/graph-smoke.git',
-          ])
-          try {
-            const empty = await page.evaluate(() => window.desktop.graphPreferences())
-            deepStrictEqual(
-              empty.scope,
-              scope,
-              'Trusted getter publishes only the captured public scope',
-            )
-            deepStrictEqual(
-              empty,
-              { state: 'ready', preferences: null, scope },
-              'Fresh qualified graph scope',
-            )
-            const saved = await page.evaluate(
-              ({ value, expectedScope }) =>
-                window.desktop.saveGraphPreferences(value, expectedScope),
-              { value: preferences, expectedScope: scope },
-            )
-            deepStrictEqual(
-              saved,
-              { state: 'ready', preferences, scope },
-              'Trusted graph preference save',
-            )
-            deepStrictEqual(
-              await page.evaluate(() => window.desktop.graphPreferences()),
-              saved,
-              'Trusted graph preference read after save',
-            )
-            const directory = join(probe.userData, 'graph-preferences')
-            const files = readdirSync(directory)
-            assertEqual(files.length, 1, 'Only one synthetic preference scope was persisted')
-            const persisted = JSON.parse(readFileSync(join(directory, files[0]), 'utf8'))
-            assertEqual(
-              persisted.scope,
-              JSON.stringify(['github.com', 'smoke-owner/graph-smoke', 'smoke-account']),
-              'Main-owned preference scope',
-            )
-            deepStrictEqual(
-              persisted.preferences,
-              preferences,
-              'Persisted native preference payload',
-            )
-            const beforeInvalid = protectedState(probe.userData)
-            for (const invalid of [
-              { ...preferences, account: 'foreign-account' },
-              { ...preferences, collapse: 'yes' },
-              { ...preferences, text: 'x'.repeat(257) },
-            ]) {
-              const refusal = await page.evaluate(
-                async ({ value, expectedScope }) => {
-                  try {
-                    return {
-                      resolved: true,
-                      value: await window.desktop.saveGraphPreferences(value, expectedScope),
-                    }
-                  } catch (error) {
-                    return { resolved: false, message: String(error.message) }
-                  }
-                },
-                { value: invalid, expectedScope: scope },
-              )
-              assert(
-                !refusal.resolved && /Invalid graph preferences/.test(refusal.message),
-                'Invalid graph preference payload was not refused',
-              )
-              assertEqual(
-                protectedState(probe.userData),
-                beforeInvalid,
-                'Invalid preference payload changed persisted state',
-              )
-            }
-            for (const expectedScope of [
-              { ...scope, repository: 'smoke-owner/other-graph' },
-              { ...scope, repositoryPath: `${canonicalRepo}-foreign` },
-              { ...scope, account: 'foreign-account' },
-            ]) {
-              const refused = await page.evaluate(
-                async ({ value, expectedScope }) => ({
-                  save: await window.desktop.saveGraphPreferences(value, expectedScope),
-                  reset: await window.desktop.resetGraphPreferences(expectedScope),
-                }),
-                { value: preferences, expectedScope },
-              )
-              for (const result of [refused.save, refused.reset]) {
-                assertEqual(
-                  result.state,
-                  'unavailable',
-                  'Mismatched write scope must be unavailable',
-                )
-                assertEqual(
-                  result.preferences,
-                  null,
-                  'Mismatched write scope must not return preferences',
-                )
-                assertEqual(
-                  result.scope,
-                  null,
-                  'Mismatched write scope must not publish another scope',
-                )
-              }
-              assertEqual(
-                protectedState(probe.userData),
-                beforeInvalid,
-                'Mismatched save/reset scope changed persisted bytes',
-              )
-            }
-            // Test sender refusal while a real scoped file exists, including reset/save attempts.
-            await inspector.call(MAIN_UNTRUSTED, 'open', ORIGIN)
-            try {
-              const refused = await inspector.call(MAIN_UNTRUSTED, 'probe', ORIGIN)
-              assertRefused(refused, /Untrusted application request\.?/u)
-              assertEqual(
-                protectedState(probe.userData),
-                beforeInvalid,
-                'Untrusted graph calls changed scoped preferences',
-              )
-            } finally {
-              await inspector.call(MAIN_UNTRUSTED, 'close', ORIGIN)
-            }
-            git(workspace, [
-              'remote',
-              'set-url',
-              'origin',
-              'https://github.com/smoke-owner/other-graph.git',
-            ])
-            deepStrictEqual(
-              await page.evaluate(() => window.desktop.graphPreferences()),
-              {
-                state: 'ready',
-                preferences: null,
-                scope: { ...scope, repository: 'smoke-owner/other-graph' },
-              },
-              'Another qualified repository must not read saved graph preferences',
-            )
-            git(workspace, [
-              'remote',
-              'set-url',
-              'origin',
-              'https://github.com/smoke-owner/graph-smoke.git',
-            ])
-            deepStrictEqual(
-              await page.evaluate(() => window.desktop.graphPreferences()),
-              saved,
-              'Returning to the qualified scope preserves preferences',
-            )
-            deepStrictEqual(
-              await page.evaluate(
-                (expectedScope) => window.desktop.resetGraphPreferences(expectedScope),
-                scope,
-              ),
-              { state: 'ready', preferences: null, scope },
-              'Trusted graph reset',
-            )
-            deepStrictEqual(
-              await page.evaluate(() => window.desktop.graphPreferences()),
-              { state: 'ready', preferences: null, scope },
-              'Graph read after reset',
-            )
-            assertEqual(readdirSync(directory).length, 0, 'Reset removed the synthetic scoped file')
-            // Retain one synthetic file so the final foreign-origin reset probe protects real bytes.
-            await page.evaluate(
-              ({ value, expectedScope }) =>
-                window.desktop.saveGraphPreferences(value, expectedScope),
-              { value: preferences, expectedScope: scope },
-            )
-          } finally {
-            git(workspace, ['remote', 'set-url', 'origin', originalOrigin])
-          }
-          return 'trusted save/read/reset, invalid payload refusal, main-derived account/repository scope and untrusted save/reset refusal'
-        })
       } finally {
         // Removing the controlled executable is the fault injection: the fixture
         // answers any `gh` that is not it with ENOENT, exactly as a machine
@@ -2470,7 +2185,12 @@ async function run(options) {
     })
 
     await check('fetch transfers the published commit', async () => {
-      await withNotice(locators, () => locators.button('Fetch').click(), /^Fetched /)
+      const context = await capturedContext(page, canonicalRepo)
+      const result = await page.evaluate(async (context) => {
+        const approval = await window.desktop.captureOperation(context)
+        return window.desktop.executeOperation(approval.token, { type: 'fetch' })
+      }, context)
+      assert(result.ok, `Captured fixture fetch failed: ${result.message}`)
       assertEqual(
         git(workspace, ['rev-parse', 'refs/remotes/origin/main']),
         workspace.publishedTip,
@@ -2484,219 +2204,96 @@ async function run(options) {
       return `origin/main advanced to ${workspace.publishedTip.slice(0, 10)}`
     })
 
-    await check('creates a branch and records its stack parent', async () => {
-      await locators.button('New branch').click()
-      const dialog = locators.dialog()
-      await dialog.waitFor()
-      await dialog.getByRole('textbox', { name: 'Branch name', exact: true }).fill(FEATURE)
-      await dialog.getByRole('combobox', { name: 'Parent branch', exact: true }).click()
-      await locators.page.getByRole('option', { name: /^main(?: \(|$)/u }).click()
-      const create = dialog.getByRole('button', { name: 'Create branch', exact: true })
-      assert(
-        !(await create.isDisabled()),
-        '"Create branch" stayed disabled with a name and a parent',
-      )
-      await withNotice(locators, () => create.click(), /^Created and switched /)
-      await locators.branch(FEATURE, true).waitFor()
-      assertEqual(head(workspace), FEATURE, 'git HEAD after creating the branch')
-      assertEqual(
-        git(workspace, ['rev-parse', `refs/heads/${FEATURE}^{commit}`]),
-        git(workspace, ['rev-parse', 'refs/heads/main^{commit}']),
-        'The new branch tip against its parent tip',
-      )
-      assertEqual(
-        git(workspace, ['config', '--local', '--get', `branch.${FEATURE}.parent`]),
-        'main',
-        'The recorded stack parent',
-      )
-      return `${FEATURE} created from main, checked out, with its parent recorded in git config`
-    })
-
-    await check('stages and commits through the working-changes view', async () => {
-      await writeFile(join(workspace.repo, 'feature.txt'), 'first pass\n')
-      await refreshSnapshot(locators)
-      await gotoView(locators, 'Working changes')
-      await locators.unstaged().getByRole('button', { name: 'Inspect feature.txt' }).waitFor()
-      await withNotice(locators, () => locators.button('Stage all').click(), /^Staged \d+ path/)
-      await locators.staged().getByRole('button', { name: 'Inspect feature.txt' }).waitFor()
-      assertEqual(porcelain(workspace), 'A  feature.txt', 'The index after staging')
-      const message = 'Add feature file from the packaged app'
-      await locators.page.getByRole('textbox', { name: 'Commit message' }).fill(message)
-      const commit = locators.button('Commit')
-      assert(
-        !(await commit.isDisabled()),
-        '"Commit" stayed disabled with a staged file and a message',
-      )
-      await withNotice(locators, () => commit.click(), /^Committed staged changes/)
-      assertEqual(git(workspace, ['log', '-1', '--pretty=%s']), message, 'The new commit subject')
-      assertEqual(
-        git(workspace, ['show', 'HEAD:feature.txt']),
-        'first pass',
-        'The committed file content',
-      )
-      assertEqual(porcelain(workspace), '', 'The working tree after committing')
-      return `staged and committed "${message}"`
-    })
-
-    await check('stashes and pops working changes', async () => {
-      await writeFile(join(workspace.repo, 'feature.txt'), 'second pass\n')
-      await writeFile(join(workspace.repo, 'scratch.txt'), 'untracked\n')
-      await refreshSnapshot(locators)
-      await gotoView(locators, 'Working changes')
-      await locators.button('Stash changes').click()
-      const dialog = locators.dialog()
-      await dialog.waitFor()
-      const message = 'work in progress from the packaged smoke'
-      await dialog.getByRole('textbox', { name: 'Message (optional)', exact: true }).fill(message)
-      await dialog.getByRole('checkbox', { name: 'Include untracked files' }).check()
-      const submit = dialog.getByRole('button', { name: 'Stash working changes', exact: true })
-      assert(!(await submit.isDisabled()), 'The stash dialog stayed disabled')
-      await withNotice(locators, () => submit.click(), /^Stashed /)
-      assertEqual(porcelain(workspace), '', 'The working tree after stashing')
-      assert(
-        !existsSync(join(workspace.repo, 'scratch.txt')),
-        'The untracked file survived the stash',
-      )
-      assert(git(workspace, ['stash', 'list']).includes(message), 'git stash list lost the message')
-      await gotoView(locators, 'Stashes')
-      await page.getByRole('listitem', { name: 'Stash stash@{0}' }).waitFor()
-      await withNotice(
-        locators,
-        () => page.getByRole('button', { name: 'Pop stash@{0}' }).click(),
-        /^Applied and removed /,
-      )
-      assertEqual(git(workspace, ['stash', 'list']), '', 'git stash list after popping')
-      const restored = porcelain(workspace)
-      assert(
-        restored.includes('feature.txt') && restored.includes('scratch.txt'),
-        `The stash was not fully restored (${restored})`,
-      )
-      assertEqual(
-        readFileSync(join(workspace.repo, 'feature.txt'), 'utf8'),
-        'second pass\n',
-        'The restored content',
-      )
-      await gotoView(locators, 'Branches')
-      return `stashed and popped "${message}" including the untracked file`
-    })
-
-    await check('resolves a merge conflict and continues the operation', async () => {
-      await writeFile(join(workspace.repo, CONFLICT), 'feature side\n')
-      await commitThroughUi(workspace, locators, 'Feature side change')
-      await switchToBranch(workspace, locators, 'main')
-      await writeFile(join(workspace.repo, CONFLICT), 'main side\n')
-      commitFromGit(workspace, 'Main side change')
-      await refreshSnapshot(locators)
-      const expectedParents = `${git(workspace, ['rev-parse', 'HEAD'])} ${git(workspace, ['rev-parse', FEATURE])}`
-
-      await mergeThroughUi(locators, FEATURE)
-      const banner = locators.operation()
-      await banner.waitFor()
-      assert(
-        /1 conflicted file/.test(text(await banner.innerText())),
-        'The operation banner did not report the conflict',
-      )
-      assert(
-        await banner.getByRole('button', { name: 'Continue', exact: true }).isDisabled(),
-        '"Continue" was enabled while the conflict was unresolved',
-      )
-      assert(mergeInProgress(workspace), 'git has no MERGE_HEAD after the conflicting merge')
-
-      await gotoView(locators, 'Working changes')
-      // A conflicted file is both staged and unstaged in Git's index, so it renders in both
-      // sections; scope the click to the unstaged list to keep the locator unambiguous.
-      await locators
-        .unstaged()
-        .getByRole('button', { name: `Resolve ${CONFLICT}`, exact: true })
-        .click()
-      const inspectorPanel = page.locator(`section[aria-label="Inspect ${CONFLICT}"]`)
-      await inspectorPanel.waitFor()
-      // Resolution now happens in the three-way resolver the inspector opens. The
-      // resolver names each side by what it means for the active operation, so the
-      // stage-3 (incoming) label is read from the pane instead of hardcoded.
-      await inspectorPanel.getByRole('button', { name: 'Open conflict resolver' }).click()
-      const resolver = page.getByRole('dialog')
-      await resolver.waitFor()
-      const incomingSide = text(
-        await resolver
-          .locator('.conflict-pane')
-          .nth(2)
-          .locator('.conflict-pane-head > span')
-          .first()
-          .innerText(),
-      )
-      // A file with conflicting regions is decided one region at a time, then the
-      // edited result is staged; the whole-file accept controls only exist for a
-      // file with no regions.
-      await resolver.getByRole('button', { name: `Accept ${incomingSide} for conflict 1` }).click()
-      await withNotice(
-        locators,
-        () => resolver.getByRole('button', { name: 'Mark resolved and stage' }).click(),
-        /^Resolved /,
-      )
-      await locators
-        .staged()
-        .getByRole('button', { name: `Inspect ${CONFLICT}` })
-        .waitFor()
-      const resolved = readFileSync(join(workspace.repo, CONFLICT), 'utf8')
-      assert(
-        !/^<{7}|^={7}|^>{7}/m.test(resolved),
-        `The resolved file still has conflict markers: ${resolved}`,
-      )
-      assertEqual(resolved, 'feature side\n', 'The resolved file content')
-
-      const resume = locators.operation().getByRole('button', { name: 'Continue', exact: true })
-      await resume.waitFor()
-      assert(
-        !(await resume.isDisabled()),
-        '"Continue" stayed disabled after the resolution was staged',
-      )
-      await withNotice(locators, () => resume.click(), /^Continued /)
-      assert(!mergeInProgress(workspace), 'MERGE_HEAD survived the continue')
-      assertEqual(
-        git(workspace, ['log', '-1', '--pretty=%P']),
-        expectedParents,
-        'The completed merge must contain the reviewed main and feature tips',
-      )
-      await locators.operation().waitFor({ state: 'hidden' })
-      assertEqual(head(workspace), 'main', 'git HEAD after completing the merge')
-      return 'the conflict was resolved in the file inspector and Continue created the merge commit'
-    })
-
-    await check('aborts a conflicted merge and restores the pre-merge state', async () => {
-      await writeFile(join(workspace.repo, CONFLICT), 'abort main side\n')
-      await commitThroughUi(workspace, locators, 'Abort scenario main side')
-      const before = readFileSync(join(workspace.repo, CONFLICT), 'utf8')
-
-      // The far side of the conflict is prepared with real git; the conflict, the abort, and the
-      // recovery all happen through the shipped renderer.
-      git(workspace, ['switch', '--quiet', FEATURE])
-      await writeFile(join(workspace.repo, CONFLICT), 'abort feature side\n')
-      commitFromGit(workspace, 'Abort scenario feature side')
-      git(workspace, ['switch', '--quiet', 'main'])
-      await refreshSnapshot(locators)
-
-      await mergeThroughUi(locators, FEATURE)
-      const banner = locators.operation()
-      await banner.waitFor()
-      assert(mergeInProgress(workspace), 'git has no MERGE_HEAD after the second conflicting merge')
-      await banner.getByRole('button', { name: /^Abort/ }).click()
-      const dialog = locators.dialog()
-      await dialog.waitFor()
-      const abort = dialog.getByRole('button', { name: 'Abort merge', exact: true })
-      await abort.waitFor()
-      assert(!(await abort.isDisabled()), '"Abort merge" stayed disabled')
-      await withNotice(locators, () => abort.click(), /^Aborted /)
-      assert(!mergeInProgress(workspace), 'MERGE_HEAD survived the abort')
-      assertEqual(
-        readFileSync(join(workspace.repo, CONFLICT), 'utf8'),
-        before,
-        'The file after the abort',
-      )
-      assertEqual(porcelain(workspace), '', 'The working tree after the abort')
-      await locators.operation().waitFor({ state: 'hidden' })
-      return 'the abort restored the pre-merge file and cleared the operation banner'
-    })
+    await check(
+      'captured lifecycle creates a new linked worktree while preserving the primary directory',
+      async () => {
+        const context = await capturedContext(page, canonicalRepo)
+        const directory = join(workspace.root, 'captured linked Ω')
+        const primaryHead = git(workspace, ['rev-parse', 'HEAD'])
+        const primaryIndex = await readFile(join(workspace.repo, '.git', 'index'))
+        const result = await page.evaluate(
+          async ({ context, directory, branch }) => {
+            const approval = await window.desktop.captureOperation(context)
+            const preview = await window.desktop.inspect(
+              { ...context, operationToken: approval.token },
+              'worktreeLifecyclePreview',
+              [
+                {
+                  kind: 'create',
+                  repositoryId: context.repositoryId,
+                  sourceRefId: context.refId,
+                  directory,
+                  newBranch: branch,
+                },
+              ],
+            )
+            if (preview.blockers.length) throw new Error(preview.blockers.join('; '))
+            return window.desktop.executeOperation(approval.token, {
+              type: 'executeWorktreeLifecycle',
+              token: preview.token,
+              coordinationConfirmed: true,
+            })
+          },
+          { context, directory, branch: FEATURE },
+        )
+        assert(
+          result.ok && result.worktreeLifecycle,
+          'Actual captured lifecycle did not confirm a result',
+        )
+        assertEqual(
+          git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: directory }),
+          FEATURE,
+          'New linked branch',
+        )
+        assertEqual(
+          git(workspace, ['rev-parse', 'HEAD']),
+          primaryHead,
+          'Lifecycle changed primary HEAD',
+        )
+        assert(
+          (await readFile(join(workspace.repo, '.git', 'index'))).equals(primaryIndex),
+          'Lifecycle rewrote primary index',
+        )
+        await writeFile(join(directory, 'native-Ω.txt'), 'Original captured directory bytes Ω\n')
+        const selected = await capturedContext(page, directory)
+        const before = await readFile(join(workspace.repo, '.git', 'config'))
+        const inspected = await page.evaluate(
+          async (context) => ({
+            status: await window.desktop.inspect(context, 'worktreeStatus', []),
+            file: await window.desktop.inspect(context, 'fileView', ['native-Ω.txt']),
+          }),
+          selected,
+        )
+        assertEqual(
+          inspected.status.path,
+          directory,
+          'Read-only inspector borrowed another directory',
+        )
+        assert(
+          inspected.status.files.some((file) => file.path === 'native-Ω.txt' && file.index === '?'),
+          'Actual untracked fact was lost',
+        )
+        assertEqual(
+          inspected.file.content,
+          'Original captured directory bytes Ω\n',
+          'Actual read-only file bytes',
+        )
+        assertEqual(
+          git(workspace, ['rev-parse', 'HEAD']),
+          primaryHead,
+          'Inspection changed primary HEAD',
+        )
+        assert(
+          (await readFile(join(workspace.repo, '.git', 'index'))).equals(primaryIndex),
+          'Inspection rewrote primary index',
+        )
+        assert(
+          (await readFile(join(workspace.repo, '.git', 'config'))).equals(before),
+          'Inspection rewrote Git config',
+        )
+        return 'Shipped main/preload captured lifecycle and read-only Unicode directory inspection; no primary checkout/index change'
+      },
+    )
 
     await check('the disposable remote was never written to', async () => {
       assertEqual(
@@ -2789,11 +2386,15 @@ async function run(options) {
             }
           })
           assert(refused, 'Adoption accepted an undiscovered identity')
-          const adopted = await page.evaluate(async (id) => {
-            const registered = await window.desktop.adoptWorktrees([id], 'packaged-adoption')
-            const active = await window.desktop.refresh()
-            return { registered, activePath: active.path }
-          }, worktree.id)
+          const original = await capturedContext(page, canonicalRepo)
+          const adopted = await page.evaluate(
+            async ({ id, context }) => {
+              const registered = await window.desktop.adoptWorktrees([id], 'packaged-adoption')
+              const active = await window.desktop.inspect(context, 'refresh', [])
+              return { registered, activePath: active.path }
+            },
+            { id: worktree.id, context: original },
+          )
           assert(
             adopted.registered.some((item) => item.path === linked),
             'Adoption did not register the existing linked directory',

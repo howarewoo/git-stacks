@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { openGallery, publishCliStatus, releaseDoubleCalls, settle } from './helpers/gallery'
-import { selectBranchInList } from './helpers/dialogs'
+import { openMergeDialog, selectBranchInList } from './helpers/dialogs'
 import { switchDestination } from './helpers/destinations'
 
 /**
@@ -16,9 +16,10 @@ import { switchDestination } from './helpers/destinations'
 test.describe('Merge reads after a run', () => {
   test('a finished run is replaced by what GitHub reports', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-lifecycle' })
-    const dialog = await openMergeOutcomes(page, 'feature/lifecycle-open')
+    const dialog = await openMergeDialog(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
+    await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
 
     // Before the run: what GitHub reports for earlier requests, with one pull request
     // still running a request.
@@ -45,8 +46,9 @@ test.describe('Merge reads after a run', () => {
 
   test('an idle merge approval cannot move to a replacement account', async ({ page }) => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
-    const dialog = await openMergeOutcomes(page)
+    const dialog = await openMergeDialog(page)
     await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
+    await dialog.getByRole('button', { name: 'Refresh what GitHub reports' }).click()
     await publishCliStatus(page, {
       state: 'authenticated',
       host: 'github.com',
@@ -69,7 +71,7 @@ test.describe('Merge reads after a run', () => {
 
   test('a refused merge stays failed on reopen, with the reason GitHub gave', async ({ page }) => {
     await openGallery(page, { scenario: 'pull-requests-merge-refused' })
-    const dialog = await openMergeOutcomes(page, 'feature/lifecycle-open')
+    const dialog = await openMergeDialog(page, 'feature/lifecycle-open')
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await settle(page)
     // A terminal `failed` result never changes, so a reopened dialog has to present the
@@ -92,7 +94,7 @@ test('a merge that landed one captured target stays partial when a later target 
   page,
 }) => {
   await openGallery(page, { scenario: 'github-cli-authenticated' })
-  const dialog = await openMergeOutcomes(page)
+  const dialog = await openMergeDialog(page)
   await expect(dialog.getByText('has not reported a result yet').first()).toBeVisible()
   await page.evaluate(() => window.fixture.hold('runAction'))
   await dialog.getByRole('button', { name: 'Merge pull request', exact: true }).last().click()
@@ -150,16 +152,6 @@ async function openCapturedRecovery(page: Page, branchName = 'feature/checkout')
   return { dialog, recovery }
 }
 
-/**
- * The merge dialog is reached from the recovery region of an explicitly captured
- * directory, through the merge outcomes that directory's journal reports.
- */
-async function openMergeOutcomes(page: Page, branchName = 'feature/checkout') {
-  const { recovery } = await openCapturedRecovery(page, branchName)
-  await recovery.getByRole('button', { name: 'Review merge outcomes' }).click()
-  return page.getByRole('dialog', { name: 'Merge pull request' })
-}
-
 test('recovery reads only an explicitly captured directory and browsing never replays a mutation', async ({
   page,
 }) => {
@@ -169,6 +161,28 @@ test('recovery reads only an explicitly captured directory and browsing never re
   expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   await page.keyboard.press('Escape')
   await expect(dialog).not.toBeVisible()
+  await page.evaluate(() => {
+    window.fixture.pushMergeProgress({
+      scope: window.fixture.operationScope(),
+      source: 'action',
+      progress: {
+        action: 'default',
+        status: 'failed',
+        message: 'Captured outcomes arrived while recovery was closed',
+        layers: [
+          {
+            branch: 'feature/checkout-tests',
+            pullRequest: 41,
+            status: 'merged',
+            detail: 'Confirmed by the captured producer',
+            mergedOid: '4444444444444444444444444444444444444444',
+            queue: null,
+            requestUuid: 'closed-recovery',
+          },
+        ],
+      },
+    })
+  })
   for (const destination of ['activity', 'attention', 'pullRequests', 'branches'] as const) {
     await switchDestination(page, destination)
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
@@ -177,6 +191,13 @@ test('recovery reads only an explicitly captured directory and browsing never re
   await page.getByRole('button', { name: 'Operations and recovery', exact: true }).click()
   await expect(dialog).toBeVisible()
   await expect(recovery).toBeVisible()
+  await expect(recovery).toContainText('Captured outcomes arrived while recovery was closed')
+  await page.evaluate(() =>
+    window.fixture.failNext('mergeStatus', 'Journal is temporarily unavailable'),
+  )
+  await recovery.getByRole('button', { name: 'Refresh merge outcomes', exact: true }).click()
+  await expect(recovery).toContainText('Recovery read unavailable')
+  await expect(recovery).toContainText('Confirmed by the captured producer')
   expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
 })
 
@@ -235,7 +256,7 @@ test('a recovery journal read failure stays visible without retrying a mutation'
 test('captured publication survives a failed journal read without replay', async ({ page }) => {
   await openGallery(page, { scenario: 'github-cli-authenticated' })
   await page.evaluate(() => window.fixture.hold('submitStackProgress'))
-  const { recovery } = await openCapturedRecovery(page)
+  const { dialog, recovery } = await openCapturedRecovery(page)
   await page.evaluate(() => {
     window.fixture.pushPublication({
       scope: window.fixture.operationScope(),
@@ -293,4 +314,5 @@ test('captured publication survives a failed journal read without replay', async
   await expect(publication).toContainText('Captured push feature/checkout-tests')
   await expect(publication).toContainText('Original operation authority was not recorded')
   expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+  await expect(dialog).toBeVisible()
 })

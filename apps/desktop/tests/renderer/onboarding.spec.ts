@@ -171,20 +171,22 @@ test.describe('Onboarding and repository discovery', () => {
     await expect(copy).toHaveText('Copy')
   })
 
-  test('adding an existing repository and drag-and-drop triggers repository registration', async ({
+  test('dropping an existing directory registers it and opens its read-only branch context', async ({
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
-    await settle(page)
-
-    // Drag-and-drop folder triggers addRepository via preload event
     await page.evaluate(() => {
-      window.fixture.dropRepository?.(['/mock/path/dropped-repo'])
+      window.fixture.setScenario('shell-connected')
+      window.fixture.dropRepository?.(['/Users/ada/Code/git-stacks'])
     })
-
-    // Fixture records addRepository call
-    const calls = await page.evaluate(() => window.fixture.calls)
-    const addCalls = calls.filter((c) => c.call === 'addRepository')
-    expect(addCalls.length).toBeGreaterThanOrEqual(1)
+    await expect(
+      page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
+    ).toBeVisible()
+    await expect(page.locator('.bw-sidebar button[aria-pressed="true"]')).toHaveAttribute(
+      'aria-label',
+      expect.stringContaining('/Users/ada/Code/git-stacks'),
+    )
+    await expect(page.getByRole('button', { name: 'main', exact: true })).toBeVisible()
+    expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 })

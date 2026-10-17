@@ -70,6 +70,10 @@ async function openCliStatusDialog(page: Page, scenario: string) {
   await settle(page)
   await cliStatusButton(page).click()
   await expect(cliStatusDialog(page)).toBeVisible()
+  await cliStatusDialog(page)
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('button', { name: 'GitHub CLI', exact: true })
+    .click()
   await settle(page)
 }
 
@@ -164,6 +168,7 @@ test.describe('Required GitHub CLI status', () => {
   }) => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
     await settle(page)
+    const originalStatus = await page.evaluate(() => window.desktop.githubCliStatus!())
 
     // The branch that carries a pull request, so the inspector's checks and the
     // review workspace both have real GitHub data behind them to be retired.
@@ -201,7 +206,13 @@ test.describe('Required GitHub CLI status', () => {
 
     // The session on screen is still the one that replaced it.
     await cliStatusButton(page).click()
-    await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()
+    await cliStatusDialog(page)
+      .getByRole('navigation', { name: 'Settings sections' })
+      .getByRole('button', { name: 'GitHub CLI', exact: true })
+      .click()
+    await expect(
+      cliStatusFacts(page).getByText(originalStatus.login!, { exact: true }),
+    ).toHaveCount(0)
     expect(await getDispatchedActions(page)).toEqual([])
   })
 
@@ -211,9 +222,9 @@ test.describe('Required GitHub CLI status', () => {
     await openGallery(page, { scenario: 'github-cli-authenticated' })
     await changeScenario(page, 'shell-long-content')
     await holdDoubleCall(page, 'openRepository')
+    await holdDoubleCall(page, 'worktreeInventory')
     const add = page.getByRole('button', { name: 'Add repository', exact: true })
     await add.click()
-    // The open dialog is modal: its own folder chooser is the local switch.
     const local = page.getByRole('dialog', { name: 'Open a local repository', exact: true })
     const choose = local.getByRole('button', { name: 'Choose folder', exact: true })
     await choose.click()
@@ -223,19 +234,21 @@ test.describe('Required GitHub CLI status', () => {
     // Main can have persisted B already. Neither a second open nor a local
     // mutation against B may run while the renderer still displays A.
     await expect(choose).toBeDisabled()
+    await page.keyboard.press('Escape')
+    await expect(local).toBeVisible()
     expect(await releaseDoubleCalls(page, 'openRepository')).toBe(1)
+    await expect(choose).toBeDisabled()
+    await expect(local).toBeVisible()
+    await releaseDoubleCalls(page, 'worktreeInventory')
     await settle(page)
     await expect(local).toHaveCount(0)
 
     const opened = scenarios['shell-long-content'].snapshot!
-    await expect(
-      page
-        .getByRole('complementary', { name: 'Workspace navigation' })
-        .getByRole('button', { name: `howarewoo/git-stacks · ${opened.path}`, exact: true }),
-    ).toHaveAttribute('aria-pressed', 'true')
-    await expect(
-      page.getByRole('button', { name: opened.currentBranch!, exact: true }),
-    ).toBeVisible()
+    await expect(page.locator('.bw-sidebar button[aria-pressed="true"]')).toHaveAttribute(
+      'aria-label',
+      expect.stringContaining(opened.path),
+    )
+    await expect(local).toHaveCount(0)
     await expect(add).toBeEnabled()
     await cliStatusButton(page).click()
     await expect(cliStatusFacts(page).getByText('None reported')).toBeVisible()

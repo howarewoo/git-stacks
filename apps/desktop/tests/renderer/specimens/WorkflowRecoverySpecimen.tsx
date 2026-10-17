@@ -1,8 +1,11 @@
 import React from 'react'
 import { EMPTY_SNAPSHOT_LIMITS } from '@git-stacks/shared/performance'
 import type { PublishProgress, RepositorySnapshot, StackPreview } from '@git-stacks/shared/types'
-import { WorkflowDialog, type WorkflowStackAPI } from '../components/workflow-dialog'
-import { standardCapabilities } from './data-fixtures'
+import {
+  WorkflowDialog,
+  type WorkflowStackAPI,
+} from '../../../src/renderer/src/components/workflow-dialog'
+import { standardCapabilities } from '../fixtures/data'
 import { publishPreview } from './DialogSpecimenData'
 
 /**

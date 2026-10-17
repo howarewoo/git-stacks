@@ -3,7 +3,6 @@ import type { NativeOperationPreview } from '@git-stacks/shared/native-operation
 import type { WorktreeLifecyclePreview } from '@git-stacks/shared/worktree-lifecycle'
 import type { OperationRecord } from '@git-stacks/shared/operation-scope'
 import type { PullRequestIndex } from '@git-stacks/shared/pr-index'
-import type { GraphPreferences } from '@git-stacks/shared/graph-preferences'
 import type { GraphChange } from './graph'
 import type {
   FileView,
@@ -59,9 +58,6 @@ export type FixtureCall =
   | 'worktreeStatus'
   | 'prIndex'
   | 'prIndexDetail'
-  | 'graphPreferences'
-  | 'saveGraphPreferences'
-  | 'resetGraphPreferences'
   | 'runAction'
   | 'fileView'
   | 'conflictView'
@@ -142,7 +138,7 @@ export interface FixtureCallRecord {
 /**
  * Deterministic data plus behavior for one gallery scenario. Snapshot data reuses the
  * repository fixtures in `tests/fixtures/workflow-scenarios.ts` and
- * `src/renderer/src/design-system/data-fixtures.ts`; nothing here invents new shapes.
+ * `tests/renderer/fixtures/data.ts`; nothing here invents new shapes.
  */
 export interface FixtureScenario {
   /** Scenario id used by `?scenario=<name>`. */
@@ -161,7 +157,6 @@ export interface FixtureScenario {
   readonly snapshotsByPath?: Readonly<Record<string, RepositorySnapshot>>
   readonly prIndex?: PullRequestIndex
   readonly inventory?: WorktreeInventory
-  readonly graphPreferences?: GraphPreferences
   /**
    * The settings file this window reads and the GitHub CLI status behind it.
    *

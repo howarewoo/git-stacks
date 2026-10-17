@@ -9,6 +9,7 @@ import {
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
 import { scenarios } from './fixtures/scenarios'
+import { cutoverScale } from './fixtures/cutover'
 import { snapshotInventory } from './fixtures/inventory'
 
 async function refreshReviewChoices(page: Page, freshOriginalOwner = false) {
@@ -32,10 +33,9 @@ for (const destination of ['pullRequests', 'branches'] as const) {
     await openGallery(page, { scenario: 'review-stacked' })
     await switchDestination(page, destination)
     if (destination === 'pullRequests') {
-      const link = page
-        .locator('.wb-secondary-list')
-        .getByRole('button')
-        .filter({ hasText: '#42 Give the review workspace' })
+      const link = page.locator('.wb-pr-row').filter({
+        has: page.locator('.wb-row-title').filter({ hasText: /^#42 / }),
+      })
       await link.focus()
       await link.press('Enter')
     } else {
@@ -51,14 +51,13 @@ for (const destination of ['pullRequests', 'branches'] as const) {
       '#42 Give the review workspace its own cancellation ids',
     )
     await expect(page.getByRole('dialog')).toHaveCount(0)
-    await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
+    await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
     if (destination === 'pullRequests') {
       await expect(page.getByRole('heading', { name: 'Pull requests', exact: true })).toBeVisible()
       await expect(
-        page
-          .locator('.wb-secondary-list')
-          .getByRole('button')
-          .filter({ hasText: '#42 Give the review workspace' }),
+        page.locator('.wb-pr-row').filter({
+          has: page.locator('.wb-row-title').filter({ hasText: /^#42 / }),
+        }),
       ).toBeFocused()
     } else {
       await expect(
@@ -240,7 +239,7 @@ test('history clear rejects stale-owner admission and held authority replacement
 test('qualified Review return retains branch filters, selected identity and scroll without mutation', async ({
   page,
 }) => {
-  await openGallery(page, { scenario: 'graph-250' })
+  await openGallery(page, { scenario: 'cutover-250' })
   await switchDestination(page, 'branches')
   const filter = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
   const list = page.locator('.bw-main-scroll')
@@ -254,12 +253,16 @@ test('qualified Review return retains branch filters, selected identity and scro
   const beforeScroll = await list.evaluate((element) => element.scrollTop)
   await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
   await expect(page.locator('.review-view')).toContainText('#40')
-  const back = page.getByRole('button', { name: 'Return to origin', exact: true })
+  const back = page.getByRole('button', { name: 'Return to original context', exact: true })
   await back.focus()
   await back.press('Enter')
   await expect(filter).toHaveValue('Change')
-  await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toHaveText('graph/change-40')
-  await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
+  await expect(page.getByRole('complementary', { name: 'Selected branch details' })).toContainText(
+    'graph/change-40',
+  )
+  // The original page/scroll stays intact when the selected row is outside its
+  // mounted window; return focus belongs to the same branch's initiating control.
+  await expect(page.getByRole('button', { name: 'Review pull request', exact: true })).toBeFocused()
   await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(beforeScroll)
   const calls = await getDoubleCalls(page)
   expect(
@@ -278,24 +281,19 @@ test('qualified Review return retains branch filters, selected identity and scro
 test('return retains selected branch context when a background title leaves the filter', async ({
   page,
 }) => {
-  await openGallery(page, { scenario: 'graph-250' })
+  await openGallery(page, { scenario: 'cutover-250' })
   await switchDestination(page, 'branches')
   const filter = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
   await filter.fill('Change 40')
   await page.locator('.bw-subtitle').filter({ hasText: /#40\b/ }).first().click()
   await page.getByRole('button', { name: 'Review pull request', exact: true }).click()
-  const snapshot = scenarios['graph-250'].snapshot!
-  const changed = {
-    ...snapshot,
-    pullRequests: snapshot.pullRequests.map((pr) =>
-      pr.number === 40 ? { ...pr, title: 'Retitled while Review was open' } : pr,
-    ),
-  }
-  await page.evaluate(
-    (inventory) => window.fixture.pushInventory(inventory),
-    snapshotInventory([changed]),
-  )
-  await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
+  const changed = structuredClone(cutoverScale(250).inventory!)
+  changed.generation += 1
+  for (const repo of changed.repositories)
+    for (const pr of repo.pullRequests)
+      if (pr.number === 40) pr.facts.title = 'Retitled while Review was open'
+  await page.evaluate((inventory) => window.fixture.pushInventory(inventory), changed)
+  await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
   await expect(filter).toHaveValue('Change 40')
   await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toHaveText('graph/change-40')
   await expect(page.locator('.bw-branch-name[aria-pressed="true"]')).toBeFocused()
@@ -338,7 +336,9 @@ test('account replacement retires the return context and display but keeps the o
     }),
   )
   await expect(page.locator('.review-draft')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Return to origin', exact: true })).toHaveCount(0)
+  await expect(
+    page.getByRole('button', { name: 'Return to original context', exact: true }),
+  ).toHaveCount(0)
   expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toBeNull()
   await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
   await refreshReviewChoices(page, true)
@@ -418,9 +418,7 @@ test('a late account rejection preserves only the latest qualified unsent edits 
   await releaseDoubleCalls(page, 'reviewSetDrafts')
   await expect(page.getByText('Local review edits are not saved', { exact: true })).toBeVisible()
   expect(await page.evaluate(async () => window.desktop.reviewDrafts!(42))).toBeNull()
-  await expect(page.locator('.bw-main:visible')).not.toContainText(
-    'Latest unsent original-account text.',
-  )
+  await expect(page.locator('.review-view')).toHaveCount(0)
   await page.evaluate((status) => window.fixture.publishCliStatus(status), original.cli)
   await page.evaluate((snapshot) => window.fixture.pushSnapshot(snapshot), {
     ...scenarios['review-stacked'].snapshot!,
@@ -940,7 +938,7 @@ test('same-number cross-repository Inbox navigation retires held old Review read
   await expect(review).toContainText('#81 Charge every native-stack page to the refresh budget')
   await expect(review).not.toContainText('Add a GitHub-derived PR Inbox')
   await expect(review).toContainText('checks failing')
-  await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
+  await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
   await expect(
     page.getByRole('textbox', { name: 'Search needs attention', exact: true }),
   ).toHaveValue('#81')
@@ -972,7 +970,7 @@ for (const entrypoint of ['inspector', 'discussion'] as const) {
       'true',
     )
     await expect(page.getByRole('dialog')).toHaveCount(0)
-    await page.getByRole('button', { name: 'Return to origin', exact: true }).click()
+    await page.getByRole('button', { name: 'Return to original context', exact: true }).click()
     await expect(
       page.getByRole('heading', { name: 'Branches & worktrees', exact: true }),
     ).toBeVisible()

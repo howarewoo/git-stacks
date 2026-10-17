@@ -13,8 +13,8 @@ export type ShortcutId =
   | 'view.branches'
   | 'view.pullRequests'
   | 'view.review'
-  | 'view.diagnostics'
-  | 'view.prInbox'
+  | 'view.settings'
+  | 'view.attention'
   | 'view.notifications'
   | 'review.nextFile'
   | 'review.previousFile'
@@ -158,19 +158,16 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     description: 'Review the pull request stacked directly below this one.',
   },
   {
-    id: 'view.diagnostics',
-    label: 'Go to Diagnostics',
+    id: 'view.settings',
+    label: 'Go to Settings',
     group: 'Views',
-    // `Mod+7` already opens Review, so the diagnostics report takes the next free view chord.
     defaultChord: 'Mod+8',
-    description: 'Switch to the repository diagnostics and compatibility report.',
+    description: 'Open Settings, including CLI, privacy and diagnostics.',
   },
   {
-    id: 'view.prInbox',
+    id: 'view.attention',
     label: 'Go to Needs attention',
     group: 'Views',
-    // `Mod+8` is Diagnostics, so the cross-repository pull request queue takes
-    // the next free view chord.
     defaultChord: 'Mod+9',
     description: 'Inspect source-backed attention across registered repositories.',
   },
@@ -178,9 +175,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutMetadata[] = [
     id: 'view.notifications',
     label: 'Go to GitHub Notifications',
     group: 'Views',
-    // `Mod+9` opens the pull-request inbox, so this module takes the next free
-    // view chord. It opens the surface that explains the credential boundary
-    // when the module is off, rather than an empty list.
+    // Optional Notifications keeps its independent consent/credential boundary.
     defaultChord: 'Mod+0',
     description: 'Switch to the optional GitHub Notifications inbox.',
   },

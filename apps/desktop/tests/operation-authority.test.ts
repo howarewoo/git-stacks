@@ -424,7 +424,6 @@ test('captured Abort admits its owned journal transition through production effe
     await rm(root, { recursive: true, force: true })
   }
 })
-
 test('owned Skip drops only the conflicted commit, keeps the later commit and resolves the original durable recovery identity', async () => {
   const { root, repo, scope } = await fixture()
   try {

@@ -29,10 +29,7 @@ export const STANDARD_VIEWPORTS = {
 
 export type StandardViewportName = keyof typeof STANDARD_VIEWPORTS
 
-/**
- * The in-view filter field. Its accessible name is the product's contract, so
- * it is resolved here once instead of being re-spelled by every suite.
- */
+/** The repository-local lane query; global search has a separate authority. */
 export function getViewFilterInput(page: Page): Locator {
   return page.getByRole('textbox', {
     name: 'Filter branches by branch, PR, or path',
@@ -114,18 +111,16 @@ export async function openGallery(page: Page, options: OpenGalleryOptions = {}):
   await page.goto(targetUrl)
   await expect(page.locator('#root')).toBeVisible({ timeout: 15_000 })
 
-  // Readiness follows the restored surface, including Review in a shared context.
-  // Empty and loading scenarios are ready as soon as their shell is rendered.
+  // Connected scenarios mount the actual Workbench. Loading and onboarding have
+  // no selected repository; no retired toolbar is required for readiness.
   if (
     route === 'app' &&
     !SCENARIOS_WITHOUT_A_REPOSITORY.has(scenario) &&
     scenario !== 'shell-loading'
   ) {
-    await expect(
-      page.getByRole('heading', { level: 1 }).filter({
-        hasText: /^(Branches & worktrees|Pull requests|Needs attention|Activity|Review)$/,
-      }),
-    ).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('.bw-sidebar')).toBeVisible({
+      timeout: 15_000,
+    })
   }
   await settle(page)
 }

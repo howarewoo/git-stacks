@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { sourceProvenance } from './helpers/provenance'
 
 const reference = resolve('tests/renderer/references/ui-243/git-stacks-workbench-v5.html')
 const referenceHash = 'e46de09e3502ac917589b4fb1c2f3cb0419f2f9cadb899709bed5a5adc3e3db2'
@@ -9,6 +10,9 @@ const referenceHash = 'e46de09e3502ac917589b4fb1c2f3cb0419f2f9cadb899709bed5a5ad
 for (const viewport of [
   { width: 1536, height: 1000 },
   { width: 1440, height: 940 },
+  { width: 1000, height: 700 },
+  { width: 1180, height: 820 },
+  { width: 1920, height: 1080 },
 ]) {
   for (const theme of ['light', 'dark']) {
     test(`@visual v5 matched reference ${viewport.width}x${viewport.height} ${theme}`, async ({
@@ -32,27 +36,56 @@ for (const viewport of [
         path: testInfo.outputPath('v5.png'),
         animations: 'disabled',
       })
-      await page.goto('/?scenario=shell-connected#/workbench-v5')
+      await page.goto('/?scenario=cutover-reference#/app')
       await page.evaluate((selectedTheme) => {
         document.documentElement.dataset.gsTheme = selectedTheme
       }, theme)
       await expect(page.locator('html')).toHaveAttribute('data-gs-theme', theme)
-      await expect(page.locator('.bw-main')).toHaveCSS(
+      const main = page.getByRole('main', { name: 'Branch workbench', exact: true })
+      await expect(main).toHaveCSS(
         'background-color',
         theme === 'dark' ? 'rgb(26, 31, 39)' : 'rgb(255, 255, 255)',
       )
-      await expect(page.getByRole('heading', { name: 'Branches & worktrees' })).toBeVisible()
+      await page.getByRole('button', { name: 'feat/worktree-registry', exact: true }).click()
+      if (viewport.width < 1040) {
+        await expect(page.getByRole('dialog', { name: 'Selected branch details' })).toBeVisible()
+      }
+      await expect(main.getByRole('heading', { level: 1 })).toHaveText('Branches & worktrees')
       await expect(page.locator('.bw-lane-row.bw-selected')).toContainText('feat/worktree-registry')
       await expect(page.locator('.bw-node')).toHaveCount(19)
-      const geometry = await page.locator('.bw-shell').evaluate((shell) => {
-        const panels = ['.bw-sidebar', '.bw-main', '.bw-inspector'].map((selector) => {
-          const bounds = shell.querySelector(selector)!.getBoundingClientRect()
-          return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
-        })
-        return panels
-      })
-      expect(geometry.map((panel) => panel.width)).toEqual([224, viewport.width - 648, 376])
-      expect(geometry.map((panel) => panel.y)).toEqual([64, 64, 64])
+      if (viewport.width >= 1040) {
+        const geometry = await page.locator('.bw-shell').evaluate((shell) =>
+          ['.bw-sidebar', '.bw-main[aria-label="Branch workbench"]', '.bw-inspector'].map(
+            (selector) => {
+              const bounds = shell.querySelector(selector)!.getBoundingClientRect()
+              return { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }
+            },
+          ),
+        )
+        const rail =
+          viewport.width < 1200
+            ? 188
+            : viewport.width <= 1350
+              ? 204
+              : viewport.width >= 1680
+                ? 236
+                : 224
+        const inspector =
+          viewport.width < 1200
+            ? 324
+            : viewport.width <= 1350
+              ? 348
+              : viewport.width >= 1680
+                ? 408
+                : 376
+        const gutters = viewport.width < 1200 ? 32 : 48
+        expect(geometry.map((panel) => panel.width)).toEqual([
+          rail,
+          viewport.width - rail - inspector - gutters,
+          inspector,
+        ])
+        expect(geometry.map((panel) => panel.y)).toEqual([64, 64, 64])
+      }
       const actual = await page.screenshot({
         path: testInfo.outputPath('react.png'),
         animations: 'disabled',
@@ -75,6 +108,32 @@ for (const viewport of [
           contentType: 'image/png',
         })
       }
+      await testInfo.attach('comparison-disposition', {
+        body: JSON.stringify(
+          {
+            consumer: 'Production App + typed inventory/inspection dispatcher',
+            source: await sourceProvenance(),
+            viewport,
+            theme,
+            density: 'compact',
+            selection: 'feat/worktree-registry',
+            scroll: 0,
+            referenceHash,
+            accepted: false,
+            limits: [
+              'User visual approval deferred',
+              'Native title bar and real Electron zoom unrun',
+              'Main-owned source facts may differ from prototype labels/totals; never infer permission/readiness from prototype badges',
+              'Narrow shared Sheet is accessibility adaptation, not pixel parity',
+            ],
+            mutations: await page.evaluate(() => window.fixture.actions),
+            calls: await page.evaluate(() => window.fixture.calls),
+          },
+          null,
+          2,
+        ),
+        contentType: 'application/json',
+      })
     })
   }
 }

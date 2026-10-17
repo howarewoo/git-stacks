@@ -19,16 +19,6 @@ import type { ReviewCommitSet, ReviewFileSet, ReviewHeadline, ReviewViewedRecord
 import type { ReviewHistory, ReviewHistoryDiff } from './review-snapshots'
 import type { PullRequestChecksReport } from './pull-request-checks'
 import type { PullRequestIndex } from './pr-index'
-import type {
-  GraphPreferences,
-  GraphPreferencesResult,
-  GraphPreferencesPublicScope,
-} from './graph-preferences'
-export type {
-  GraphPreferences,
-  GraphPreferencesResult,
-  GraphPreferencesPublicScope,
-} from './graph-preferences'
 import type { NotificationInbox, NotificationModuleStatus } from './notifications'
 import type {
   PullRequestInboxFilterDraft,
@@ -1649,15 +1639,6 @@ export interface DesktopAPI {
   savePullRequestInboxFilters?(
     filters: readonly PullRequestInboxFilterDraft[],
   ): Promise<PullRequestInboxSavedFilter[]>
-  /** Main derives storage authority; mutation callers supply only a public namespace precondition. */
-  graphPreferences?(): Promise<GraphPreferencesResult>
-  saveGraphPreferences?(
-    preferences: GraphPreferences,
-    expectedScope: GraphPreferencesPublicScope,
-  ): Promise<GraphPreferencesResult>
-  resetGraphPreferences?(
-    expectedScope: GraphPreferencesPublicScope,
-  ): Promise<GraphPreferencesResult>
 }
 
 export type GitCapability = 'referenceTransactions' | 'rebaseUpdateRefs'

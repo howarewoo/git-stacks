@@ -319,10 +319,10 @@ export function applyPatch(
   current: AppSettings,
   patch: SettingsPatch,
 ): { settings: AppSettings; issues: SettingsIssue[] } {
-  let shortcuts = patch.shortcuts ?? current.shortcuts
+  let shortcuts: unknown = patch.shortcuts ?? current.shortcuts
   let legacyShortcutStorage = current.migrated.legacyShortcutStorage
   if (patch.legacyShortcutImport && qualifiesForLegacyShortcutImport(current)) {
-    shortcuts = patch.legacyShortcutImport
+    shortcuts = migrateRetiredShortcutBindings(patch.legacyShortcutImport)
     legacyShortcutStorage = true
   }
   const merged: Record<string, unknown> = {
@@ -507,6 +507,24 @@ export function lockedKeys(
   return refused
 }
 
+const retiredShortcutKeys = [
+  ['view.prInbox', 'view.attention'],
+  ['view.diagnostics', 'view.settings'],
+] as const
+
+/** One-way persisted-data import; retired IDs are not live actions or patch aliases. */
+function migrateRetiredShortcutBindings(value: unknown): unknown {
+  if (!isRecord(value) || !retiredShortcutKeys.some(([old]) => Object.hasOwn(value, old)))
+    return value
+  const migrated = { ...value }
+  for (const [old, current] of retiredShortcutKeys) {
+    if (!Object.hasOwn(migrated, current) && Object.hasOwn(migrated, old))
+      migrated[current] = migrated[old]
+    delete migrated[old]
+  }
+  return migrated
+}
+
 /** Reads the settings file, reporting corruption instead of throwing. */
 export async function readSettingsFile(file: string): Promise<{
   settings: AppSettings
@@ -538,6 +556,10 @@ export async function readSettingsFile(file: string): Promise<{
   // a newer build reads the file.
   if (isRecord(parsed) && typeof parsed.useSystemGit === 'boolean' && !isRecord(parsed.git)) {
     parsed = { ...parsed, git: { useSystemGit: parsed.useSystemGit } }
+  }
+  if (isRecord(parsed)) {
+    const shortcuts = migrateRetiredShortcutBindings(parsed.shortcuts)
+    if (shortcuts !== parsed.shortcuts) parsed = { ...parsed, shortcuts }
   }
   return validateSettings(parsed)
 }

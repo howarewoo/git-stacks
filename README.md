@@ -427,37 +427,28 @@ refresh never reports the pull requests on screen as freshly checked. When the
 issue read fails, the last confirmed issues stay listed and the reason they are
 unconfirmed is shown, instead of an empty inbox that looks current.
 
-The title bar states remote freshness in words, with the age of the last
-confirmed data, and says when local Git still works. Cached responses are
-display only: the native stacks capability the snapshot asks GitHub about on
-every interval is read with its validator, and review submission, publish,
-and force-push always re-read GitHub live. A high-impact mutation that lost
-its answer is never replayed on reconnect — it is listed with its reason until
-dismissed.
+Remote facts in the workbench and inspector retain their observed freshness and
+unknown/unavailable states; navigation does not authorize a refresh or mutation.
+Cached responses are display only. Native capability checks, review submission,
+publication and force-with-lease execution revalidate captured authority live.
+An accepted high-impact effect whose answer was lost is never replayed on reconnect.
 
-Renderer checks distinguish the `/` in-view filter from the `Mod+K` command
-palette. The safety suite advances pending hover timers after opening a
-destructive dialog to verify that contextual cards cannot cover its warning.
+Renderer checks distinguish `/` in-view filtering from `Mod+K` global search,
+exercise modal/menu focus containment and return, and reject unintended mutations.
+The retired graph hover-card/timer presentation is not a production path.
 
 ### Deleting branches
 
-In **Branches**, choose **Select branches**, check the branches to remove, then
-choose **Delete selected**. Remote-only rows can be selected directly in **All**;
-switching to **Remote** is not required. The first checked branch chooses local or
-remote deletion for the batch. Other branch types are disabled until you
-**Clear selection**, so local and remote deletions cannot be mixed.
+In **Branches & worktrees**, check the exact rows or the mounted-page checkbox,
+then choose **Preview selected local branch deletion…** or
+**Preview selected remote branch deletion…**. The preview captures repository,
+qualified refs, tips and the explicitly chosen execution directory. Mixed or
+ineligible targets are refused rather than silently replaced with another scope.
 
-**Select all visible** selects eligible rows of the batch's type on the currently
-mounted page only. With no checked branches, it selects local branches when any
-eligible local rows are visible; otherwise it selects remote branches. Check a
-remote row first to select all visible remotes in a mixed list.
-
-Selections remain counted across paging, search, **All**, **With PRs**, and filters
-matching their type. Switching to an incompatible **Local** or **Remote** filter
-clears the checked branches without exiting selection mode.
-**Clear selection** also keeps selection mode open; **Done selecting** exits it.
-A successful deletion clears the checked branches without exiting selection mode.
-Opening another repository clears the selection and exits selection mode.
+Checked rows are page-local: paging, search/status/ref/worktree filters, folds
+and repository changes clear the batch. **Clear selection** clears checked rows
+without changing the inspected branch. Selecting or inspecting a row never
+deletes or checks out anything.
 
 The confirmation lists each selected local ref and captured tip. Confirm with
 the delete button; typing a branch name is not required, including when
@@ -681,8 +672,9 @@ view memory stores navigation, not settings. Supported privacy/redacted support
 preview/export and platform-specific signed-update controls remain available.
 Graph-only/demo/Design/reset-scenario controls are not production destinations;
 the obsolete duplicate PR Inbox presentation is removed, not its source rules.
-Optional Notifications remains a secondary entry with separate consent, host,
-credential and removal policy; it never borrows the primary `gh` session.
+Optional Notifications opens from the top-bar **Notifications** button, including
+at narrow/zoomed viewport sizes. It remains a secondary entry with separate consent,
+host, credential and removal policy; it never borrows the primary `gh` session.
 
 For focused source checks, run `pnpm run typecheck` and
 `pnpm --filter git-stacks exec tsx --test tests/collaboration.test.ts`.
@@ -1150,7 +1142,7 @@ Diagnostics.
 
 ## Settings
 
-Settings is reachable from the command palette (**Settings…**). Preferences are
+Settings is reachable from the sidebar footer and its confirmed keyboard shortcut. Preferences are
 stored in `settings.json` under the app's user-data directory, which main owns
 and validates; the renderer never chooses or writes that path.
 
@@ -1719,8 +1711,8 @@ and a bank is never rewritten.
 Text that arrives from outside this app is text, and it is shown as text. The
 values a person reads but did not write are a pull request title and branch
 name, a repository description, and a commit subject and author. They are
-rendered as React children — `data-views.tsx`, `repository-hover-cards.tsx`,
-`repository-views.tsx`, `onboarding.tsx` — so an author's angle brackets are
+rendered as React children — `branch-workbench.tsx`, `collaboration-views.tsx`,
+`review-view.tsx`, `onboarding.tsx` — so an author's angle brackets are
 characters on the screen and never markup. There is no Markdown renderer in
 this app and no sanitiser standing in for one: nothing parses a value into
 elements, and nothing writes one with `innerHTML`.
@@ -1842,6 +1834,26 @@ harness. There is no second copy of a budget anywhere.
 | `MAX_FILE_BYTES`         | 2 MiB         | working-tree file preview                  |
 | `GIT_CONCURRENCY`        | 8             | `mapWithConcurrency`                       |
 | `SNAPSHOT_BRANCH_BUDGET` | 1500 branches | per-branch analysis in `getSnapshot`       |
+| `WORKTREE_READ_CONCURRENCY` | 2 reads | inventory status and watcher fallback |
+| `WORKTREE_REFRESH_SETTLE_MS` | 400 ms | topology refresh coalescing |
+| `LANE_ROW_PAGE_SIZE` | 64 rows | mounted bottom-up lanes |
+| `LANE_RELATIONSHIP_PAGE_SIZE` | 32 rows | inspector children plus selected/parent |
+| `LANE_CONTINUATION_PAGE_SIZE` | 20 continuations | off-page parent navigation |
+| `SELECTED_DETAIL_CACHE_LIMIT` | 4 entries | main-owned selected PR detail cache |
+| `LANE_INPUT_PAINT_BUDGET_MS` | 250 ms | actual warm lane input-to-settled-paint p95 |
+| `LANE_PROJECTION_LAYOUT_BUDGET_MS` | 100 ms | lane projection plus measured DOM relationship layout p95 |
+| `LANE_SCALE_HEAP_BUDGET_BYTES` | 32 MiB | post-GC 5000-object growth over identically warmed 250-object process |
+| `LANE_NAVIGATION_HEAP_BUDGET_BYTES` | 8 MiB | post-GC growth after 30 navigation/read-refresh cycles |
+| `LANE_WARM_SAMPLE_COUNT` | 20 samples | warm input/layout envelope |
+| `LANE_NAVIGATION_CYCLE_COUNT` | 30 cycles | navigation/read-refresh envelope |
+
+The retired `GRAPH_OUTLINE_ROW_LIMIT`, `GRAPH_DETAIL_NODE_LIMIT`,
+`GRAPH_PATH_PAGE_SIZE` and `GRAPH_SELECTED_CACHE_LIMIT` map respectively to
+lane rows, inspector relationships, off-page continuations and selected detail
+cache. Their numerical values remain 64/32/20/4; all graph time/heap/sample limits
+retain their values under the `LANE_*` names above. No compatibility aliases or
+graph-camera/card callers remain. Complete inventory authority is independent of
+mounted pages; the ordinary list budget remains 200, not a relaxed lane limit.
 
 ### Benchmarks
 
@@ -1861,7 +1873,7 @@ carried into the current trend.
 
 The `startup` measurement runs the built Electron app against the 3,000-ref
 fixture. It starts before process launch and ends after the Workbench inventory
-reports all 3,001 local branches and its first 200 lane rows complete two animation
+reports all 3,001 local branches and its first 64 lane rows complete two animation
 frames. The seeded repository opens directly; no onboarding activation is needed.
 The `interaction` measurement starts at an actual input event in the
 “Filter branches by branch, PR, or path” field and ends after the single matching
@@ -1884,6 +1896,30 @@ pinned Electron sandbox helper installed with its supported ownership and mode,
 or an environment that supports Chromium's namespace sandbox. A helper setup
 failure is an unmet runtime prerequisite, not permission to use `--no-sandbox`
 or `ELECTRON_DISABLE_SANDBOX` to report passing startup/interaction budgets.
+
+The dedicated lane envelope uses the actual built, sandboxed Electron consumer.
+It creates 250/1000/5000-object deep/wide/disconnected fixtures with 120 real
+worktrees each, records 20 trusted-input warm samples and 30 navigation/read-refresh
+cycles, and writes `apps/desktop/benchmarks/lane-envelope.json` by default:
+
+```sh
+pnpm run build
+pnpm --filter git-stacks exec tsx scripts/perf/run-benchmarks.ts --lanes-only
+```
+
+`--lanes` adds this envelope after the ordinary benchmark fixtures instead.
+Each packet records actual source hashes, hardware/runtime, viewport/motion,
+mounted row/node/relationship counts, trusted main IPC and validated inspection
+operation counts, p95 input/layout times, and explicit post-GC heap. Scale growth
+compares identically warmed fresh processes against the 250-object baseline;
+navigation growth compares before/after 30 cycles in the same process. Timings
+end after the matching committed DOM and two frames, not merely after dispatch.
+Counters contain fixed transport names only, never arguments, paths or credentials.
+Owned benchmark processes strip inherited Git/GitHub session variables and isolate
+Git/gh configuration. Only these runs enable ephemeral loopback main/renderer
+inspectors; no test API or counter API is exposed to the production renderer.
+Do not compare older graph/card/camera definitions or other runner classes as if
+they were the same series. Do not fabricate an unrun packet or relax a budget.
 
 It writes `benchmarks/latest.json` and appends one line per run to
 `benchmarks/trend.jsonl` (capped at the last 200 runs). The `budgets` job in the
@@ -2003,10 +2039,9 @@ never applied to the one it now shows:
 These are the extreme cases the app states rather than hanging or crashing on.
 
 - **A changed-file listing past 8 MiB.** The listing is cut on a record boundary
-  and `limits.filesTruncated` is set. The Working changes view says how many
-  files it is showing and disables bulk stage, bulk unstage, and stash, because
-  acting on a partial listing would silently skip files. Inspect individual
-  files, or use an editor or the command line for the rest.
+  and `limits.filesTruncated` is set. The selected directory's read-only Changes
+  panel labels the listed files as a lower bound. No partial listing authorizes
+  staging, committing, discarding or stashing; develop in an editor or terminal.
 - **More branches than `SNAPSHOT_BRANCH_BUDGET`.** Reported through
   `limits.branchesSkipped`, as described above.
 - **A diff past `MAX_DIFF_BYTES` or a file past `MAX_FILE_BYTES`.** The
@@ -2121,32 +2156,7 @@ retries, drop assertions or disable the sandbox to conceal stalls.
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
 
-The application fixtures exercise the current workbench shell: Branches & worktrees,
-Pull requests, Needs attention, and Activity. Full Review starts from a qualified PR;
-committed history and Notifications open in dialogs. Renderer helpers wait for the
-restored surface's heading, not the retired repository toolbar. Legacy graph-camera
-and removed mutation-control assertions are not contracts for this shell.
-
-Review return preserves the originating filter, selection, scroll and keyboard focus.
-Readonly navigation keeps the qualified Review mounted, preserving its pane and
-verified draft baseline; a retired provider owner cannot retain private metadata.
-Branch filters accept displayed PR numbers with or without the `#` prefix.
-Explicitly captured operations keep their scoped publication and merge journal
-subscriptions alive when recovery is closed or another inspection surface is active.
-Saved-filter full-list writes wait while their store read is pending, even when
-a previous list is cached.
-Stack-preview fixtures issue fresh tokens on each read, matching production's
-single-use plans so explicit reloads cannot reuse a rejected preview.
-Cross-repository Review tests wait for the destination's qualified headline request
-before releasing it; old-repository reads stay held until the destination is verified.
-Held CLI reads cannot replace newer provider status. Notifications keep their
-independent credential ownership, fence late host-scoped answers, and complete
-enable → credential save → inbox read before dismissing authorization. Captured
-operation progress is checked against its provider authority, not an inspection key.
-Workflow dialogs use that same captured authority unchanged, so reopening merge
-or publication recovery shares the shell's journal and progress-event cache.
-
-### v5 workbench foundation and matched visual evidence
+### Integrated v5 cutover and matched visual evidence
 
 The current visual/product contract is [#243](https://github.com/howarewoo/git-stacks/issues/243)
 and root [DESIGN.md](DESIGN.md#layout), not historical graph parity. The immutable
@@ -2158,48 +2168,43 @@ The linked original ZIP's SHA-256 is
 `8b0d48f11e774a365f621b0b8f8496380b8f1efddcb808f2f804bc533f1e5a44`.
 Biome excludes this reference rather than rewriting its bytes.
 
-`BranchWorkbench` in `apps/desktop/src/renderer/src/components/branch-workbench.tsx`
-is the real React foundation composition. It accepts explicit readonly
-`BranchWorkbenchSnapshot` presentation facts, qualified repository/branch selection,
-main-derived capabilities and an `onAction(action, context)` callback carrying
-repository/ref/worktree/PR IDs. Missing capability/detail data stays unavailable;
-displayed readiness is not mutation authority. The main-owned inventory contract
-is projected at shell integration, together with source-qualified dependency and
-review facts; no filesystem/Git/credential read belongs in this component.
-This foundation does not add a second production route or change the existing
-App before the downstream shell replacement.
+The production `App` mounts `BranchWorkbench` from
+`apps/desktop/src/renderer/src/components/branch-workbench.tsx`, not a Foundation
+specimen or prototype route. Its readonly presentation facts come from main-owned
+inventory and captured inspection, with qualified repository/ref/worktree/PR
+selection. Missing facts stay unknown; readiness does not grant mutation authority.
+The shipped entry has no fixture API, hash-based specimen router or development UI.
 
-Repository count fields are nullable main-owned complete totals, not counts
-inferred from mounted branch rows (which cannot include every PR-only identity).
-Partial/unavailable totals display Unknown. The optional `density` prop is
-`compact` or `standard`; standard grows branch/trunk rows to 92/76px.
-PR association metadata uses `null` for confirmed absence and `undefined` for
-unavailable metadata; unavailable associations are not labelled “No pull request”.
+Count fields are nullable complete source totals, not mounted-row counts.
+Partial/unavailable totals display Unknown. Compact and standard density retain
+the reference hierarchy; unpublished local commits, published heads, native
+membership and worktree status remain separate facts.
 
-Only the separate gallery imports `fixtures/workbench-v5.ts`. Open
-`/?scenario=shell-connected#/workbench-v5` or append `&workbench=degraded`
-before the hash for partial local/offline-provider facts. Stable qualified tuple
-IDs follow inventory identity boundaries; fixture directories are synthetic.
-The fixture observer shows requested intents with their exact IDs and explicitly
-does not report Git/GitHub success. Selecting, filtering, folding and inspecting
-never dispatches an operation.
+Only the separate gallery imports fixtures and specimens. `#/app` consumes the
+actual production App through the typed desktop double. `cutover-reference` feeds
+approved source facts through the genuine inventory/inspection dispatcher;
+`cutover-250`, `cutover-1000` and `cutover-5000` include 120 directory contexts and
+an independent clone. `cutover-inspection` supplies selected-directory dual edits,
+rename preimages, Unicode untracked bytes and a 2400-line bounded preview.
+The standalone `#/workbench-v5` is a composition specimen, not production cutover
+or native evidence. Fixture intent logs never establish Git/provider success.
 
 After the normal type/build prerequisites, from the repository root:
 
 ```sh
-GALLERY_PORT=5264 pnpm --filter git-stacks exec playwright test tests/renderer/workbench-v5.spec.ts tests/renderer/workbench-v5.visual.spec.ts
+GALLERY_PORT=5264 pnpm --filter git-stacks exec playwright test tests/renderer/cutover.spec.ts tests/renderer/cutover-integration.spec.ts tests/renderer/workbench-v5.visual.spec.ts tests/renderer/destinations.visual.spec.ts tests/renderer/dialogs.visual.spec.ts
 ```
 
-The visual scenario captures immutable v5 and the actual consumer at 1536×1000
-and 1440×940 in both themes, with identical compact density, registry selection
-and initial scroll. It attaches reference/React/side-by-side/50% overlay PNGs
-under `apps/desktop/test-results/renderer`; it does not overwrite historical
-goldens or declare pixel parity from a generic catalog pass. Review differences
-explicitly in PR evidence. Native window chrome, shared 44px icon/checkbox targets
-and shared line-tab focus styling can differ for accessibility; lane orientation,
-hierarchy, pane proportions and selection may not be dismissed as equivalent
-functionality. This fixture proves composition and intent, not live inventory,
-provider writes, native zoom, manual screen-reader use or downstream shell cutover.
+The matched suite captures the unchanged reference and actual App at 1536×1000,
+1440×940, 1000×700, 1180×820 and 1920×1080 in both themes, with matched compact
+density, registry selection and initial scroll. It attaches reference/consumer/
+side-by-side/50% overlay images and actual source fingerprints beneath
+`apps/desktop/test-results/renderer`. Current surface/dialog/state suites attach
+candidate captures; they do not re-pin historical macOS baselines or mark parity
+accepted. Review differences explicitly, including narrow shared Sheet adaptation,
+native title-bar space and accessibility targets. Hierarchy, bottom-up edges,
+pane proportions and scope may not be dismissed as equivalent functionality.
+Browser evidence is not native zoom, manual assistive technology or provider writes.
 
 `WorkbenchPane` is exported by `@git-stacks/ui`: persistent `header` and optional
 `footer` slots surround independently scrolling children; `bodyClassName` styles
@@ -2241,9 +2246,13 @@ sidebar owns pinned repositories, global search, cross-repository Attention and
 Activity, and repository Branches/Pull requests. Review uses the existing wide
 `ReviewView`, including original durable drafts. Settings, onboarding, optional
 Notifications and explicit operation/recovery dialogs remain secondary consumers.
-Stacks, standalone Changes/History/Stashes and the old graph destination are no
-longer production routes. Historical reference bytes and backend graph readers
-remain retained; graph scenario names now also supply large Workbench inventories.
+Stacks, standalone Changes/History/Stashes, graph camera/cards and top repository
+tabs are retired. Historical references and Git domain/recovery readers remain;
+obsolete graph-preference files are left untouched on disk, not replayed or deleted.
+Live shortcut IDs are `view.attention` and `view.settings`, not retired Inbox/
+Diagnostics routes. A one-way settings reader/explicit legacy-storage import
+preserves authored chords, gives canonical choices precedence, and never rewrites
+the stored file merely to read it; no live action aliases remain.
 
 `projectWorkbenchInventory` joins genuine main-owned qualified repository/ref/
 worktree/PR identities. Local clones remain separate even when their remotes match.
@@ -2254,9 +2263,9 @@ unknown, not passing checks, a clean directory or a fabricated zero.
 
 `projectBranchLanes` is deterministic iterative postorder: children above actual
 parents, shared ancestors once, invalid/cyclic/foreign endpoints without edges.
-The authoritative model is separate from the fixed `LIST_PAGE_SIZE` mounted page.
-Continuation controls locate relationships on other pages. Filters retain required
-labelled ancestors; clearing restores intentional folds and unfiltered position.
+The authoritative model is separate from the unchanged `LANE_ROW_PAGE_SIZE`
+mounted page. Off-page parent continuation controls page independently and locate
+real relationships; filters retain labelled ancestors without inventing edges.
 Bulk selection includes only eligible matching local branch IDs on the current
 page, never trunk, context rows or unmounted matches; it resets as view scope changes.
 
@@ -2268,9 +2277,23 @@ original authored text. Attention/Review return restores the originating surface
 Global search is independent of local lane filters and includes full path/ref-kind
 context, debounce, bounded pages, keyboard selection and explicit read errors.
 Branch-only selection resets the directory and tab atomically; worktree selection
-retains only the exact chosen directory. Pending Attention→Review navigation is
-generation-fenced and retired by a newer explicit destination. The single shortcut
-dispatcher observes the existing confirmed settings query, including live remaps.
+retains only the exact chosen directory. Pending Attention→Review navigation and
+delayed explicit folder registration activation are fenced by newer inspection
+navigation; registration itself still completes and must be confirmed by inventory.
+Same-owner pending repository reads keep their prior qualified inspection answer;
+API or provider-owner replacement cannot reuse it. Qualified Review stays mounted
+across sidebar destinations, retaining Code scroll, selected lines and original
+unsent composition. Explicit narrow inspector dismissal survives readonly updates.
+The single shortcut dispatcher observes the existing confirmed settings query,
+including live remaps.
+
+Returning from Review restores focus to the original qualified branch or source
+entry as well as its controlled filters, page and scroll. If the selected branch
+is outside that unchanged mounted window, focus returns to its initiating
+inspector control rather than silently paging/scrolling. Qualified PR/Attention
+entry keys survive title/fact updates. A newer repository, surface, selection or
+primary account retires pending focus; no old private entry transfers to a
+replacement principal. Branch search accepts bare and `#`-prefixed PR numbers.
 
 `DesktopAPI.inspect(context, operation, args, requestId)` is the typed captured-read
 boundary. Main validates sender and the fixed operation table, resolves registered
@@ -2289,6 +2312,12 @@ Snapshot and captured conflict inspections skip automatic journal/lock recovery.
 Captured historical comparison never fetches missing Git objects: it uses local
 objects, a validated provider endpoint comparison, or an explicit unavailable
 result. Existing explicit operational recovery and object-fetch behavior is retained.
+
+The actual App fixture dispatcher keeps mutable per-directory snapshot sources,
+admits refresh/status answers when the request starts, and projects watcher
+snapshots into the genuine inventory subscription. Explicitly supplied typed
+inventory remains authoritative. Held reads cannot adopt a newer snapshot on
+release; linked-directory HEAD/index/file facts remain exact to that directory.
 
 Overview, Changes, Checks and Discussion belong to the exact selected context.
 Multiple associated directories require an explicit choice. Changes shows staged
@@ -2343,10 +2372,15 @@ stays separately disclosed as an original authored draft, not claimed as current
 metadata or sent outside the fresh offered scope. Provider-owner retirement cannot
 silently move that draft to a replacement principal. Fresh PR metadata forms use only
 their own provider snapshot/generation, never an unrelated spent local Git approval.
-Captured progress reads and events use the minted `OperationCapture.scope`, not a UI
-cache identity. The persistent Workbench shell retains original-owner publication and
-merge subscriptions while a modal is hidden; foreign scope events cannot replace its
-immutable saved choices, and status inspection never dispatches Resume automatically.
+Captured progress reads and events use the minted `OperationCapture.scope` through
+its original qualified inspection API, not a UI cache identity or ambient journal
+reader. The persistent Workbench shell owns publication/merge subscriptions, initial
+reads and query observers while a modal is hidden. Dialog teardown cannot remove
+those outcomes; an unavailable later read keeps the last confirmed result visible.
+Foreign scope events cannot replace immutable saved choices, and status inspection
+never dispatches Resume automatically. Attention full-list saved-filter writes wait
+for the current store reread, even when an older successful answer is cached, and
+remain single-flight so a stale list cannot erase independently authored filters.
 Publication review discloses full local/base/remote-lease OIDs, push effects and original
 native membership/resulting order. Reviewed merge discloses its full base-first
 downstack and the membership included in the selected request.
@@ -2370,7 +2404,6 @@ inspection and its durable status remain available.
 Strict merge authorization distinguishes missing secondary history from malformed or
 unreadable history and also consults retained original durable merge intents. A bad
 history is neither empty nor repaired by inspection and cannot authorize another write.
-
 Worktree creation qualifies an absent normalized destination and an explicit local
 branch or new branch from a captured base. It never switches an existing checkout
 or falsely adopts a failed/partial creation. Cleanup preflights the exact whole
@@ -2430,14 +2463,74 @@ pnpm --filter git-stacks exec tsx --test --test-name-pattern="read-only conflict
 pnpm --filter git-stacks gallery --host 127.0.0.1 --port 4317
 ```
 
-The gallery's default `#/app` mounts actual production source with the test-only
-desktop double. `files-staged` includes both staged and unstaged content;
-`graph-5000` supplies large published inventories. Fixture observations prove
-renderer intent and bounded presentation, never native Git/provider success.
-Native/manual/assistive-technology and final Electron timing/heap certification
-for #243 remain user-deferred until all overhaul issues are implemented. Keep that
-acceptance separate from compilation/model/browser evidence; do not bless macOS
-visual baselines from another platform or change sandbox privileges.
+The gallery's default `#/app` mounts actual production source with a test-only
+desktop double. The cutover harness records bounded rows/relationships, actual
+read/write intent, watcher bursts, independent context restoration, late-read
+retirement and read-only local comparison. Qualified durable draft/review suites
+remain separate; local/provider authority and recovery regressions use disposable
+real repositories. Native/manual/assistive-technology/provider acceptance and final
+Electron timing/heap certification for #243/#255 remain **USER-DEFERRED**. Neither
+compilation nor browser/model evidence passes those gates or permits sandbox changes.
+
+CLI refresh has its own pending read generation and configured-host fence. A
+status event retires only the configured-host read, and a late completion cannot
+replace the current account or unlock a newer refresh. Local repository opening
+uses the real registration dialog's independent single-flight lock through
+inventory confirmation, not only through the native picker.
+
+Optional Notifications retains separate inbox/credential errors and host-scoped
+read/write admission. Consent submission enables the separately authorized module,
+saves its credential and reads its inbox in that order, checking the original
+host/generation between steps. Host changes retire old answers/errors and pending
+credential UI; primary `gh` account changes do not erase this independent inbox.
+
+### Integrated cutover coverage and manual-ready delivery
+
+The five-member #243 implementation stack partitions code ownership as follows;
+this is implementation coverage, not ticket closure or acceptance:
+
+| Layer | Issues | Delivered production scope |
+| --- | --- | --- |
+| [Foundation #257](https://github.com/howarewoo/git-stacks/pull/257) | #244, #245 | Shared v5 composition, tokens, component placement and immutable references |
+| [Workbench #258](https://github.com/howarewoo/git-stacks/pull/258) | #246, #247, #248 | Main-owned qualified inventory, shell/context/lanes and read-only inspection |
+| [Collaboration #260](https://github.com/howarewoo/git-stacks/pull/260) | #249, #250, #254 | Provider-qualified lists/full Review, Attention and observed Activity |
+| [Safe operations #262](https://github.com/howarewoo/git-stacks/pull/262) | #251, #252, #253 | Worktree lifecycle, captured/local/provider authority, scoped workflows and durable recovery |
+| [Integrated cutover #255](https://github.com/howarewoo/git-stacks/issues/255) | #255 | Cumulative reconciliation, legacy retirement, exact budget mapping, actual-consumer harness and final-source manual package |
+
+The delivery PR records exact final head/base/revisions, full native bottom-to-top
+membership, exercised checks, source fingerprints, package paths/checksums and
+retained resources. A draft PR, native stack resource or package is not a ready
+state, CI pass, signed-release proof or permission to merge.
+
+Residual #39 implementation and acceptance remain separately observable:
+
+| Area | Current source/contract and useful regression entry | User acceptance still deferred |
+| --- | --- | --- |
+| #11 provider-owned authentication | `main/github-cli.ts`, `github-primary-record.ts`, `github-transport.ts`; `tests/github-cli.test.ts` | Installed provider CLI, host/account replacement and native integration |
+| #18 review threads and original durable drafts | `ReviewView`, captured inspection and main review transport/journals; qualified renderer draft/conversation suites | Owned live provider review, native editing/AT and retained-owner recovery |
+| #19 checks and rerun | `check-details.tsx`, typed captured check/rerun transport; `tests/pull-request-checks.test.ts` | Live owned provider rules/check observations and explicit rerun |
+| #27 repository discovery/clone | Actual discovery dialog, `main/clone-repository.ts`; `tests/repository-clone.test.ts` | Owned clone destination, pinned Git/native promotion and manual error handling |
+| #33 verified updates | Settings update state machine and `scripts/release-update-*`; `tests/update-security.test.ts`, `update-lifecycle.test.ts` | Signed release/channel/OS update installation and rollback |
+| #34 controlled/provider acceptance | Owned CLI/API and disposable Git fixtures, packaged smoke and qualified operation regressions | Explicitly authorized disposable live targets/profile only; never default live writes |
+| #38 GitHub hosts | Typed main host/capability transport; `tests/github-host.test.ts`, `github-host-server.test.ts` | Actual GHES/provider capabilities, permissions and unavailable/partial responses |
+
+For a final-source manual run, use Node 24, the committed frozen lockfile, then
+`pnpm run package` in the retained final allocation. Launch the freshly produced
+unpacked executable, not a previous parent/Foundation artifact: Linux
+`apps/desktop/release/linux-unpacked/git-stacks`, macOS
+`apps/desktop/release/mac-arm64/Git Stacks.app/Contents/MacOS/Git Stacks` (or the
+architecture-matching `release/mac` variant). The associated delivery PR identifies
+the actual generated path and resource hashes. Windows packaged smoke is unsupported.
+Use owned disposable repositories and isolated app/Git/gh state as described in
+the packaged/manual procedures below; never personal repositories or inherited
+provider credentials for acceptance. Keep source/package identity with every result.
+
+Native sandbox/display prerequisites, manual assistive technology, real native
+window/zoom/lifecycle, signed updates, live provider outcomes and final Electron
+performance budgets remain **USER-DEFERRED** until the user runs them. An unsupported
+sandbox environment is not permission to disable isolation, change helper privileges
+or substitute browser intent for native proof. Implementation/draft delivery does
+not wait on these external gates, and their absence is never recorded as passed.
 
 ### Fresh checkout
 
@@ -2451,26 +2544,22 @@ pnpm run gallery
 
 Open the loopback URL printed by Vite. No GitHub credentials, Electron preload, personal repository, external font, or chat artifact is required. The deterministic `DesktopAPI` double records requests in memory; it never executes Git, authenticates, or opens external URLs. Treat its action history as evidence of renderer dispatch only, not proof that a Git operation succeeds. The packaged smoke covers real local Git separately.
 
-Append `#/index` for the scenario directory. App scenarios use `/?scenario=shell-connected#/app`; the gallery activates the real App's Open local repository control to load the deterministic snapshot. `shell-no-repository` and `shell-loading` intentionally stay on the no-repository/loading surface. Component routes retain `#/design-system-controls`, `#/design-system-shell-specimen`, `#/design-system-data-specimen`, and `#/design-system-dialog-specimen` in this separate gallery only.
+Append `#/index` for the scenario directory. Actual App scenarios use `/?scenario=cutover-reference#/app` and the test-only typed inventory/inspection double; no production fixture route exists. Canonical secondary specimens are `#/design-system-specimen`, `#/design-system-dialog-specimen`, `#/workflow-recovery`, `#/inventory-consumer` and `#/workbench-v5`; retired controls/shell/data aliases are not current routes.
 
-For workspace refinements, exercise `shell-connected` and `shell-long-content`
-at 1000×700, 1440×940, 1920×1080, and the 720×470 zoom-equivalent viewport.
-Check the title-bar palette independently of the toolbar filter, arrow-key
-navigation across group labels, repository switching through recents, and
-keyboard expansion of **Repository info** and **Edit stack layers**. Opening a
-disclosure must not dispatch Git; layer actions must still enter their reviewed
-workflows. The keyboard, accessibility, safety, and motion/zoom renderer suites
-cover these contracts. After intentional shell changes, update the affected
-macOS visual baselines with `pnpm run test:visual:update`.
+For workspace refinements, exercise actual `#/app` at minimum/default/wide and
+720×470 zoom-equivalent sizes. Test global search independently of the local lane
+filter, full qualified names on the narrow rail, windowed keyboard focus,
+per-repository selection/filter/fold/scroll restoration, and captured menus.
+Inspection/navigation never dispatches Git. Current cutover captures remain review
+candidates; do not replace historical macOS baselines to conceal mismatches.
 
-For a broad polish pass, inspect every destination: Branches, Stacks, Working
-changes, History, Stashes, Pull requests, Review, PR Inbox, GitHub Notifications,
-and Diagnostics. Cover all nine Settings sections and all five Review tabs,
-including unified/split Code, lower submitted threads, replies, and pending
-drafts. Inspect ordinary, reviewed, and destructive workflows alongside clone,
-CLI status, Git runtime, shortcuts, reconciliation, dirty-checkout, credential
-consent, and conflict-resolution dialogs. Use the default and minimum native
-windows in both themes; keep wide-window and 720×470 zoom-equivalent coverage.
+For a broad pass, inspect Branches/worktrees, Pull requests, full Review, global
+Needs attention and Activity. Settings, optional Notifications, discovery/clone,
+captured operations, history, native management and recovery are secondary dialogs,
+not replacement development destinations. Cover all Settings sections and Review
+panes, unified/split Code, submitted threads/replies and original durable drafts.
+Use both themes and minimum/default/wide/zoom-equivalent viewports; native chrome,
+real Electron zoom and manual assistive technology remain separate user acceptance.
 
 Include confirmed, empty, loading, stale, and refused reads, not only populated
 lists. Check computed type roles, content insets, disabled gates, keyboard focus,
@@ -2536,14 +2625,13 @@ must remain usable, and retrying must restore the commit list.
 
 | Area      | Gallery scenarios / exercised controls                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shell     | `shell-no-repository`, `shell-loading`, `shell-connected`, `shell-long-content`, `shell-offline`; the real Hide details pane control                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Shell | Actual `#/app`: pinned repositories, global/local search, context restore; no top tabs or old Details toolbar |
 | Ancestry  | `ancestry-linear`, `ancestry-branching`, `ancestry-deep`, `ancestry-remote-consolidated`, `ancestry-missing-parent`, `ancestry-cycle`, `ancestry-requires-restack`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| Changes   | `files-clean`, `files-staged`, `files-unstaged`, `files-renamed`, `files-untracked`, `files-conflicts`, `files-truncated`, `files-long-content`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| History   | `history-loading` (`release('history')` to finish), `history-error`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Read-only local inspection | `cutover-inspection`: HEAD→index / index→directory dual edits, rename preimage, Unicode untracked bytes, 2400-line preview; existing conflict/binary/LFS/submodule/sparse/truncated fixtures remain source inputs |
+| History | Explicit selected committed-history dialog; no standalone development/history route or cherry-pick/revert controls |
 | PRs       | `pull-requests-lifecycle`, `pull-requests-checks`, `pull-requests-checks-detail` (required failure, optional failure, running workflow, required context not yet reported), `pull-requests-checks-stale` (visibly stale report with rerun unavailable), `pull-requests-empty`, `pull-requests-unavailable`, `pull-requests-issue-links` (a closing-keyword link and a local contextual link on one PR)                                                                                                                                                                                                                                                                                                                            |
 | Review    | `review-stacked`, plus `answerNext('reviewFiles', …)` for a deleted text file and a 1,200-line generated file: the deleted file is read, addressed, and commented on entirely through its base lines, and the generated file's window stays two pages wide while each reveal, including the one that slides it, keeps every mounted row on the line its gutter names; the file tree's rows are reached and opened with arrow keys and Enter without dispatching anything                                                                                                                                                                                                                                                          |
-| Stashes   | `stash-stable-oid`, `stash-empty`, `stash-index-shift`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Inbox     | `pr-inbox-queue` (two registered repositories, one row per group), `pr-inbox-empty`, `pr-inbox-partial` (a repository read without review or check metadata), `pr-inbox-membership-unknown` (the host named no account, so no viewer-relative group is decided and the reason is named), `pr-inbox-unavailable` (GitHub unreachable behind the confirmed rows), `pr-inbox-retired` (a read ended before it confirmed anything, so it holds no rows and blames neither the account or the network); the six group counts, keyboard search, saving and removing a filter, `failNext('pullRequestInbox')` for the refusal, `answerNext('pullRequestInbox', …)` for a read that ended, and `setScenario` for the in-place transitions |
+| Attention/Activity | Qualified inventory reasons, provider-PR deduplication, clone-local conflicts, unavailable facts, observed transitions; first snapshots are not historical events |
 | Workflows | `workflow-preview-ready`, `workflow-preview-loading` (`release('stackPreview')`), `workflow-preview-blocked`, `workflow-preview-stale`, `workflow-action-error`, `workflow-partial-restack`, `workflow-conflict-recovery`, `workflow-operation-recovery`, `workflow-external-operation`; form validation, typed confirmation, and `hold('runAction')` for busy state                                                                                                                                                                                                                                                                                                                                                              |
 
 ```sh
@@ -2556,13 +2644,13 @@ pnpm run test:controls
 pnpm run format:check
 ```
 
-The gallery can also be built with `pnpm run build:gallery`. Its output is `out/renderer-fixtures`, outside the production renderer entry point. `test:controls` loads that output in an isolated Electron window.
+The gallery can also be built with `pnpm run build:gallery`; output is `out/renderer-fixtures`, outside the production entry. `test:controls` uses the pinned Playwright browser against this separate gallery, not an unsandboxed Electron specimen launcher.
 
 Run `pnpm run test:ui` locally (or `pnpm --filter git-stacks exec playwright test` from root, or `pnpm exec playwright test` inside `apps/desktop`) for one combined visual/behavioral HTML report (separate invocations replace the previous report). Axe attachments retain violations and incomplete checks; rendered contrast measurements are report annotations. The `Accessibility checks` workflow runs the behavioural renderer suite (axe, contrast, keyboard, focus, 200% zoom, reduced motion) plus the shared keyboard/state-label unit tests on every push and pull request. Pixel baselines are macOS-only and stay a local gate. The committed images come from more than one macOS point release, so the exact platform, architecture, and pinned Playwright Chromium an image was recorded under are stated per run rather than asserted here for all of them; patch-level system-font drift is expected and tested through the programmatic design-system tokens check.
 
 Baselines are committed images, and the pull request records the exact platform, architecture, and verification run evidence each image came from rather than maintaining transient author-only capture notes here.
 
-The visual suite covers the ten destinations and three dialog compositions at minimum/default/wide sizes, shared-control variants, and a small set of long/error/recovery layouts. Other fixture states remain available in the gallery without separate screenshots or label-only assertions. Behavioral tests focus on keyboard access, asynchronous transitions, contrast, zoom/reduced motion, and mutation guards.
+Current visual harnesses capture actual production surfaces and scoped dialogs at five matched desktop viewports in both themes, alongside unchanged v5 comparisons. Candidate images carry source/context/call evidence and remain unaccepted until user review; historical images are retained, never relabelled as current passes.
 
 ### Packaged desktop smoke
 
@@ -2591,13 +2679,12 @@ The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `r
 
 The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks (minimize/restore document visibility and bounds, maximize/unmaximize) are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
 
-The branch-creation check selects the branch identity independently of appended
-picker status annotations, then verifies the checkout, branch tip, and recorded
-stack parent with Git.
-
-The commit helper waits for Stage all to become enabled after a repository
-refresh rather than sampling its transient disabled state once. The existing
-20-second UI timeout and real Git commit and clean-working-tree assertions remain.
+Current local Git probes use explicit captured authority: fixture-only Fetch,
+new linked-worktree creation preserving the primary HEAD/index, and exact
+read-only Unicode status/file inspection. They do not stage, commit, stash,
+switch another checkout or use the retired development UI. Native owned/unowned
+recovery and final effect fences also have disposable integration regressions;
+run them separately from manual native window/assistive-technology evidence.
 
 ### IPC sender validation
 
@@ -2608,18 +2695,15 @@ The same packaged smoke proves the `validateSender` boundary in `apps/desktop/sr
 
 Both refusals are checked against the handler's own precondition (`repository:refresh` needs an open repository), so a guard that stopped answering would be caught rather than mistaken for a refusal. The frame clause of the guard has no live case to reject: `frame-src 'none'`, the `will-frame-navigate` and `will-attach-webview` guards, and `nodeIntegrationInSubFrames: false` mean no child frame of the shipped window ever holds an `ipcRenderer`. The smoke attempts three named subframes and then reads each child frame from the main process — a renderer can only read a frame it is same-origin with — asking the frame itself what it holds. To pass, each attempted frame must have exactly one matching main-process observation reporting `typeof window.desktop === 'undefined'`; missing frames or failed inspections fail the check rather than count as bridge absence. A frame whose navigation the CSP refused may hold a `chrome-error://` document rather than the requested app document; the report records the document actually observed. This measures that the frame clause is unreachable; it is not a live rejection proof for it.
 
-### PR Inbox desktop smoke
+### Integrated navigation and Attention smoke
 
-```sh
-pnpm run build
-node apps/desktop/tests/inbox.e2e.cjs [shots-dir]
-```
-
-The smoke launches the real Electron main process and preload bridge — never a renderer fixture double — against a synthetic GitHub host this script owns, over verified TLS (`NODE_EXTRA_CA_CERTS`, no verification is disabled). The fixture certificate, repositories, tokens, `settings.json`/`repositories.json`, Chromium profile, and Git/gh configuration all live in the owned temporary root, so no ambient credential, personal repository, or OS secret store can reach the run. Credential sealing is provided by the shared external fixture at `apps/desktop/apps/desktop/tests/fixtures/isolated-desktop.cjs`, which replaces every native `safeStorage` entry point before the production main module loads and keeps Chromium on `--use-mock-keychain`/`--password-store=basic`; if that guard cannot be proven, the fixture refuses to load the production main. It observes, in the live window: the six Inbox groups with the counts the host answered, the `/` chord reaching the queue's search field, a matchless search reaching the filtered-empty state rather than an empty queue, clearing restoring the rows, a row opening its own repository's Review with no Git action, a row for another registered repository adopting that repository, and a saved filter surviving a real process restart. The synthetic host is the only authority: nothing here writes to GitHub.
-
-The provider CLI must independently trust the fixture's TLS issuer. `NODE_EXTRA_CA_CERTS` configures Node, not `gh`'s certificate verification; Node reaching the synthetic host is not proof that the CLI can. If the CLI rejects the certificate, record this smoke as blocked before Inbox data loads. Do not disable TLS verification or install the disposable issuer into a personal OS trust store to force a pass.
-
-This is a dev-main smoke; the packaged executable, preload packaging, and CSP remain the packaged desktop smoke's proof, and a real OS key-store acceptance is a separate manual gate.
+The old PR Inbox/graph-camera Electron presentation harnesses are retired with
+their routes. Use the real-App `cutover.spec.ts`, `cutover-integration.spec.ts`,
+and accessibility harness for context, local/global search, read-only inspection,
+windowed keyboard focus, and mutation-free navigation. These dispatch fixtures
+are not native IPC, Git, provider, assistive-technology or performance acceptance.
+Use the current-source packaged desktop smoke for the native boundaries above;
+manual/provider/AT/performance acceptance remains user-deferred for this cutover.
 
 ### Update flow smoke
 
@@ -2827,10 +2911,10 @@ Turbo tracks shared source as an input of both consumers. Design-specific tasks 
 - Use TanStack Form's `useForm`, `form.Field`, `handleChange`, `handleBlur`, and `useSelector` for local form drafts. Native form submission prevents default and stops propagation before `form.handleSubmit`; await asynchronous transports and retain synchronous dispatch locks.
 - Keep hydrated `defaultValues` consistent with values passed to `form.reset`, including fields mounted only in another section. Do not duplicate repository previews, recovery state, editor documents, or persistent review drafts in form state. Clear credential fields before transport dispatch and on dismissal; never log them.
 
-`pnpm run test:controls` exercises the actual shared controls in Electron and the guarded recovery specimen through the production preload. Focused renderer coverage includes:
+`pnpm run test:controls` exercises shared controls and TanStack forms in the separate browser gallery. It does not exercise production preload or native sandbox/IPC; those belong to the packaged desktop smoke. Focused renderer coverage includes:
 
 ```sh
-pnpm run test:ui tests/renderer/base-ui.spec.ts tests/renderer/tanstack-forms.spec.ts tests/renderer/safety.spec.ts
+pnpm run test:ui tests/renderer/base-ui.spec.ts tests/renderer/tanstack-forms.spec.ts tests/renderer/cutover-integration.spec.ts
 ```
 
 When adding a variant or migrating a view:
@@ -2902,18 +2986,18 @@ git config --local branch.feature/two.parent feature/one
 
 Add a file of your own when a step needs a working change; what the app reads is Git, not how the file was written.
 
-A member is recorded as `branch.<name>.parent`; the app walks those links to the default branch and groups branches by the first ancestor below it, so each further branch needs a new name and the previous branch as its parent, and only such a chain reaches one stack — build it past 200 members (`LIST_PAGE_SIZE`) when you intend to exercise the paged-list parts of steps 3 and 4. Open the fixture with **Add local repository** on the no-repository pane or by dropping the folder on the window — adoption never writes to the repository — then delete the run root and nothing else.
+A dependency parent is recorded as `branch.<name>.parent`. Build an owned fixture past 64 branch rows (`LANE_ROW_PAGE_SIZE`) for cross-page lane focus and past 32 relationships (`LANE_RELATIONSHIP_PAGE_SIZE`) for inspector paging; ordinary lists retain their separate 200-row budget. Use the package's **Add repository** folder picker, never a personal repository, and delete only the disposable fixture root after the manual run.
 
-**Readers.** `Mod` is `Cmd` on macOS and `Ctrl` on Windows ([`packages/shared/src/shortcuts.ts`](packages/shared/src/shortcuts.ts)); press each `Mod` chord to confirm it reaches the app, because a reader can keep a chord for itself. The branch tree, the stack rail, History, and every dialog handle the keyboard in the app, and a reader's reading mode — NVDA browse mode, Narrator scan mode — spends arrows, Home, End, and Enter on its own cursor, so run those checks in the reader's interaction or focus mode and use the reading mode to read what the app announces. Record which mode each observation was made in; an announcement that differs between the two modes is recorded, not treated as a defect.
+**Readers.** `Mod` is `Cmd` on macOS and `Ctrl` on Windows/Linux. Confirm the reader does not intercept the configured chords. Run lane, Review-member and dialog keyboard checks in the reader's interaction/focus mode; record browse/scan-mode announcements separately. Automation is not reader acceptance.
 
-1. Confirm the record above names this platform, this build, and this reader, and that the reader is in the configuration you recorded. Then Tab to **Add local repository**, confirm the reader announces its name and role, and record what the operating system's folder picker announces, where focus lands once the workbench opens, and whether the repository's name and path are spoken.
-2. **Destination navigation.** With no pointer, arrow through the Workspace destinations rail and activate each of the ten destinations. After each switch, confirm focus lands on the destination's heading and the change is spoken through the polite live region. Also verify the direct routes: `/` focuses the in-view filter, `Mod+K` opens the command palette with its own search focused, and the view shortcuts reach every destination: `Mod+1`–`Mod+8` for Branches through Diagnostics, `Mod+9` for PR Inbox, and `Mod+0` for GitHub Notifications.
-3. **Branch tree.** Tab once into the repository branch tree and confirm it is a single tab stop. With Up/Down move between rows and confirm level, sibling position, and set size are announced; Home/End jump to the first and last row of the whole filtered list, revealing the page that mounts it when the list is paged, and the tree keeps its single tab stop. Press Enter and confirm the details pane follows the selection and focus stays in the tree. Confirm every row states current, remote, parent cycle, parent missing, requires-restack, pull-request number, checks, and ahead/behind in words, and that a visible focus ring marks the row. Filter the list so a branch's parent is no longer shown, and confirm the remaining rows announce no parent above them and share one root set. Finally, slide the mounted window past the first page and repeat Up/Down: focus must move to the neighbouring mounted row, the rows already mounted must be the rows still mounted, and the window must not jump back to the top.
-4. **Stack rail and history.** On Stacks, Tab into the member list and repeat the same arrow/Home/End/Enter contract, including Up/Down and Home/End on a stack longer than one page. On History, do the same for the commit list and confirm the inspected commit is announced as current.
-5. **Text entry.** In the reader's focus or interaction mode, type `7/k` into the in-view filter and confirm every character is inserted, no destination changes, and the palette does not open. Repeat inside the command palette search. Open a dialog and confirm Tab is trapped, Escape does not discard entered work, explicit Cancel returns focus to the control that opened the dialog, and a rejected operation keeps focus inside the modal with its error associated. Record reader-owned letter navigation in browse or scan mode separately from app shortcut failures; Narrator automatically turns scan mode off in edit fields so text can be entered.
-6. **Zoom and motion.** Check both sizes separately. Zoom to 200% — the app installs a real application menu, so View's Zoom In and Reset Zoom are reachable from the keyboard — walk all ten destinations, then Reset Zoom, then resize the window to the app's own minimum, 1000×700, and walk them again: at each, no horizontal scrolling, no action pushed off-screen, and the tree, rail, and history still keyboard-reachable. Enable Reduce Motion on macOS, turn Animation effects off on Windows, and confirm transitions are suppressed while status text, focus rings, and busy locks remain.
-7. **State without colour.** Repeat the branch, pull-request, and Diagnostics surfaces under a high-contrast or monochrome display setting (Increase contrast or Grayscale on macOS, a built-in high-contrast theme on Windows) and confirm lifecycle, checks, review, capability support, and unavailable/unknown data are all still readable as words.
-8. **Errors and recovery.** Trigger unavailable GitHub metadata, a history error, a stale preview reload, busy state, partial completion, and conflict Continue/Abort. Confirm focus moves to a newly raised error and that announcements are timely without duplicating or hiding important state. With an error still on screen, open and cancel a dialog and confirm focus returns to the control that opened it rather than back to that error.
+1. Record platform, exact package/source SHA, reader and reader mode. Tab to **Add repository**, record the native folder picker and the registered repository name/path announcements.
+2. **Navigation.** Tab through Branches, Pull requests, Needs attention and Activity; open Review from an actual qualified PR row. Verify heading/focus announcements, Settings, optional Notifications and explicit recovery dialogs. Use `Mod+K` from non-editable focus for global search; local lane search must remain independent. Inspect configured shortcuts rather than expecting retired Stacks/Changes/History/Stashes/Inbox destinations.
+3. **Branch lanes.** Up/Down/Home/End must traverse the whole filtered projection across 64-row pages, move visible focus, and not change selection or a checkout. Enter changes inspection. Confirm qualified branch/PR/worktree identity, parent evidence, off-page continuation endpoints, unknown/conflicted/missing data, bulk-selection exclusions and a visible focus ring. Filtered ancestors remain context, never eligible bulk matches.
+4. **Read-only inspection and Review.** Verify shared narrow Sheet focus containment, Escape/dismissal and return focus; inspector tabs, file selection and 1000-line diff paging must be keyboard reachable without Stage/Commit/Stash controls. In Review, verify member navigation, unsent draft preservation, comparison/viewer replacement warnings and readonly history access without replay.
+5. **Text entry.** Type `7/k` into local/global search and draft inputs. Plain letters and IME composition must not trigger navigation. Explicit cancel restores initiating focus; errors stay associated with their controls, and unsent work is retained according to the current dialog contract.
+6. **Zoom and motion.** Exercise all current surfaces at real 200% Electron zoom and at the 1000×700 minimum separately, including the narrow inspector Sheet. Check horizontal overflow, clipped actions, focus restoration and reduced-motion status truthfulness. Record native limits independently from browser geometry.
+7. **State without colour.** Inspect lanes, Attention, Review, CLI/Diagnostics Settings and recovery under high contrast/monochrome. Lifecycle, checks, authorization and unknown/unavailable observations must remain readable as words.
+8. **Errors and recovery.** Use owned unavailable-metadata, history-read, stale-preview, busy and paused/conflicted cases. Confirm original qualified authority remains explicit and opening/dismissing recovery never replays or retargets a journal. Continue/Skip/Abort require an explicit supported captured decision, not browsing or navigation.
 9. **Native window controls.** With the reader and no pointer, reach the window's own controls and confirm each is announced by the name of its action — minimize, zoom, and close on macOS; minimize, maximize or restore, and close on Windows — that activating each does what its name says, and that returning from full screen leaves the same names in the same order. A control announced by its icon, its position, or an untranslated name is a finding.
 10. Record findings and platform limits in the pull request. Sign off only after blocking keyboard, contrast, state-truthfulness, and safety-dispatch findings are resolved.
 
@@ -3269,11 +3353,11 @@ desktop application is a separate matter from all of
 this: a packaged, signed install is verified on its own terms and none of the
 evidence here says anything about it.
 
-## Changes workspace
+## Retained file-operation domain contracts
 
-Select a file row to inspect its staged and working-tree diffs. The separate file checkbox stages or unstages the whole file; its mixed state means the file has changes on both sides of the index. File-row selection alone never stages anything. If Git rejects a file action, the index is unchanged and the mixed checkbox still reflects the partially staged file after refresh.
+The main-process file/index and partial-patch engines remain domain contracts; the retired development workspace and its staging controls are not production destinations. The current inspector reads HEAD→index and index→directory without mutation. Use an external editor or terminal for development and staging.
 
-For a text file, use the per-hunk **Stage hunk** or **Unstage hunk** button to move just that hunk between the working tree and index. Toggle changed lines within a hunk to include or exclude them, then apply the hunk; toggling a line alone does not write to Git. With focus on a hunk, Up/Down/Home/End move among hunks, and Enter or S applies the focused hunk. Keyboard activation of an individual line button only changes its selection.
+Whole-file and partial-text domain operations remain guarded by exact file/index identities. A mixed status means a path has changes on both sides of the index, not that any inspected lines have been staged.
 
 Only staged changes enter the next commit. Each hunk action checks the selected file's index and working-tree identity again, then takes Git's index lock before copying the complete current index. Another file staged while the diff was loading is preserved; a Git writer that encounters the owned lock must retry. If the selected file changed, refresh the inspector and review the diff. Renames and copies, new or deleted files, binary/untracked/conflicted files, unsupported text diffs, and oversized diffs require whole-file handling or conflict resolution rather than partial patching. Selected text patches retain adjacent replacement order, exact repeated-line positions, zero-context insertion anchors, CRLF, no-newline markers, and quoted Unicode paths where Git can safely apply them.
 
@@ -3318,8 +3402,8 @@ Sync Stack never rewrites published remote history without explicit confirmation
 If Git encounters conflicts during the rebase cascade:
 
 1. The operation pauses in `git-stacks-stack.json` in the selected worktree's Git administrative directory, saving its stable recovery identity, active replay proof and backup refs under `refs/git-stacks/backups/<id>/<hex-encoded-branch>`.
-2. Conflicted files appear in the selected directory's Changes view and conflict resolver; other directories are not borrowed.
-3. Resolve and stage conflicts, then use **Continue** to resume the original owned replay. **Skip…** separately confirms dropping only the exact current paused commit; later commits and conflicts still follow the original journal.
+2. Inspect conflicted paths in the exact selected directory's read-only Changes inspector; no other directory is borrowed.
+3. Resolve and stage conflicts in an external editor or terminal, then use **Continue** in the captured recovery workflow to resume the original owned replay. **Skip…** separately confirms dropping only the exact current paused commit; later commits and conflicts still follow the original journal.
 4. **Abort** restores recorded local tips and metadata only where their current identities remain proven. External changes block rollback; already published remote or provider effects are not undone. Recovery retains the original force consent and leases.
 
 ## Linked issues
@@ -3441,27 +3525,18 @@ it and the original tips stay recoverable.
 
 ## Review workspace
 
-Open a repository **Pull requests** row, a **PR Inbox** row, a stack PR link,
-the inspector's **Review changes** action, or a palette review command to reach
-the same selected **Review** workspace. No branch is checked out. **Manage**
-remains an explicit secondary control; **PR actions** contains management and
-**Open on GitHub**. Local Git commands remain in the palette and local-work
-destinations rather than competing with code in Review.
+Open a qualified **Pull requests** row, **Needs attention** item, lane PR link,
+inspector review action or global-search PR result to reach the same selected
+**Review** workspace. No branch is checked out. Management remains an explicit
+secondary captured operation; the read-only workbench has no standalone staging,
+commit, stash or graph-camera destinations.
 
-**Return to …** returns to the workspace that opened Review. The qualified
-origin keeps graph filters, the actual selected PR/ref, expansion and dependent
-path, camera, and local outline/list scroll. Review retains its reading and
-composition state independently. A selected PR that no longer matches a graph
-filter remains explicitly outside that filter. Repository/origin/account or
-credential replacement retires incompatible ephemeral navigation; a cross-repository
-Inbox entry can return to its same host/account queue without restoring the old
-repository's graph. Navigation does not fetch Git refs, check out branches, or
-dispatch a mutation.
-
-Active destinations keep their mounted identity while their existing scoped
-state handlers retire incompatible graph search, selection, and saved-view state.
-Changing authority does not reset the Inbox's local filter or collapse the
-reconciliation disclosure; retired remote rows and repair previews still disappear.
+Return navigation restores the repository-qualified lane query, selected ref/PR,
+inspector state and mounted-page focus without borrowing another checkout.
+Review retains its reading and composition state independently. Repository,
+origin, host/account and credential replacement retire incompatible ephemeral
+reads and navigation; authored drafts and journals remain stored under their
+original owner. Navigation never checks out a branch or dispatches a mutation.
 
 Review read results remain Query-owned, while selection and unsent form values
 remain local. While a structured repository mutation is busy, a refreshed file
@@ -3836,9 +3911,13 @@ pnpm --filter git-stacks exec tsx --test tests/review-snapshots.test.ts
 pnpm run test:ui tests/renderer/review-snapshots.spec.ts
 ```
 
-## PR Inbox
+## Historical PR Inbox domain rules
 
-`Mod+9` opens the PR Inbox: a GitHub-derived triage queue over every registered repository. In the gallery, a row for a second registered repository opens that repository's own workspace: `openRepository` answers with the snapshot registered for the requested path and adopts it, so every repository-scoped read after it answers for the repository now on screen. The `pr-inbox-*` scenarios carry their own primary snapshot holding the pull requests their rows name, so the `connected` fixture that other destinations review is not rewritten to suit the queue. `pr-inbox-no-repository` is the same queue with nothing open, which is the case the search shortcut is checked in as well. It answers "what pull request work is waiting on me?" — it is **not** GitHub's notification inbox. Nothing in it reads a notification, subscription, release, or discussion, and no classic notification scope is required: every fact comes from the pull request, review, and check data the app already reads through a host-aware transport. Opening a row lands in the Review workspace for that row's own repository without checking anything out or changing branches. A row belongs to the host, account, and credential its read was made with: changing any of them retires the read in flight and drops its rows, so a later refresh that fails keeps nothing from the credential it replaced. The credential is whatever the transport that will make the requests would authenticate with — including the profile the `gh` CLI reports when that CLI speaks for a host — reduced to an opaque per-host fingerprint that never holds the credential itself. The host alone is enough to retire the queue, so switching it does not wait for an account status. Each host is admitted against its own newest reported allowance, never against another host's, and a count from a window that has already reset admits the next refresh; a host that named a wait is left alone until then, kept across refreshes that confirm no rows.
+The duplicate PR Inbox destination and `Mod+9` route are retired. Its provider
+read/grouping rules and independently authored records remain historical domain
+contracts; current triage lives in repository-qualified Needs attention and
+Pull requests, with Review reached without ambient `openRepository` activation.
+The retained `pr-inbox-*` data fixtures are source inputs, not a promised route.
 
 ### Group semantics
 
@@ -3895,7 +3974,7 @@ Run the Inbox tests with:
 pnpm --filter git-stacks exec tsx --test tests/pr-inbox.test.ts tests/pr-inbox-views.test.ts tests/pr-inbox-service.test.ts
 ```
 
-The `pr-inbox-structured` gallery scenario adds long titles, same-number PRs in two repositories, saved-view criteria and zero/truncated count facts. Exercise the real renderer with `GALLERY_PORT=5238 pnpm run test:ui tests/renderer/pr-inbox.spec.ts --workers=1`; the suite includes restoration after remount, unavailable-fact exclusions, read-only repository-qualified navigation, accessibility and desktop/200% reflow sizes.
+Historical Inbox filter/read contracts remain available for persisted data and domain regression coverage; the standalone Inbox presentation is retired. Current user triage is qualified Needs attention, and full Review opens through repository Pull requests or Attention without borrowing a checkout.
 
 ## Repository PR/ref discovery contract
 
@@ -3905,8 +3984,4 @@ Selected detail is bound to the current source head/ref and base target, not jus
 
 Selected reads capture their repository generation before the initial authority check. Retirement during that check rejects the admitted request before its detail reader runs, even if a replacement repository has already loaded.
 
-`projectPrGraph({ host: index.host, repository: index.fullName, pullRequests: index.pullRequests, branches: snapshot.branches, nativeStacks: snapshot.nativeStacks, complete: index.complete && snapshot.limits.branchesSkipped === 0 })` is a pure display projection. IDs qualify host, origin repository, PR number or full Git ref. Edges distinguish GitHub base targets, head associations, recorded parent intent, inferred ancestry and submitted native order; unresolved, ambiguous, cyclic and not-yet-enumerated targets remain explicit. Missing author or direct-review-request completeness is not a negative fact. Inbox membership is personal triage, never the input filter for repository All open PRs; the index includes accessible open PRs of unrelated authors. Partial index pages and graph edges are display-only: `getGitHubData` and existing live mutation preflight still enumerate complete scope independently. Neither review drafts nor recovery journals live in the selected-detail cache.
-
-Conflict reporting compares established qualified edge targets: an explicit `refs/remotes/origin/main` parent agrees with a GitHub `main` target resolving to that same ref. A PR target also agrees with its source-confirmed `github-head` local/origin ref association without merging their provenance edges. Same-named unassociated local refs, other remotes, fork heads, or unknown head repositories do not establish equivalence. Ambiguous or missing edges retain their source evidence rather than inventing a ref alias.
-
-Focused model and transport checks: `pnpm --filter git-stacks exec tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/pr-graph.test.ts tests/pr-index.test.ts tests/github.test.ts`.
+Focused model and transport checks: `pnpm --filter git-stacks exec tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/workbench-model.test.ts tests/pr-index.test.ts tests/github.test.ts`.

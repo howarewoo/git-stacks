@@ -143,6 +143,7 @@ export function PullRequestList({
             key={pr.id}
             variant="ghost"
             className="wb-pr-row"
+            data-collaboration-id={pr.id}
             onClick={() =>
               onOpen({
                 repositoryId: repository!.identity.id,
@@ -329,7 +330,12 @@ export function AttentionView({
           aria-label="Attention repository"
           value={filter.criteria.repositories?.[0] ?? ''}
           onValueChange={(repository) =>
-            change({ criteria: repository ? { repositories: [repository] } : {} })
+            change({
+              criteria: {
+                ...filter.criteria,
+                repositories: repository ? [repository] : undefined,
+              },
+            })
           }
           options={[
             { value: '', label: 'All repositories' },
@@ -421,6 +427,7 @@ export function AttentionView({
                 <Button
                   className="wb-attention-row"
                   key={item.id}
+                  data-collaboration-id={item.id}
                   variant="ghost"
                   onClick={() => onOpen(item.target)}
                 >

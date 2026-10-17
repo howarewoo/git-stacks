@@ -64,6 +64,7 @@ async function handlers(
       },
     },
     inspectionHandlers,
+    benchmarkReadCounts: null,
     inspectionAuthority: new AsyncLocalStorage(),
     inspectionReads: new RepositoryScheduler(1),
     scheduler,
