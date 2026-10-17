@@ -77,7 +77,7 @@ export function UpdateNotice({ status }: { status: UpdateStatus | null }) {
 
 /** The facts about the updater that are true regardless of what it is doing. */
 export function updateFacts(status: UpdateStatus | null, channel: UpdateChannel): ContextFact[] {
-  return [
+  const facts: ContextFact[] = [
     { label: 'Installed version', value: status?.currentVersion ?? 'Unknown', code: true },
     { label: 'Channel', value: channel },
     { label: 'Signing key', value: TRUST_LABEL[status?.trust ?? 'none'] },
@@ -90,6 +90,18 @@ export function updateFacts(status: UpdateStatus | null, channel: UpdateChannel)
         : 'Reading platform support…',
     },
   ]
+  if (status?.lastSuccessAt) {
+    facts.push({
+      label: 'Last checked',
+      value: new Date(status.lastSuccessAt).toLocaleString(),
+    })
+  } else if (status?.lastAttemptAt) {
+    facts.push({
+      label: 'Last checked',
+      value: `${new Date(status.lastAttemptAt).toLocaleString()} (attempted)`,
+    })
+  }
+  return facts
 }
 
 /**
@@ -109,7 +121,11 @@ function notice(status: UpdateStatus | null) {
   // still holding a valid offer must be able to read that the download
   // finished, that an install is running, or that the last attempt was refused.
   const leads = offered === null || OUTCOME_PHASES.has(status.phase)
-  const headline = leads ? PHASE_LABEL[status.phase] : (offered as string)
+  const phaseHeadline =
+    status.phase === 'downloaded' && !status.supported
+      ? 'The release is downloaded and verified. Follow the instructions below to complete the update manually.'
+      : PHASE_LABEL[status.phase]
+  const headline = leads ? phaseHeadline : (offered as string)
   const body = status.failure
     ? `${status.failure.message} (${status.failure.reason})`
     : leads && offered !== null
