@@ -1,0 +1,148 @@
+name: Unsigned desktop dev preview
+
+on:
+  push:
+    tags: ['dev-preview-*']
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin
+            arch: arm64
+          - os: macos-15-intel
+            platform: darwin
+            arch: x64
+          - os: windows-2025
+            platform: win32
+            arch: x64
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Check preview identity and empty update trust
+        shell: bash
+        run: |
+          version=$(node -p 'require("./apps/desktop/package.json").version')
+          test "$GITHUB_REF_NAME" = "dev-preview-${version#*-dev.}"
+          [[ "$version" == *-dev.* ]]
+          node -e 'const keys = require("./apps/desktop/resources/update-trusted-keys.json"); if (keys.keys.length !== 0) process.exit(1)'
+      - name: Put the MSVC toolchain on PATH
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'No Visual Studio C++ toolchain on this runner' }
+          $environment = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set"
+          $toolchain = $false
+          foreach ($line in $environment) {
+            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+            if ($matches[1] -eq 'Path') {
+              if ($matches[2] -match 'VC\\Tools\\MSVC') { $toolchain = $true }
+              $matches[2] -split ';' | Where-Object { $_ } >> $env:GITHUB_PATH
+            } else {
+              "$line" >> $env:GITHUB_ENV
+            }
+          }
+          if (-not $toolchain) { throw 'The MSVC toolchain did not reach PATH' }
+      - run: pnpm install --frozen-lockfile
+      - name: Install the catalog's pinned Chromium on its visual baseline platform
+        if: matrix.platform == 'linux'
+        run: pnpm --filter design exec playwright install --with-deps chromium
+      - name: Verify catalog behavior, accessibility, and Linux visual baselines
+        if: matrix.platform == 'linux'
+        run: pnpm --filter design test:catalog
+      - name: Build unsigned installers and verify bundled native helpers
+        run: pnpm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Smoke-test the packaged Mac application
+        if: matrix.platform == 'darwin'
+        run: node apps/desktop/scripts/packaged-desktop-smoke.mjs
+        env:
+          TMPDIR: ${{ runner.temp }}
+      - name: Select this platform's installer
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir preview-artifacts
+          shopt -s nullglob
+          installers=(apps/desktop/release/*.dmg apps/desktop/release/*.exe apps/desktop/release/*.AppImage)
+          test "${#installers[@]}" -eq 1
+          extension="${installers[0]##*.}"
+          cp "${installers[0]}" "preview-artifacts/Git-Stacks-${GITHUB_REF_NAME}-${PLATFORM}-${ARCH}.${extension}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dev-preview-${{ matrix.platform }}-${{ matrix.arch }}
+          path: preview-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: dev-preview-*
+          path: preview-artifacts
+          merge-multiple: true
+      - name: Publish the explicitly unsigned prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd preview-artifacts
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
+          sha256sum ./* > SHA256SUMS.txt
+          cat > release-notes.md <<'NOTES'
+          ## Unsigned development preview — testing only
+
+          These installers are not Developer ID/Authenticode signed or notarized. They are not production releases. Automatic updates are disabled; no stable/beta update feed is changed.
+
+          The preview uses the regular Git Stacks application identity and settings location, not a side-by-side preview profile. Use a test computer or back up existing app data before replacing an installed copy.
+
+          | Computer | Download suffix |
+          | --- | --- |
+          | Mac, Apple Silicon | `darwin-arm64.dmg` |
+          | Mac, Intel | `darwin-x64.dmg` |
+          | Windows, x64 | `win32-x64.exe` |
+          | Linux, x64 | `linux-x64.AppImage` |
+
+          **macOS:** Open the disk image and drag Git Stacks to Applications. If blocked, attempt to open it, then use System Settings → Privacy & Security → Open Anyway only if you trust this repository and download. Do not disable Gatekeeper globally.
+
+          **Windows:** Run the installer. SmartScreen may warn about the unsigned app; use More info → Run anyway only if you trust this repository and download.
+
+          **Linux:** Make the AppImage executable (`chmod +x ./Git-Stacks-*.AppImage`) and run it. Your distribution may require FUSE compatibility libraries. Do not launch with `--no-sandbox`.
+
+          Install GitHub CLI (`gh`) and sign in with `gh auth login` for GitHub collaboration. Local repository inspection does not require GitHub sign-in. Test with disposable repositories first.
+
+          Build/type checks and packaged Git/clone-helper verification run on all four targets. The packaged desktop smoke runs on both Macs. Catalog behavior, accessibility, and committed visual baselines are checked on Linux. Linux GUI and Windows install smoke are not automated by this workflow. Installation on a separate computer remains a manual test.
+          NOTES
+          printf '\nSource commit: %s\nBuild: https://github.com/%s/actions/runs/%s\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> release-notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag --prerelease --latest=false \
+            --title "Git Stacks dev preview ${GITHUB_REF_NAME#dev-preview-} (unsigned)" \
+            --notes-file release-notes.md \
+            ./*.dmg ./*.exe ./*.AppImage SHA256SUMS.txt

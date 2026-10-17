@@ -738,7 +738,7 @@ export async function listStatus(
 ): Promise<{ files: ChangedFile[]; truncated: boolean }> {
   const { text, truncated } = await runGitCapped(
     repoPath,
-    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
     { maxBytes: MAX_STATUS_BYTES, boundary: '\0', signal },
   )
   return { files: parseStatus(text, truncated), truncated }

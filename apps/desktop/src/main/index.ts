@@ -968,13 +968,15 @@ async function repositoryOperationScope(
   signal?: AbortSignal,
 ): Promise<OperationScope> {
   const generation = hostGeneration
+  const captured = inspectionAuthority.getStore()
   const remoteUrl = await getOriginUrl(root, signal)
   const host = remoteHostContext(parseRemote(remoteUrl))
   const service = host ? gitHubCliStatusService(host.host) : null
   const status = service ? await service.read() : null
   if (
     signal?.aborted ||
-    (inspectionAuthority.getStore()?.root ?? activeRepository) !== root ||
+    captured?.signal.aborted ||
+    (captured && captured.root !== root) ||
     generation !== hostGeneration ||
     (host && service !== gitHubCliStatusService(host.host))
   )

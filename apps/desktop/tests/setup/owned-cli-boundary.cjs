@@ -22,7 +22,13 @@ const { mkdtempSync, realpathSync } = require('node:fs')
 const { tmpdir } = require('node:os')
 const { join } = require('node:path')
 
-const owned = mkdtempSync(join(tmpdir(), 'git-stacks-owned-gh-'))
+// Directory authority rejects symlink spellings; create every fixture from the
+// physical temporary root, including macOS's /var and /tmp aliases.
+const temporaryRoot = realpathSync(tmpdir())
+process.env.TMPDIR = temporaryRoot
+process.env.TEMP = temporaryRoot
+process.env.TMP = temporaryRoot
+const owned = mkdtempSync(join(temporaryRoot, 'git-stacks-owned-gh-'))
 
 // The CLI's own configuration is this run's, and empty: a keychain or a
 // hosts.yml belonging to the person running the suite is never what these tests

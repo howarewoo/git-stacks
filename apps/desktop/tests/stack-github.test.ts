@@ -1084,13 +1084,18 @@ test('a native stack on a release line merges against the branch it is registere
     assert.notEqual(remoteOid(harness, 'release/1.x'), beforeRelease)
     assert.equal(
       git(harness, ['rev-parse', 'refs/remotes/origin/release/1.x']),
-      remoteOid(harness, 'release/1.x'),
+      beforeRelease,
+      'landing does not implicitly fetch or rewrite the reviewed tracking refs',
     )
+    await runAction(harness.repo, { type: 'fetch' })
     assert.equal(
-      git(harness, ['config', '--get', 'branch.child.gitStacksMergedCommitOid']),
-      prFor(after, 'child').mergeOid,
-      'fallback merge-commit discovery uses the fetched release trunk',
+      git(harness, ['rev-parse', 'refs/remotes/origin/release/1.x']),
+      remoteOid(harness, 'release/1.x'),
+      'an explicit fetch imports the landed release line',
     )
+    assert.equal(git(harness, ['rev-parse', 'refs/remotes/origin/main']), beforeMain)
+    assert.equal(git(harness, ['show', 'refs/remotes/origin/release/1.x:parent.txt']), 'parent')
+    assert.equal(git(harness, ['show', 'refs/remotes/origin/release/1.x:child.txt']), 'child')
   })
 })
 
@@ -1578,6 +1583,9 @@ test('merged-root restack uses fetched remote main, preserves merged content, an
     assert.equal(remoteOid(harness, 'main'), mergedParent.mergeOid)
     assert.equal(mergedParent.headOid, parentHeadBefore)
 
+    // The app never fetches implicitly; the rewritten trunk shows up only after a fetch,
+    // and the restack reviews the fetched base the same way the workflow does.
+    await runAction(harness.repo, { type: 'fetch' })
     const restackPreview = await previewStack(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -1676,6 +1684,9 @@ test('restack preserves unpublished commits after a merged parent', {
     assert.ok(mergedParentHead)
     assert.ok(mergedParentMergeOid)
 
+    // The app never fetches implicitly; the rewritten trunk shows up only after a fetch,
+    // and the restack reviews the fetched base the same way the workflow does.
+    await runAction(harness.repo, { type: 'fetch' })
     git(harness, ['switch', 'parent'])
     const laterParentTip = await commitFile(
       harness,
@@ -1750,6 +1761,9 @@ test('restack preserves commits added to a merged PR source after its merge', {
       prFor(state, 'parent').mergeOid,
     )
 
+    // The app never fetches implicitly; the rewritten trunk shows up only after a fetch,
+    // and the restack reviews the fetched base the same way the workflow does.
+    await runAction(harness.repo, { type: 'fetch' })
     git(harness, ['switch', 'parent'])
     const laterParentTip = await commitFile(
       harness,
@@ -1839,6 +1853,9 @@ test('restack reconstructs merge-time head from journal and rejects unproven met
     assert.equal(journalContent.parent.headOid, mergedHead)
     assert.equal(journalContent[String(prFor(state, 'parent').number)].headOid, mergedHead)
 
+    // The app never fetches implicitly; the rewritten trunk shows up only after a fetch,
+    // and the restack reviews the fetched base the same way the workflow does.
+    await runAction(harness.repo, { type: 'fetch' })
     git(harness, ['config', '--local', '--unset', 'branch.parent.gitStacksMergedHeadOid'])
     git(harness, ['config', '--local', '--unset', 'branch.parent.gitStacksMergedCommitOid'])
 
@@ -2335,6 +2352,10 @@ test('restack rejects stale ancestor candidate when journal records the true mer
     const mergedHead = prFor(state, 'parent').headOid
     assert.equal(mergedHead, parentTip)
 
+    // The app never fetches implicitly; the rewritten trunk shows up only after a fetch,
+    // and the restack reviews the fetched base the same way the workflow does.
+    await runAction(harness.repo, { type: 'fetch' })
+
     // Stale config points at parentFirstCommit (an ancestor of mergedHead)
     git(harness, ['switch', 'child'])
     git(harness, ['config', '--local', 'branch.parent.gitStacksMergedHeadOid', parentFirstCommit])
@@ -2723,6 +2744,7 @@ test('a queue that holds a pull request, ejects it, and takes it again is read f
     await publishStack(harness)
     const state = await makeStackMergeable(harness)
     const childNumber = prFor(state, 'child').number
+    const parentNumber = prFor(state, 'parent').number
     // This repository has a merge queue, so the documented default action resolves to one.
     state.mergeQueue = true
     await harness.writeState(state)
@@ -2775,6 +2797,44 @@ test('a queue that holds a pull request, ejects it, and takes it again is read f
       )
       assert.equal(localOid(harness, 'child'), before.local, 'an ejection moves no ref')
       assert.equal(remoteOid(harness, 'child'), before.remote)
+
+      // One member being removed does not authorize a replay of the shared request while
+      // the queue still holds the rest of the group: the live request is refused and no
+      // second request is submitted.
+      const replayPreview = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      await assert.rejects(
+        runAction(harness.repo, {
+          type: 'executeStack',
+          token: replayPreview.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'merge_queue',
+        }),
+      )
+      assert.equal(starts.length, 1, 'a partly held group submits no new request')
+      assert.equal(localOid(harness, 'child'), before.local, 'the refusal moves no ref')
+      assert.equal(remoteOid(harness, 'child'), before.remote)
+
+      // A genuine re-enqueue starts only after the whole shared request is durably
+      // confirmed dropped: remove the remaining membership and read it back.
+      const cleared = await harness.readState()
+      delete cleared.mergeQueueMembers?.[String(parentNumber)]
+      await harness.writeState(cleared)
+      const allDropped = await getMergeStatus(harness.repo)
+      assert.equal(
+        allDropped?.layers.find((entry) => entry.pullRequest === parentNumber)?.queue?.outcome,
+        'dropped',
+        'the remaining member was confirmed removed by a read',
+      )
+      assert.equal(
+        allDropped?.layers.find((entry) => entry.pullRequest === childNumber)?.queue?.outcome,
+        'dropped',
+      )
 
       // Enqueueing again is a new request, and the queue reports it again.
       const again = await previewStack(
@@ -3284,8 +3344,41 @@ test('a request that later enqueues is read from the owning endpoint and stays e
       )
       assert.equal(
         offered.merge?.actions.includes('merge_queue'),
+        false,
+        'the live capability field reports no queue, so the accepted enqueue offers none',
+      )
+      // A read that cannot answer the queue fields is an unknown strategy too, no matter
+      // what an earlier enqueue recorded.
+      const unreadable = await harness.readState()
+      unreadable.mergeQueueFields = 'absent'
+      await harness.writeState(unreadable)
+      const unseen = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.equal(
+        unseen.merge?.actions.includes('merge_queue'),
+        false,
+        'an unknown queue read grants no strategy from a recorded enqueue',
+      )
+      // GitHub's own capability is the first-class evidence: once it reports a queue, the
+      // same preview offers the documented action again.
+      const membered = await harness.readState()
+      membered.mergeQueue = true
+      delete membered.mergeQueueFields
+      await harness.writeState(membered)
+      const reoffered = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      assert.equal(
+        reoffered.merge?.actions.includes('merge_queue'),
         true,
-        'an accepted enqueue is the evidence a queue exists for this base ref',
+        'live queue capability authorizes an offered queue after the degraded read',
       )
     })
   })

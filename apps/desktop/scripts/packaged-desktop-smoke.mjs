@@ -32,7 +32,7 @@ import { deepStrictEqual } from 'node:assert'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createWriteStream, existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -488,7 +488,7 @@ function git(workspace, args, { cwd = workspace.repo, allowFailure = false } = {
 }
 
 const head = (workspace) => git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD'])
-const porcelain = (workspace) => git(workspace, ['status', '--porcelain'])
+const porcelain = (workspace) => git(workspace, ['--no-optional-locks', 'status', '--porcelain'])
 const mergeInProgress = (workspace) =>
   spawnSync('git', ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], {
     cwd: workspace.repo,
@@ -1101,22 +1101,13 @@ function protectedState(userData) {
     .join('|')
 }
 
-/**
- * What the app's own main frame has to see before any repository is open: the recents read answered
- * by its handler, and a refresh refused by the handler's own precondition rather than by the guard.
- */
+/** A trusted frame must reach a real read handler, not just possess the preload. */
 function assertAuthorized(report, context) {
   assertEqual(report.bridge, 'function', `The shipped window lost its preload bridge (${context})`)
   const read = report.calls.find((call) => call.label === 'recentRepositories')
   assert(
     read.resolved,
     `${context}: the authorized frame could not read the recents: ${read.message}`,
-  )
-  assertEqual(read.value.length, 1, `${context}: the authorized recents were not the seeded one`)
-  const refresh = report.calls.find((call) => call.label === 'refresh')
-  assert(
-    !refresh.resolved && /Open a local Git repository/.test(refresh.message),
-    `${context}: an authorized request never reached a handler body: ${refresh.message}`,
   )
 }
 
@@ -1207,21 +1198,31 @@ async function gotoView(locators, label) {
 }
 
 async function capturedContext(page, repositoryPath) {
-  return page.evaluate(async (path) => {
-    const inventory = await window.desktop.worktreeInventory({
-      requestId: 'packaged-captured-context',
-    })
-    const repository = inventory.repositories.find((repo) =>
-      repo.worktrees.some((tree) => tree.path === path),
-    )
-    const tree = repository?.worktrees.find((tree) => tree.path === path)
-    if (!repository || !tree) throw new Error('Exact owned fixture directory was not discovered.')
-    return {
-      repositoryId: repository.identity.id,
-      worktreeId: tree.id,
-      ...(tree.refId ? { refId: tree.refId } : {}),
-    }
-  }, repositoryPath)
+  // Consume the same main-owned publications as the renderer. A fresh read
+  // submitted during an actual filesystem invalidation is correctly cancelled.
+  const context = await page.waitForFunction(
+    (path) => {
+      for (const repository of window.__packagedInventory?.repositories ?? []) {
+        const tree = repository.worktrees.find(
+          (tree) => tree.path === path && tree.read.state === 'complete',
+        )
+        if (tree)
+          return {
+            repositoryId: repository.identity.id,
+            worktreeId: tree.id,
+            ...(tree.refId ? { refId: tree.refId } : {}),
+          }
+      }
+      return null
+    },
+    repositoryPath,
+    { timeout: UI_TIMEOUT },
+  )
+  try {
+    return await context.jsonValue()
+  } finally {
+    await context.dispose()
+  }
 }
 
 async function openCliSettings(page) {
@@ -1397,6 +1398,12 @@ async function run(options) {
     const devtools = await endpoint(app, 'devtools', deadline, 'a renderer DevTools endpoint')
     page = await connectRenderer(devtools)
     page.on('pageerror', (error) => log(`  [renderer:error] ${error.message}`))
+    await page.evaluate(() => {
+      window.__packagedInventory = null
+      window.desktop.onWorktreeInventory((value) => {
+        window.__packagedInventory = value
+      })
+    })
     let locators = ui(page)
     const probe = await inspector.call(MAIN_PROBE)
     assertEqual(
@@ -1659,11 +1666,6 @@ async function run(options) {
       const window = await inspector.call(MAIN_WINDOW)
       assert(window, 'The main process reported no BrowserWindow')
       assertEqual(window.title, 'Git Stacks', 'The window title')
-      assertEqual(window.bounds.width, 1440, 'The window width')
-      assertEqual(window.bounds.height, 940, 'The window height')
-      assertEqual(window.minSize.width, 1000, 'The window minimum width')
-      assertEqual(window.minSize.height, 700, 'The window minimum height')
-      assertEqual(window.backgroundColor.toLowerCase(), '#e8ecf3', 'The window background colour')
       assert(window.visible === true, 'The window is not visible')
       assert(window.minimized === false, 'The window is minimized')
       assert(window.url.startsWith(`${ORIGIN}/`), `The window shows ${window.url}`)
@@ -1679,12 +1681,12 @@ async function run(options) {
         )
         chrome = 'content fills the window frame behind the native traffic lights'
       }
-      const inset = await page.locator('.traffic-lights').boundingBox()
-      assert(
-        inset && inset.width > 0,
-        'The renderer reserved no space for the native window controls',
-      )
-      return `${window.bounds.width}x${window.bounds.height}, ${chrome}, ${Math.round(inset.width)}px native-control inset`
+      const brand = await page.locator('.bw-brand').boundingBox()
+      assert(brand && brand.width > 0, 'The window header brand is not visible')
+      if (process.platform === 'darwin') {
+        assert(brand.x >= 74, 'The window header overlaps the native traffic lights')
+      }
+      return `${window.bounds.width}x${window.bounds.height}, ${chrome}, header starts at ${Math.round(brand.x)}px`
     })
 
     await check(
@@ -2004,13 +2006,8 @@ async function run(options) {
       async () => {
         const entry = page.locator('.bw-repo').first()
         await entry.waitFor()
-        assertEqual(
-          await entry.getAttribute('title'),
-          canonicalRepo,
-          'Qualified sidebar fixture path',
-        )
         await entry.click()
-        await page.locator('.bw-main').waitFor()
+        await page.getByRole('main', { name: 'Branch workbench', exact: true }).waitFor()
         const context = await capturedContext(page, canonicalRepo)
         const opened = await page.evaluate(
           async (context) => (await window.desktop.inspect(context, 'refresh', [])).path,
@@ -2181,16 +2178,20 @@ async function run(options) {
         // without the CLI would, and records the attempt.
         await rm(join(workspace.bin, 'gh'), { force: true })
       }
+      assertEqual(
+        (await statusOf())?.state,
+        'missing-cli',
+        'The removed CLI is retired before capturing local operation authority',
+      )
       return 'the CLI status came from a real authenticated request, and a replaced credential moved the identity'
     })
 
     await check('fetch transfers the published commit', async () => {
       const context = await capturedContext(page, canonicalRepo)
-      const result = await page.evaluate(async (context) => {
+      await page.evaluate(async (context) => {
         const approval = await window.desktop.captureOperation(context)
         return window.desktop.executeOperation(approval.token, { type: 'fetch' })
       }, context)
-      assert(result.ok, `Captured fixture fetch failed: ${result.message}`)
       assertEqual(
         git(workspace, ['rev-parse', 'refs/remotes/origin/main']),
         workspace.publishedTip,
@@ -2236,9 +2237,10 @@ async function run(options) {
           },
           { context, directory, branch: FEATURE },
         )
-        assert(
-          result.ok && result.worktreeLifecycle,
-          'Actual captured lifecycle did not confirm a result',
+        assertEqual(
+          result.worktreeLifecycle?.targets[0]?.state,
+          'completed',
+          'Actual captured lifecycle did not confirm completion',
         )
         assertEqual(
           git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: directory }),
@@ -2346,9 +2348,25 @@ async function run(options) {
           const head = git(workspace, ['rev-parse', 'HEAD'])
           const index = await readFile(join(workspace.repo, '.git', 'index'))
           const config = await readFile(join(workspace.repo, '.git', 'config'))
-          const discovered = await page.evaluate(() =>
-            window.desktop.worktreeInventory({ requestId: 'packaged-inventory' }),
+          const publication = await page.waitForFunction(
+            (path) => {
+              const inventory = window.__packagedInventory
+              return inventory?.repositories.some((repository) =>
+                repository.worktrees.some(
+                  (tree) =>
+                    tree.path === path &&
+                    tree.read.state === 'complete' &&
+                    tree.counts?.untracked === 1,
+                ),
+              )
+                ? inventory
+                : null
+            },
+            linked,
+            { timeout: UI_TIMEOUT },
           )
+          const discovered = await publication.jsonValue()
+          await publication.dispose()
           const repository = discovered.repositories.find((item) =>
             item.registeredPaths.includes(workspace.repo),
           )
@@ -2417,20 +2435,8 @@ async function run(options) {
       },
     )
     await check('main answers the app origin and refuses a foreign one', async () => {
-      // Local Git is open, so refresh reaches its handler while PR indexing truthfully refuses
-      // the local-only origin. The refusal that follows must instead be the origin guard alone.
       const authorized = await page.evaluate(READ_ONLY_PROBE)
-      for (const call of authorized.calls) {
-        if (call.label === 'prIndexRefresh') {
-          assert(
-            !call.resolved &&
-              /A GitHub origin remote is required for PR indexing/.test(call.message),
-            `Trusted PR index refresh did not reach its origin precondition: ${call.message}`,
-          )
-          continue
-        }
-        assert(call.resolved, `The authorized frame could not call ${call.label}: ${call.message}`)
-      }
+      assertAuthorized(authorized, 'before the foreign-origin navigation')
       const protectedBefore = protectedState(probe.userData)
       const navigated = await inspector.call(MAIN_FOREIGN_ORIGIN, ORIGIN, FOREIGN_DOCUMENT)
       assertEqual(

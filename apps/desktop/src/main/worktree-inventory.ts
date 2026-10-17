@@ -33,7 +33,7 @@ import {
 } from './git-core'
 import { RepositoryScheduler } from './repository-scheduler'
 import { RepositoryWatcher, type RepositoryWatcherOptions } from './git-watcher'
-import { resolveGitRuntime, withGitRuntime } from './git-runtime'
+import { resolveGitRuntime, withGitRuntime, type GitRuntimeRecord } from './git-runtime'
 
 // Remove one protocol terminator, not newline characters belonging to the path.
 const GIT_PATH_TERMINATOR = process.platform === 'win32' ? /\r?\n$/ : /\n$/
@@ -509,6 +509,15 @@ export class WorktreeInventoryService {
   private roots: string[] = []
   private controller: AbortController | null = null
   private automaticController: AbortController | null = null
+  private pending: Array<{
+    request: InventoryRequest
+    signal?: AbortSignal
+    automatic: boolean
+    runtime: GitRuntimeRecord
+    detach?: () => void
+    resolve: (value: WorktreeInventory) => void
+    reject: (error: unknown) => void
+  }> = []
   private state: WorktreeInventory = {
     generation: 0,
     repositories: [],
@@ -709,13 +718,80 @@ export class WorktreeInventoryService {
       }
     })
   }
-  async read(request: InventoryRequest, signal?: AbortSignal): Promise<WorktreeInventory> {
-    return this.readInventory(request, signal, false)
+  read(request: InventoryRequest, signal?: AbortSignal): Promise<WorktreeInventory> {
+    // The runtime is resolved inside the caller's pinned context and carried on
+    // the lane entry; the dequeue side never re-resolves it.
+    return resolveGitRuntime().then((runtime) =>
+      withGitRuntime(runtime, () => this.enqueueRead(request, signal, false, runtime)),
+    )
+  }
+  /**
+   * Derived reads run on one service lane. A younger manual read waits for the
+   * lane instead of ending a caller's in-flight read; it only supersedes an
+   * in-flight automatic refresh, which has no caller. Invalidations and caller
+   * cancellation still abort and reject exactly as for a single read, and each
+   * queued read runs inside the Git runtime its own caller pinned.
+   */
+  private enqueueRead(
+    request: InventoryRequest,
+    signal: AbortSignal | undefined,
+    automatic: boolean,
+    runtime: GitRuntimeRecord,
+  ): Promise<WorktreeInventory> {
+    if (signal?.aborted) return Promise.reject(new CommandCancelled())
+    if (automatic && this.pending.some((entry) => entry.automatic))
+      return Promise.reject(new CommandCancelled())
+    if (!automatic && this.controller && this.automaticController === this.controller)
+      this.controller.abort()
+    const { promise, resolve, reject } = Promise.withResolvers<WorktreeInventory>()
+    const entry: (typeof this.pending)[number] = {
+      request,
+      signal,
+      automatic,
+      runtime,
+      resolve,
+      reject,
+    }
+    if (signal) {
+      const abandon = () => {
+        const waiting = this.pending.indexOf(entry)
+        if (waiting !== -1) this.pending.splice(waiting, 1)
+        reject(new CommandCancelled())
+      }
+      entry.detach = () => signal.removeEventListener('abort', abandon)
+      signal.addEventListener('abort', abandon, { once: true })
+    }
+    this.pending.push(entry)
+    this.dequeue()
+    return promise
+  }
+  private dequeue(): void {
+    const next = this.pending[0]
+    if (!next || this.controller) return
+    this.pending.shift()
+    next.detach?.()
+    if (next.signal?.aborted) {
+      next.reject(new CommandCancelled())
+      this.dequeue()
+      return
+    }
+    const controller = new AbortController()
+    this.controller = controller
+    if (next.automatic) this.automaticController = controller
+    void withGitRuntime(next.runtime, () =>
+      this.readInventory(next.request, next.signal, controller),
+    )
+      .then(next.resolve, next.reject)
+      .finally(() => {
+        if (this.controller === controller) this.controller = null
+        if (this.automaticController === controller) this.automaticController = null
+        this.dequeue()
+      })
   }
   private async readInventory(
     request: InventoryRequest,
     signal: AbortSignal | undefined,
-    automatic: boolean,
+    controller: AbortController,
   ): Promise<WorktreeInventory> {
     this.selection = {
       selectedWorktreeId: request.selectedWorktreeId,
@@ -723,10 +799,6 @@ export class WorktreeInventoryService {
     }
     clearTimeout(this.refreshTimer)
     this.refreshTimer = undefined
-    this.controller?.abort()
-    const controller = new AbortController()
-    this.controller = controller
-    this.automaticController = automatic ? controller : null
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     const generation = ++this.generation
     const old = new Map(
@@ -874,8 +946,6 @@ export class WorktreeInventoryService {
     } catch (error) {
       for (const path of invalid) this.invalid.add(path)
       throw error
-    } finally {
-      if (this.automaticController === controller) this.automaticController = null
     }
   }
   private async armWatchers(state: WorktreeInventory, signal: AbortSignal): Promise<void> {
@@ -1079,7 +1149,12 @@ export class WorktreeInventoryService {
         .then((runtime) => {
           if (!this.active || signal.aborted) return
           return withGitRuntime(runtime, () =>
-            this.readInventory({ requestId: 'inventory-watch', ...this.selection }, signal, true),
+            this.enqueueRead(
+              { requestId: 'inventory-watch', ...this.selection },
+              signal,
+              true,
+              runtime,
+            ),
           )
         })
         .catch(() => {
@@ -1097,6 +1172,12 @@ export class WorktreeInventoryService {
     this.controller?.abort()
     this.watcherController.abort()
     clearTimeout(this.refreshTimer)
+    const stopping = this.pending
+    this.pending = []
+    for (const entry of stopping) {
+      entry.detach?.()
+      entry.reject(new CommandCancelled())
+    }
     this.stopWatchers()
   }
 }

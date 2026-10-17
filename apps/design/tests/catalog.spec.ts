@@ -597,6 +597,9 @@ test('narrow long content and 200-percent CSS-viewport reflow retain reachable a
 test('automated accessibility and measured essential boundaries and focus contrast in both themes', async ({
   page,
 }) => {
+  // Four full-catalog Axe sweeps plus focus/contrast checks share one deadline.
+  // Allow both themes to finish while the root suite also runs native Git tests.
+  test.setTimeout(120_000)
   await page.goto('/')
   for (const theme of ['light', 'dark']) {
     await page.evaluate((theme) => {

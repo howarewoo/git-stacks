@@ -263,6 +263,19 @@ test('a cancelled branch batch waits for every running probe before releasing it
   assert.equal(active, 0)
 })
 
+test('capped status inspection never refreshes or rewrites the Git index', async () => {
+  const { root, repo } = await repository()
+  try {
+    const before = await readFile(join(repo, '.git', 'index'))
+    await fs.utimes(join(repo, 'base.txt'), 0, 0)
+    const status = await listStatus(repo)
+    assert.deepEqual(status.files, [])
+    assert.deepEqual(await readFile(join(repo, '.git', 'index')), before)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a huge changed-file listing is bounded and reported instead of hanging', async () => {
   const { root, repo, git } = await repository()
   try {

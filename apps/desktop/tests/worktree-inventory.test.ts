@@ -14,7 +14,12 @@ import {
   WorktreeInventoryService,
 } from '../src/main/worktree-inventory'
 import { RepositoryScheduler } from '../src/main/repository-scheduler'
-import { WORKTREE_READ_CONCURRENCY } from '@git-stacks/shared/performance'
+import { CommandCancelled } from '../src/main/git-core'
+import {
+  EMPTY_SNAPSHOT_LIMITS,
+  WORKTREE_READ_CONCURRENCY,
+  WORKTREE_REFRESH_SETTLE_MS,
+} from '@git-stacks/shared/performance'
 import type { WorktreeInventory } from '@git-stacks/shared/worktree-inventory'
 import type { PullRequest } from '@git-stacks/shared/types'
 import { resolveGitRuntime, withGitRuntime } from '../src/main/git-runtime'
@@ -65,6 +70,60 @@ class MeasuredScheduler extends RepositoryScheduler {
         } finally {
           this.active--
         }
+      },
+      signal,
+    )
+  }
+}
+
+/**
+ * Parks exactly one scheduler task at its start, at a deterministic point, so
+ * tests can supersede or cancel a read mid-flight without wall-clock waits.
+ * The gate object and its resolvers survive until release(), so a parked task
+ * can always be unmooted.
+ */
+class GatedScheduler extends RepositoryScheduler {
+  #gate: {
+    held: PromiseWithResolvers<void>
+    entered: PromiseWithResolvers<void>
+    armed: boolean
+  } | null = null
+
+  arm(): void {
+    this.#gate = {
+      armed: true,
+      entered: Promise.withResolvers<void>(),
+      held: Promise.withResolvers<void>(),
+    }
+  }
+
+  wait(): Promise<void> {
+    if (!this.#gate) throw new Error('The scheduler gate was not armed')
+    return this.#gate.entered.promise
+  }
+
+  release(): void {
+    const gate = this.#gate
+    if (!gate) return
+    this.#gate = null
+    gate.held.resolve()
+  }
+
+  override read<T>(
+    root: string,
+    task: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return super.read(
+      root,
+      async (combined) => {
+        const gate = this.#gate
+        if (gate && gate.armed) {
+          gate.armed = false
+          gate.entered.resolve()
+          await gate.held.promise
+        }
+        return await task(combined)
       },
       signal,
     )
@@ -471,10 +530,12 @@ test('cancelled late discovery cannot replace a newer repository', {
     const refused = assert.rejects(late)
     await entered.promise
     service.register([second.repo])
-    const current = await service.read({ requestId: 'new' })
+    // The register-aborted read only unwinds once the gate releases; the new
+    // read waits behind that unwind on the service lane.
+    const current = service.read({ requestId: 'new' })
     gate.resolve()
     await refused
-    assert.deepEqual(current.repositories[0].registeredPaths, [second.repo])
+    assert.deepEqual((await current).repositories[0].registeredPaths, [second.repo])
     assert.deepEqual(service.current().repositories[0].registeredPaths, [second.repo])
     assert.ok(
       emitted
@@ -486,6 +547,129 @@ test('cancelled late discovery cannot replace a newer repository', {
     service.stop()
     await rm(first.root, { recursive: true, force: true })
     await rm(second.root, { recursive: true, force: true })
+  }
+})
+
+test('competing inventory reads queue instead of cancelling each other, and owned cancellation still refuses', {
+  timeout: 40_000,
+}, async () => {
+  const { root, repo } = await fixture()
+  const observed: string[] = []
+  const scheduler = new GatedScheduler()
+  const service = new WorktreeInventoryService(
+    scheduler,
+    () => {},
+    undefined,
+    {},
+    // The dependency read is an existing observed scope boundary: each queued
+    // caller's runtime record must be the one its own caller pinned.
+    async () => {
+      observed.push((await resolveGitRuntime()).versionOutput)
+      return { branches: [], limits: EMPTY_SNAPSHOT_LIMITS }
+    },
+  )
+  service.setActive(false)
+  const waiting = new AbortController()
+  const running = new AbortController()
+  try {
+    service.register([repo])
+    const base = await resolveGitRuntime()
+    // Two callers pin the real runtime, identifying their context with
+    // nonbehavioural version metadata only.
+    const elderRuntime = { ...base, versionOutput: 'fixture-elder-caller' }
+    const youngerRuntime = { ...base, versionOutput: 'fixture-younger-caller' }
+    // Two independent callers read the same view. The older read keeps its
+    // lane and answers with its own fresh publication; the younger read waits
+    // behind it and derives its own even fresher publication. Asking again
+    // must never cancel an in-flight caller's read.
+    scheduler.arm()
+    const elder = withGitRuntime(elderRuntime, () => service.read({ requestId: 'renderer' }))
+    await scheduler.wait()
+    const younger = withGitRuntime(youngerRuntime, () =>
+      service.read({ requestId: 'packaged-captured-context' }),
+    )
+    scheduler.release()
+    const elderState = await elder
+    const youngerState = await younger
+    assert.ok(youngerState.generation > elderState.generation)
+    for (const state of [elderState, youngerState])
+      assert.ok(state.repositories.some((item) => item.registeredPaths.includes(repo)))
+    // The younger read ran inside its own pinned runtime, not the elder's and
+    // not whatever the lane resolved last.
+    assert.deepEqual(observed, ['fixture-elder-caller', 'fixture-younger-caller'])
+
+    // A caller that gives up while its read waits in the lane is refused at
+    // the front of the queue, before any Git work is started for it.
+    scheduler.arm()
+    const parked = service.read({ requestId: 'held' })
+    await scheduler.wait()
+    const abandoned = service.read({ requestId: 'abandoned' }, waiting.signal)
+    const refusedWait = assert.rejects(abandoned, CommandCancelled)
+    waiting.abort()
+    scheduler.release()
+    const heldState = await parked
+    await refusedWait
+    assert.ok(heldState.repositories.some((item) => item.registeredPaths.includes(repo)))
+
+    // A caller that cancels while its read is running is still refused by the
+    // unchanged cancellation fences.
+    scheduler.arm()
+    const cancelled = service.read({ requestId: 'owned' }, running.signal)
+    const refusedRun = assert.rejects(cancelled, CommandCancelled)
+    await scheduler.wait()
+    running.abort()
+    scheduler.release()
+    await refusedRun
+  } finally {
+    scheduler.release()
+    service.stop()
+    waiting.abort()
+    running.abort()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a scheduled refresh survives invalidation while the cancelled reader is still unwinding', {
+  timeout: 30_000,
+}, async (context) => {
+  const { root, repo } = await fixture()
+  const scheduler = new GatedScheduler()
+  let listener: (value: WorktreeInventory) => void = () => {}
+  const service = new WorktreeInventoryService(scheduler, (value) => listener(value))
+  service.setActive(false)
+  try {
+    service.register([repo])
+    const runtime = await resolveGitRuntime()
+    scheduler.arm()
+    const old = withGitRuntime(runtime, () => service.read({ requestId: 'invalidated' }))
+    const refused = assert.rejects(old, CommandCancelled)
+    await scheduler.wait()
+    const refreshed = nextInventory(
+      service,
+      (next) => {
+        listener = next
+      },
+      (value) =>
+        value.state === 'complete' &&
+        value.repositories.some((item) => item.registeredPaths.includes(repo)),
+    )
+    context.mock.timers.enable({ apis: ['setTimeout'] })
+    await withGitRuntime(runtime, async () => {
+      service.setActive(true)
+      service.register([repo])
+      context.mock.timers.tick(WORKTREE_REFRESH_SETTLE_MS)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    })
+    context.mock.timers.reset()
+    scheduler.release()
+    await refused
+    const current = await refreshed
+    assert.equal(current.repositories[0].worktrees[0].status, 'clean')
+  } finally {
+    context.mock.timers.reset()
+    scheduler.release()
+    service.stop()
+    await rm(root, { recursive: true, force: true })
   }
 })
 

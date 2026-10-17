@@ -1,6 +1,6 @@
 {
   "name": "git-stacks",
-  "version": "0.1.0",
+  "version": "0.1.0-dev.20261017.1",
   "private": true,
   "license": "MIT",
   "description": "A local-first desktop workbench for Git branches and stacked pull requests",
@@ -11,7 +11,7 @@
     "start": "electron-vite preview",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/*.test.ts",
+    "test": "tsx --test --test-concurrency=4 --import ./tests/setup/owned-cli-boundary.cjs tests/*.test.ts",
     "test:live": "tsx tests/live/cli.ts --controlled",
     "bench:performance": "tsx scripts/perf/run-benchmarks.ts",
     "gallery": "vite --config tests/renderer/vite.config.ts",

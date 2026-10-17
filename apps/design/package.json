@@ -10,8 +10,9 @@
     "build": "vite build",
     "preview": "vite preview --port 5299 --strictPort",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm run check:manifest && pnpm run test:catalog",
+    "test": "pnpm run check:manifest && playwright test --grep-invert @visual",
     "test:catalog": "playwright test",
+    "test:visual": "playwright test --grep @visual",
     "check:manifest": "node scripts/check-manifest.mjs"
   },
   "dependencies": {

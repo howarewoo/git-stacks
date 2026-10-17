@@ -191,6 +191,35 @@ test('an action that waited for a stalled background read is refused after the s
   assert.equal(mutated, null, 'the action must not reach the repository the window left')
 })
 
+test('a cancelled queued background read cannot replace a completed mutation result', async () => {
+  const scheduler = new RepositoryScheduler()
+  const started = gate()
+  const finish = gate()
+  let state = 'before'
+  const mutation = scheduler.mutate('/repo', async () => {
+    started.release()
+    await finish.promise
+    state = 'committed'
+    return state
+  })
+  await started.promise
+  const controller = new AbortController()
+  const cancelled = scheduler.read(
+    '/repo',
+    async () => {
+      state = 'cancelled read ran'
+    },
+    controller.signal,
+  )
+  const refused = assert.rejects(cancelled, CommandCancelled)
+  const survivor = scheduler.read('/repo', async () => state)
+  controller.abort()
+  finish.release()
+  assert.equal(await mutation, 'committed')
+  await refused
+  assert.equal(await survivor, 'committed')
+})
+
 test('runtime preference changes are serialized through repository operations and cannot disrupt an in-flight write', async () => {
   const operations = new RepositoryOperations()
   const started = gate()

@@ -271,11 +271,15 @@ test('restack rejects a branch tip changed immediately after checkout', async ()
   assert.deepEqual(preview.blockers, [])
 
   const raceFlag = join(root, 'branch-advanced')
-  // A restack checks the branch out with `switch -- <branch>` and then reads the
-  // tip back, so the concurrent update lands after the checkout succeeds and
-  // before Git Stacks confirms the tip it previewed.
+  // A restack checks the branch out with `switch --no-overwrite-ignore -- <branch>` and
+  // then reads the tip back, so the concurrent update lands after the checkout succeeds
+  // and before Git Stacks confirms the tip it previewed.
   const race = beginGitRace({
-    matches: (args) => args[0] === 'switch' && args[1] === '--' && args[2] === 'feature',
+    matches: (args) =>
+      args[0] === 'switch' &&
+      args[1] === '--no-overwrite-ignore' &&
+      args[2] === '--' &&
+      args[3] === 'feature',
     inject: () => {
       runRealGit(repo, ['switch', '--', 'feature'])
       runRealGit(repo, ['update-ref', 'refs/heads/feature', advancedTip])

@@ -14,8 +14,10 @@ interface Gate {
   resolve: () => void
 }
 
+// These scenarios run many full snapshots over real Git processes alongside
+// other native files; use an integration deadline rather than the 30s unit limit.
 test('tracked detail failure degrades snapshots and retains only qualified background facts', {
-  timeout: 30_000,
+  timeout: 120_000,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'tracked-payload-'))
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' })
@@ -129,7 +131,7 @@ test('tracked detail failure degrades snapshots and retains only qualified backg
   }
 })
 test('independent clones share qualified provider reads without sharing local status', {
-  timeout: 30_000,
+  timeout: 120_000,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'remote-authority-'))
   const first = join(root, 'first')

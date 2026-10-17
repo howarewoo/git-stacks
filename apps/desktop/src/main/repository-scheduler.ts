@@ -98,7 +98,7 @@ export class RepositoryScheduler {
   ): Promise<T> {
     const lane = this.lane(repository)
     const start = (): Promise<T> => {
-      if (signal?.aborted) throw new CommandCancelled()
+      if (signal?.aborted) return Promise.reject(new CommandCancelled())
       const controller = new AbortController()
       const forward = () => controller.abort()
       if (signal) signal.addEventListener('abort', forward, { once: true })

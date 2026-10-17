@@ -14,7 +14,7 @@
     "start": "turbo run start --",
     "build": "turbo run build --",
     "typecheck": "turbo run typecheck --",
-    "test": "node --test scripts/ci/select-checks.test.mjs && turbo run test --",
+    "test": "node --test scripts/ci/select-checks.test.mjs && turbo run test --concurrency=1 --",
     "test:ci-selector": "node --test scripts/ci/select-checks.test.mjs",
     "test:live": "turbo run test:live --",
     "bench:performance": "turbo run bench:performance --",

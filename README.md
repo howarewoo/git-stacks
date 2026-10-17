@@ -140,6 +140,12 @@ that cannot compile it fails instead of shipping a build that would fall back to
 an unsafe rename. `pnpm run package` and `pnpm run dist` finish by running the
 helper from inside the packaged app, so a build that left it out fails there.
 
+Root tests run the native and catalog suites sequentially so Git subprocesses do
+not contend with Chromium's full-catalog accessibility sweeps. The native runner
+also limits concurrent test files to four. Its credential-free bootstrap
+canonicalizes the temporary root before creating fixtures: directory authority
+intentionally rejects symlink aliases such as macOS's `/var` spelling.
+
 ### Monorepo architecture and Turborepo
 
 The repository is structured as a pnpm workspace monorepo managed by Turborepo (`turbo.json`):
@@ -548,6 +554,12 @@ independent of local read cancellation, so a delayed reply cannot restore
 credential-retired metadata. A newly mounted observer waits for main before
 exposing cached credential-owned facts.
 
+Derived inventory reads share a serialized service lane. Distinct manual callers
+wait for their own fresh read instead of cancelling one another; queued work
+retains the caller's pinned Git runtime. Explicit cancellation and root/watcher
+invalidation still reject the affected read. At most one automatic refresh waits
+in the lane, preserving invalidations while a cancelled read unwinds.
+
 Local/common-directory, administrative worktree, full local/remote ref, logical
 remote host/repository, and PR identities are separate opaque IDs. Do not parse
 them or replace them with display names. Independent clones remain distinct local
@@ -555,6 +567,9 @@ authorities even when provider knowledge is shared. Qualified fork-head refs joi
 their own host/repository and published OID, separately from the PR's base repository
 and a local branch's current OID/upstream comparison. Ref records retain all
 explicit worktree associations; PR-only and branch-without-worktree records remain.
+
+Capped status listings disable Git's optional index locks, so observing a clean
+worktree cannot refresh index metadata and trigger its own watcher invalidation.
 
 Discovery and inspection use read-only Git commands. Adoption revalidates captured
 path, administrative/common-directory authority and availability, then only writes
@@ -1132,10 +1147,11 @@ is the local one, and the app says which of the two it is showing.
 This build does not infer ruleset or merge-queue support from a host name or a
 version number. GitHub Enterprise Server versions differ from one another and
 from github.com, so the app reports what a host answered and never maps a version
-to a feature. Merge-queue delivery is offered for a base ref only when GitHub
-reports a queue for it, or this repository has already had an enqueue accepted
-for it; whether a given instance offers a queue depends on that instance's
-version and its configuration, not on anything this build knows in advance.
+to a feature. Merge-queue delivery is offered only when a fresh GitHub read
+reports it for the reviewed base ref. An accepted enqueue remains historical
+evidence about its request, not permission to override disabled or unknown live
+policy. Whether an instance offers a queue depends on that instance's version
+and configuration, not on anything this build knows in advance.
 
 Per-host and per-repository capability state is visible in Settings and in
 Diagnostics.
@@ -1311,7 +1327,7 @@ restarting a sequence at one would be a replay the app is right to refuse.
 
 ### How a release is published
 
-Publishing a GitHub release runs
+Publishing a signed GitHub release runs
 [`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml)
 in three jobs. The packaging job refuses to start unless the release tag is `v`
 followed by the version in `package.json` and every signing prerequisite is
@@ -1340,7 +1356,7 @@ Every sequence a channel issues is also written once under a name of its own —
 those names as well as from the two fixed names above, so an interrupted
 publication cannot leave a channel looking empty.
 
-A prerelease on GitHub publishes the `beta` channel; a full release publishes
+A signed prerelease on GitHub publishes the `beta` channel; a full release publishes
 `stable`. The moving tag only ever moves forward along this repository's history,
 and a tag that has been moved elsewhere stops the release instead of being
 overwritten. Before any of it is published, the manifest and its signature are
@@ -1654,7 +1670,7 @@ than a guess.
 
 `pnpm run dist` run locally packages the app without a certificate, so the output
 is a development package, not a release: it is not signed, not notarised, not
-attested, and not offered to anyone else. It also refuses to install updates. A
+attested, and not published by that command. It also refuses to install updates. A
 packaged build takes its trusted keys from its own bundle and nowhere else, and a
 local package carries none because only the release job injects one, so it
 reports updates as not configured, and the app will not fetch a manifest or
@@ -1663,6 +1679,43 @@ from `GIT_STACKS_UPDATE_KEY_ID` and `GIT_STACKS_UPDATE_PUBLIC_KEY` for fixtures,
 and **Settings → Updates** says so when it is running on such a key; that path
 does not exist in a packaged build, because whoever starts a process decides its
 environment.
+
+### Development previews for another computer
+
+The separate [unsigned dev preview workflow](.github/workflows/dev-preview.yml)
+builds test installers for Apple Silicon Macs, Intel Macs, Windows x64, and Linux
+x64. These are explicitly unsigned development packages, not signed releases.
+They carry no update keys, publish no update manifests, and do not change the
+stable or beta feeds.
+
+The preview uses the regular app identity and settings location. It is not an
+isolated, side-by-side installation; use a test computer or back up existing app
+data before replacing an installed copy.
+
+On a release branch, set `apps/desktop/package.json` to
+`<base-version>-dev.<preview-id>`, commit it with the workflow, and push a new
+`dev-preview-<preview-id>` tag at that commit. For example,
+`0.1.0-dev.20261017.1` uses `dev-preview-20261017.1`. The tag-triggered workflow
+builds and typechecks each target, verifies the packaged Git runtime and native
+clone helper, and runs the packaged desktop smoke on both Macs. The Linux runner
+also validates the full catalog against its committed Linux visual baselines.
+Only after all four jobs succeed does it publish a GitHub prerelease containing
+four installers and `SHA256SUMS.txt`. Publication uses the workflow token, so it does not trigger
+the separate release-published signed workflow. Never reuse or move a preview tag.
+
+Download the installer matching the target OS and architecture. On macOS, open the
+DMG, drag Git Stacks to Applications, and, if blocked, use System Settings →
+Privacy & Security → Open Anyway only for a download you trust. Do not disable
+Gatekeeper globally. On Windows, run the installer; SmartScreen may require
+More info → Run anyway for this unsigned package. On Linux, make the AppImage
+executable and run it; FUSE compatibility libraries may be required. Do not bypass
+Electron's sandbox. The release notes include the source revision, build run,
+verification limits, and installation instructions.
+
+GitHub collaboration requires an installed, authenticated GitHub CLI (`gh`).
+Start testing with disposable repositories. Windows installation, Linux GUI
+launch, clean-machine security prompts, and native OS credential-store acceptance
+remain manual verification; the Mac smoke uses synthetic credential storage.
 
 ### Keeping the release key trusted
 
@@ -2344,6 +2397,12 @@ repository mutation lane. Main revalidates it under the participating journal lo
 inspection, selection and the ambient open repository never authorize a write.
 Independent clones remain separate local domains even when their remotes match.
 These locks exclude participating app operations, not external tools or agents.
+Cancelling a queued background read rejects only that read; draining the queue
+cannot replace a completed mutation's result with a cancellation error.
+Provider-scope capture and recovery-record reads follow their explicitly qualified
+registered worktree, not the legacy globally active repository. Selecting another
+repository does not invalidate an independently captured worktree's authority;
+registration, physical state and provider-generation fences still apply.
 
 Prepared reads carry `InspectionContext.operationToken`, binding preview dispatch
 and publication to the original provider and physical authority across intervening
@@ -2768,10 +2827,18 @@ pnpm --filter design build
 pnpm --filter design preview
 pnpm --filter design typecheck
 pnpm --filter design check:manifest
+pnpm --filter design test          # behavioral and accessibility checks on any host
+pnpm --filter design test:visual   # screenshot checks on the baseline platform (Linux x64)
 pnpm --filter design test:catalog
 ```
 
 The catalog uses port 5299 and produces `apps/design/dist`, independently of Electron, the native helper, Git provisioning, repositories and `gh` authentication. A root install still installs desktop dependencies. `VITE_BASE=/catalog/ pnpm --filter design build` selects a hosting subpath; preview that build with `VITE_BASE=/catalog/ pnpm --filter design preview` and open `http://localhost:5299/catalog/`. Keep the same base when previewing so asset requests resolve; no deployment is implied. Output remains fixed at `dist` so Turbo can restore the actual static assets.
+
+Root `pnpm test` runs catalog behavioral and accessibility checks, not the
+platform-specific screenshot comparisons. `test:catalog` remains the complete
+catalog suite; run it on Linux x64 for the committed visual baselines. Running the
+visual suite on another platform creates unapproved reference captures and fails;
+do not treat those files as reviewed baselines.
 
 Canonical ownership is `packages/ui/src/components/ui`, `packages/ui/src/lib`, and `packages/ui/src/tokens`. Shared foundation CSS is `packages/ui/src/styles/foundations.css`; desktop shell CSS stays in desktop. Run shadcn additions from the shared package and retain Base UI `base-nova` configuration. Change the shared token/component, update its specimen and applicable states in `apps/design/src`, and run affected design and desktop checks in the same PR. Catalog fixtures never import desktop private source or use `window.desktop`; desktop integration fixtures remain separate and are not replaced.
 
