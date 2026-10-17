@@ -31,6 +31,16 @@ export class RepositoryOperations {
   private tail: Promise<void> = Promise.resolve()
   private writing = 0
   private switching = 0
+  private fence: { isFenced: boolean } | null = null
+
+  setAdmissionFence(fence: { isFenced: boolean } | null): void {
+    this.fence = fence
+  }
+
+  hasActiveOrQueuedMutations(): boolean {
+    return this.writing > 0 || this.switching > 0
+  }
+
   /**
    * The repository the window is showing, once a switch has completed. It is
    * what a mutation names when it asks for admission.
@@ -46,6 +56,11 @@ export class RepositoryOperations {
    * or omitted for work that belongs to none (the Git runtime preference).
    */
   write<T>(operation: () => Promise<T>, repository?: string): Promise<T> {
+    if (this.fence?.isFenced) {
+      return Promise.reject(
+        new Error('Cannot run repository operation: an update installation is in progress.'),
+      )
+    }
     // Admission is synchronous: a switch cannot complete between this check and
     // the enqueue below, so a refused action never reaches Git at all.
     if (repository !== undefined && repository !== this.current) {
@@ -68,6 +83,11 @@ export class RepositoryOperations {
   }
 
   switchRepository<T>(repository: string, operation: () => Promise<T>): Promise<T> {
+    if (this.fence?.isFenced) {
+      return Promise.reject(
+        new Error('Cannot run repository operation: an update installation is in progress.'),
+      )
+    }
     // Unlike a user mutation, a repository switch must wait for the old
     // repository's cancelled reads to release the queue, not reject the switch.
     this.switching += 1

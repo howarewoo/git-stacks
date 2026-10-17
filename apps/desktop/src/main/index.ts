@@ -216,6 +216,11 @@ import type {
 import type { GitEnvironmentStatus } from '@git-stacks/shared/types'
 import { UpdateService } from './update/service'
 import {
+  InstallAdmissionFence,
+  RendererReadinessCoordinator,
+  coordinateSafeInstall,
+} from './update/admission'
+import {
   PullRequestInboxService,
   retiredPullRequestInboxReport,
   type PullRequestInboxTarget,
@@ -280,8 +285,13 @@ function setRecents(next: RecentRepository[]): void {
   inventory.register(next.map((item) => item.path))
 }
 const operations = new RepositoryOperations()
-
 const scheduler = new RepositoryScheduler()
+const installFence = new InstallAdmissionFence()
+const readinessCoordinator = new RendererReadinessCoordinator()
+installFence.registerAuthority(operations)
+installFence.registerAuthority(scheduler)
+operations.setAdmissionFence(installFence)
+scheduler.setAdmissionFence(installFence)
 const inventory = new WorktreeInventoryService(
   scheduler,
   (value) => {
@@ -962,6 +972,8 @@ function repository() {
 }
 
 const inspectionReads = new RepositoryScheduler(WORKTREE_READ_CONCURRENCY)
+installFence.registerAuthority(inspectionReads)
+inspectionReads.setAdmissionFence(installFence)
 
 async function repositoryOperationScope(
   root: string,
@@ -1768,6 +1780,7 @@ function installHandlers() {
     }
   })
   ipcMain.handle('operation:execute', async (_event, tokenValue: unknown, action: GitAction) => {
+    installFence.assertNotFenced('captured operation')
     if (
       !isRecord(action) ||
       ![
@@ -2376,13 +2389,13 @@ function installHandlers() {
     const asked = (request ?? {}) as Record<string, unknown>
     try {
       const clone = validatedClone(asked)
-      const value = await onboardingRequest(
-        requestIdClaim(asked.requestId, 'onboarding'),
-        (signal) =>
+      const value = await installFence.trackClone(() =>
+        onboardingRequest(requestIdClaim(asked.requestId, 'onboarding'), (signal) =>
           runCloneRequest(clone, signal, {
             clone: cloneRepository,
             activate: (path) => activateRepository(path),
           }),
+        ),
       )
       return { ok: true as const, value }
     } catch (error) {
@@ -2886,45 +2899,49 @@ function installHandlers() {
   ipcMain.handle(
     'repository:review-set-drafts',
     (event, value: unknown, expectedUpdatedAt: unknown) => {
-      return readRepository(
-        async (root, signal) => {
-          const incoming = requireDraftRecord(value)
-          if (
-            expectedUpdatedAt !== null &&
-            (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.length > 128)
-          ) {
-            throw new Error('A full draft save requires its observed saved version.')
-          }
-          const remote = await originRemote(root, signal)
-          const owner = requireReviewOwner(incoming)
-          if (owner.repo !== reviewRepositoryIdentity(remote))
-            throw new Error('The draft repository or host changed. Your unsent text was not moved.')
-          // Compare the captured public owner with Git and GitHub before saving;
-          // changing credentials never silently adopts another authority's text.
-          const permissions = await readReviewPermissions(root, incoming.number, signal)
-          if (owner.viewer !== permissions.viewer)
-            throw new Error('The draft account changed. Your unsent text was not moved.')
-          await assertReviewDraftOwner(
-            root,
-            owner.repo,
-            owner.viewer,
-            incoming.number,
-            incoming.drafts.map((draft) => draft.id),
-            incoming.comparison,
-            signal,
-          )
-          return writeReviewDrafts(
-            root,
-            { ...incoming, ...owner },
-            expectedUpdatedAt,
-            async () => {
-              await revalidateReviewOwner(root, incoming.number, owner, null, signal)
-            },
-            signal,
-          )
-        },
-        'review-set-drafts',
-        'github',
+      return installFence.trackDraftWrite(() =>
+        readRepository(
+          async (root, signal) => {
+            const incoming = requireDraftRecord(value)
+            if (
+              expectedUpdatedAt !== null &&
+              (typeof expectedUpdatedAt !== 'string' || expectedUpdatedAt.length > 128)
+            ) {
+              throw new Error('A full draft save requires its observed saved version.')
+            }
+            const remote = await originRemote(root, signal)
+            const owner = requireReviewOwner(incoming)
+            if (owner.repo !== reviewRepositoryIdentity(remote))
+              throw new Error(
+                'The draft repository or host changed. Your unsent text was not moved.',
+              )
+            // Compare the captured public owner with Git and GitHub before saving;
+            // changing credentials never silently adopts another authority's text.
+            const permissions = await readReviewPermissions(root, incoming.number, signal)
+            if (owner.viewer !== permissions.viewer)
+              throw new Error('The draft account changed. Your unsent text was not moved.')
+            await assertReviewDraftOwner(
+              root,
+              owner.repo,
+              owner.viewer,
+              incoming.number,
+              incoming.drafts.map((draft) => draft.id),
+              incoming.comparison,
+              signal,
+            )
+            return writeReviewDrafts(
+              root,
+              { ...incoming, ...owner },
+              expectedUpdatedAt,
+              async () => {
+                await revalidateReviewOwner(root, incoming.number, owner, null, signal)
+              },
+              signal,
+            )
+          },
+          'review-set-drafts',
+          'github',
+        ),
       )
     },
   )
@@ -3449,8 +3466,32 @@ function installHandlers() {
   ipcMain.handle('update:download', async (event) => {
     return await requireUpdateService().download()
   })
-  ipcMain.handle('update:install', async (event) => {
-    return await requireUpdateService().install()
+  ipcMain.handle('update:report-readiness', (_event, report: unknown) => {
+    if (
+      report &&
+      typeof report === 'object' &&
+      'nonce' in report &&
+      typeof report.nonce === 'string' &&
+      'ready' in report &&
+      typeof report.ready === 'boolean'
+    ) {
+      const reason =
+        'reason' in report && typeof report.reason === 'string' ? report.reason : undefined
+      return readinessCoordinator.reportReadiness({
+        nonce: report.nonce,
+        ready: report.ready,
+        reason,
+      })
+    }
+    return false
+  })
+  ipcMain.handle('update:install', async (_event) => {
+    return coordinateSafeInstall({
+      fence: installFence,
+      readiness: readinessCoordinator,
+      getWebContents: () => (window && !window.isDestroyed() ? window.webContents : null),
+      install: (options) => requireUpdateService().install(options),
+    })
   })
   ipcMain.handle('update:cancel', (event) => {
     return requireUpdateService().cancel()

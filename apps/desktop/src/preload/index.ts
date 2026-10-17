@@ -201,6 +201,11 @@ const desktop: DesktopAPI = {
   cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
   onUpdateStatus: (listener: (status: UpdateStatus) => void) =>
     subscribe('update:status', listener),
+  reportUpdateReadiness: (report) => ipcRenderer.invoke('update:report-readiness', report),
+  onPrepareUpdateReadiness: (listener: (payload: { nonce: string }) => void) =>
+    subscribe('update:prepare-readiness', listener),
+  onUpdateAdmissionSettled: (listener: (payload: { admitted: boolean; nonce?: string }) => void) =>
+    subscribe('update:admission-settled', listener),
   pullRequestInbox: (request) => ipcRenderer.invoke('inbox:pull-requests', request),
   pullRequestInboxFilters: () => ipcRenderer.invoke('inbox:filters'),
   savePullRequestInboxFilters: (filters) => ipcRenderer.invoke('inbox:filters-save', filters),

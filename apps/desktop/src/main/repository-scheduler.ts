@@ -35,6 +35,11 @@ export class RepositoryScheduler {
   private readonly lanes = new Map<string, RepositoryLane>()
   private readonly readConcurrency: number
   private readonly domains = new Map<string, string>()
+  private fence: { isFenced: boolean } | null = null
+
+  setAdmissionFence(fence: { isFenced: boolean } | null): void {
+    this.fence = fence
+  }
 
   /** Bind discovered linked paths to the common-local identity, never a provider URL. */
   async bind(repository: string, commonLocalId: string): Promise<void> {
@@ -80,6 +85,13 @@ export class RepositoryScheduler {
     repository = this.domains.get(repository) ?? repository
     const lane = this.lanes.get(repository)
     return Boolean(lane && (lane.mutationActive || lane.mutations.length > 0))
+  }
+  /** True while any mutation is active or queued in any repository lane. */
+  hasActiveOrQueuedMutations(): boolean {
+    for (const lane of this.lanes.values()) {
+      if (lane.mutationActive || lane.mutations.length > 0) return true
+    }
+    return false
   }
 
   pendingReads(repository: string): number {
@@ -146,12 +158,18 @@ export class RepositoryScheduler {
    * and waits for those reads to settle before its own work begins.
    */
   async mutate<T>(repository: string, task: () => Promise<T>): Promise<T> {
+    if (this.fence?.isFenced) {
+      throw new Error('Cannot run repository mutation: an update installation is in progress.')
+    }
     const lane = this.lane(repository)
     await new Promise<void>((start) => {
       lane.mutations.push(start)
       this.drain(lane)
     })
     try {
+      if (this.fence?.isFenced) {
+        throw new Error('Cannot run repository mutation: an update installation is in progress.')
+      }
       return await task()
     } finally {
       lane.mutationActive = false

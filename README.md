@@ -1496,6 +1496,19 @@ Once the platform installer owns the files, the update cannot be stopped: a
 cancel or a channel change at that point is reported as too late rather than
 pretending to have taken effect.
 
+### Installation admission and draft preservation
+
+Installing an update cannot race repository mutations or lose unsent authored review text:
+
+1. **Synchronous app-wide admission fence.** Before any asynchronous operation begins, the install request atomically verifies that no repository mutations, background scheduler lanes, foreground operations, or clones are active or queued across any repository. If any mutation is queued or running, the install is refused immediately. Once admitted, the fence prevents any new repository mutations or clones from starting until safe cutover or release. Long background reads and external tool activity do not block admission, and external activity is never inferred from a clean tree.
+2. **Renderer draft readiness coordination.** Before native handoff, the main process coordinates with the active application window to ensure authored content is safe:
+   - Existing pending and queued FIFO review draft saves are awaited until they completely persist to disk.
+   - Any unsaved, failed, conflicted, or context-retired retained review comments block native installation dispatch without replaying, rebasing, submitting, or discarding them. Unsaved drafts must be resolved in their original repository and account context.
+   - Review draft composition is frozen against racing edits during readiness.
+   - The renderer window's lifecycle is bound to the attempt: if the window is closed, destroyed, reloaded, or crashes before native cutover, readiness fails closed and installation is cancelled.
+3. **Safe refusal and candidate retention.** If admission is refused or if pre-dispatch fails before native cutover, the fence is released and editor usability is restored immediately. The verified downloaded update and `downloaded` phase are preserved, enabling safe retry without re-downloading.
+4. **Authoritative native cutover boundary.** The fence transitions to installing and remains permanently held only when the native cutover step is actually dispatched (macOS live bundle replacement or Windows detached NSIS installer launch). The final readiness revalidation runs immediately before live bundle replacement or installer spawn with no intervening await.
+
 One thing happens at a time. A check, a download, an install, and a channel
 change are each a single operation, and the second of them waits for the first
 to finish and clean up rather than running beside it. A stop is asked for

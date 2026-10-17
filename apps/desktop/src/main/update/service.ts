@@ -67,6 +67,16 @@ export interface UpdateServiceOptions {
    * machine can be made to stop at exactly that moment otherwise.
    */
   onStaged?: (staged: StagedUpdate) => Promise<void> | void
+  /** Called immediately before native bundle swap or installer spawn. */
+  beforeNativeCutover?: () => void
+  /** Called immediately upon successful native handoff/replacement. */
+  onNativeCutover?: () => void
+}
+
+export interface ServiceInstallOptions {
+  beforeNativeCutover?: () => void
+  onNativeCutover?: () => void
+  signal?: AbortSignal
 }
 
 interface UpdateState {
@@ -493,11 +503,11 @@ export class UpdateService {
    * file that was changed on disk after the download cannot be installed, and
    * the running app's own identity is checked by the platform installer.
    */
-  async install(): Promise<UpdateStatus> {
-    return this.exclusive(() => this.runInstall())
+  async install(options?: ServiceInstallOptions): Promise<UpdateStatus> {
+    return this.exclusive(() => this.runInstall(options))
   }
 
-  private async runInstall(): Promise<UpdateStatus> {
+  private async runInstall(options?: ServiceInstallOptions): Promise<UpdateStatus> {
     if (this.stateFailure) {
       this.phase = 'failed'
       this.failure = this.stateFailure
@@ -510,6 +520,14 @@ export class UpdateService {
       return this.publish()
     }
     const run = this.claim()
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        run.controller.abort()
+      } else {
+        const forwardAbort = () => run.controller.abort()
+        options.signal.addEventListener('abort', forwardAbort, { once: true })
+      }
+    }
     // A directory of this attempt's own, created inside the app's private data
     // directory and never reused. A fixed name would be a name another process
     // or an earlier run could already hold, and cleaning it up afterwards would
@@ -594,6 +612,8 @@ export class UpdateService {
             this.restartRequired = true
             this.options.relaunch()
           },
+          beforeNativeCutover: options?.beforeNativeCutover ?? this.options.beforeNativeCutover,
+          onNativeCutover: options?.onNativeCutover ?? this.options.onNativeCutover,
         })
         retains = outcome.retains !== undefined
       } finally {

@@ -599,6 +599,10 @@ export interface InstallOptions {
   /** Called when this app must close for the platform installer to finish. */
   quit?: () => void
   onProgress?: (message: string) => void
+  /** Called immediately before native bundle swap or installer spawn, after all verification. */
+  beforeNativeCutover?: () => void
+  /** Called immediately upon successful native handoff/replacement. */
+  onNativeCutover?: () => void
 }
 
 /**
@@ -698,6 +702,7 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
       return { installed: false, reason: 'The installed app could not be located for replacement.' }
     }
     await rm(backup, { recursive: true, force: true })
+    options.beforeNativeCutover?.()
     await rename(livePath, backup)
     try {
       await rename(prepared, livePath)
@@ -707,6 +712,7 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
       await rename(backup, livePath).catch(() => undefined)
       throw error
     }
+    options.onNativeCutover?.()
     const removed = await rm(backup, { recursive: true, force: true }).then(
       () => true,
       () => false,
@@ -753,6 +759,7 @@ async function installNsis(staged: StagedUpdate, options: InstallOptions): Promi
   // The token goes out before the installer exists, so that whichever instance
   // of it does the work has something to answer with when it finishes.
   const token = await beginHandoff(dirname(staged.path))
+  options.beforeNativeCutover?.()
   const child = spawn(staged.path, ['/S'], {
     detached: true,
     stdio: 'ignore',
@@ -778,6 +785,7 @@ async function installNsis(staged: StagedUpdate, options: InstallOptions): Promi
   // while this process holds them open. It is detached, this app then closes,
   // and the installer completes on its own.
   child.unref()
+  options.onNativeCutover?.()
   // Being spawned is not the same as having read the file. A Windows installer
   // opens its own executable again after it starts, and elevation hands the
   // work to a second instance of it that begins after this process has gone,
