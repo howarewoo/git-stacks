@@ -5,25 +5,29 @@ import { ReconciliationPanel } from './components/reconciliation-view'
 import * as React from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useOperationProgressProjection } from './lib/operation-progress'
+import { Button } from '@git-stacks/ui/components/button'
 import {
-  Button,
   Command,
   CommandInput,
   CommandList,
   CommandItem,
   CommandEmpty,
+} from '@git-stacks/ui/components/command'
+import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  WorkbenchPane,
-  Select,
+} from '@git-stacks/ui/components/dialog'
+import { WorkbenchPane } from '@git-stacks/ui/components/workbench-pane'
+import { Select } from '@git-stacks/ui/components/select'
+import {
   Accordion,
   AccordionItem,
   AccordionTrigger,
   AccordionContent,
-} from '@git-stacks/ui'
+} from '@git-stacks/ui/components/accordion'
 import { BranchWorkbench } from './components/branch-workbench'
 import {
   projectBranchLanes,

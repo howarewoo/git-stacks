@@ -1,16 +1,16 @@
 import * as React from 'react'
+import { Button } from '@git-stacks/ui/components/button'
+import { Checkbox } from '@git-stacks/ui/components/checkbox'
 import {
-  Button,
-  Checkbox,
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  Field,
-  Input,
-  Select,
-} from '@git-stacks/ui'
+} from '@git-stacks/ui/components/dialog'
+import { Field } from '@git-stacks/ui/components/field'
+import { Input } from '@git-stacks/ui/components/input'
+import { Select } from '@git-stacks/ui/components/select'
 import type { DesktopAPI, NativeStack } from '@git-stacks/shared/types'
 import type { RepositoryInventory } from '@git-stacks/shared/worktree-inventory'
 import type { OperationCapture } from '@git-stacks/shared/operation-scope'
