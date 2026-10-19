@@ -4,6 +4,10 @@ import path from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { promisify } from 'node:util'
 import { MAX_COMMAND_BYTES, MAX_STATUS_BYTES } from '@git-stacks/shared/performance'
+import {
+  COMMAND_CANCELLATION_MESSAGE,
+  COMMAND_CANCELLATION_NAME,
+} from '@git-stacks/shared/cancellation'
 import type { ChangedFile, GitOperation, Stash } from '@git-stacks/shared/types'
 import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
 import { assertInspectionOrigin, validateOperationEffect } from './inspection-context'
@@ -120,8 +124,8 @@ export class CommandCancelled extends Error {
   readonly cancelled = true
 
   constructor() {
-    super('The request was cancelled.')
-    this.name = 'CommandCancelled'
+    super(COMMAND_CANCELLATION_MESSAGE)
+    this.name = COMMAND_CANCELLATION_NAME
   }
 }
 

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, writeFile, readFile, rm, rename, cp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +14,7 @@ import {
   validateRecordedRecovery,
   createOperationEffectValidator,
   createOperationProviderValidator,
+  registeredOperationTargetId,
   unresolvedOperationRecords,
 } from '../src/main/operation-authority'
 import { previewWorktreeLifecycle, executeWorktreeLifecycle } from '../src/main/worktree-lifecycle'
@@ -40,7 +42,9 @@ function git(root: string, ...args: string[]): string {
   }).trim()
 }
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-operation-'))
+  // A joined path under a symlinked temporary parent never equals the path Git
+  // reports for a worktree, so the fixture resolves its root before anything else.
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'git-stacks-operation-')))
   const repo = join(root, 'primary')
   const remote = join(root, 'remote.git')
   await mkdir(repo)
@@ -59,7 +63,8 @@ async function fixture() {
 async function linked(repo: string, directory: string, branch: string) {
   git(repo, 'worktree', 'add', '-b', branch, directory, 'main')
   git(repo, 'push', '-u', 'origin', branch)
-  return (await discoverWorktrees(repo)).worktrees.find((tree) => tree.path === directory)!
+  const resolved = realpathSync(directory)
+  return (await discoverWorktrees(repo)).worktrees.find((tree) => tree.path === resolved)!
 }
 
 test('captures reject index, same-status content, ref and physical directory drift without changing another checkout', async () => {
@@ -897,6 +902,42 @@ test('production provider callback refuses same-physical origin retirement durin
     assert.equal(git(repo, 'rev-parse', 'HEAD'), originalHead)
     assert.deepEqual(await readFile(join(repo, '.git', 'index')), originalIndex)
     assert.equal(git(repo, 'stash', 'list'), originalStash)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('explicit operation targets answer registered repositories and their discovered worktrees, never unregistered directories', async () => {
+  const { root, repo } = await fixture()
+  try {
+    const directory = join(root, 'selected')
+    await linked(repo, directory, 'feature')
+    const discovered = realpathSync(directory)
+    const inventory = await discoverWorktrees(repo)
+    assert.deepEqual(
+      registeredOperationTargetId(repo, [inventory], [{ path: repo, name: 'primary' }]),
+      inventory.identity.id,
+      'A registered repository root answers for itself',
+    )
+    assert.deepEqual(
+      registeredOperationTargetId(discovered, [inventory], [{ path: repo, name: 'primary' }]),
+      inventory.identity.id,
+      'A discovered worktree of a registered repository answers for itself',
+    )
+    assert.equal(
+      registeredOperationTargetId(
+        join(root, 'unregistered'),
+        [inventory],
+        [{ path: repo, name: 'primary' }],
+      ),
+      null,
+      'A directory outside every registered repository was refused',
+    )
+    assert.equal(
+      registeredOperationTargetId(repo, [inventory], []),
+      null,
+      'A directory no registration ever carried was refused',
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

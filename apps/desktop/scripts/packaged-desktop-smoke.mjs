@@ -32,7 +32,7 @@ import { deepStrictEqual } from 'node:assert'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createWriteStream, existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -288,6 +288,12 @@ async function startApiDouble(workspace) {
   const requests = []
   const received = []
   const account = 'smoke-account'
+  // Holds make a read in flight deterministic: while armed, every GraphQL
+  // request waits for the release this run sends after the cancel it wants to
+  // observe, so an expected cancellation always lands on a read that is
+  // actually suspended on the provider.
+  const held = []
+  let holding = false
   const send = (response, status, body) => {
     response.writeHead(status, {
       'content-type': 'application/json; charset=utf-8',
@@ -297,7 +303,7 @@ async function startApiDouble(workspace) {
     })
     response.end(JSON.stringify(body))
   }
-  const server = createServer((request, response) => {
+  const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     const authorization = request.headers.authorization ?? null
     requests.push({
@@ -317,6 +323,7 @@ async function startApiDouble(workspace) {
       return
     }
     if (request.method === 'POST' && url.pathname.endsWith('/graphql')) {
+      if (holding) await new Promise((settle) => held.push(settle))
       send(response, 200, {
         data: {
           viewer: { login: account, id: 'U_kgDO' },
@@ -334,6 +341,16 @@ async function startApiDouble(workspace) {
     requests,
     /** The credentials this run's API received, in the order they arrived. */
     credentials: () => received,
+    /** Arms the hold: every GraphQL request that follows suspends until release. */
+    hold: () => {
+      holding = true
+    },
+    /** Requests currently suspended inside the hold, not merely recorded. */
+    suspended: () => held.length,
+    release: () => {
+      holding = false
+      for (const settle of held.splice(0)) settle()
+    },
     close: () => new Promise((resolve) => server.close(resolve)),
     workspace,
   }
@@ -819,7 +836,13 @@ const READ_ONLY_PROBE = `(async () => {
     try {
       return { label, resolved: true, value: (await call()) ?? null }
     } catch (error) {
-      return { label, resolved: false, message: String(error?.message ?? error) }
+      return {
+        label,
+        resolved: false,
+        message: String(error?.message ?? error),
+        name: error?.name ?? null,
+        cancelled: error?.cancelled === true,
+      }
     }
   }
   return {
@@ -1212,6 +1235,7 @@ async function capturedContext(page, repositoryPath) {
       new Promise((resolve, reject) => {
         let settled = false
         let unsubscribe
+        let last = null
         const finish = (error, context) => {
           if (settled) return
           settled = true
@@ -1221,6 +1245,7 @@ async function capturedContext(page, repositoryPath) {
           else resolve(context)
         }
         const consume = (inventory) => {
+          last = inventory
           if (settled) return
           const repository = inventory.repositories.find((repo) =>
             repo.worktrees.some((tree) => tree.path === path),
@@ -1233,21 +1258,42 @@ async function capturedContext(page, repositoryPath) {
             ...(tree.refId ? { refId: tree.refId } : {}),
           })
         }
-        const timer = setTimeout(
-          () =>
-            finish(
-              new Error('Exact owned fixture directory was not discovered within 20 seconds.'),
+        const timer = setTimeout(() => {
+          // Only this run's own data: the requested fixture path, the
+          // registrations the last observed inventory actually held, and its
+          // recorded failures, so the failing acquisition is distinguishable
+          // and the fixture state is visible without a rerun.
+          const registrations =
+            last && Array.isArray(last.repositories) && last.repositories.length > 0
+              ? JSON.stringify(
+                  last.repositories.map((repo) => ({
+                    identity: repo.identity?.id ?? null,
+                    registeredPaths: repo.registeredPaths ?? null,
+                  })),
+                )
+              : 'none'
+          const failures =
+            last && Array.isArray(last.failures) && last.failures.length > 0
+              ? JSON.stringify(last.failures)
+              : 'none'
+          finish(
+            new Error(
+              `Exact owned fixture directory ${path} was not discovered within 20 seconds. ` +
+                `The last observed inventory registered ${registrations}, with failures ${failures}.`,
             ),
-          20_000,
-        )
+          )
+        }, 20_000)
         try {
           unsubscribe = window.desktop.onWorktreeInventory(consume)
           window.desktop
             .worktreeInventory({ requestId: 'packaged-captured-context' })
             .then(consume, (error) => {
+              // The shipped preload rejects a cancelled command with the
+              // plain bridge-safe answer; anything else is a real failure.
               if (
-                error?.name === 'CommandCancelled' ||
-                /(?:^|: )CommandCancelled: The request was cancelled\.$/.test(error?.message ?? '')
+                typeof error?.cancelled === 'boolean' &&
+                error?.cancelled === true &&
+                error?.name === 'CommandCancelled'
               )
                 return
               finish(error)
@@ -1375,6 +1421,15 @@ async function run(options) {
       },
     )
     const canonicalRepo = realpathSync(workspace.repo)
+    // Constants later scenarios share: the second registered repository is the
+    // provider-backed read target (the primary keeps its disposable local
+    // origin), and the controlled CLI's credentials are named once, since the
+    // cancellation scenario must re-arm the CLI the credential check retires.
+    const recordsSecond = join(workspace.root, 'records-second-Ω')
+    const smokeCredentials = [
+      'gho_smoke_credential_0000000000000000000000000000000000',
+      'gho_smoke_credential_1111111111111111111111111111111111',
+    ]
     app = launch(target, workspace, api.base)
     inspector = await Cdp.open(
       await endpoint(app, 'inspector', deadline, 'a main-process inspector endpoint'),
@@ -2101,8 +2156,8 @@ async function run(options) {
     })
 
     await check('the real API path runs on the credential this CLI holds', async () => {
-      const first = 'gho_smoke_credential_0000000000000000000000000000000000'
-      const second = 'gho_smoke_credential_1111111111111111111111111111111111'
+      const first = smokeCredentials[0]
+      const second = smokeCredentials[1]
       // The host this run serves its API from is the host the app decides first:
       // a configured base outranks the host a repository names, because the CLI
       // is sent to that base and authenticates as whoever serves it. The account
@@ -2219,6 +2274,21 @@ async function run(options) {
         'Removing the owned CLI retires authenticated status',
       )
       assertEqual(retired?.login, null, 'Removing the owned CLI retires the authenticated account')
+      // The removal above served the retirement proof; every later read runs
+      // against the CLI this run started with, restored to the credential it
+      // ended holding. Both host names this run routes (the configured API
+      // base's own host and the dotcom host that base serves for) are
+      // configured again so provider reads answer through and only this CLI.
+      await writeControlledGh(workspace, {
+        token: second,
+        apiBase: api.base,
+        hosts: {
+          [apiHost]: [{ state: 'success', active: true, host: apiHost, login: 'smoke-account' }],
+          'github.com': [
+            { state: 'success', active: true, host: 'github.com', login: 'smoke-account' },
+          ],
+        },
+      })
       return 'the CLI status came from a real authenticated request, and a replaced credential moved the identity'
     })
 
@@ -2228,7 +2298,11 @@ async function run(options) {
         const approval = await window.desktop.captureOperation(context)
         return window.desktop.executeOperation(approval.token, { type: 'fetch' })
       }, context)
-      assert(result.ok, `Captured fixture fetch failed: ${result.message}`)
+      assertEqual(
+        result.message,
+        'Fetched all remotes',
+        'The captured fetch was not credited to this repository',
+      )
       assertEqual(
         git(workspace, ['rev-parse', 'refs/remotes/origin/main']),
         workspace.publishedTip,
@@ -2275,8 +2349,8 @@ async function run(options) {
           { context, directory, branch: FEATURE },
         )
         assert(
-          result.ok && result.worktreeLifecycle,
-          'Actual captured lifecycle did not confirm a result',
+          result.worktreeLifecycle?.targets.some((target) => target.state === 'completed'),
+          'Actual captured lifecycle did not confirm its created target',
         )
         assertEqual(
           git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: directory }),
@@ -2294,6 +2368,23 @@ async function run(options) {
         )
         await writeFile(join(directory, 'native-Ω.txt'), 'Original captured directory bytes Ω\n')
         const selected = await capturedContext(page, directory)
+        // Explicit capture on a linked worktree: the directory is a registered
+        // worktree of the primary repository, and the approval is minted for
+        // this directory without needing to match the repository the window
+        // shows — registration, not the active checkout, is what qualifies it.
+        const linkedApproval = await page.evaluate(async (context) => {
+          try {
+            const approval = await window.desktop.captureOperation(context)
+            return {
+              token: typeof approval?.token === 'string',
+              repositoryPath: approval?.scope.repositoryPath ?? null,
+            }
+          } catch (error) {
+            return { error: error?.message ?? String(error) }
+          }
+        }, selected)
+        assertEqual(linkedApproval.repositoryPath, directory, 'Captured linked-worktree authority')
+        assert(linkedApproval.token, 'Explicit linked worktree minted no operation token')
         const before = await readFile(join(workspace.repo, '.git', 'config'))
         const inspected = await page.evaluate(
           async (context) => ({
@@ -2377,87 +2468,326 @@ async function run(options) {
     await check(
       'packaged inventory bridge discovers simultaneous worktrees without checkout or Git writes',
       async () => {
+        // The linked directory is created once and deliberately kept for the
+        // whole run: the adoption below registers it in the running app, and
+        // the records and cancellation scenarios that follow still resolve
+        // provider reads through it. Removing a registered fixture directory
+        // mid-run leaves operation readers a missing spawn cwd (ENOENT), so
+        // the disposable root owns this worktree's lifetime.
         const linked = join(workspace.root, 'inventory linked Ω')
         git(workspace, ['worktree', 'add', '-b', 'inventory/smoke', linked])
-        try {
-          await writeFile(join(linked, 'inventory-untracked.txt'), 'Read-only inventory fixture\n')
-          const head = git(workspace, ['rev-parse', 'HEAD'])
-          const index = await readFile(join(workspace.repo, '.git', 'index'))
-          const config = await readFile(join(workspace.repo, '.git', 'config'))
-          const discovered = await page.evaluate(() =>
-            window.desktop.worktreeInventory({ requestId: 'packaged-inventory' }),
-          )
-          const repository = discovered.repositories.find((item) =>
-            item.registeredPaths.includes(workspace.repo),
-          )
-          assert(repository, 'The registered local authority was absent from inventory')
-          const primary = repository.worktrees.find((tree) => tree.path === workspace.repo)
-          const worktree = repository.worktrees.find((tree) => tree.path === linked)
-          assert(
-            primary && worktree,
-            'The primary and linked worktrees were not discovered together',
-          )
-          assertEqual(worktree.kind, 'linked', 'Linked worktree classification')
-          assertEqual(worktree.status, 'dirty', 'Linked worktree status')
-          assertEqual(worktree.counts.untracked, 1, 'Linked untracked count')
-          assert(primary.id !== worktree.id, 'Worktree identities were conflated')
-          assertEqual(primary.repositoryId, worktree.repositoryId, 'Common local authority')
-          assertEqual(
-            git(workspace, ['rev-parse', 'HEAD']),
-            head,
-            'Inventory changed the primary HEAD',
-          )
-          assert(
-            (await readFile(join(workspace.repo, '.git', 'index'))).equals(index),
-            'Inventory rewrote the primary index',
-          )
-          assert(
-            (await readFile(join(workspace.repo, '.git', 'config'))).equals(config),
-            'Inventory rewrote Git config',
-          )
-          const refused = await page.evaluate(async () => {
-            try {
-              await window.desktop.adoptWorktrees(['unknown-authority'], 'adoption-refusal')
-              return false
-            } catch {
-              return true
-            }
-          })
-          assert(refused, 'Adoption accepted an undiscovered identity')
-          const original = await capturedContext(page, canonicalRepo)
-          const adopted = await page.evaluate(
-            async ({ id, context }) => {
-              const registered = await window.desktop.adoptWorktrees([id], 'packaged-adoption')
-              const active = await window.desktop.inspect(context, 'refresh', [])
-              return { registered, activePath: active.path }
-            },
-            { id: worktree.id, context: original },
-          )
-          assert(
-            adopted.registered.some((item) => item.path === linked),
-            'Adoption did not register the existing linked directory',
-          )
-          assertEqual(
-            adopted.activePath,
-            workspace.repo,
-            'Adoption changed the active checkout context',
-          )
-          assertEqual(git(workspace, ['rev-parse', 'HEAD']), head, 'Adoption changed HEAD')
-          assert(
-            (await readFile(join(workspace.repo, '.git', 'config'))).equals(config),
-            'Adoption rewrote Git config',
-          )
-          return 'Actual shipped main/preload: shared common authority, dirty local facts, existing-directory adoption without focus/checkout change and refused forged adoption'
-        } finally {
-          git(workspace, ['worktree', 'remove', '--force', linked])
-          git(workspace, ['branch', '-D', 'inventory/smoke'])
-        }
+        await writeFile(join(linked, 'inventory-untracked.txt'), 'Read-only inventory fixture\n')
+        const head = git(workspace, ['rev-parse', 'HEAD'])
+        const index = await readFile(join(workspace.repo, '.git', 'index'))
+        const config = await readFile(join(workspace.repo, '.git', 'config'))
+        // The same acquisition shape as capturedContext: watch the published
+        // channel, kick exactly one manual read, and accept the first
+        // inventory that already holds the expected worktrees. A manual read
+        // a watcher refresh supersedes answers as a plain cancellation and is
+        // ignored; the published inventory still arrives.
+        const discovered = await page.evaluate(
+          ({ repo, linked }) =>
+            new Promise((resolve, reject) => {
+              let settled = false
+              let unsubscribe
+              const finish = (error, value) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                try {
+                  unsubscribe?.()
+                } catch {}
+                if (error) reject(error)
+                else resolve(value)
+              }
+              const wanted = (inventory) => {
+                const repository = inventory.repositories?.find((item) =>
+                  item.registeredPaths?.includes(repo),
+                )
+                if (!repository) return null
+                const primary = repository.worktrees.find((tree) => tree.path === repo)
+                const worktree = repository.worktrees.find((tree) => tree.path === linked)
+                if (!primary || !worktree) return null
+                return inventory
+              }
+              const consume = (inventory) => {
+                if (settled) return
+                const value = wanted(inventory)
+                if (value) finish(null, value)
+              }
+              const timer = setTimeout(
+                () => finish(new Error('Published inventory never reached the wanted discovery.')),
+                20_000,
+              )
+              try {
+                unsubscribe = window.desktop.onWorktreeInventory(consume)
+                window.desktop
+                  .worktreeInventory({ requestId: 'packaged-inventory' })
+                  .then(consume, (error) => {
+                    // The shipped preload rejects a cancelled command with
+                    // the plain bridge-safe answer; anything else is real.
+                    if (
+                      typeof error?.cancelled === 'boolean' &&
+                      error?.cancelled === true &&
+                      error?.name === 'CommandCancelled'
+                    )
+                      return
+                    finish(error)
+                  })
+              } catch (error) {
+                finish(error)
+              }
+            }),
+          { repo: workspace.repo, linked },
+        )
+        const repository = discovered.repositories.find((item) =>
+          item.registeredPaths.includes(workspace.repo),
+        )
+        assert(repository, 'The registered local authority was absent from inventory')
+        const primary = repository.worktrees.find((tree) => tree.path === workspace.repo)
+        const worktree = repository.worktrees.find((tree) => tree.path === linked)
+        assert(primary && worktree, 'The primary and linked worktrees were not discovered together')
+        assertEqual(worktree.kind, 'linked', 'Linked worktree classification')
+        assertEqual(worktree.status, 'dirty', 'Linked worktree status')
+        assertEqual(worktree.counts.untracked, 1, 'Linked untracked count')
+        assert(primary.id !== worktree.id, 'Worktree identities were conflated')
+        assertEqual(primary.repositoryId, worktree.repositoryId, 'Common local authority')
+        assertEqual(
+          git(workspace, ['rev-parse', 'HEAD']),
+          head,
+          'Inventory changed the primary HEAD',
+        )
+        assert(
+          (await readFile(join(workspace.repo, '.git', 'index'))).equals(index),
+          'Inventory rewrote the primary index',
+        )
+        assert(
+          (await readFile(join(workspace.repo, '.git', 'config'))).equals(config),
+          'Inventory rewrote Git config',
+        )
+        const refused = await page.evaluate(async () => {
+          try {
+            await window.desktop.adoptWorktrees(['unknown-authority'], 'adoption-refusal')
+            return false
+          } catch {
+            return true
+          }
+        })
+        assert(refused, 'Adoption accepted an undiscovered identity')
+        const original = await capturedContext(page, canonicalRepo)
+        const adopted = await page.evaluate(
+          async ({ id, context }) => {
+            const registered = await window.desktop.adoptWorktrees([id], 'packaged-adoption')
+            const active = await window.desktop.inspect(context, 'refresh', [])
+            return { registered, activePath: active.path }
+          },
+          { id: worktree.id, context: original },
+        )
+        assert(
+          adopted.registered.some((item) => item.path === linked),
+          'Adoption did not register the existing linked directory',
+        )
+        assertEqual(
+          adopted.activePath,
+          workspace.repo,
+          'Adoption changed the active checkout context',
+        )
+        assertEqual(git(workspace, ['rev-parse', 'HEAD']), head, 'Adoption changed HEAD')
+        assert(
+          (await readFile(join(workspace.repo, '.git', 'config'))).equals(config),
+          'Adoption rewrote Git config',
+        )
+        return 'Actual shipped main/preload: shared common authority, dirty local facts, existing-directory adoption without focus/checkout change and refused forged adoption'
       },
     )
+    await check(
+      'operation records still enumerate the non-active primary journal entry after the second repository registers',
+      async () => {
+        // A second registered repository the window is not showing. Its origin
+        // is the owned local bare repository the primary already uses — a valid
+        // Git remote the app can read — so inventory discovers it like any
+        // local repository: the API double this run owns is not a Git HTTP
+        // remote. The provider scenario below temporarily swaps the origin to a
+        // github-shaped URL and restores this borrowed local one.
+        const second = recordsSecond
+        await mkdir(second)
+        git(workspace, ['init', '-b', 'main'], { cwd: second })
+        await writeFile(join(second, 'notes.txt'), 'Second registered fixture Ω\n')
+        git(workspace, ['add', '.'], { cwd: second })
+        git(workspace, ['commit', '-m', 'Second registered base'], { cwd: second })
+        git(workspace, ['remote', 'add', 'origin', workspace.origin], { cwd: second })
+        const opened = await page.evaluate(async (path) => {
+          try {
+            const snapshot = await window.desktop.addRepository(path)
+            return { path: snapshot?.path ?? null }
+          } catch (error) {
+            return { error: error?.message ?? String(error) }
+          }
+        }, second)
+        assertEqual(opened.path, second, 'The second registered repository did not open')
+        // The registration is only a prerequisite: the shared acquisition
+        // helper proves the inventory actually discovered the second
+        // repository, so the multi-repository records query below cannot pass
+        // against a partial registration state.
+        await capturedContext(page, second)
+        const records = await page.evaluate(() => window.desktop.operationRecords())
+        assert(Array.isArray(records), 'Operation records did not answer an array')
+        assert(
+          records.some((record) => record.worktreePath === canonicalRepo),
+          "The non-active repository's recorded operations were not enumerated",
+        )
+        const restored = await page.evaluate(async (path) => {
+          const snapshot = await window.desktop.addRepository(path)
+          return snapshot?.path ?? null
+        }, canonicalRepo)
+        assertEqual(restored, canonicalRepo, 'The primary repository was not restored')
+        return 'records still enumerated the non-active primary journal entry after the second repository opened'
+      },
+    )
+
+    await check(
+      'a cancelled read answers as plaintext cancellation without an error stack, and a genuine failure stays one',
+      async () => {
+        const context = await capturedContext(page, canonicalRepo)
+        const packagedLog = join(workspace.evidence, 'packaged-app.log')
+        const handlerErrors = () =>
+          existsSync(packagedLog)
+            ? readFileSync(packagedLog, 'utf8')
+                .split('\n')
+                .filter((line) =>
+                  line.includes("Error occurred in handler for 'inspection:request'"),
+                ).length
+            : 0
+        const before = handlerErrors()
+        const requestId = 'packaged-transport-cancellation'
+        // The suspended read has to be genuinely provider-backed. The dispatch
+        // therefore targets the second registered repository with a
+        // repository-only context: GitHub inspection routes such a refresh to
+        // the live provider read (`inspect:snapshot` selects it when no
+        // worktree is named), while the primary keeps its disposable local
+        // origin and every captured-worktree context stays local. The origin
+        // the read resolves is this run's own alias of the configured base, so
+        // the provider request lands on the API double this run owns and is
+        // restored afterwards. The registration is acquired through the shared
+        // capturedContext helper, so a manual inventory read a watcher refresh
+        // supersedes answers as an ignored plain cancellation instead of an
+        // escaped rejection; only the repository identity rides into the
+        // repository-only dispatch.
+        const { repositoryId } = await capturedContext(page, recordsSecond)
+        const readContext = { repositoryId }
+        const borrowedOrigin = git(workspace, ['config', '--get', 'remote.origin.url'], {
+          cwd: recordsSecond,
+        })
+        const servedOrigin = `https://github.com/SmokeFixture/${basename(recordsSecond)}.git`
+        git(workspace, ['remote', 'set-url', 'origin', servedOrigin], { cwd: recordsSecond })
+        // The hold is armed before the read is dispatched and released in this
+        // scenario's finally: a provider request that arrives while armed is
+        // genuinely suspended, so the cancel below always lands on a read that
+        // is in flight, never on a read that already answered.
+        api.hold()
+        try {
+          const seen = api.requests.filter(
+            (entry) => entry.path === '/user' || entry.path === '/graphql',
+          ).length
+          await page.evaluate(
+            async ({ context, requestId }) => {
+              window.__packagedCancelled = false
+              window.desktop.inspect(context, 'refresh', [], requestId).then(
+                () => {
+                  window.__packagedCancelled = { resolved: true }
+                },
+                (error) => {
+                  // Plain bridge data: this captures exactly what the page world
+                  // received from the shipped preload after a cancelled read.
+                  window.__packagedCancelled = {
+                    name: error?.name ?? null,
+                    message: error?.message ?? null,
+                    cancelled: error?.cancelled ?? null,
+                  }
+                },
+              )
+            },
+            { context: readContext, requestId },
+          )
+          const deadline = Date.now() + UI_TIMEOUT
+          while (
+            Date.now() < deadline &&
+            (api.suspended() === 0 ||
+              api.requests.filter((entry) => entry.path === '/user' || entry.path === '/graphql')
+                .length === seen)
+          )
+            await new Promise((wait) => setTimeout(wait, 50))
+          assert(api.suspended() > 0, 'The captured refresh never reached its provider read')
+          await page.evaluate(
+            ({ context, requestId }) => window.desktop.inspect(context, 'cancel', [requestId]),
+            { context: readContext, requestId },
+          )
+          const cancelledAt = Date.now() + UI_TIMEOUT
+          while (Date.now() < cancelledAt) {
+            const cancelled = await page.evaluate(() => window.__packagedCancelled)
+            if (cancelled) break
+            await new Promise((wait) => setTimeout(wait, 50))
+          }
+          const cancelled = await page.evaluate(() => window.__packagedCancelled)
+          assert(
+            cancelled && cancelled.resolved !== true,
+            'A cancelled read was answered with a success value',
+          )
+          assertEqual(
+            cancelled.name,
+            'CommandCancelled',
+            'Renderer cancellation name after the real bridge',
+          )
+          assert(cancelled.cancelled === true, 'Renderer cancelled fact after the real bridge')
+          assertEqual(
+            handlerErrors(),
+            before,
+            'An expected cancellation reached the console as an error stack',
+          )
+        } finally {
+          git(workspace, ['remote', 'set-url', 'origin', borrowedOrigin], { cwd: recordsSecond })
+          api.release()
+        }
+        const genuine = await page.evaluate(async (context) => {
+          try {
+            await window.desktop.inspect(
+              { repositoryId: context.repositoryId },
+              'worktreeStatus',
+              [],
+            )
+            return { resolved: true }
+          } catch (error) {
+            return {
+              resolved: false,
+              name: error?.name ?? null,
+              message: error?.message ?? String(error),
+              cancelled: error?.cancelled ?? null,
+            }
+          }
+        }, context)
+        assert(!genuine.resolved, 'A genuine failure was answered as a success')
+        assert(genuine.cancelled === null, 'A genuine failure was decoded as a cancellation')
+        assert(
+          genuine.name && genuine.name !== 'CommandCancelled',
+          'A genuine failure adopted the cancellation name',
+        )
+        assertEqual(handlerErrors(), before + 1, 'A genuine failure was not logged for the record')
+        return 'cancelled read stayed plaintext without a new handler error line, genuine failure stayed logged'
+      },
+    )
+
     await check('main answers the app origin and refuses a foreign one', async () => {
       // Local Git is open, so refresh reaches its handler while PR indexing truthfully refuses
       // the local-only origin. The refusal that follows must instead be the origin guard alone.
       const authorized = await page.evaluate(READ_ONLY_PROBE)
+      // A deliberately superseded read answers its manual invocation with the
+      // plain bridge-safe cancellation the shipped preload decodes (name
+      // 'CommandCancelled', cancelled true). The sender guard never emits that
+      // typed cancellation regardless of message prose, so a call rejected in
+      // exactly this shape in the authorized frame still proved the trusted
+      // handler reached it. Every other rejection must stay a failure, and the
+      // unauthorized and foreign reports below still have to show the actual
+      // untrusted refusal on every method, never a cancellation.
       for (const call of authorized.calls) {
         if (call.label === 'prIndexRefresh') {
           assert(
@@ -2465,6 +2795,14 @@ async function run(options) {
               /A GitHub origin remote is required for PR indexing/.test(call.message),
             `Trusted PR index refresh did not reach its origin precondition: ${call.message}`,
           )
+          continue
+        }
+        if (
+          !call.resolved &&
+          call.name === 'CommandCancelled' &&
+          call.cancelled &&
+          (call.label === 'worktreeInventory' || call.label === 'refresh')
+        ) {
           continue
         }
         assert(call.resolved, `The authorized frame could not call ${call.label}: ${call.message}`)

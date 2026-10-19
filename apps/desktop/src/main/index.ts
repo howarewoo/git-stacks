@@ -17,6 +17,8 @@ import {
 import type { OperationCapture } from '@git-stacks/shared/operation-scope'
 import { parseReviewComposerDraft } from '@git-stacks/shared/review-threads'
 import { inspectionAuthority, validateInspectionDispatch } from './inspection-context'
+import { registeredOperationTargetId } from './operation-authority'
+import { COMMAND_CANCELLATION_WIRE } from '@git-stacks/shared/cancellation'
 import {
   INSPECTION_CHANNELS,
   type InspectionContext,
@@ -987,9 +989,19 @@ async function repositoryOperationScope(
   const host = remoteHostContext(parseRemote(remoteUrl))
   const service = host ? gitHubCliStatusService(host.host) : null
   const status = service ? await service.read() : null
+  const captured = inspectionAuthority.getStore()
   if (
     signal?.aborted ||
-    (inspectionAuthority.getStore()?.root ?? activeRepository) !== root ||
+    // An independently nominated target — a registered repository or one of its
+    // discovered worktrees — answers for itself and is never required to be the
+    // repository the window shows. Anything else still answers exactly the
+    // inspected or active repository. Registration is the only fence relaxed
+    // here: directory, origin, provider and captured-approval validation run
+    // after the reads this function makes and again in each caller.
+    (captured
+      ? captured.root !== root
+      : activeRepository !== root &&
+        registeredOperationTargetId(root, inventory.current().repositories, recents) === null) ||
     generation !== hostGeneration ||
     (host && service !== gitHubCliStatusService(host.host))
   )
@@ -1571,8 +1583,12 @@ async function currentDiagnostics(settings: AppSettings) {
  * bundle can carry — the fixed channel and a safe failure category. The thrown
  * value is re-raised unchanged, so the window still decides what to show.
  *
- * A request from outside the app is refused rather than failed, and a cancelled
- * operation is the answer the user asked for, so neither is recorded.
+ * A request from outside the app is refused rather than failed. A cancelled
+ * operation is the answer the user asked for, so neither is recorded — but a
+ * rethrown cancellation would also leave an expected error stack in the
+ * console and reach the renderer as a flattened message string, so main
+ * resolves it with the internal cancellation token instead; the preload turns
+ * that back into a rejection before any renderer promise exists.
  */
 const inspectionHandlers = new Map<
   string,
@@ -1605,9 +1621,12 @@ const ipcMain = {
           return listener(event, ...args)
         })
         .catch((error: unknown) => {
-          if (!(error instanceof UntrustedRequestError) && !isCommandCancelled(error)) {
-            recordFailure(channel, error)
-          }
+          if (error instanceof UntrustedRequestError) throw error
+          // A cancelled command is the answer the user asked for: it is not a
+          // failure record, and resolving the token keeps an expected stop out
+          // of the console error stack and out of the renderer message string.
+          if (isCommandCancelled(error)) return COMMAND_CANCELLATION_WIRE
+          recordFailure(channel, error)
           throw error
         }),
     )

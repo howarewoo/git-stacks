@@ -20,6 +20,31 @@ import { gitCommandEnvironment, resolveGitRuntime } from './git-runtime'
 import { readJournal, writeJournal, withJournalLock } from './review-journal'
 import { isRecord } from '@git-stacks/shared/guards'
 import type { MergeQueueObservation } from './merge-async'
+import type { RepositoryInventory } from '@git-stacks/shared/worktree-inventory'
+import type { RecentRepository } from '@git-stacks/shared/types'
+
+/**
+ * Explicit operation-target authority: an independently nominated path belongs
+ * to a repository that is registered and current — the repository root itself
+ * or a discovered worktree of it. It never has to be the repository the window
+ * shows; anything else still needs the ambient authority.
+ */
+export function registeredOperationTargetId(
+  root: string,
+  repositories: readonly RepositoryInventory[],
+  recents: readonly RecentRepository[],
+): string | null {
+  const repository = repositories.find(
+    (repo) =>
+      repo.registeredPaths.includes(root) || repo.worktrees.some((tree) => tree.path === root),
+  )
+  if (
+    !repository ||
+    !repository.registeredPaths.some((path) => recents.some((recent) => recent.path === path))
+  )
+    return null
+  return repository.identity.id
+}
 
 const directoryStatOptions = { bigint: true } as const
 function directoryIncarnation(value: BigIntStats): string {
