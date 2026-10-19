@@ -1,25 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { Badge } from '@git-stacks/ui/components/badge'
+import { Button, IconButton } from '@git-stacks/ui/components/button'
+import { Checkbox } from '@git-stacks/ui/components/checkbox'
+import { Input } from '@git-stacks/ui/components/input'
+import { Select } from '@git-stacks/ui/components/select'
+import { SegmentedControl } from '@git-stacks/ui/components/segmented-control'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@git-stacks/ui/components/tabs'
+import { Sheet, SheetContent, SheetTitle } from '@git-stacks/ui/components/sheet'
+import { WorkbenchPane } from '@git-stacks/ui/components/workbench-pane'
 import {
-  Badge,
-  Button,
-  Checkbox,
-  IconButton,
-  Input,
-  Select,
-  SegmentedControl,
-  Tabs,
-  TabsList,
-  TabsTrigger,
-  TabsContent,
-  Sheet,
-  SheetContent,
-  SheetTitle,
-  WorkbenchPane,
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-} from '@git-stacks/ui'
+} from '@git-stacks/ui/components/dropdown-menu'
 import {
   ArrowUp,
   ArrowUpRight,

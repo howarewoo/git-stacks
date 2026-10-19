@@ -1,15 +1,15 @@
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Button } from '@git-stacks/ui/components/button'
 import {
-  Button,
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  Field,
-  Input,
-} from '@git-stacks/ui'
+} from '@git-stacks/ui/components/dialog'
+import { Field } from '@git-stacks/ui/components/field'
+import { Input } from '@git-stacks/ui/components/input'
 import type { DesktopAPI, RepositorySnapshot } from '@git-stacks/shared/types'
 import { LIST_PAGE_SIZE } from '@git-stacks/shared/performance'
 

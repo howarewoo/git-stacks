@@ -2790,7 +2790,16 @@ After editing `packages/ui/src/tokens/tokens.json`, run `pnpm run tokens:generat
 
 `packages/ui` owns the browser-safe shadcn `base-nova` library, backed by `@base-ui/react`. Both desktop and design import `@git-stacks/ui/components/<name>` and `@git-stacks/ui/lib/utils`. Existing desktop import paths are thin re-exports, not duplicate implementations. Keep token-based styling, CVA variants and `cn()`; all three `components.json` files direct reusable additions to the shared workspace (`rsc: false`, Lucide, neutral base).
 
-For UI work in either app, inspect the [shared exports](packages/ui/src/index.ts) and [catalog manifest](apps/design/src/manifest.ts) first. Import controls from `@git-stacks/ui` or `@git-stacks/ui/components/<name>` and compose their supported APIs; use `@git-stacks/ui/styles.css` for shared foundations. This applies to the design app's own shell and controls as well as its examples. Keep application-specific layout and domain behavior local, but extend reusable controls in `packages/ui` instead of copying their markup or interaction logic. [DESIGN.md's reuse rules](DESIGN.md#design-system-reuse) define the boundary.
+For UI work in either app, inspect the [shared exports](packages/ui/src/index.ts) and [catalog manifest](apps/design/src/manifest.ts) first. Import controls from `@git-stacks/ui/components/<name>` and compose their supported APIs; use `@git-stacks/ui/styles.css` for shared foundations. This applies to the design app's own shell and controls as well as its examples. Keep application-specific layout and domain behavior local, but extend reusable controls in `packages/ui` instead of copying their markup or interaction logic. [DESIGN.md's reuse rules](DESIGN.md#design-system-reuse) define the boundary.
+
+Use the component entry points in desktop runtime code rather than the
+`@git-stacks/ui` barrel. Vite serves workspace source as native modules during
+development: importing the barrel loads every re-exported control and its
+dependencies, including unused charts and calendars, before the app can render.
+To verify development startup changes, compare cold renderer loads with separate
+Vite caches and disposable `GIT_STACKS_USER_DATA` profiles; inspect first-contentful
+paint and requested modules in the actual Electron window. The built-app
+benchmarks do not measure Vite's cold dependency optimization.
 
 For a shared component change, update its existing catalog specimen and manifest when the documented API or states change. Verify the affected application interface as well as the specimen: search, navigation, focus, disabled states, and popup behavior must work where the component is actually used. Use the catalog commands below and the [renderer verification guidance](#renderer-verification) for relevant desktop consumers; catalog interaction does not prove Git or IPC success.
 
