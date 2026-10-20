@@ -2070,6 +2070,18 @@ never applied to the one it now shows:
   so an action asked for against the repository being left cannot land on the
   one the window opens next.
 
+An expected cancellation is transported as an answer, never as a failure. Main
+resolves a cancelled command with the internal token `{ commandCancellation:
+true }` — exact and one-field, so no genuine result collides with it — and
+records no failure, prints no Electron handler error stack and publishes no
+success. The shipped preload decodes that token back into the plain rejection
+`{ name: 'CommandCancelled', message: 'The request was cancelled.', cancelled:
+true }` before any `DesktopAPI` promise exists: a native `Error` crossing
+`contextBridge` keeps only its message, so the answer has to be plain data to
+stay recognizable. No `DesktopAPI` caller receives the token as a value, and
+genuine failures keep the whole error path — record, console and renderer —
+unchanged.
+
 ### Documented limits
 
 These are the extreme cases the app states rather than hanging or crashing on.
@@ -2380,6 +2392,15 @@ repository mutation lane. Main revalidates it under the participating journal lo
 inspection, selection and the ambient open repository never authorize a write.
 Independent clones remain separate local domains even when their remotes match.
 These locks exclude participating app operations, not external tools or agents.
+
+Nominating a target registers with the repository, not with the window: an
+explicitly qualified operation may address the registered common repository's own
+root or one of its currently discovered worktrees the window is not showing, and
+the approval is minted for that exact directory. Everything else still answers
+only through the inspected or active authority, and registration is the only
+fence this relaxation makes — physical-directory incarnation, origin, provider,
+host-generation and captured-approval validation run unchanged across the
+capture, safety, execute, records, inspection and management callers.
 
 Prepared reads carry `InspectionContext.operationToken`, binding preview dispatch
 and publication to the original provider and physical authority across intervening
@@ -2716,8 +2737,18 @@ The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `r
 The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks (minimize/restore document visibility and bounds, maximize/unmaximize) are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
 
 Current local Git probes use explicit captured authority: fixture-only Fetch,
-new linked-worktree creation preserving the primary HEAD/index, and exact
-read-only Unicode status/file inspection. They do not stage, commit, stash,
+new linked-worktree creation preserving the primary HEAD/index, exact
+read-only Unicode status/file inspection, an explicit capture on a linked
+worktree the window is not showing, and operation records that keep enumerating
+the non-active primary journal entry after a second repository registers. A
+later probe dispatches a genuinely provider-backed read against that second
+repository on the gh-hosted origin interaction name, suspends it on this run's
+own API hold before dispatch, cancels it from the page world and asserts the
+plaintext cancellation fields with no new handler error line, while a genuine
+failure keeps its error stack. For that read the second repository's origin is
+pointed at this run's own provider route (the primary keeps its disposable
+local origin), and both the origin and the controlled CLI the credential check
+retires are restored afterwards. These probes do not stage, commit, stash,
 switch another checkout or use the retired development UI. Native owned/unowned
 recovery and final effect fences also have disposable integration regressions;
 run them separately from manual native window/assistive-technology evidence.

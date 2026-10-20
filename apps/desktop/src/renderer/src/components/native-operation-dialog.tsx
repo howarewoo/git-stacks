@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { errorMessage } from '../lib/error-message'
 import { Button } from '@git-stacks/ui/components/button'
 import { Checkbox } from '@git-stacks/ui/components/checkbox'
 import {
@@ -119,7 +120,7 @@ export function NativeOperationDialog({
       setApprovalVersion(sourceVersion)
       setPreview(value)
     } catch (cause) {
-      setError(String(cause))
+      setError(errorMessage(cause))
     } finally {
       lock.current = false
       setBusy(false)
@@ -160,7 +161,7 @@ export function NativeOperationDialog({
       await onChanged()
     } catch (cause) {
       setError(
-        `${String(cause)} This confirmation is spent. Inspect durable Operations status before preparing another request; an uncertain provider write is not replayed.`,
+        `${errorMessage(cause)} This confirmation is spent. Inspect durable Operations status before preparing another request; an uncertain provider write is not replayed.`,
       )
     } finally {
       lock.current = false

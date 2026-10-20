@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { errorMessage } from '../lib/error-message'
 import { Button } from '@git-stacks/ui/components/button'
 import { Checkbox } from '@git-stacks/ui/components/checkbox'
 import {
@@ -126,7 +127,7 @@ export function WorktreeLifecycleDialog({
       setApprovalVersion(sourceVersion)
       setPreview(value)
     } catch (error) {
-      setError(String(error))
+      setError(errorMessage(error))
     } finally {
       lock.current = false
       setBusy(false)
@@ -168,7 +169,7 @@ export function WorktreeLifecycleDialog({
       setResult(value.worktreeLifecycle)
       await onChanged()
     } catch (error) {
-      setError(String(error))
+      setError(errorMessage(error))
     } finally {
       lock.current = false
       setBusy(false)

@@ -308,6 +308,8 @@ export interface FixtureControl {
   release(call?: FixtureCall, occurrence?: 'oldest' | 'newest'): number
   /** Rejects the next call of `call` once, then restores normal behavior. */
   failNext(call: FixtureCall, message?: string, name?: string): void
+  /** Rejects with a bridge-safe payload without converting it into an Error. */
+  rejectNext(call: FixtureCall, value: unknown): void
   /**
    * Answers the next call of `call` with `value` once, then restores normal
    * behavior. The value is the answer the producer itself would return, so a

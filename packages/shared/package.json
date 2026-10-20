@@ -7,6 +7,7 @@
   "exports": {
     "./capabilities": "./src/capabilities.ts",
     "./conflict": "./src/conflict.ts",
+    "./cancellation": "./src/cancellation.ts",
     "./guards": "./src/guards.ts",
     "./host": "./src/host.ts",
     "./inspection": "./src/inspection.ts",
