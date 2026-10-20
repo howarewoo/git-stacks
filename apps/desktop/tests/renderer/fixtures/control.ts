@@ -290,7 +290,7 @@ export function installFixtureControl(options: {
   const heldViewed = new Map<string, ReviewViewedRecord>()
   const calls: FixtureCallRecord[] = []
   const holds = new Set<FixtureCall>()
-  const oneShotFailures = new Map<FixtureCall, Error>()
+  const oneShotFailures = new Map<FixtureCall, unknown>()
   const oneShotAnswers = new Map<FixtureCall, unknown>()
   const dropListeners = new Set<(paths: string[]) => void>()
   const released = new Set<FixtureCall>()
@@ -2649,6 +2649,9 @@ export function installFixtureControl(options: {
       const failure = new Error(message ?? `Git Stacks fixture: ${call} failed`)
       failure.name = name
       oneShotFailures.set(call, failure)
+    },
+    rejectNext(call, value) {
+      oneShotFailures.set(call, value)
     },
     answerNext(call, value) {
       oneShotAnswers.set(call, value)

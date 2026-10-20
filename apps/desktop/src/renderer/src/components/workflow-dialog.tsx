@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { errorMessage as workflowError } from '../lib/error-message'
 import { useForm, useSelector } from '@tanstack/react-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { OperationProgress, OperationCapture } from '@git-stacks/shared/operation-scope'
@@ -92,9 +93,7 @@ export type WorkflowRequest =
       destructive?: boolean
     }
 
-export function workflowError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
+export { workflowError }
 
 const stackLabels = {
   restack: 'Restack',

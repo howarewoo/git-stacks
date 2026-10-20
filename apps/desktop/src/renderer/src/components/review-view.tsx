@@ -81,6 +81,7 @@ import {
   reviewSnapshotLabel,
 } from '@git-stacks/shared/review-snapshots'
 import { PullRequestChecksPanel } from './check-details'
+import { errorMessage } from '../lib/error-message'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
 
 /**
@@ -99,9 +100,7 @@ export interface ReviewCommands {
 type Stage = 'idle' | 'loading' | 'ready' | 'failed'
 
 function readableError(value: unknown): string {
-  if (value instanceof Error && value.message) return value.message
-  if (typeof value === 'string' && value) return value
-  return 'GitHub did not return review data.'
+  return errorMessage(value, 'GitHub did not return review data.')
 }
 
 interface LocalDraftWrite {
