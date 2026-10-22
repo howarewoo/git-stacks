@@ -49,7 +49,7 @@ export function SegmentedControl<T extends string>({
           value={option.value}
           type="button"
           className={cn(
-            'min-h-[var(--gs-semantic-density-control-compact)] rounded-[var(--gs-semantic-radius-pill)] px-3 text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-secondary)] outline-none transition-colors hover:text-[var(--gs-semantic-text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)]',
+            'relative min-h-[var(--gs-semantic-density-control-compact)] rounded-[var(--gs-semantic-radius-pill)] px-3 text-[length:var(--gs-semantic-type-label-size)] font-medium leading-[var(--gs-semantic-type-label-line)] text-[var(--gs-semantic-text-secondary)] outline-none transition-colors hover:text-[var(--gs-semantic-text-primary)] focus-visible:ring-2 focus-visible:ring-[var(--gs-semantic-focus-ring)] after:absolute after:inset-x-3 after:bottom-1 after:h-0.5 after:rounded-full after:bg-[var(--gs-semantic-selection-text)] after:opacity-0 data-pressed:after:opacity-100 forced-colors:after:bg-[Highlight]',
             value === option.value
               ? 'bg-[var(--gs-semantic-selection-background)] text-[var(--gs-semantic-selection-text)]'
               : 'bg-transparent',

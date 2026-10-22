@@ -415,7 +415,6 @@
   fill: none;
   stroke: var(--gs-semantic-border-essential);
   stroke-width: 1.5;
-  opacity: 0.65;
 }
 .bw-lines path.bw-related {
   stroke: var(--gs-semantic-selection-text);

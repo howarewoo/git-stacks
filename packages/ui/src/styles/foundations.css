@@ -29,7 +29,7 @@
   --color-foreground: var(--gs-semantic-text-primary);
   --color-card: var(--gs-semantic-surface-content);
   --color-card-foreground: var(--gs-semantic-text-primary);
-  --color-popover: var(--gs-semantic-surface-content);
+  --color-popover: var(--gs-component-overlay-background);
   --color-popover-foreground: var(--gs-semantic-text-primary);
   --color-primary: var(--gs-semantic-action-primary);
   --color-primary-foreground: var(--gs-semantic-action-primary-foreground);

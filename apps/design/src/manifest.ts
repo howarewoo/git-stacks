@@ -46,6 +46,7 @@ export const UPSTREAM_RECONCILIATION = {
     'Iconography is an owned foundation using direct named lucide-react imports; Lucide documentation is its source, not a shadcn component.',
     'Examples are catalog-only local simulations, not desktop product features or Git/GitHub transports.',
     'WorkbenchPane is an owned composition, not an upstream inventory entry: header/footer slots remain persistent around an independently scrolling body; bodyClassName styles that scroll region. The catalog Git composition and desktop v5 workbench consume the same exported implementation.',
+    'Dialogs and floating panels use semantic.surface.raised, with theme-aware scrims and elevation. Filled and line tabs and SegmentedControl retain explicit selected indicators; Foundations demonstrates selection separately from focus.',
   ],
 } as const
 
@@ -177,7 +178,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     anatomy:
       'NavigationMenu, NavigationMenuList, NavigationMenuItem, NavigationMenuTrigger, NavigationMenuContent, NavigationMenuLink',
     keyboard: 'Tab moves between triggers, Down arrow enters content, Esc returns to trigger.',
-    tokens: ['semantic.surface.content', 'semantic.elevation.medium'],
+    tokens: ['semantic.surface.raised', 'semantic.elevation.medium'],
     importExample:
       "import { NavigationMenu, NavigationMenuList, NavigationMenuItem } from '@git-stacks/ui/components/navigation-menu'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/navigation-menu',
@@ -195,7 +196,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'Menubar, MenubarMenu, MenubarTrigger, MenubarContent, MenubarItem, MenubarSeparator, MenubarShortcut',
     keyboard:
       'Left/Right arrows move between top-level menus, Up/Down arrows navigate items, Enter activates, Esc closes.',
-    tokens: ['semantic.surface.content', 'semantic.border.essential', 'semantic.elevation.medium'],
+    tokens: ['semantic.surface.raised', 'semantic.border.essential', 'semantic.elevation.medium'],
     importExample:
       "import { Menubar, MenubarMenu, MenubarTrigger, MenubarContent, MenubarItem } from '@git-stacks/ui/components/menubar'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/menubar',
@@ -213,7 +214,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator',
     keyboard:
       'Down arrow opens menu, Up/Down arrows move focus, Enter activates item, Esc closes and returns focus to trigger.',
-    tokens: ['semantic.surface.content', 'semantic.border.essential', 'semantic.elevation.medium'],
+    tokens: ['semantic.surface.raised', 'semantic.border.essential', 'semantic.elevation.medium'],
     importExample:
       "import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@git-stacks/ui/components/dropdown-menu'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/dropdown-menu',
@@ -231,7 +232,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator',
     keyboard:
       'Right-click or Shift+F10 opens menu at pointer/element, arrow keys navigate items, Enter activates, Esc dismisses.',
-    tokens: ['semantic.surface.content', 'semantic.elevation.medium'],
+    tokens: ['semantic.surface.raised', 'semantic.elevation.medium'],
     importExample:
       "import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@git-stacks/ui/components/context-menu'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/context-menu',
@@ -249,7 +250,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'Command, CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem, CommandShortcut',
     keyboard:
       'Typing filters cmdk items; Up/Down moves selection and Enter activates. CommandDialog adds a Base UI dialog; this app binds Ctrl/⌘ K.',
-    tokens: ['semantic.surface.content', 'semantic.border.essential', 'semantic.elevation.large'],
+    tokens: ['semantic.surface.raised', 'semantic.border.essential', 'semantic.elevation.large'],
     importExample:
       "import { Command, CommandInput, CommandList, CommandItem } from '@git-stacks/ui/components/command'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/command',
@@ -264,10 +265,15 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     summary:
       'Layered sections of content displayed one at a time, switching between view modes or review tabs.',
     anatomy:
-      'Tabs, TabsList, TabsTrigger, TabsContent wrap Base UI tabs. TabsList supports default/line variants and controlSize="compact" | "standard" (default). Tabs supports horizontal/vertical orientation.',
+      'Tabs, TabsList, TabsTrigger, TabsContent wrap Base UI tabs. TabsList supports default/line variants and controlSize="compact" | "standard" (default). Tabs supports horizontal/vertical orientation. Both variants retain an explicit underline or vertical selected indicator independently of keyboard focus.',
     keyboard:
       'Left/Right arrows move between horizontal tabs; Up/Down move between vertical tabs. Tabs automatically activate panels or activate on Enter/Space with manual activation.',
-    tokens: ['semantic.surface.inset', 'semantic.selection.background', 'semantic.radius.control'],
+    tokens: [
+      'semantic.surface.inset',
+      'semantic.selection.background',
+      'semantic.selection.text',
+      'semantic.radius.control',
+    ],
     importExample:
       "import { Tabs, TabsList, TabsTrigger, TabsContent } from '@git-stacks/ui/components/tabs'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/tabs',
@@ -427,7 +433,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'SelectPrimitive.Root, SelectPrimitive.Trigger, SelectPrimitive.Portal, SelectPrimitive.Popup, SelectPrimitive.Item',
     keyboard:
       'Space/Enter opens list, Up/Down arrows navigate items, Enter selects item, Esc closes.',
-    tokens: ['semantic.surface.content', 'semantic.border.essential', 'semantic.radius.control'],
+    tokens: ['semantic.surface.raised', 'semantic.border.essential', 'semantic.radius.control'],
     importExample: "import { Select } from '@git-stacks/ui/components/select'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/select',
     reconciledWith: 'shadcn Base UI catalog 2026-10-10; owned Quiet Workbench adaptation',
@@ -457,7 +463,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     anatomy:
       'Combobox, ComboboxInput, ComboboxContent, ComboboxList, ComboboxItem, ComboboxEmpty; optional ComboboxChips for multiple values.',
     keyboard: 'Typing filters items, Down arrow enters list, Enter selects, Esc dismisses.',
-    tokens: ['semantic.surface.content', 'semantic.border.essential', 'semantic.radius.item'],
+    tokens: ['semantic.surface.raised', 'semantic.border.essential', 'semantic.radius.item'],
     importExample:
       "import { Combobox, ComboboxInput, ComboboxItem } from '@git-stacks/ui/components/combobox'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/combobox',
@@ -509,7 +515,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'DatePicker accepts date, onDateChange, placeholder and disabled; internally composes Button, Popover and Calendar.',
     keyboard:
       'Button activates popup with Space/Enter, calendar is keyboard navigable, Esc closes.',
-    tokens: ['semantic.surface.content', 'semantic.border.essential', 'semantic.radius.control'],
+    tokens: ['semantic.surface.raised', 'semantic.border.essential', 'semantic.radius.control'],
     importExample: "import { DatePicker } from '@git-stacks/ui/components/date-picker'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/date-picker',
     reconciledWith: 'shadcn Base UI catalog 2026-10-10; owned Quiet Workbench adaptation',
@@ -898,7 +904,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     keyboard:
       'Base UI focus trap confines focus within modal, Esc closes nested popups before the modal, focus returns to initiating trigger control. Nested Popover, Combobox, and ContextMenu use the popover layer above the dialog.',
     tokens: [
-      'semantic.surface.content',
+      'semantic.surface.raised',
       'component.overlay.scrim',
       'semantic.border.essential',
       'semantic.elevation.large',
@@ -921,6 +927,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     keyboard:
       'Base UI traps focus and handles safe dismissal; set initialFocus explicitly when a particular control must receive focus. The caller performs and settles the confirmed action.',
     tokens: [
+      'semantic.surface.raised',
       'semantic.feedback.error-surface',
       'semantic.feedback.error-text',
       'semantic.elevation.large',
@@ -942,7 +949,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
     anatomy: 'Sheet, SheetTrigger, SheetContent, SheetHeader, SheetTitle, SheetDescription',
     keyboard: 'Focus trap inside sheet, Esc dismisses, focus returns to trigger.',
     tokens: [
-      'semantic.surface.content',
+      'semantic.surface.raised',
       'component.overlay.scrim',
       'semantic.elevation.large',
       'semantic.border.decorative',
@@ -963,7 +970,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'Drawer, DrawerTrigger, DrawerContent, DrawerHeader, DrawerTitle, DrawerDescription, DrawerFooter, DrawerClose; content composes portal, overlay and swipe handle.',
     keyboard: 'Keyboard navigable, touch swipe gestures, Esc dismisses, focus trapped while open.',
     tokens: [
-      'semantic.surface.content',
+      'semantic.surface.raised',
       'component.overlay.scrim',
       'semantic.elevation.large',
       'semantic.radius.workbench',
@@ -985,7 +992,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'Popover, PopoverTrigger, PopoverContent; content composes Base UI Portal, Positioner and Popup.',
     keyboard:
       'Tab moves into popover content, Esc closes popover and restores focus to trigger button.',
-    tokens: ['semantic.surface.content', 'semantic.elevation.medium', 'semantic.border.essential'],
+    tokens: ['semantic.surface.raised', 'semantic.elevation.medium', 'semantic.border.essential'],
     importExample:
       "import { Popover, PopoverTrigger, PopoverContent } from '@git-stacks/ui/components/popover'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/popover',
@@ -1003,7 +1010,7 @@ export const COMPONENT_MANIFEST: ComponentManifestEntry[] = [
       'HoverCard, HoverCardTrigger, HoverCardContent; content composes Base UI Portal, Positioner and Popup.',
     keyboard:
       'Opens on hover with intentional delay, closes on mouse leave; keyboard users access underlying link directly.',
-    tokens: ['semantic.surface.content', 'semantic.elevation.medium', 'semantic.radius.item'],
+    tokens: ['semantic.surface.raised', 'semantic.elevation.medium', 'semantic.radius.item'],
     importExample:
       "import { HoverCard, HoverCardTrigger, HoverCardContent } from '@git-stacks/ui/components/hover-card'",
     upstreamDoc: 'https://ui.shadcn.com/docs/components/hover-card',

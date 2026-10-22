@@ -231,6 +231,7 @@ const colorGroups: {
     pairs: [
       { label: 'Workspace canvas', background: 'surface.canvas', foreground: 'text.primary' },
       { label: 'Content surface', background: 'surface.content', foreground: 'text.primary' },
+      { label: 'Raised overlay', background: 'surface.raised', foreground: 'text.secondary' },
       { label: 'Inset grouping', background: 'surface.inset', foreground: 'text.secondary' },
       { label: 'Row hover', background: 'surface.hover', foreground: 'text.primary' },
     ],
@@ -293,6 +294,7 @@ function colorVariable(role: ColorRole) {
 
 export function Foundations() {
   const semantic = tokens.semantic
+  const [density, setDensity] = useState<'compact' | 'standard'>('compact')
   return (
     <section id="foundations" className="design-entry" tabIndex={-1}>
       <h2>Foundations</h2>
@@ -385,6 +387,16 @@ export function Foundations() {
           remain visible before focus; the ring appears when navigating with the keyboard. Motion
           respects the system reduced-motion preference.
         </p>
+        <UI.SegmentedControl
+          label="Selection indicator example"
+          value={density}
+          onValueChange={setDensity}
+          options={[
+            { value: 'compact', label: 'Compact' },
+            { value: 'standard', label: 'Standard' },
+          ]}
+        />
+        <p>Selected segments retain an underline independently of keyboard focus and fill color.</p>
       </div>
     </section>
   )

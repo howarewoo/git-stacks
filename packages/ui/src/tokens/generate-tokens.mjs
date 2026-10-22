@@ -34,16 +34,14 @@ const resolved = new Map()
 for (const name of tokens.keys()) resolved.set(name, resolveToken(name))
 
 /**
- * The dark palette is a parallel table of colour primitives, not a second set of
- * semantic tokens. Every token is re-resolved against a table whose
- * `primitive.color.*` entries point at `primitive.dark.color.*`, so a semantic
- * token written once in tokens.json lands on the right colour in both themes
- * and a dark key that is missing falls back to the light value.
+ * Dark overrides replace colour and shadow primitives, not semantic tokens.
+ * Each token is re-resolved against the matching `primitive.dark.*` entry;
+ * missing dark primitives retain their light value.
  */
 const darkTokens = new Map(tokens)
-for (const [name, entry] of tokens) {
-  if (!name.startsWith('primitive.color.')) continue
-  const dark = tokens.get(`primitive.dark.color.${name.slice('primitive.color.'.length)}`)
+for (const name of tokens.keys()) {
+  if (!/^primitive\.(color|shadow)\./.test(name)) continue
+  const dark = tokens.get(`primitive.dark.${name.slice('primitive.'.length)}`)
   if (dark) darkTokens.set(name, dark)
 }
 const darkResolved = new Map()
