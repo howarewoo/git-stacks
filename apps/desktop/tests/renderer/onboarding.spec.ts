@@ -186,7 +186,9 @@ test.describe('Onboarding and repository discovery', () => {
       'aria-label',
       expect.stringContaining('/Users/ada/Code/git-stacks'),
     )
-    await expect(page.getByRole('button', { name: 'main', exact: true })).toBeVisible()
+    await expect(
+      page.locator('.bw-lane-row').getByRole('button', { name: 'main', exact: true }),
+    ).toBeVisible()
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 })
