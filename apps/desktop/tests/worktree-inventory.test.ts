@@ -1094,6 +1094,12 @@ run().catch((error) => { console.error(error); process.exit(1) })
       await held.promise
       assert.equal(connections.length, WORKTREE_READ_CONCURRENCY)
       const beforeInactive = publications.length
+      const heldInventory = structuredClone(service.current())
+      assert.equal(heldInventory.state, 'partial')
+      for (const tree of heldInventory.repositories[0].worktrees) {
+        assert.equal(tree.counts, null)
+        assert.equal(tree.read.observedAt, null)
+      }
       service.setActive(false)
       await Promise.all(connections.map((connection) => connection.closed))
       await scheduler.quiesce(repo)
@@ -1103,9 +1109,7 @@ run().catch((error) => { console.error(error); process.exit(1) })
         'Queued details dispatched inactive',
       )
       assert.equal(publications.length, beforeInactive, 'Automatic batch published inactive')
-      assert.ok(
-        service.current().repositories[0].worktrees.every((tree) => tree.status === 'clean'),
-      )
+      assert.deepEqual(service.current(), heldInventory, 'Retired automatic details changed facts')
 
       hold = false
       const automaticResume = nextInventory(

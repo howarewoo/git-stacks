@@ -49,6 +49,8 @@ async function fixture() {
   const remote = join(root, 'remote.git')
   await mkdir(repo)
   git(repo, 'init', '-b', 'main')
+  git(repo, 'config', '--local', 'user.name', 'Operation fixture')
+  git(repo, 'config', '--local', 'user.email', 'fixture@example.invalid')
   git(repo, 'config', 'commit.gpgSign', 'false')
   await writeFile(join(repo, 'tracked.txt'), 'base\n')
   git(repo, 'add', '.')
@@ -443,6 +445,7 @@ test('owned Skip drops only the conflicted commit, keeps the later commit and re
     await writeFile(join(repo, 'tracked.txt'), 'later conflicting layer\n')
     git(repo, 'add', 'tracked.txt')
     git(repo, 'commit', '-m', 'Resolved remaining conflicting commit')
+    const remainingCommit = git(repo, 'rev-parse', 'HEAD')
     git(repo, 'config', 'branch.layer.parent', 'main')
     git(repo, 'config', 'branch.layer.parentTip', base)
     git(repo, 'switch', 'main')
@@ -517,6 +520,7 @@ test('owned Skip drops only the conflicted commit, keeps the later commit and re
       ),
       /Restack remains paused/,
     )
+    assert.equal(git(directory, 'rev-parse', 'REBASE_HEAD'), remainingCommit)
     assert.equal((await getStackProgress(directory))?.operationId, paused.operationId)
     await assert.rejects(revalidateOperation(recovery, originalScope))
     await writeFile(join(directory, 'tracked.txt'), 'explicit remaining resolution\n')

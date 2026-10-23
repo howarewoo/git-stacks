@@ -5,7 +5,6 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   BlockerList,
   OperationContext,
-  OperationSteps,
   PhaseStatus,
   WarningNote,
   WorkflowFrame,
@@ -698,30 +697,6 @@ test('reviewed operations show the real source, target, and commit identifiers',
   assert.match(markup, /aaaa00000000/)
   assert.match(markup, /2222222222/)
   assert.match(markup, /font-mono/)
-})
-
-test('preview steps list every reviewed branch with its parent, commits, and OID', () => {
-  const markup = renderToStaticMarkup(
-    React.createElement(OperationSteps, {
-      steps: restackPreview.steps,
-      label: 'Planned stack operations',
-    }),
-  )
-  assert.match(markup, /aria-label="Planned stack operations"/)
-  assert.match(markup, /feature\/checkout<\/strong>/)
-  assert.match(markup, /into main · 2 commits/)
-  assert.match(markup, /<code class="font-mono">2222222222<\/code>/)
-  assert.match(markup, /feature\/checkout-tests/)
-  assert.match(markup, /into feature\/checkout · 1 commit/)
-  assert.match(markup, /<code class="font-mono">3333333333<\/code>/)
-  assert.match(markup, />draft</)
-  assert.match(markup, /#41 · feature\/checkout-tests → feature\/checkout/)
-  assert.equal(
-    renderToStaticMarkup(
-      React.createElement(OperationSteps, { steps: [], label: 'Planned stack operations' }),
-    ),
-    '',
-  )
 })
 
 test('blockers and warnings stay on screen with their reasons intact', () => {

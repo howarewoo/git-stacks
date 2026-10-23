@@ -3293,6 +3293,7 @@ test('a request that later enqueues is read from the owning endpoint and stays e
     )
     const running = await harness.readState()
     running.asyncMergeStaysPending = true
+    running.mergeQueue = false
     await harness.writeState(running)
     const { transport, polls } = recordingMergeTransport()
     await withHarnessTransport(harness, transport, async () => {
@@ -3354,8 +3355,8 @@ test('a request that later enqueues is read from the owning endpoint and stays e
       )
       assert.equal(
         offered.merge?.actions.includes('merge_queue'),
-        true,
-        'an accepted enqueue is the evidence a queue exists for this base ref',
+        false,
+        'retained queue membership does not authorize delivery without live queue capability',
       )
     })
   })

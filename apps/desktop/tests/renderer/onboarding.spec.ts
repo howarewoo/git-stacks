@@ -175,6 +175,7 @@ test.describe('Onboarding and repository discovery', () => {
     page,
   }) => {
     await openGallery(page, { scenario: 'shell-no-repository' })
+    await holdDoubleCall(page, 'refresh')
     await page.evaluate(() => {
       window.fixture.setScenario('shell-connected')
       window.fixture.dropRepository?.(['/Users/ada/Code/git-stacks'])
@@ -186,9 +187,20 @@ test.describe('Onboarding and repository discovery', () => {
       'aria-label',
       expect.stringContaining('/Users/ada/Code/git-stacks'),
     )
-    await expect(
-      page.locator('.bw-lane-row').getByRole('button', { name: 'main', exact: true }),
-    ).toBeVisible()
+    const row = page.locator('.bw-lane-row').filter({
+      has: page
+        .getByRole('button', { name: 'main', exact: true })
+        .and(page.getByTitle('main', { exact: true })),
+    })
+    await expect(row.getByRole('button', { name: 'main', exact: true })).toHaveCount(2)
+    const branch = row
+      .getByRole('button', { name: 'main', exact: true })
+      .and(page.getByTitle('main', { exact: true }))
+    await branch.click()
+    await expect(branch).toHaveAttribute('aria-pressed', 'true')
+    await releaseDoubleCalls(page, 'refresh')
+    await settle(page)
+    await expect(branch).toHaveAttribute('aria-pressed', 'true')
     expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
   })
 })
