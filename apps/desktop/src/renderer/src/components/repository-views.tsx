@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { skipToken, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { OperationProgress } from '@git-stacks/shared/operation-scope'
 import {
   mergeProgressAfterRead,
@@ -70,6 +70,7 @@ function RemoteOperationStatus({
   })
   const pushedMerge = useQuery<OperationProgress<MergeProgress> | null>({
     queryKey: mergeProgressKey,
+    queryFn: skipToken,
     enabled: false,
   })
   const progress = publication.data?.progress

@@ -12,6 +12,42 @@ test.beforeEach(async ({ page }) => {
   })
 })
 
+/**
+ * Chromium rasterises text against the subpixel device phase of its container, so a
+ * runner whose layout lands a specimen between device pixels draws different glyphs from
+ * the same content. The whole target is moved to the nearest device-pixel origin for the
+ * capture only; its internal geometry, text and state are untouched. A target that is
+ * already transformed is refused rather than overwritten, and the inline value it had is
+ * restored exactly even when the capture fails.
+ */
+async function captureAtDevicePixelOrigin(
+  locator: Locator,
+  capture: () => Promise<void>,
+): Promise<void> {
+  const aligned = await locator.evaluate((node) => {
+    if (getComputedStyle(node).transform !== 'none') {
+      throw new Error('Capture alignment refuses a target that already has a transform')
+    }
+    const ratio = node.ownerDocument.defaultView!.devicePixelRatio
+    const { left, top } = node.getBoundingClientRect()
+    const x = Math.round(left * ratio) / ratio - left
+    const y = Math.round(top * ratio) / ratio - top
+    if (x === 0 && y === 0) return null
+    const inline = node.style.transform
+    node.style.transform = `translate(${x}px, ${y}px)`
+    return { inline }
+  })
+  try {
+    await capture()
+  } finally {
+    if (aligned) {
+      await locator.evaluate((node, inline) => {
+        node.style.transform = inline
+      }, aligned.inline)
+    }
+  }
+}
+
 async function contrast(locator: Locator, property: 'borderTopColor' | 'outlineColor') {
   return locator.evaluate((node, property) => {
     const style = getComputedStyle(node)
@@ -594,15 +630,17 @@ test('narrow long content and 200-percent CSS-viewport reflow retain reachable a
   ).toBeLessThanOrEqual(0.001)
 })
 
-test('automated accessibility and measured essential boundaries and focus contrast in both themes', async ({
-  page,
-}) => {
-  await page.goto('/')
-  for (const theme of ['light', 'dark']) {
-    await page.evaluate((theme) => {
-      document.documentElement.dataset.gsTheme = theme
-      document.documentElement.classList.toggle('dark', theme === 'dark')
-    }, theme)
+for (const theme of ['light', 'dark'])
+  test(`automated accessibility and measured essential boundaries and focus contrast in the ${theme} theme`, async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await page.getByRole('combobox', { name: 'Theme', exact: true }).click()
+    await page
+      .getByRole('option', { name: theme === 'dark' ? 'Dark' : 'Light', exact: true })
+      .click()
+    await expect(page.locator('html')).toHaveAttribute('data-gs-theme', theme)
+    await page.keyboard.press('Tab')
     // Reduced-motion color transitions still need a rendered frame before Axe reads surfaces.
     await page.waitForFunction(() => {
       const probe = document.createElement('div')
@@ -646,8 +684,7 @@ test('automated accessibility and measured essential boundaries and focus contra
         .violations,
     ).toEqual([])
     await page.keyboard.press('Escape')
-  }
-})
+  })
 
 for (const theme of ['light', 'dark'])
   test(`representative ${theme} visual baseline @visual`, async ({ page }) => {
@@ -663,15 +700,18 @@ for (const theme of ['light', 'dark'])
     await page.locator('.catalog-toolbar').evaluate((toolbar) => {
       toolbar.style.visibility = 'hidden'
     })
-    await page.locator('#git-compositions').scrollIntoViewIfNeeded()
-    await expect(page.locator('#git-compositions')).toHaveScreenshot(
-      `git-compositions-${theme}.png`,
-      { animations: 'disabled' },
+    const composition = page.locator('#git-compositions')
+    await composition.scrollIntoViewIfNeeded()
+    await captureAtDevicePixelOrigin(composition, () =>
+      expect(composition).toHaveScreenshot(`git-compositions-${theme}.png`, {
+        animations: 'disabled',
+      }),
     )
     await page.getByRole('textbox', { name: 'Search components' }).fill('Button')
-    await expect(page.locator('#button')).toHaveScreenshot(`button-${theme}.png`, {
-      animations: 'disabled',
-    })
+    const button = page.locator('#button')
+    await captureAtDevicePixelOrigin(button, () =>
+      expect(button).toHaveScreenshot(`button-${theme}.png`, { animations: 'disabled' }),
+    )
   })
 
 test('attachment supported states retry removal and bubble variants are live', async ({ page }) => {

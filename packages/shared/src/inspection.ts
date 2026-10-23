@@ -22,6 +22,7 @@ export interface InspectionWorktreeStatus {
 
 /** Fixed named operations; every operation retains its existing main validator. */
 export const INSPECTION_CHANNELS = {
+  /** Optional 'reuse' argument reads local metadata without refreshing the provider. */
   refresh: 'inspection:snapshot',
   worktreeStatus: 'inspection:worktree-status',
   cancel: 'operation:cancel',
@@ -40,6 +41,7 @@ export const INSPECTION_CHANNELS = {
   conflictView: 'repository:conflict',
   history: 'repository:history',
   commitDiff: 'repository:commit-diff',
+  branchCommits: 'repository:branch-commits',
   pullRequest: 'repository:pull-request',
   pullRequestPage: 'repository:pull-request-page',
   pullRequestLayer: 'repository:pull-request-layer',
@@ -68,7 +70,9 @@ export const INSPECTION_CHANNELS = {
 } as const
 export type InspectionOperation = keyof typeof INSPECTION_CHANNELS
 export type InspectionMethod<K extends InspectionOperation> = NonNullable<DesktopAPI[K]>
-export type InspectionArgs<K extends InspectionOperation> = Parameters<InspectionMethod<K>>
+export type InspectionArgs<K extends InspectionOperation> = K extends 'refresh'
+  ? [remotePolicy?: 'reuse']
+  : Parameters<InspectionMethod<K>>
 export type InspectionResult<K extends InspectionOperation> = Awaited<
   ReturnType<InspectionMethod<K>>
 >

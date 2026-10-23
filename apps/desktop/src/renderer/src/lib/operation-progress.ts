@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { skipToken, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   sameOperationScope,
   type OperationProgress,
@@ -109,9 +109,11 @@ export function useOperationProgressProjection(
           },
     [scope],
   )
-  useQuery({ queryKey: keys.publication, enabled: false })
-  useQuery({ queryKey: keys.merge, enabled: false })
-  useQuery({ queryKey: keys.mergeProgress, enabled: false })
+  // Observed keys keep the zero-lifetime cache resident while the captured
+  // owner exists; skipToken preserves the observers without a fetching path.
+  useQuery({ queryKey: keys.publication, queryFn: skipToken, enabled: false })
+  useQuery({ queryKey: keys.merge, queryFn: skipToken, enabled: false })
+  useQuery({ queryKey: keys.mergeProgress, queryFn: skipToken, enabled: false })
   React.useEffect(() => {
     if (!scope || !api) return
     let active = true

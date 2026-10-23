@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { errorMessage as workflowError } from '../lib/error-message'
 import { useForm, useSelector } from '@tanstack/react-form'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { skipToken, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { OperationProgress, OperationCapture } from '@git-stacks/shared/operation-scope'
 import { useOperationSafety } from '../lib/operation-safety'
 import {
@@ -324,8 +324,16 @@ function PrLinkedIssuesSection({
   const [unlinkIssueNumber, setUnlinkIssueNumber] = React.useState<number | null>(null)
   const linkKey = ['workflow-issue-link-preview', scope, pr.number, linkIssueNumber] as const
   const unlinkKey = ['workflow-issue-unlink-preview', scope, pr.number, unlinkIssueNumber] as const
-  const linkQuery = useQuery<IssueLinkPreview | null>({ queryKey: linkKey, enabled: false })
-  const unlinkQuery = useQuery<IssueLinkPreview | null>({ queryKey: unlinkKey, enabled: false })
+  const linkQuery = useQuery<IssueLinkPreview | null>({
+    queryKey: linkKey,
+    queryFn: skipToken,
+    enabled: false,
+  })
+  const unlinkQuery = useQuery<IssueLinkPreview | null>({
+    queryKey: unlinkKey,
+    queryFn: skipToken,
+    enabled: false,
+  })
   const links = linksQuery.data?.links ?? []
   const loading = linksQuery.isFetching
   // The issue search is its own form: it is submitted without nesting a second HTML
@@ -935,6 +943,7 @@ export function WorkflowDialog({
   })
   const mergeProgressQuery = useQuery<OperationProgress<MergeProgress> | null>({
     queryKey: mergeProgressKey,
+    queryFn: skipToken,
     enabled: false,
   })
   const mergeStatusQuery = useQuery({
@@ -965,7 +974,11 @@ export function WorkflowDialog({
   const [mergeRunning, setMergeRunning] = React.useState(false)
   const [attempt, setAttempt] = React.useState(0)
   const previewKey = ['workflow-preview', snapshot.path, queryScope, request, attempt] as const
-  const previewQuery = useQuery<WorkflowData>({ queryKey: previewKey, enabled: false })
+  const previewQuery = useQuery<WorkflowData>({
+    queryKey: previewKey,
+    queryFn: skipToken,
+    enabled: false,
+  })
   const preview = previewQuery.data?.kind === 'stack' ? previewQuery.data.value : null
   const surgery = previewQuery.data?.kind === 'surgery' ? previewQuery.data.value : null
   const push = previewQuery.data?.kind === 'forcePush' ? previewQuery.data.value : null

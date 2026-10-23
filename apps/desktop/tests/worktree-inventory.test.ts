@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, writeFile, readFile, rm, rename, chmod } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, rename, chmod, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type Socket } from 'node:net'
@@ -34,7 +34,7 @@ function git(cwd: string, ...args: string[]): string {
   })
 }
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-inventory-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'git-stacks-inventory-')))
   const repo = join(root, 'primary workspace')
   await mkdir(repo)
   git(repo, 'init', '-b', 'main')
@@ -83,6 +83,163 @@ function nextInventory(
   if (predicate(service.current())) resolve(service.current())
   return promise
 }
+
+test('discovery publishes unknown worktree facts before inspection without mutating its receipt', async () => {
+  const { root, repo } = await fixture()
+  git(repo, 'worktree', 'add', join(root, 'sibling'), '-b', 'sibling')
+  const publications: WorktreeInventory[] = []
+  const service = new WorktreeInventoryService(new RepositoryScheduler(), (value) =>
+    publications.push(value),
+  )
+  try {
+    service.register([repo])
+    const complete = await service.read({ requestId: 'discovery-before-status' })
+    const discovered = publications.find(
+      (value) =>
+        value.repositories[0]?.refs.length &&
+        value.repositories[0].worktrees.every((tree) => tree.read.observedAt === null),
+    )
+    assert.ok(discovered, 'refs are published before sibling status inspections finish')
+    assert.equal(discovered.state, 'partial')
+    assert.equal(discovered.repositories[0].worktrees.length, 2)
+    for (const tree of discovered.repositories[0].worktrees) {
+      assert.notEqual(tree.read.state, 'complete')
+      assert.equal(tree.read.observedAt, null)
+      assert.equal(tree.counts, null)
+    }
+    assert.equal(complete.state, 'complete')
+    assert.ok(complete.generation > discovered.generation)
+    assert.ok(complete.repositories[0].worktrees.every((tree) => tree.read.state === 'complete'))
+  } finally {
+    service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+for (const invalidation of ['watcher', 'resume'] as const)
+  test(`overlapping pending reads preserve ${invalidation} invalidation and confirmed sibling facts`, async () => {
+    const { root, repo } = await fixture()
+    const changed = join(root, 'changed')
+    const unchanged = join(root, 'unchanged')
+    git(repo, 'worktree', 'add', changed, '-b', 'changed')
+    git(repo, 'worktree', 'add', unchanged, '-b', 'unchanged')
+    const invalidated = Promise.withResolvers<void>()
+    let replacePending = false
+    let selectedWorktreeId: string | undefined
+    let replacement: Promise<WorktreeInventory> | undefined
+    const service = new WorktreeInventoryService(
+      new RepositoryScheduler(),
+      (value) => {
+        if (
+          replacePending &&
+          value.repositories[0]?.worktrees.every((tree) => tree.read.observedAt === null)
+        ) {
+          replacePending = false
+          // Start B synchronously: A has consumed its invalid flags but has not
+          // reached its asynchronous abort/catch cleanup yet.
+          replacement = service.read({ requestId: 'replacement', selectedWorktreeId })
+        }
+      },
+      () => invalidated.resolve(),
+    )
+    try {
+      service.register([repo])
+      const initial = await service.read({ requestId: 'initial' })
+      const primary = initial.repositories[0].worktrees.find((tree) => tree.path === repo)!
+      const stable = initial.repositories[0].worktrees.find((tree) => tree.path === unchanged)!
+      selectedWorktreeId = primary.id
+      if (invalidation === 'resume') service.setActive(false)
+      await writeFile(join(changed, 'external.txt'), 'external edit\n')
+      if (invalidation === 'resume') service.setActive(true)
+      else await invalidated.promise
+      replacePending = true
+      await assert.rejects(service.read({ requestId: 'interrupted', selectedWorktreeId }))
+      assert.ok(replacement, 'the replacement overlaps the interrupted pending read')
+      const refreshed = await replacement
+      const dirty = refreshed.repositories[0].worktrees.find((tree) => tree.path === changed)!
+      const retained = refreshed.repositories[0].worktrees.find((tree) => tree.id === stable.id)!
+      assert.equal(dirty.status, 'dirty')
+      assert.equal(dirty.counts?.untracked, 1)
+      assert.equal(dirty.read.state, 'complete')
+      assert.equal(retained.status, 'clean')
+      assert.deepEqual(retained.counts, stable.counts)
+      assert.equal(retained.read.state, 'complete')
+      if (invalidation === 'watcher') assert.equal(retained.read.observedAt, stable.read.observedAt)
+      else assert.notEqual(retained.read.observedAt, stable.read.observedAt)
+      assert.notEqual(
+        refreshed.repositories[0].worktrees.find((tree) => tree.id === primary.id)?.read.observedAt,
+        primary.read.observedAt,
+        'selected facts are inspected again',
+      )
+    } finally {
+      service.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+test('resume fences an explicit read holding pre-resume sibling observations', async () => {
+  const { root, repo } = await fixture()
+  const sibling = join(root, 'sibling')
+  git(repo, 'worktree', 'add', sibling, '-b', 'sibling')
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  class HeldInspectionScheduler extends RepositoryScheduler {
+    readsUntilHold = 0
+    override read<T>(
+      root: string,
+      task: (signal: AbortSignal) => Promise<T>,
+      signal?: AbortSignal,
+    ): Promise<T> {
+      const hold = this.readsUntilHold > 0 && --this.readsUntilHold === 0
+      return super.read(
+        root,
+        async (combined) => {
+          const result = await task(combined)
+          if (hold) {
+            entered.resolve()
+            await release.promise
+          }
+          return result
+        },
+        signal,
+      )
+    }
+  }
+  const scheduler = new HeldInspectionScheduler()
+  const service = new WorktreeInventoryService(scheduler, () => {})
+  try {
+    service.register([repo])
+    const initial = await service.read({ requestId: 'initial' })
+    const primary = initial.repositories[0].worktrees.find((tree) => tree.path === repo)!
+    scheduler.readsUntilHold = 2 // Discovery, then the selected worktree inspection.
+    const explicit = service.read({
+      requestId: 'held-explicit',
+      selectedWorktreeId: primary.id,
+    })
+    const retired = assert.rejects(explicit, 'pre-resume observations cannot publish after resume')
+    await entered.promise
+    service.setActive(false)
+    await writeFile(join(sibling, 'external.txt'), 'changed while inactive\n')
+    service.setActive(true)
+    release.resolve()
+    await retired
+    const refreshed = await service.read({ requestId: 'after-resume' })
+    const observed = refreshed.repositories[0].worktrees.find((tree) => tree.path === sibling)!
+    assert.equal(observed.read.state, 'complete')
+    assert.equal(observed.status, 'dirty')
+    assert.equal(observed.counts?.untracked, 1)
+    const repeated = await service.read({ requestId: 'reuse-after-resume' })
+    assert.equal(
+      repeated.repositories[0].worktrees.find((tree) => tree.id === observed.id)?.status,
+      'dirty',
+      'later reuse cannot resurrect the pre-resume clean observation',
+    )
+  } finally {
+    release.resolve()
+    service.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('a failed registered root automatically recovers when its directory returns', {
   timeout: 30_000,
@@ -624,7 +781,14 @@ test('credential retirement during a late local read cannot restore the old PR p
     }
   }
   const scheduler = new HeldScheduler()
-  const service = new WorktreeInventoryService(scheduler, () => {})
+  const { getSnapshot } = await import('../src/main/git')
+  const service = new WorktreeInventoryService(
+    scheduler,
+    () => {},
+    () => {},
+    {},
+    (path, signal) => getSnapshot(path, signal, undefined, 'reuse', false, true),
+  )
   service.setActive(false)
   try {
     git(repo, 'remote', 'add', 'origin', 'https://github.com/example/inventory.git')
@@ -645,6 +809,25 @@ test('credential retirement during a late local read cannot restore the old PR p
       remoteUrl: 'https://github.com/example/inventory.git',
       pullRequests: [facts],
     })
+    await service.read({ requestId: 'provider-dependencies' })
+    assert.equal(service.current().repositories[0].dependenciesRead?.state, 'complete')
+    assert.ok(service.current().repositories[0].dependencyRevision)
+    const previousDependencyRevision = service.current().repositories[0].dependencyRevision
+    service.adoptRemote({
+      path: repo,
+      remoteUrl: 'https://github.com/example/inventory.git',
+      pullRequests: [{ ...facts, base: 'changed-base' }],
+    })
+    const changed = service.current().repositories[0]
+    assert.equal(changed.dependencies, undefined)
+    assert.equal(changed.dependencyDefaultBranch, undefined)
+    assert.equal(changed.dependencyRevision, undefined)
+    assert.equal(changed.dependenciesRead?.state, 'partial')
+    await service.read({ requestId: 'changed-provider-dependencies' })
+    assert.notEqual(
+      service.current().repositories[0].dependencyRevision,
+      previousDependencyRevision,
+    )
     scheduler.hold = true
     const late = service.read({ requestId: 'late' })
     await entered.promise
@@ -653,6 +836,10 @@ test('credential retirement during a late local read cannot restore the old PR p
     const result = await late
     assert.deepEqual(result.repositories[0].pullRequests, [])
     assert.equal(result.repositories[0].worktrees[0].status, 'clean')
+    assert.equal(result.repositories[0].dependencies, undefined)
+    assert.equal(result.repositories[0].dependencyDefaultBranch, undefined)
+    assert.equal(result.repositories[0].dependencyRevision, undefined)
+    assert.equal(result.repositories[0].dependenciesRead?.state, 'partial')
     const failed = new WorktreeInventoryService(new RepositoryScheduler(), () => {})
     failed.setActive(false)
     try {

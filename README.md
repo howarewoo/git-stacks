@@ -2117,8 +2117,15 @@ These are the extreme cases the app states rather than hanging or crashing on.
 The `Accessibility checks` workflow uses one selection job for the stable
 `automated`, `design`, and `budgets` checks. Pull requests select affected workloads;
 every `main` push and `workflow_dispatch` runs the full existing nonvisual renderer,
-catalog, typecheck, keyboard/component unit, and performance workloads. Visual
-baselines remain a separate macOS-only local check.
+catalog, typecheck, keyboard/component unit, and performance workloads. Desktop
+renderer visual baselines remain a separate macOS-only local check.
+
+Manual dispatch also runs the independent `root-suite` job on native Ubuntu 24.04
+x64 with Node 24 and the pinned Playwright Chromium. It installs frozen dependencies
+and executes the normal root `pnpm test`, including the complete desktop unit suite
+and design manifest/browser tests, under a 30-minute job limit. This complete root
+coverage is dispatch-only; the existing affected-check selector and automatic
+push/PR workloads are unchanged.
 
 `scripts/ci/select-checks.mjs` is the single dependency-free Node 24/Git policy.
 The workflow runs its permanent regression suite once before dependency installation,
@@ -2303,11 +2310,34 @@ preserves authored chords, gives canonical choices precedence, and never rewrite
 the stored file merely to read it; no live action aliases remain.
 
 `projectWorkbenchInventory` joins genuine main-owned qualified repository/ref/
-worktree/PR identities. Local clones remain separate even when their remotes match.
-Main resolves `Branch.parentRef`; renderer display names and tracking upstreams
-never establish parentage. Published head/base and native stack membership are
-independent facts. Unavailable, partial and stale observations remain explicitly
-unknown, not passing checks, a clean directory or a fabricated zero.
+worktree/PR identities. A local branch pairs with its configured tracking upstream
+into a single row while keeping physical ref identities, tips, and delete capabilities
+distinct. Standalone remote rows remain only for unrepresented remotes. Local clones
+remain separate even when their remotes match. Main resolves `Branch.parentRef`;
+renderer display names and tracking upstreams never establish parentage, and feature
+branches tracking a remote default branch do not become trunk. Published head/base
+and native stack membership are independent facts. Branch commit count measures
+parent-relative commits (`parentOID..branchOID`) against a fenced main-resolved parent
+endpoint. Paired rows explicitly label the local branch count; standalone remote rows
+count their own qualified remote tip. Neither upstream-ahead counts nor published PR
+bases substitute for that dependency. Dependency fields and their semantic revision
+travel together in the inventory; unchanged observation timestamps do not trigger
+live provider snapshots, and retained inspector detail cannot supply an old no-parent
+decision. The selected count revalidates relationship and consumed provider authority
+before and after reading Git. Local directory facts remain available while inspecting
+ref-only remote history; detached HEAD history retains its exact worktree authority.
+Count provenance is visible in status/navigation labels as well as accessible names;
+unavailable, partial, stale and not-applicable observations remain distinct, never
+passing checks, a clean directory, or a fabricated zero. Cache-only operation observers
+use `skipToken` to mount under zero-lifetime cache without missing query warnings.
+
+Snapshot status disables optional Git index writes per command, so a clean-index refresh
+cannot invalidate its own watched inventory collection. Bounded PR pages, layers and
+inbox reads update the same confirmed provider payload consumed by dependency resolution.
+Their generation/read ordering is checked at admission and again after the caller's final
+await before inventory publication, including across independent clones. Bounded metadata
+does not refresh full-list timestamps or issue coverage, and a replacement published head
+cannot inherit unobserved checks or review certification from the previous head.
 
 `projectBranchLanes` is deterministic iterative postorder: children above actual
 parents, shared ancestors once, invalid/cyclic/foreign endpoints without edges.
@@ -2953,7 +2983,7 @@ catalog controls and desktop Git workflows are not globally restyled.
 
 The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, Typeset and the owned Iconography foundation, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing.
  
-Representative light/dark screenshots use the committed Playwright Chromium on Linux x64, 1280×1600, device scale 1, en-US, UTC, system fonts and reduced motion. The taller viewport contains the Git composition and Button specimens, avoiding Chromium's beyond-viewport capture and its transient 1×1 responsive reflow. Behavioral tests retain 1280×900 unless a scenario explicitly exercises another size. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Baselines are platform-specific, not evidence for macOS or Windows. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
+Representative light/dark screenshots have separate committed Linux x64 and reviewed macOS Darwin arm64 baseline families. Use the pinned Playwright Chromium for the recorded platform, 1280×1600, device scale 1, en-US, UTC, system fonts and reduced motion. The taller viewport contains the Git composition and Button specimens, avoiding Chromium's beyond-viewport capture and its transient 1×1 responsive reflow. Each whole capture target is temporarily aligned to the nearest device-pixel origin; existing transformed targets are refused, internal layout is unchanged, and the prior inline transform is restored even if capture fails. Behavioral tests retain 1280×900 unless a scenario explicitly exercises another size. Accessibility cases select each theme through the catalog control and enter keyboard modality before focus probes; each theme retains full-page and open-dialog Axe scans. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Record the actual browser version/executable, OS/architecture, fonts and run settings with each baseline family. Neither family's result establishes pixel identity on another platform or Windows coverage. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
 When verifying the Card specimen, inspect both cards against the catalog canvas
 in light and dark themes, then follow Inspect composition to the local Git

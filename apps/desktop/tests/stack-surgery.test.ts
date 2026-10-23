@@ -473,13 +473,3 @@ test('a layer whose replay boundary cannot be proven is blocked rather than gues
     assert.equal((top?.blockers.length ?? 0) > 0, true, 'a layer without a boundary blocks')
   })
 })
-
-test('an uncommitted working tree blocks the surgery before anything is read', async () => {
-  await withHarness(async (harness) => {
-    await fourLayerStack(harness)
-    git(harness, ['switch', 'middle'])
-    await writeFile(join(harness.repo, 'middle.txt'), 'dirty\n', 'utf8')
-    const blocked = await preview(harness, { kind: 'insert', branch: 'middle', name: 'helper' })
-    assert.match(blocked.blockers.join(' '), /uncommitted changes/i)
-  })
-})

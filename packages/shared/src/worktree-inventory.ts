@@ -1,4 +1,4 @@
-import type { GitOperation, PullRequest, RemoteFreshness } from './types'
+import type { Branch, GitOperation, PullRequest, RemoteFreshness } from './types'
 
 /** Opaque qualified tuples; display names never grant local authority. */
 export type InventoryId = string
@@ -77,6 +77,10 @@ export interface RepositoryInventory {
   discovery: InventoryRead
   refsRead: InventoryRead
   dependenciesRead?: InventoryRead
+  dependencies?: Pick<Branch, 'ref' | 'parent' | 'parentRef' | 'parentSource' | 'recordedParent'>[]
+  /** Semantic dependency content, not the time an unchanged observation completed. */
+  dependencyRevision?: string
+  dependencyDefaultBranch?: string
   refs: InventoryRef[]
   worktrees: InventoryWorktree[]
   pullRequests: InventoryPullRequest[]

@@ -74,6 +74,8 @@ export async function runLaneEnvelope(repoRoot, workspace, out) {
             code: 'KeyA',
             windowsVirtualKeyCode: 65,
             modifiers: process.platform === 'darwin' ? 4 : 2,
+            // CDP's synthetic chord alone does not perform Electron's native edit command.
+            commands: ['selectAll'],
           })
           await client.send('Input.dispatchKeyEvent', {
             type: 'keyUp',

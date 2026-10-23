@@ -515,12 +515,15 @@ export class WorktreeInventoryService {
     failures: [],
     state: 'complete',
   }
+  // Last finished inspections remain reusable when a pending discovery is interrupted.
+  private inspectedWorktrees = new Map<InventoryId, InventoryWorktree>()
   private watchers = new Map<string, RepositoryWatcher>()
   private watchedIds = new Map<string, InventoryId>()
   private invalid = new Set<string>()
   private refreshTimer: NodeJS.Timeout | undefined
   private active = true
   private remote = new Map<string, Pick<RepositorySnapshot, 'path' | 'pullRequests' | 'remote'>>()
+  private dependencyEpoch = 0
   private readonly watcherReads = new RepositoryScheduler(WORKTREE_READ_CONCURRENCY)
   private watcherController = new AbortController()
   constructor(
@@ -531,7 +534,7 @@ export class WorktreeInventoryService {
     private readDependencies?: (
       root: string,
       signal: AbortSignal,
-    ) => Promise<Pick<RepositorySnapshot, 'branches' | 'limits'>>,
+    ) => Promise<Pick<RepositorySnapshot, 'branches' | 'limits'> & { defaultBranch?: string }>,
   ) {}
 
   current(): WorktreeInventory {
@@ -552,6 +555,11 @@ export class WorktreeInventoryService {
       failures: [],
       state: 'partial',
     }
+    const retainedRepositories = new Set(
+      this.state.repositories.map((repository) => repository.identity.id),
+    )
+    for (const [id, tree] of this.inspectedWorktrees)
+      if (!retainedRepositories.has(tree.repositoryId)) this.inspectedWorktrees.delete(id)
     const observedPaths = new Set(
       this.state.repositories.flatMap((repository) => [
         repository.identity.commonDirectory,
@@ -582,29 +590,59 @@ export class WorktreeInventoryService {
       return
     }
     this.watcherController = new AbortController()
+    // Explicit reads may finish while inactive, but cannot cross the resumed
+    // observation boundary with facts copied before watcher coverage returned.
+    this.controller?.abort()
+    this.generation++
+    this.inspectedWorktrees.clear()
     for (const repository of this.state.repositories)
       for (const tree of repository.worktrees) this.invalid.add(tree.path)
     this.schedule()
   }
+  private retireDependencies(repository: RepositoryInventory): void {
+    repository.dependencies = undefined
+    repository.dependencyDefaultBranch = undefined
+    repository.dependencyRevision = undefined
+    repository.dependenciesRead = {
+      state: 'partial',
+      observedAt: null,
+      error: 'Provider dependency authority changed; local dependency analysis pending',
+    }
+  }
+  private remoteDependencyKey(
+    snapshot: Pick<RepositorySnapshot, 'pullRequests'> | undefined,
+  ): string {
+    return JSON.stringify(
+      snapshot?.pullRequests.map((pr) => [pr.number, pr.head, pr.headOid, pr.base, pr.stack]) ??
+        null,
+    )
+  }
   retireRemote(): void {
     // Match main's authority retirement: configured transports may alias logical hosts.
     this.remote.clear()
+    this.dependencyEpoch++
     this.state = {
       ...this.state,
       generation: ++this.publication,
-      repositories: this.state.repositories.map((repository) => ({
-        ...repository,
-        pullRequests: [],
-        remoteFreshness: null,
-        refs: repository.refs.map((ref) => ({ ...ref, pullRequestIds: [] })),
-      })),
+      repositories: this.state.repositories.map((repository) => {
+        const next = {
+          ...repository,
+          pullRequests: [],
+          remoteFreshness: null,
+          refs: repository.refs.map((ref) => ({ ...ref, pullRequestIds: [] })),
+        }
+        if (next.remote) this.retireDependencies(next)
+        return next
+      }),
     }
     this.publish(this.state)
+    this.schedule()
   }
   adoptRemote(
     snapshot: Pick<RepositorySnapshot, 'path' | 'remoteUrl' | 'pullRequests' | 'remote'>,
   ): void {
     const origin = parseRemote(snapshot.remoteUrl)
+    let dependencyChanged = false
     if (origin) {
       const id = inventoryId('remote', origin.host.toLowerCase(), origin.fullName.toLowerCase())
       const previous = this.remote.get(id)
@@ -624,17 +662,27 @@ export class WorktreeInventoryService {
       } else if (snapshot.remote && snapshot.remote.state !== 'fresh') {
         this.remote.set(id, { ...previous!, remote: { ...snapshot.remote, fetchedAt: previousAt } })
       }
+      dependencyChanged =
+        this.remoteDependencyKey(previous) !== this.remoteDependencyKey(this.remote.get(id))
     }
+    if (dependencyChanged) this.dependencyEpoch++
     this.state = {
       ...this.state,
       generation: ++this.publication,
       repositories: this.state.repositories.map((repository) => {
         const next = { ...repository, refs: repository.refs.map((ref) => ({ ...ref })) }
         this.joinRemote(next)
+        if (
+          dependencyChanged &&
+          next.remote?.fullName.toLowerCase() === origin?.fullName.toLowerCase() &&
+          next.remote?.host.toLowerCase() === origin?.host.toLowerCase()
+        )
+          this.retireDependencies(next)
         return next
       }),
     }
     this.publish(this.state)
+    if (dependencyChanged) this.schedule()
   }
   adoptPullRequestPage(
     repositoryId: string,
@@ -654,7 +702,7 @@ export class WorktreeInventoryService {
       pullRequests: [...merged.values()].slice(0, LIST_PAGE_SIZE),
       remote: {
         state: 'stale',
-        fetchedAt: observedAt,
+        fetchedAt: existing?.remote?.fetchedAt ?? null,
         checkedAt: observedAt,
         detail: 'A bounded PR page is observed, not a complete repository readiness read.',
         rateLimitReset: null,
@@ -729,11 +777,8 @@ export class WorktreeInventoryService {
     this.automaticController = automatic ? controller : null
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     const generation = ++this.generation
-    const old = new Map(
-      this.state.repositories.flatMap((repo) =>
-        repo.worktrees.map((tree) => [tree.id, tree] as const),
-      ),
-    )
+    const dependencyEpoch = this.dependencyEpoch
+    const old = this.inspectedWorktrees
     const invalid = new Set(this.invalid)
     this.invalid.clear()
     const repositories: RepositoryInventory[] = []
@@ -767,6 +812,25 @@ export class WorktreeInventoryService {
               if (this.readDependencies) {
                 try {
                   const snapshot = await this.readDependencies(root, signal)
+                  discovered.dependencyDefaultBranch = snapshot.defaultBranch
+                  discovered.dependencies = snapshot.branches.map(
+                    ({ ref, parent, parentRef, parentSource, recordedParent }) => ({
+                      ref,
+                      parent,
+                      parentRef,
+                      parentSource,
+                      recordedParent,
+                    }),
+                  )
+                  discovered.dependencyRevision = createHash('sha256')
+                    .update(
+                      JSON.stringify([
+                        discovered.remote ? dependencyEpoch : 0,
+                        snapshot.defaultBranch,
+                        discovered.dependencies,
+                      ]),
+                    )
+                    .digest('hex')
                   const byRef = new Map(snapshot.branches.map((branch) => [branch.ref, branch]))
                   for (const ref of discovered.refs) {
                     const branch = byRef.get(ref.name)
@@ -802,6 +866,28 @@ export class WorktreeInventoryService {
       }
       // Arm first: an edit between inspection and watch readiness must not become the baseline.
       await this.armWatchers({ generation, repositories, failures, state: 'partial' }, combined)
+      if (combined.aborted || generation !== this.generation) throw new CommandCancelled()
+      // Ref/dependency discovery is usable before every sibling worktree status is read.
+      // Keep the published arrays independent of the replacements below so pending facts
+      // stay pending until a subsequent publication actually observes them.
+      const discovered: WorktreeInventory = {
+        generation: ++this.publication,
+        repositories: repositories.map((repository) => ({
+          ...repository,
+          refs: repository.refs.map((ref) => ({ ...ref })),
+          worktrees: [...repository.worktrees],
+        })),
+        failures,
+        state: repositories.length ? 'partial' : failures.length ? 'failed' : 'complete',
+      }
+      for (const repository of discovered.repositories) this.joinRemote(repository)
+      if (dependencyEpoch !== this.dependencyEpoch) {
+        for (const repository of discovered.repositories) {
+          if (repository.remote) this.retireDependencies(repository)
+        }
+      }
+      this.state = discovered
+      this.publish(discovered)
       const priority = new Set(request.visibleWorktreeIds ?? [])
       const prioritized = [...repositories].sort(
         (a, b) =>
@@ -847,6 +933,12 @@ export class WorktreeInventoryService {
         })
       }
       if (combined.aborted || generation !== this.generation) throw new CommandCancelled()
+      if (dependencyEpoch !== this.dependencyEpoch) {
+        for (const repository of repositories) {
+          if (repository.remote) this.retireDependencies(repository)
+        }
+        this.schedule()
+      }
       const state: WorktreeInventory = {
         generation: ++this.publication,
         repositories,
@@ -868,6 +960,11 @@ export class WorktreeInventoryService {
             : 'complete',
       }
       for (const repository of repositories) this.joinRemote(repository)
+      this.inspectedWorktrees = new Map(
+        repositories.flatMap((repository) =>
+          repository.worktrees.map((tree) => [tree.id, tree] as const),
+        ),
+      )
       this.state = state
       this.publish(state)
       return state
@@ -976,8 +1073,10 @@ export class WorktreeInventoryService {
               )
                 changed.add(primary.path)
             }
-            this.onLocalChange?.(current.registeredPaths)
             for (const affected of changed) this.invalid.add(affected)
+            for (const [id, inspected] of this.inspectedWorktrees)
+              if (changed.has(inspected.path)) this.inspectedWorktrees.delete(id)
+            this.onLocalChange?.(current.registeredPaths)
             this.controller?.abort()
             this.generation++
             this.state = {
@@ -1097,6 +1196,7 @@ export class WorktreeInventoryService {
     this.controller?.abort()
     this.watcherController.abort()
     clearTimeout(this.refreshTimer)
+    this.inspectedWorktrees.clear()
     this.stopWatchers()
   }
 }

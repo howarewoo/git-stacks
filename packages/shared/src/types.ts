@@ -442,6 +442,8 @@ export interface RepositorySnapshot {
   operation: GitOperation | null
   stackOperation: StackProgress | null
   headOid: string | null
+  /** Main's consumed provider read identity; bounded reads do not refresh full coverage. */
+  providerRead?: number
   github: { available: boolean; message: string }
   nativeStacks?: NativeStack[]
   nativeStackPreviewAvailable?: boolean
@@ -539,6 +541,12 @@ export interface Commit {
 export interface HistoryPage {
   commits: Commit[]
   hasMore: boolean
+}
+export interface BranchCommitsRead {
+  /** Commits reachable from the branch tip but not the resolved dependency parent tip (parentOID..branchOID). */
+  commits: number
+  branchOid: string
+  parentOid: string
 }
 export interface FileView {
   path: string
@@ -1379,6 +1387,7 @@ export interface DesktopAPI {
   conflictView(path: string): Promise<ConflictFile>
   history(ref: string, skip: number, requestId?: string): Promise<HistoryPage>
   commitDiff(oid: string, requestId?: string): Promise<{ text: string; truncated: boolean }>
+  branchCommits?(parentRefId: string, requestId?: string): Promise<BranchCommitsRead>
   pushPreview(): Promise<PushPreview>
   stackPreview(kind: StackKind, branch: string): Promise<StackPreview>
   reviewedMergePreview?(number: number): Promise<StackPreview>

@@ -6,7 +6,17 @@ import type {
   spawnSync as SpawnSyncFunction,
 } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -159,7 +169,13 @@ function beginScenario(scenario: ArmedScenario): GitScenario {
 
 // Git Stacks captures Node's spawn API when its own modules load, and the race
 // fixture shims that API, so the Git Stacks modules under test are loaded here.
-const { getSnapshot, resolveRepository, runAction } = await import('../src/main/git')
+const {
+  getSnapshot,
+  resolveRepository,
+  runAction,
+  resolveBranchCommitDependency,
+  getBranchCommitCount,
+} = await import('../src/main/git')
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'git-stacks-test-'))
@@ -176,6 +192,70 @@ async function fixture() {
   git('commit', '-m', 'Initial commit')
   return { root, repo, git }
 }
+
+test('snapshot status leaves an out-of-date clean index unchanged', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    const { listStatus } = await import('../src/main/git-core')
+    const index = join(repo, '.git', 'index')
+    const before = await readFile(index)
+    const tracked = join(repo, 'shared.txt')
+    const metadata = await stat(tracked)
+    // Same bytes, different metadata: ordinary status optionally refreshes the
+    // index here, which would invalidate an inventory read watching this repo.
+    await utimes(tracked, metadata.atime, new Date(metadata.mtimeMs + 2000))
+    assert.deepEqual(await listStatus(repo), { files: [], truncated: false })
+    assert.deepEqual(
+      await readFile(index),
+      before,
+      'a snapshot read must not rewrite its own index',
+    )
+    git('status', '--porcelain=v1', '-z', '--untracked-files=all')
+    assert.notDeepEqual(
+      await readFile(index),
+      before,
+      'the fixture must exercise the optional index refresh that a snapshot avoids',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('selected commit counts follow dependency-only changes and qualified remote parents', async () => {
+  const { root, repo, git } = await fixture()
+  try {
+    const base = git('rev-parse', 'HEAD')
+    git('checkout', '-b', 'topic')
+    await writeFile(join(repo, 'shared.txt'), 'first\n')
+    git('commit', '-am', 'First topic commit')
+    const first = git('rev-parse', 'HEAD')
+    await writeFile(join(repo, 'shared.txt'), 'second\n')
+    git('commit', '-am', 'Second topic commit')
+    const tip = git('rev-parse', 'HEAD')
+    git('branch', 'base-a', base)
+    git('branch', 'base-b', first)
+    git('config', 'branch.topic.parent', 'base-a')
+    const before = await resolveBranchCommitDependency(repo, 'refs/heads/topic')
+    assert.equal(before.parentRef, 'refs/heads/base-a')
+    assert.equal((await getBranchCommitCount(repo, tip, base)).commits, 2)
+    git('config', 'branch.topic.parent', 'base-b')
+    const after = await resolveBranchCommitDependency(repo, 'refs/heads/topic')
+    assert.equal(after.parentRef, 'refs/heads/base-b')
+    assert.notEqual(after.evidence, before.evidence)
+    assert.equal(git('rev-parse', 'HEAD'), tip)
+    assert.equal((await getBranchCommitCount(repo, tip, first)).commits, 1)
+    git('update-ref', 'refs/remotes/origin/topic', tip)
+    const remote = await resolveBranchCommitDependency(repo, 'refs/remotes/origin/topic')
+    assert.equal(remote.parentRef, 'refs/heads/base-b')
+    assert.equal(
+      (await getSnapshot(repo)).branches.find((b) => b.ref === 'refs/remotes/origin/topic')
+        ?.parentRef,
+      remote.parentRef,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('dirty switches and option-like branch names cannot change or discard work', async () => {
   const { root, repo, git } = await fixture()

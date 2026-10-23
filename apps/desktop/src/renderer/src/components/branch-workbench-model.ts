@@ -20,6 +20,14 @@ export interface WorkbenchRepository {
   readyBranchCount?: number | null
   worktreeCount: number | null
   attentionCount: number | null
+  countProvenance?: {
+    branch?: { state: string; reason?: string }
+    pullRequest?: { state: string; reason?: string }
+    unpublished?: { state: string; reason?: string }
+    ready?: { state: string; reason?: string }
+    worktree?: { state: string; reason?: string }
+    attention?: { state: string; reason?: string }
+  }
 }
 
 export interface WorkbenchBranch {
@@ -30,10 +38,29 @@ export interface WorkbenchBranch {
   title: string
   parentId: string | null
   parentIssue?: string
+  /** Main-resolved qualified parent ref identity before row remapping. */
+  parentRefId?: string | null
+  parentOid?: string | null
+  /** Qualified main-resolved Git ancestry parent before row remapping. */
+  dependencyParentRefId?: string | null
+  dependencyParentOid?: string | null
+  dependencyParentIssue?: string
   recordedParent?: string | null
   worktreesKnown?: boolean
   trunk: boolean
   refKind?: 'local' | 'remote'
+  /** Qualified local ref identity and tip when present. */
+  localRef?: { id: string; name: string; oid: string } | null
+  /** Qualified tracking remote ref identity and tip when present. */
+  remoteRef?: {
+    id: string
+    name: string
+    oid: string
+    remoteId?: string | null
+    remoteName?: string | null
+  } | null
+  /** Configured upstream tracking ref name when set in local Git config. */
+  configuredUpstream?: string | null
   /** Read affordance only; never authority to execute a Git mutation. */
   bulkEligible?: boolean
   worktrees: readonly {
@@ -46,11 +73,14 @@ export interface WorkbenchBranch {
   }[]
   local: WorkbenchFact
   unpushed: number | null
+  behind?: number | null
   commits: number | null
+  commitsIssue?: string
   attention: boolean
   needsRestack: boolean
   conflicted: boolean | null
   readyToMerge: boolean | null
+  pullRequestIssue?: string
   /** null is confirmed absence; undefined is unavailable association metadata. */
   pullRequest?: {
     id: string
@@ -77,7 +107,13 @@ export interface WorkbenchBranch {
 export interface BranchWorkbenchSnapshot {
   repositories: readonly WorkbenchRepository[]
   branches: readonly WorkbenchBranch[]
-  globalCounts?: { attention: number | null; readyToMerge: number | null }
+  globalCounts?: {
+    attention: number | null
+    readyToMerge: number | null
+    attentionReason?: string
+    attentionMissingCoverage?: readonly string[]
+    readyReason?: string
+  }
   localFreshness: string
   remoteFreshness: string
   notice?: string
