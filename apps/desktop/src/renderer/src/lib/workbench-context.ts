@@ -104,6 +104,12 @@ export function readWorkbenchMemory(): Record<string, RepositoryViewMemory> {
           scope: view.scope,
           folded: view.folded,
           scroll: view.scroll,
+          paneScroll:
+            typeof view.paneScroll === 'number' &&
+            Number.isFinite(view.paneScroll) &&
+            view.paneScroll >= 0
+              ? view.paneScroll
+              : initialWorkbenchView.paneScroll,
           unfilteredScroll:
             typeof view.unfilteredScroll === 'number' &&
             Number.isFinite(view.unfilteredScroll) &&

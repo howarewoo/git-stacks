@@ -422,6 +422,13 @@ the same shared pane implementation rather than duplicating its scroll behavior.
 - **Announcements:** success notices, rejected previews, and workspace changes are polite; errors and blockers are assertive. A live region states an outcome once, and never replaces the visible control it describes.
 - **Zoom and motion:** the workbench reflows to a 720×470 CSS-pixel viewport, equivalent to 200% zoom on the standard window, without horizontal scrolling or unreachable actions. A control row's height is a minimum, never a fixed basis: at the zoom a person set, or in a narrow window, its controls wrap onto further lines and must push what follows them down rather than overlap it. `prefers-reduced-motion: reduce` suppresses transitions while status text, focus rings, and operation locks remain.
 
+The branch pane reserves space for its sticky column labels and a full standard
+row. When header and footer controls outgrow a short viewport, the pane scrolls
+locally instead of collapsing the row scrollport beneath its labels. Revealing a
+branch control by pointer or keyboard respects that sticky-label inset.
+Both the pane and lane scroll offsets remain repository-local and restore
+independently when returning from another repository or workspace destination.
+
 ### Cards / Containers
 
 - **Corner Style:** Workbench surfaces retain the 24px token; items use 16px and controls use 12px, with incumbent utility-specific corners preserved.

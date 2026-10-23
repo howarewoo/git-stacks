@@ -167,6 +167,16 @@ export function presentationScenario(source: BranchWorkbenchSnapshot): FixtureSc
       refIds: repo.refs.filter((ref) => ref.pullRequestIds.includes(pr.id)).map((ref) => ref.id),
     }))
     repo.dependenciesRead = read
+    repo.dependencies = branches.map(
+      ({ ref, parent, parentRef, parentSource, recordedParent }) => ({
+        ref,
+        parent,
+        parentRef,
+        parentSource,
+        recordedParent,
+      }),
+    )
+    repo.dependencyDefaultBranch = snapshot.defaultBranch
     inventory.repositories.push(repo)
   }
   return {
@@ -211,7 +221,8 @@ export function cutoverScale(size: GraphSize): FixtureScenario {
     branches: primary.branches.slice(0, 4),
     pullRequests: primary.pullRequests.slice(0, 3),
   }
-  const inventory = snapshotInventory([primary, clone])
+  const snapshots = [primary, clone]
+  const inventory = snapshotInventory(snapshots)
   const repo = inventory.repositories[0]
   const tree = repo.worktrees[0]
   repo.worktrees = Array.from({ length: 120 }, (_, position) => {
@@ -257,7 +268,38 @@ export function cutoverScale(size: GraphSize): FixtureScenario {
     ref.worktreeIds = repo.worktrees
       .filter((worktree) => worktree.refId === ref.id)
       .map((worktree) => worktree.id)
-  for (const repository of inventory.repositories) repository.dependenciesRead = read
+  // The PR-only tip's published base needs an observed remote facet, not a
+  // display-name match against a local branch.
+  const publishedOnly = repo.pullRequests.find((pr) => pr.refIds.length === 0)!
+  const baseRef = repo.refs.find(
+    (ref) => ref.kind === 'local' && ref.name === `refs/heads/${publishedOnly.facts.base}`,
+  )!
+  const publishedBaseName = `refs/remotes/origin/${publishedOnly.facts.base}`
+  const publishedBaseId = JSON.stringify([repo.identity.id, 'ref', publishedBaseName])
+  baseRef.upstream = publishedBaseId
+  repo.refs.push({
+    ...baseRef,
+    id: publishedBaseId,
+    name: publishedBaseName,
+    kind: 'remote',
+    remoteName: 'origin',
+    remoteId: repo.remote!.id,
+    upstream: null,
+    worktreeIds: [],
+  })
+  for (const [index, repository] of inventory.repositories.entries()) {
+    repository.dependenciesRead = read
+    repository.dependencies = snapshots[index].branches.map(
+      ({ ref, parent, parentRef, parentSource, recordedParent }) => ({
+        ref,
+        parent,
+        parentRef,
+        parentSource,
+        recordedParent,
+      }),
+    )
+    repository.dependencyDefaultBranch = snapshots[index].defaultBranch
+  }
   return {
     name: `cutover-${size}`,
     summary: `Deterministic ${size} PR/ref objects, deep and wide forks, no-directory and remote-only refs, 120 distinct worktrees and independent clone.`,

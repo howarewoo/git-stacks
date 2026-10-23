@@ -47,8 +47,20 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
 
     test('selected branch inspector remains keyboard operable at compact reflow', async ({
       page,
-    }) => {
-      await page.getByRole('button', { name: 'feature/checkout', exact: true }).click()
+    }, info) => {
+      const branch = page
+        .locator('.bw-lane-row')
+        .getByRole('button', { name: 'feature/checkout', exact: true })
+      const geometry = await branch.evaluate((node) => {
+        const scroll = node.closest('.bw-main-scroll')!
+        const labels = node.closest('.bw-lane-group')!.querySelector('.bw-labels')!
+        return {
+          available: scroll.clientHeight - labels.getBoundingClientRect().height,
+          target: node.getBoundingClientRect().height,
+        }
+      })
+      expect(geometry.available).toBeGreaterThanOrEqual(geometry.target)
+      await branch.click()
       const inspector = page.getByRole('complementary', { name: 'Selected branch details' })
       await expect(inspector).toBeVisible()
       for (const name of ['Overview', 'Changes', 'Checks', 'Discussion']) {
@@ -61,6 +73,33 @@ test.describe('Responsive pane adaptation, compact reflow, and reduced motion', 
         expect(box!.x).toBeGreaterThanOrEqual(0)
         expect(box!.x + box!.width).toBeLessThanOrEqual(720)
       }
+      await page.keyboard.press('Escape')
+      await expect(inspector).toHaveCount(0)
+      await expect(branch).toBeFocused()
+      const pane = page.getByRole('main', { name: 'Branch workbench', exact: true })
+      const footer = pane.locator('.bw-panel-bottom')
+      await footer.scrollIntoViewIfNeeded()
+      await expect(footer).toBeInViewport({ ratio: 1 })
+      const footerScroll = await pane.evaluate((node) => node.scrollTop)
+      const discover = pane.getByRole('button', { name: 'Discover worktrees', exact: true })
+      await discover.focus()
+      await expect(discover).toBeFocused()
+      await expect(discover).toBeInViewport({ ratio: 1 })
+      expect(footerScroll).toBeGreaterThan(await pane.evaluate((node) => node.scrollTop))
+      await branch.focus()
+      expect(
+        await branch.evaluate((node) => {
+          const box = node.getBoundingClientRect()
+          return node.contains(
+            document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2),
+          )
+        }),
+      ).toBe(true)
+      expect(await page.evaluate(() => document.scrollingElement?.scrollTop)).toBe(0)
+      await info.attach('compact-workbench-restored-focus', {
+        body: await page.screenshot(),
+        contentType: 'image/png',
+      })
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
       ).toBe(false)

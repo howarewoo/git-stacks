@@ -703,14 +703,14 @@ for (const theme of ['light', 'dark'])
     const composition = page.locator('#git-compositions')
     await composition.scrollIntoViewIfNeeded()
     await captureAtDevicePixelOrigin(composition, () =>
-      expect(composition).toHaveScreenshot(`git-compositions-${theme}.png`, {
+      expect.soft(composition).toHaveScreenshot(`git-compositions-${theme}.png`, {
         animations: 'disabled',
       }),
     )
     await page.getByRole('textbox', { name: 'Search components' }).fill('Button')
     const button = page.locator('#button')
     await captureAtDevicePixelOrigin(button, () =>
-      expect(button).toHaveScreenshot(`button-${theme}.png`, { animations: 'disabled' }),
+      expect.soft(button).toHaveScreenshot(`button-${theme}.png`, { animations: 'disabled' }),
     )
   })
 

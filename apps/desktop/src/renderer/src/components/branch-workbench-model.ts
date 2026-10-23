@@ -253,6 +253,7 @@ export interface WorkbenchViewState {
   tab: 'overview' | 'changes' | 'checks' | 'discussion'
   worktreeId: string | null
   scroll: number
+  paneScroll: number
   page: number
   unfilteredScroll?: number
   unfilteredPage?: number
@@ -267,6 +268,7 @@ export const initialWorkbenchView: WorkbenchViewState = {
   tab: 'overview',
   worktreeId: null,
   scroll: 0,
+  paneScroll: 0,
   page: 0,
 }
 

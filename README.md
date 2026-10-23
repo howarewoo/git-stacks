@@ -1959,9 +1959,18 @@ they were the same series. Do not fabricate an unrun packet or relax a budget.
 
 It writes `benchmarks/latest.json` and appends one line per run to
 `benchmarks/trend.jsonl` (capped at the last 200 runs). The `budgets` job in the
-`Accessibility checks` workflow runs the full harness on main pushes and manual
-dispatches, and on PRs affecting desktop production code or shared dependencies. It uploads `benchmarks/`
-as an artifact and fails when any measurement exceeds its budget. See
+`Accessibility checks` workflow runs the general benchmark harness on main pushes
+and manual dispatches, and on PRs affecting desktop production code or shared
+dependencies. It uploads `benchmarks/` as an artifact and fails when any measurement
+exceeds its budget. That command does not include the native lane envelope.
+
+Manual dispatch additionally runs the independent `native-lane-envelope` job on
+Ubuntu 24.04 x64 with a 30-minute job limit. It builds the production desktop,
+explicitly provisions and verifies the pinned Git runtime, configures the supported
+Electron sandbox helper, then runs the existing `--lanes-only` command under Xvfb.
+The `native-lane-envelope` artifact retains `benchmarks/lanes/lane-envelope.json`
+when produced, including source and hardware provenance and any exceeded budgets.
+Missing or failed runs are not lane-envelope acceptance. See
 [Selective CI](#selective-ci) for the conservative selection policy.
 
 ### What the hot paths no longer do
@@ -2126,6 +2135,11 @@ and executes the normal root `pnpm test`, including the complete desktop unit su
 and design manifest/browser tests, under a 30-minute job limit. This complete root
 coverage is dispatch-only; the existing affected-check selector and automatic
 push/PR workloads are unchanged.
+
+The separate dispatch-only `native-lane-envelope` job measures the real production
+Electron application at 250, 1000 and 5000 objects with 120 concurrent worktrees.
+It retains the existing first-page, input, layout, mounted-window, request and heap
+limits; the general `budgets` job remains independent and unchanged.
 
 `scripts/ci/select-checks.mjs` is the single dependency-free Node 24/Git policy.
 The workflow runs its permanent regression suite once before dependency installation,

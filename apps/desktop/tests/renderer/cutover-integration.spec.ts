@@ -36,7 +36,10 @@ test('actual selected directory separates HEAD-index and index-directory edits, 
   page,
 }) => {
   await openGallery(page, { scenario: 'cutover-inspection' })
-  await page.getByRole('button', { name: 'feat/repository-history', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/repository-history', exact: true })
+    .click()
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await chooseFile(page, /src\/dual\.ts$/)
   await expect(page.getByLabel('Staged · HEAD compared with index', { exact: true })).toContainText(
@@ -64,11 +67,17 @@ test('a late selected-file read cannot replace a newly selected directory or imp
   page,
 }) => {
   await openGallery(page, { scenario: 'cutover-inspection' })
-  await page.getByRole('button', { name: 'feat/repository-history', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/repository-history', exact: true })
+    .click()
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await page.evaluate(() => window.fixture.hold('fileView'))
   await chooseFile(page, /src\/dual\.ts$/)
-  await page.getByRole('button', { name: 'feat/worktree-registry', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/worktree-registry', exact: true })
+    .click()
   await page.evaluate(() => window.fixture.release('fileView'))
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await expect(
@@ -84,7 +93,10 @@ test('global keyboard search is independent of the local lane filter and does no
   await openGallery(page, { scenario: 'cutover-250' })
   const local = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
   await local.fill('graph/change-250')
-  await page.getByRole('button', { name: 'graph/change-250', exact: true }).focus()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'graph/change-250', exact: true })
+    .focus()
   await page.keyboard.press('Control+k')
   const search = page.getByRole('dialog', { name: 'Global search', exact: true })
   await expect(search).toBeVisible()
@@ -149,7 +161,10 @@ test('generated local diff pages preserve exact 1000-line boundaries and reset f
   page,
 }) => {
   await openGallery(page, { scenario: 'cutover-inspection' })
-  await page.getByRole('button', { name: 'feat/repository-history', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/repository-history', exact: true })
+    .click()
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await chooseFile(page, /src\/generated\.ts$/)
   const staged = page.getByLabel('Staged · HEAD compared with index', { exact: true })

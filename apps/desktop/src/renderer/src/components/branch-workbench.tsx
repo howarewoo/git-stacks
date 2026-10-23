@@ -366,6 +366,7 @@ export function BranchWorkbench({
     return () => media.removeEventListener('change', update)
   }, [])
   const scroll = useRef<HTMLDivElement>(null)
+  const pane = useRef<HTMLElement>(null)
   const pendingRowFocus = useRef<string | null>(null)
   useLayoutEffect(() => {
     const id = pendingRowFocus.current
@@ -378,7 +379,9 @@ export function BranchWorkbench({
     }
   }, [page, focusedBranchId])
   useLayoutEffect(() => {
+    pane.current = scroll.current?.closest<HTMLElement>('.bw-main') ?? null
     if (scroll.current) scroll.current.scrollTop = viewState.scroll
+    if (pane.current) pane.current.scrollTop = viewState.paneScroll
   }, [surface, repositoryId])
   const filtering = Boolean(query) || filter !== filters[0] || scope !== 'all' || refScope !== 'all'
   const unfiltered = useRef({
@@ -400,6 +403,7 @@ export function BranchWorkbench({
       tab,
       worktreeId,
       scroll: scrollTop,
+      paneScroll: pane.current?.scrollTop ?? viewState.paneScroll,
       page,
       unfilteredScroll: unfiltered.current.scroll,
       unfilteredPage: unfiltered.current.page,
@@ -1247,6 +1251,7 @@ export function BranchWorkbench({
             className="bw-main"
             aria-label="Branch workbench"
             role="main"
+            onScroll={() => persistView()}
             header={
               <>
                 <div className="bw-panel-head">

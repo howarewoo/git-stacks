@@ -330,7 +330,11 @@ export function workbenchV5Fixture(degraded = false): BranchWorkbenchSnapshot {
         parentId: parentSeed ? refId(repo, parentSeed[2]) : null,
         trunk: primary,
         refKind: state === 'remote' ? 'remote' : 'local',
-        worktreesKnown: !unknown,
+        localRef:
+          state === 'remote'
+            ? null
+            : { id: refId(repo, ref), name: `refs/heads/${ref}`, oid: head.padEnd(40, '0') },
+        worktreesKnown: true,
         bulkEligible:
           !primary && !unknown && state !== 'remote' && dirty === 0 && state !== 'conflict',
         worktrees:
@@ -355,7 +359,9 @@ export function workbenchV5Fixture(degraded = false): BranchWorkbenchSnapshot {
                   changedFiles: unknown ? null : dirty,
                 },
               ],
-        local: { label: number ? 'Published' : 'Local only' },
+        local: {
+          label: unknown ? 'Local status unavailable' : number ? 'Published' : 'Local only',
+        },
         unpushed: unknown ? null : ahead,
         commits: number ? 3 : ahead,
         attention: ['review', 'changes', 'failed', 'conflict', 'restack'].includes(state),
