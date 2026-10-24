@@ -163,7 +163,7 @@ function App() {
   const [, updateRunningOperations] = React.useReducer((value: number) => value + 1, 0)
   const [discoveryWorktrees, setDiscoveryWorktrees] = React.useState(false)
   const [discoveryPage, setDiscoveryPage] = React.useState(0)
-  const [historyOpen, setHistoryOpen] = React.useState(false)
+  const [historyContext, setHistoryContext] = React.useState<InspectionContext | null>(null)
   const [notificationOpen, setNotificationOpen] = React.useState(false)
   const [credentialOpen, setCredentialOpen] = React.useState(false)
   const [notificationInbox, setNotificationInbox] = React.useState<NotificationInbox | null>(null)
@@ -356,16 +356,8 @@ function App() {
     () => (desktop ? inspectionAPI(desktop, context) : null),
     [desktop, context],
   )
-  const historyContext: InspectionContext = React.useMemo(
-    () => ({
-      repositoryId,
-      refId: selectedRefId,
-      worktreeId: selectedRefId ? undefined : selectedTree?.id,
-    }),
-    [repositoryId, selectedRefId, selectedTree?.id],
-  )
   const historyAPI = React.useMemo(
-    () => (desktop ? inspectionAPI(desktop, historyContext) : null),
+    () => (desktop && historyContext ? inspectionAPI(desktop, historyContext) : null),
     [desktop, historyContext],
   )
   const publishedContext: InspectionContext = React.useMemo(
@@ -1307,15 +1299,11 @@ function App() {
       return
     }
     if (action === 'history') {
-      if (captured.branchId) {
-        const saved = memoryRef.current[captured.repositoryId] ?? emptyRepositoryMemory
-        navigate(captured.repositoryId, 'branches', captured.branchId, captured.worktreeId)
-        updateMemory(captured.repositoryId, {
-          selectedId: captured.branchId,
-          view: { ...saved.view, worktreeId: captured.worktreeId ?? null },
-        })
-      }
-      setHistoryOpen(true)
+      setHistoryContext({
+        repositoryId: captured.repositoryId,
+        refId: captured.branchId,
+        worktreeId: captured.branchId ? undefined : captured.worktreeId,
+      })
       return
     }
     if (action === 'open-directory') {
@@ -2757,18 +2745,27 @@ function App() {
           </Button>
         </DialogContent>
       </Dialog>
-      <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+      <Dialog
+        open={Boolean(historyContext)}
+        onOpenChange={(open) => {
+          if (!open) setHistoryContext(null)
+        }}
+      >
         <DialogContent className="wb-history-dialog">
           <DialogHeader>
             <DialogTitle>Selected committed history</DialogTitle>
             <DialogDescription>Read-only context, independent of checkout.</DialogDescription>
           </DialogHeader>
-          {historyAPI && selected ? (
+          {historyAPI && historyContext ? (
             <ContextHistory
               key={JSON.stringify(historyContext)}
               api={historyAPI}
               identity={JSON.stringify(historyContext)}
-              ref={repository?.refs.find((ref) => ref.id === primaryRefId)?.name ?? 'HEAD'}
+              ref={
+                inventory.data?.repositories
+                  .find((repo) => repo.identity.id === historyContext.repositoryId)
+                  ?.refs.find((ref) => ref.id === historyContext.refId)?.name ?? 'HEAD'
+              }
             />
           ) : (
             <p>Select a qualified branch or worktree.</p>
