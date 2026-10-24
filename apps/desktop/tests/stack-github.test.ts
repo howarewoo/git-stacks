@@ -1076,6 +1076,9 @@ test('a native stack on a release line merges against the branch it is registere
         ['merged', 'merged'],
       )
     })
+    // Landing never fetches; the tracking-ref assertions below are only true once the run
+    // explicitly fetched what the queue of the landing's request left on origin.
+    await runAction(harness.repo, { type: 'fetch' })
     const after = await harness.readState()
     assert.equal(prFor(after, 'parent').state, 'MERGED')
     assert.equal(prFor(after, 'child').state, 'MERGED')
@@ -1086,11 +1089,9 @@ test('a native stack on a release line merges against the branch it is registere
       git(harness, ['rev-parse', 'refs/remotes/origin/release/1.x']),
       remoteOid(harness, 'release/1.x'),
     )
-    assert.equal(
-      git(harness, ['config', '--get', 'branch.child.gitStacksMergedCommitOid']),
-      prFor(after, 'child').mergeOid,
-      'fallback merge-commit discovery uses the fetched release trunk',
-    )
+    // Landing never fetches, so the fallback trunk scan at finalize cannot see the merge
+    // commits this request created; with both provider sha paths absent from the wire the
+    // unknown merge commit stays unfabricated, and only a later fetch imports the objects.
   })
 })
 
@@ -1578,6 +1579,9 @@ test('merged-root restack uses fetched remote main, preserves merged content, an
     assert.equal(remoteOid(harness, 'main'), mergedParent.mergeOid)
     assert.equal(mergedParent.headOid, parentHeadBefore)
 
+    // The merge commit exists on the remote's trunk; the restack plan is only allowed to
+    // validate and replay onto a trunk the run actually fetched.
+    await runAction(harness.repo, { type: 'fetch' })
     const restackPreview = await previewStack(
       harness.repo,
       await getSnapshot(harness.repo),
@@ -1676,6 +1680,10 @@ test('restack preserves unpublished commits after a merged parent', {
     assert.ok(mergedParentHead)
     assert.ok(mergedParentMergeOid)
 
+    // The merge commit exists on the remote's trunk; the restack plan is only allowed to
+    // validate and replay onto a trunk the run actually fetched.
+    await runAction(harness.repo, { type: 'fetch' })
+
     git(harness, ['switch', 'parent'])
     const laterParentTip = await commitFile(
       harness,
@@ -1749,6 +1757,10 @@ test('restack preserves commits added to a merged PR source after its merge', {
       git(harness, ['config', '--get', 'branch.parent.gitStacksMergedCommitOid']),
       prFor(state, 'parent').mergeOid,
     )
+
+    // The merge commit exists on the remote's trunk; the restack plan is only allowed to
+    // validate and replay onto a trunk the run actually fetched.
+    await runAction(harness.repo, { type: 'fetch' })
 
     git(harness, ['switch', 'parent'])
     const laterParentTip = await commitFile(
@@ -1833,6 +1845,10 @@ test('restack reconstructs merge-time head from journal and rejects unproven met
     state = await harness.readState()
     const mergedHead = prFor(state, 'parent').headOid
     assert.ok(mergedHead)
+
+    // The merge commit exists on the remote's trunk; the restack plan is only allowed to
+    // validate and replay onto a trunk the run actually fetched.
+    await runAction(harness.repo, { type: 'fetch' })
 
     const journalPath = join(harness.repo, '.git', 'git-stacks-merged-heads.json')
     const journalContent = JSON.parse(await readFile(journalPath, 'utf8'))
@@ -2335,6 +2351,10 @@ test('restack rejects stale ancestor candidate when journal records the true mer
     const mergedHead = prFor(state, 'parent').headOid
     assert.equal(mergedHead, parentTip)
 
+    // The merge commit exists on the remote's trunk; the restack plan is only allowed to
+    // validate and replay onto a trunk the run actually fetched.
+    await runAction(harness.repo, { type: 'fetch' })
+
     // Stale config points at parentFirstCommit (an ancestor of mergedHead)
     git(harness, ['switch', 'child'])
     git(harness, ['config', '--local', 'branch.parent.gitStacksMergedHeadOid', parentFirstCommit])
@@ -2746,35 +2766,85 @@ test('a queue that holds a pull request, ejects it, and takes it again is read f
         ['enqueued', 'enqueued'],
       )
 
-      // The queue accepted the group, so it is reported as holding it, with the place it
-      // named. An accepted enqueue is not that evidence; GitHub's membership is.
+      // The queue accepted the group, so it is reported as holding every member of it, with
+      // the place it named. An accepted enqueue is not that evidence; GitHub's membership is.
       const queued = await getMergeStatus(harness.repo)
+      const parentNumber = prFor(state, 'parent').number
       const held = queued?.layers.find((entry) => entry.pullRequest === childNumber)
+      const heldParent = queued?.layers.find((entry) => entry.pullRequest === parentNumber)
       assert.equal(held?.status, 'enqueued')
       assert.equal(held?.queue?.outcome, 'queued')
       assert.equal(held?.queue?.membership, 'queued')
       assert.ok((held?.queue?.entry?.position ?? 0) > 0, 'the entry names the place in the queue')
       assert.equal(held?.queue?.stale, false)
+      assert.equal(heldParent?.queue?.membership, 'queued', 'the group holds its parent too')
+      assert.ok(heldParent?.queue?.entry, 'the parent names its own place in the queue')
       assert.equal(starts.length, 1, 'reading a queue outcome submits no merge')
+      const entryFor = (layer: typeof held) => ({
+        position: layer?.queue?.entry?.position ?? 0,
+        state: layer?.queue?.entry?.state ?? 'QUEUED',
+        enqueuedAt: layer?.queue?.entry?.enqueuedAt ?? '',
+      })
 
-      // The queue rejects it for a failing rule. Nothing merges and no ref moves; the pull
-      // request is simply no longer held.
-      const ejected = await harness.readState()
-      delete ejected.mergeQueueMembers?.[String(childNumber)]
+      // The queue releases the child alone for a failing rule while the parent stays held.
+      // Nothing merges and no ref moves. The fixture's saved state does not carry the live
+      // queue record, so the provider's membership is written out whole rather than edited.
       const before = { local: localOid(harness, 'child'), remote: remoteOid(harness, 'child') }
-      await harness.writeState(ejected)
-      const dropped = await getMergeStatus(harness.repo)
-      const out = dropped?.layers.find((entry) => entry.pullRequest === childNumber)
+      const partial = await harness.readState()
+      partial.mergeQueueMembers = { [String(parentNumber)]: entryFor(heldParent) }
+      await harness.writeState(partial)
+      const partiallyDropped = await getMergeStatus(harness.repo)
+      const out = partiallyDropped?.layers.find((entry) => entry.pullRequest === childNumber)
+      const stillHeld = partiallyDropped?.layers.find((entry) => entry.pullRequest === parentNumber)
       assert.equal(out?.queue?.outcome, 'dropped', 'a pull request the queue let go is dropped')
       assert.equal(out?.queue?.membership, 'not-queued')
       assert.equal(out?.status, 'not-merged')
+      assert.equal(stillHeld?.queue?.membership, 'queued', 'the held parent is still queued')
+      assert.equal(stillHeld?.queue?.outcome, 'queued')
+      assert.equal(localOid(harness, 'child'), before.local, 'an ejection moves no ref')
+      assert.equal(remoteOid(harness, 'child'), before.remote)
+      assert.equal(starts.length, 1, 'reading a partial release submits no merge')
+
+      // The group is still held through its parent, so a retry of the whole group must not
+      // dispatch a second request that would put the released child back behind it.
+      const startsBeforeRetry = starts.length
+      const retry = await previewStack(
+        harness.repo,
+        await getSnapshot(harness.repo),
+        'merge',
+        'child',
+      )
+      await assert.rejects(
+        runAction(harness.repo, {
+          type: 'executeStack',
+          token: retry.token,
+          allowForce: false,
+          mergeMethod: 'squash',
+          mergeAction: 'merge_queue',
+        }),
+        'a retry while the parent is held is refused',
+      )
+      assert.deepEqual(
+        starts.slice(startsBeforeRetry),
+        [],
+        'a retry while the parent is held dispatches no provider request',
+      )
+
+      // Releasing the last held member leaves the whole group dropped.
+      const fullyReleased = await harness.readState()
+      fullyReleased.mergeQueueMembers = {}
+      await harness.writeState(fullyReleased)
+      const dropped = await getMergeStatus(harness.repo)
+      for (const number of [parentNumber, childNumber]) {
+        const layer = dropped?.layers.find((entry) => entry.pullRequest === number)
+        assert.equal(layer?.queue?.outcome, 'dropped')
+        assert.equal(layer?.queue?.membership, 'not-queued')
+      }
       assert.notEqual(
         dropped?.message,
         'GitHub reports no further change for these merge requests.',
         'the summary reports the removal GitHub published',
       )
-      assert.equal(localOid(harness, 'child'), before.local, 'an ejection moves no ref')
-      assert.equal(remoteOid(harness, 'child'), before.remote)
 
       // Enqueueing again is a new request, and the queue reports it again.
       const again = await previewStack(
@@ -3223,6 +3293,7 @@ test('a request that later enqueues is read from the owning endpoint and stays e
     )
     const running = await harness.readState()
     running.asyncMergeStaysPending = true
+    running.mergeQueue = false
     await harness.writeState(running)
     const { transport, polls } = recordingMergeTransport()
     await withHarnessTransport(harness, transport, async () => {
@@ -3284,8 +3355,8 @@ test('a request that later enqueues is read from the owning endpoint and stays e
       )
       assert.equal(
         offered.merge?.actions.includes('merge_queue'),
-        true,
-        'an accepted enqueue is the evidence a queue exists for this base ref',
+        false,
+        'retained queue membership does not authorize delivery without live queue capability',
       )
     })
   })

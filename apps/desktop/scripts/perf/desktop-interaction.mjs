@@ -184,6 +184,8 @@ export async function measureDesktop(repoRoot, fixture, options = {}) {
     electron,
     [
       '--disable-gpu',
+      '--use-mock-keychain',
+      '--password-store=basic',
       `--remote-debugging-port=${port}`,
       ...(mainPort ? [`--inspect=127.0.0.1:${mainPort}`] : []),
       join(repoRoot, 'out/main/index.js'),

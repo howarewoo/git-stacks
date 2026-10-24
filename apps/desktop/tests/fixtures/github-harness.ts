@@ -1364,7 +1364,8 @@ export interface GitHubHarnessOptions {
 export async function createGitHubHarness(
   options: GitHubHarnessOptions = {},
 ): Promise<GitHubHarness> {
-  const root = options.root ?? (await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-')))
+  const root =
+    options.root ?? realpathSync(await mkdtemp(join(tmpdir(), 'git-stacks-github-harness-')))
   const defaultBranch = options.defaultBranch ?? 'main'
   const repo = join(root, 'repo')
   const bare = join(root, options.barePath ?? 'remote.git')

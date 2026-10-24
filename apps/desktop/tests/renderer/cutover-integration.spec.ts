@@ -7,6 +7,7 @@ import {
   publishCliStatus,
 } from './helpers/gallery'
 import { switchDestination } from './helpers/destinations'
+import { inventoryFixture } from './fixtures/inventory'
 import type { Page } from '@playwright/test'
 
 const writes = [
@@ -36,7 +37,10 @@ test('actual selected directory separates HEAD-index and index-directory edits, 
   page,
 }) => {
   await openGallery(page, { scenario: 'cutover-inspection' })
-  await page.getByRole('button', { name: 'feat/repository-history', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/repository-history', exact: true })
+    .click()
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await chooseFile(page, /src\/dual\.ts$/)
   await expect(page.getByLabel('Staged · HEAD compared with index', { exact: true })).toContainText(
@@ -64,11 +68,17 @@ test('a late selected-file read cannot replace a newly selected directory or imp
   page,
 }) => {
   await openGallery(page, { scenario: 'cutover-inspection' })
-  await page.getByRole('button', { name: 'feat/repository-history', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/repository-history', exact: true })
+    .click()
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await page.evaluate(() => window.fixture.hold('fileView'))
   await chooseFile(page, /src\/dual\.ts$/)
-  await page.getByRole('button', { name: 'feat/worktree-registry', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/worktree-registry', exact: true })
+    .click()
   await page.evaluate(() => window.fixture.release('fileView'))
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await expect(
@@ -84,7 +94,10 @@ test('global keyboard search is independent of the local lane filter and does no
   await openGallery(page, { scenario: 'cutover-250' })
   const local = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
   await local.fill('graph/change-250')
-  await page.getByRole('button', { name: 'graph/change-250', exact: true }).focus()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'graph/change-250', exact: true })
+    .focus()
   await page.keyboard.press('Control+k')
   const search = page.getByRole('dialog', { name: 'Global search', exact: true })
   await expect(search).toBeVisible()
@@ -149,7 +162,10 @@ test('generated local diff pages preserve exact 1000-line boundaries and reset f
   page,
 }) => {
   await openGallery(page, { scenario: 'cutover-inspection' })
-  await page.getByRole('button', { name: 'feat/repository-history', exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: 'feat/repository-history', exact: true })
+    .click()
   await page.getByRole('tab', { name: /^Changes/ }).click()
   await chooseFile(page, /src\/generated\.ts$/)
   const staged = page.getByLabel('Staged · HEAD compared with index', { exact: true })
@@ -246,3 +262,69 @@ test('a delayed explicit folder registration cannot replace a newer inspected de
   ).toBeVisible()
   expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
 })
+
+for (const withDirectory of [false, true]) {
+  test(`remote history preserves the second shared-upstream row ${withDirectory ? 'with' : 'without'} a directory`, async ({
+    page,
+  }) => {
+    await openGallery(page, { scenario: 'shell-connected' })
+    const inventory = inventoryFixture(100)
+    const repository = inventory.repositories[0]
+    const original = repository.refs.find((ref) => ref.name === 'refs/heads/topic')!
+    const copyId = JSON.stringify([repository.identity.id, 'ref', 'refs/heads/topic-copy'])
+    const directory = repository.worktrees[1]
+    if (withDirectory) {
+      directory.refId = copyId
+      original.worktreeIds = original.worktreeIds.filter((id) => id !== directory.id)
+    }
+    repository.refs.push({
+      ...original,
+      id: copyId,
+      name: 'refs/heads/topic-copy',
+      worktreeIds: withDirectory ? [directory.id] : [],
+      pullRequestIds: [],
+    })
+    await page.evaluate((value) => window.fixture.pushInventory(value), inventory)
+    await page.getByRole('button', { name: /^fixture\/inventory ·/ }).click()
+    await page
+      .locator('.bw-lane-row')
+      .getByRole('button', { name: 'topic-copy', exact: true })
+      .click()
+    const selectedRow = page.locator('.bw-lane-row.bw-selected .bw-branch-name')
+    const inspector = page.locator('.bw-inspector')
+    await expect(selectedRow).toHaveText('topic-copy')
+    await expect(inspector.locator('.bw-directory code')).toHaveText(
+      withDirectory ? directory.path : 'Inspect without checkout',
+    )
+    await inspector.getByRole('button', { name: /Inspect remote tracking history/ }).click()
+    const history = page.getByRole('dialog', { name: 'Selected committed history' })
+    await expect(history).toBeVisible()
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.fixture.calls.filter(
+            (call) => call.call === 'inspect' && call.args[1] === 'history',
+          ),
+        ),
+      )
+      .toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            args: [
+              { repositoryId: repository.identity.id, refId: original.upstream },
+              'history',
+              expect.arrayContaining(['refs/remotes/origin/topic']),
+            ],
+          }),
+        ]),
+      )
+    await page.keyboard.press('Escape')
+    await expect(history).toHaveCount(0)
+    await expect(selectedRow).toHaveText('topic-copy')
+    await expect(inspector.locator('.bw-ref')).toHaveText('topic-copy')
+    await expect(inspector.locator('.bw-directory code')).toHaveText(
+      withDirectory ? directory.path : 'Inspect without checkout',
+    )
+    await noWrites(page)
+  })
+}

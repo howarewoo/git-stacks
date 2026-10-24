@@ -61,6 +61,33 @@ import {
 
 const relationshipChildPageSize = LANE_RELATIONSHIP_PAGE_SIZE - 2
 
+function countLabel(
+  count: number | null | undefined,
+  provenance?: { state: string; reason?: string },
+): string {
+  const state = provenance?.state
+  const availability =
+    state === 'na'
+      ? 'N/A'
+      : state === 'loading' || state === 'pending' || state === 'refreshing'
+        ? 'Loading…'
+        : state === 'unauthorized'
+          ? 'Unauthorized'
+          : state === 'rate-limited'
+            ? 'Rate limited'
+            : state === 'stale'
+              ? 'Stale'
+              : state === 'partial'
+                ? 'Partial'
+                : state === 'failed' || state === 'unavailable'
+                  ? 'Unavailable'
+                  : 'Unknown'
+  if (count !== null && count !== undefined) {
+    return state === 'stale' ? `${count} (stale)` : String(count)
+  }
+  return provenance?.reason ? `${availability}: ${provenance.reason}` : availability
+}
+
 export interface BranchWorkbenchProps {
   snapshot: BranchWorkbenchSnapshot
   repositoryId: string
@@ -339,6 +366,7 @@ export function BranchWorkbench({
     return () => media.removeEventListener('change', update)
   }, [])
   const scroll = useRef<HTMLDivElement>(null)
+  const pane = useRef<HTMLElement>(null)
   const pendingRowFocus = useRef<string | null>(null)
   useLayoutEffect(() => {
     const id = pendingRowFocus.current
@@ -351,7 +379,9 @@ export function BranchWorkbench({
     }
   }, [page, focusedBranchId])
   useLayoutEffect(() => {
+    pane.current = scroll.current?.closest<HTMLElement>('.bw-main') ?? null
     if (scroll.current) scroll.current.scrollTop = viewState.scroll
+    if (pane.current) pane.current.scrollTop = viewState.paneScroll
   }, [surface, repositoryId])
   const filtering = Boolean(query) || filter !== filters[0] || scope !== 'all' || refScope !== 'all'
   const unfiltered = useRef({
@@ -373,6 +403,7 @@ export function BranchWorkbench({
       tab,
       worktreeId,
       scroll: scrollTop,
+      paneScroll: pane.current?.scrollTop ?? viewState.paneScroll,
       page,
       unfilteredScroll: unfiltered.current.scroll,
       unfilteredPage: unfiltered.current.page,
@@ -416,8 +447,19 @@ export function BranchWorkbench({
     const row = document.getElementById(`branch-${anchor.id}`)
     if (row) scroll.current.scrollTop += row.getBoundingClientRect().top - anchor.top
   }, [folded])
-  const selected = branches.find((branch) => branch.id === selectedBranchId)
-  const selectedLane = topology.find((entry) => entry.branch.id === selectedBranchId)
+  const selected = branches.find(
+    (branch) =>
+      branch.id === selectedBranchId ||
+      branch.localRef?.id === selectedBranchId ||
+      branch.remoteRef?.id === selectedBranchId,
+  )
+  const selectedLane = topology.find(
+    (entry) =>
+      entry.branch.id === selectedBranchId ||
+      entry.branch.id === selected?.id ||
+      entry.branch.localRef?.id === selectedBranchId ||
+      entry.branch.remoteRef?.id === selectedBranchId,
+  )
   const worktree =
     selected?.worktrees.find((tree) => tree.id === worktreeId) ??
     (worktreeId === null && selected?.worktreesKnown === true && selected.worktrees.length === 1
@@ -449,8 +491,8 @@ export function BranchWorkbench({
   }
   const matching = topology.filter(({ branch }) => {
     if (hidden.has(branch.id)) return false
-    if (refScope === 'local' && branch.refKind !== 'local') return false
-    if (refScope === 'remote' && branch.refKind !== 'remote') return false
+    if (refScope === 'local' && !branch.localRef && branch.refKind !== 'local') return false
+    if (refScope === 'remote' && !branch.remoteRef && branch.refKind !== 'remote') return false
     if (scope === 'with' && !branch.worktrees.length) return false
     if (scope === 'without' && (branch.worktreesKnown !== true || branch.worktrees.length))
       return false
@@ -459,7 +501,7 @@ export function BranchWorkbench({
     if (filter === 'Ready to merge' && branch.readyToMerge !== true) return false
     if (
       query &&
-      !`${branch.ref} ${branch.title} ${branch.pullRequest ? `#${branch.pullRequest.number}` : ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
+      !`${branch.ref} ${branch.remoteRef ? `${branch.remoteRef.name} ${branch.remoteRef.name.replace(/^refs\/remotes\//, '')}` : ''} ${branch.title} ${branch.pullRequest ? `#${branch.pullRequest.number}` : ''} ${branch.worktrees.map((tree) => tree.path).join(' ')}`
         .toLowerCase()
         .includes(query.toLowerCase())
     )
@@ -666,7 +708,9 @@ export function BranchWorkbench({
                     </>
                   ) : (
                     <Badge variant="secondary">
-                      {selected.pullRequest === null ? 'Branch / ref' : 'PR metadata unknown'}
+                      {selected.pullRequest === null
+                        ? 'Branch / ref'
+                        : (selected.pullRequestIssue ?? 'PR metadata unknown')}
                     </Badge>
                   )}
                 </div>
@@ -698,6 +742,22 @@ export function BranchWorkbench({
                 context,
                 'default',
               )}
+              {selected.remoteRef && selected.localRef
+                ? action(
+                    'history',
+                    <>
+                      <History />
+                      Inspect remote tracking history (
+                      {selected.remoteRef.name.replace(/^refs\/remotes\//, '')})
+                    </>,
+                    {
+                      ...context,
+                      branchId: selected.remoteRef.id,
+                      worktreeId: undefined,
+                    },
+                    'ghost',
+                  )
+                : null}
               <div className="bw-between">
                 <Button
                   size="sm"
@@ -837,15 +897,28 @@ export function BranchWorkbench({
                   </div>
                   <div className="bw-facts">
                     <div>
-                      <strong>{selected.commits ?? 'Unknown'}</strong>
-                      <small>branch commits</small>
+                      <strong>
+                        {selected.commitsIssue
+                          ? selected.commitsIssue === 'na'
+                            ? 'N/A'
+                            : selected.commitsIssue === 'loading'
+                              ? 'Loading…'
+                              : selected.commitsIssue
+                          : (selected.commits ?? 'Unknown')}
+                      </strong>
+                      <small>
+                        {selected.localRef ? 'local branch commits' : 'remote branch commits'}
+                      </small>
                     </div>
                     <div>
                       <strong>{worktree ? (worktree.changedFiles ?? 'Unknown') : '—'}</strong>
                       <small>uncommitted files</small>
                     </div>
                     <div>
-                      <strong>{selected.unpushed ?? 'Unknown'}</strong>
+                      <strong>
+                        {selected.unpushed ??
+                          (!selected.localRef ? 'N/A: no local branch' : selected.local.label)}
+                      </strong>
                       <small>unpushed commits</small>
                     </div>
                   </div>
@@ -1027,7 +1100,17 @@ export function BranchWorkbench({
               'attention',
               <>
                 <Inbox />
-                Needs attention<span className="bw-count">{countAttention ?? 'Unknown'}</span>
+                Needs attention
+                <span className="bw-count" title={snapshot.globalCounts?.attentionReason}>
+                  {countAttention !== null
+                    ? snapshot.globalCounts?.attentionMissingCoverage
+                      ? `${countAttention} (partial)`
+                      : countAttention
+                    : 'Unknown'}
+                </span>
+                {snapshot.globalCounts?.attentionReason ? (
+                  <small>{snapshot.globalCounts.attentionReason}</small>
+                ) : null}
               </>,
               { repositoryId },
               'ghost',
@@ -1051,14 +1134,30 @@ export function BranchWorkbench({
               onClick={() => onAction('branches', { repositoryId })}
             >
               <GitBranch />
-              Branches<span>{repository?.branchCount ?? 'Unknown'}</span>
+              Branches
+              <span
+                className="bw-count"
+                title={repository?.countProvenance?.branch?.reason}
+                aria-label={`Branches: ${repository?.branchCount ?? repository?.countProvenance?.branch?.reason ?? 'Unknown'}`}
+              >
+                {countLabel(repository?.branchCount, repository?.countProvenance?.branch)}
+              </span>
             </Button>
             {action(
               'pull-requests',
               <>
                 <GitPullRequest />
                 Pull requests
-                <span className="bw-count">{repository?.pullRequestCount ?? 'Unknown'}</span>
+                <span
+                  className="bw-count"
+                  title={repository?.countProvenance?.pullRequest?.reason}
+                  aria-label={`Pull requests: ${repository?.pullRequestCount ?? repository?.countProvenance?.pullRequest?.reason ?? 'Unknown'}`}
+                >
+                  {countLabel(
+                    repository?.pullRequestCount,
+                    repository?.countProvenance?.pullRequest,
+                  )}
+                </span>
               </>,
               { repositoryId },
               'ghost',
@@ -1075,17 +1174,32 @@ export function BranchWorkbench({
                   variant="unstyled"
                   className={`bw-repo ${repo.id === repositoryId ? 'bw-repo-active' : ''}`}
                   aria-pressed={repo.id === repositoryId}
-                  aria-label={`${repo.owner}/${repo.name}${repo.path ? ` · ${repo.path}` : ''}`}
+                  aria-label={[
+                    `${repo.owner}/${repo.name}`,
+                    repo.path ? `path: ${repo.path}` : null,
+                    `${repo.worktreeCount ?? repo.countProvenance?.worktree?.reason ?? 'Unknown'} worktrees`,
+                    repo.attentionCount !== 0
+                      ? `attention: ${repo.attentionCount ?? repo.countProvenance?.attention?.reason ?? 'Unknown'}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
                   title={repo.path}
                   onClick={() => switchRepository(repo.id)}
                 >
                   <span className="bw-repo-mark">{repo.mark}</span>
                   <span>
                     <strong>{repo.name}</strong>
-                    <small>{repo.worktreeCount ?? 'Unknown'} worktrees</small>
+                    <small title={repo.countProvenance?.worktree?.reason}>
+                      {repo.worktreeCount ?? 'Unknown'} worktrees
+                    </small>
                   </span>
                   {repo.attentionCount !== 0 ? (
-                    <span className="bw-warning bw-count">
+                    <span
+                      className="bw-warning bw-count"
+                      title={repo.countProvenance?.attention?.reason}
+                      aria-label={`${repo.name} attention: ${repo.attentionCount ?? repo.countProvenance?.attention?.reason ?? 'Unknown'}`}
+                    >
                       {repo.attentionCount ?? 'Unknown'} ·
                     </span>
                   ) : null}
@@ -1117,7 +1231,13 @@ export function BranchWorkbench({
             <div className="bw-shipping">
               <GitMerge />
               <div>
-                <strong>{countReady ?? 'Unknown'} ready to merge</strong>
+                <strong>
+                  {countReady !== null
+                    ? `${countReady} ready to merge`
+                    : snapshot.globalCounts?.readyReason
+                      ? `Ready to merge unavailable (${snapshot.globalCounts.readyReason})`
+                      : 'Unknown ready to merge'}
+                </strong>
                 <small>Across all repositories</small>
               </div>
             </div>
@@ -1131,6 +1251,7 @@ export function BranchWorkbench({
             className="bw-main"
             aria-label="Branch workbench"
             role="main"
+            onScroll={() => persistView()}
             header={
               <>
                 <div className="bw-panel-head">
@@ -1162,25 +1283,43 @@ export function BranchWorkbench({
                     setFilter(value)
                     setChecked(new Set())
                   }}
-                  options={filters.map((label) => ({
-                    value: label,
-                    label: (
-                      <>
-                        {label}
-                        <span>
-                          {(label === 'All branches'
-                            ? repository?.branchCount
-                            : label === 'Needs you'
-                              ? repository?.attentionCount
-                              : label === 'Unpublished'
-                                ? repository?.unpublishedCount
-                                : repository?.readyBranchCount === undefined
-                                  ? repository?.readyToMergeCount
-                                  : repository.readyBranchCount) ?? 'Unknown'}
-                        </span>
-                      </>
-                    ),
-                  }))}
+                  options={filters.map((label) => {
+                    const count =
+                      label === 'All branches'
+                        ? repository?.branchCount
+                        : label === 'Needs you'
+                          ? repository?.attentionCount
+                          : label === 'Unpublished'
+                            ? repository?.unpublishedCount
+                            : repository?.readyBranchCount === undefined
+                              ? repository?.readyToMergeCount
+                              : repository.readyBranchCount
+                    const prov =
+                      label === 'All branches'
+                        ? repository?.countProvenance?.branch
+                        : label === 'Needs you'
+                          ? repository?.countProvenance?.attention
+                          : label === 'Unpublished'
+                            ? repository?.countProvenance?.unpublished
+                            : repository?.countProvenance?.ready
+                    const text = countLabel(count, prov)
+                    return {
+                      value: label,
+                      label: (
+                        <>
+                          {label}
+                          <span
+                            title={prov?.reason}
+                            aria-label={
+                              prov?.reason ? `${label}: ${text} (${prov.reason})` : undefined
+                            }
+                          >
+                            {text}
+                          </span>
+                        </>
+                      ),
+                    }
+                  })}
                 />
                 <div className="bw-toolbar">
                   <div className="bw-search">
@@ -1447,7 +1586,7 @@ export function BranchWorkbench({
                         data-lane={entry.lane}
                         className={`bw-grid bw-lane-row ${branch.trunk ? 'bw-trunk' : ''} ${selectedBranchId === branch.id ? 'bw-selected' : ''} ${isContext ? 'bw-context' : ''}`}
                         role="group"
-                        aria-label={`${branch.ref}. ${entry.parentId ? `Parent: ${byId.get(entry.parentId)?.branch.ref}.` : (entry.issue ?? 'No recorded parent.')} ${isContext ? 'Context: does not match current filter.' : ''} ${tree?.status.label ?? 'No worktree'}. ${branch.pullRequest?.review.label ?? (branch.pullRequest === null ? 'No pull request' : 'PR association unknown')}. ${branch.pullRequest?.checks.label ?? ''}`}
+                        aria-label={`${branch.ref}. ${entry.parentId ? `Parent: ${byId.get(entry.parentId)?.branch.ref}.` : (entry.issue ?? 'No recorded parent.')} ${isContext ? 'Context: does not match current filter.' : ''} ${tree?.status.label ?? 'No worktree'}. ${branch.pullRequest?.review.label ?? (branch.pullRequest === null ? 'No pull request' : (branch.pullRequestIssue ?? 'PR association unknown'))}. ${branch.pullRequest?.checks.label ?? ''}`}
                         onKeyDown={(event) => {
                           if (
                             event.defaultPrevented ||
@@ -1613,10 +1752,16 @@ export function BranchWorkbench({
                                 {branch.trunk
                                   ? ''
                                   : branch.unpushed === null
-                                    ? 'Unpushed unknown'
+                                    ? !branch.localRef
+                                      ? 'Unpushed N/A: no local branch'
+                                      : branch.local.label
                                     : branch.unpushed
-                                      ? `↑ ${branch.unpushed} unpushed`
-                                      : branch.local.label}
+                                      ? branch.behind
+                                        ? `↑ ${branch.unpushed} · ↓ ${branch.behind} diverged`
+                                        : `↑ ${branch.unpushed} unpushed`
+                                      : branch.behind
+                                        ? `↓ ${branch.behind} behind upstream`
+                                        : branch.local.label}
                               </span>
                             ) : null}
                           </div>
@@ -1641,14 +1786,18 @@ export function BranchWorkbench({
                                   ? 'Default branch'
                                   : branch.pullRequest === null
                                     ? 'No pull request'
-                                    : 'PR association unknown'}
+                                    : (branch.pullRequestIssue ?? 'PR association unknown')}
                               </span>
                               <small>
                                 {branch.trunk
                                   ? ''
                                   : branch.unpushed
-                                    ? 'Unpublished commits'
-                                    : branch.local.label}
+                                    ? branch.behind
+                                      ? `Diverged (↑ ${branch.unpushed} · ↓ ${branch.behind})`
+                                      : 'Unpublished commits'
+                                    : branch.pullRequest === null
+                                      ? 'Local branch'
+                                      : ''}
                               </small>
                             </>
                           )}
@@ -1660,7 +1809,27 @@ export function BranchWorkbench({
                             worktreeId: branch.worktrees.length === 1 ? tree?.id : undefined,
                             pullRequestId: branch.pullRequest?.id,
                           }}
-                          capabilities={capabilities}
+                          capabilities={{
+                            ...capabilities,
+                            rename: branch.localRef
+                              ? {}
+                              : { reason: 'Choose a qualified local branch' },
+                            parent: branch.localRef
+                              ? {}
+                              : { reason: 'Choose a qualified local branch' },
+                            upstream: branch.localRef
+                              ? {}
+                              : { reason: 'Choose a qualified local branch' },
+                            'delete-local': branch.localRef
+                              ? {}
+                              : { reason: 'Choose a qualified local branch' },
+                            'delete-remote': branch.remoteRef
+                              ? {}
+                              : { reason: 'Choose a branch with a remote tracking ref' },
+                            review: branch.pullRequest
+                              ? {}
+                              : { reason: 'No selected pull request' },
+                          }}
                           onAction={onAction}
                         />
                       </div>

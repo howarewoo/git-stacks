@@ -58,6 +58,7 @@ export function inspectionAPI(
           operation === 'pullRequestLayer'
             ? args[2]
             : operation === 'commitDiff' ||
+                operation === 'branchCommits' ||
                 [
                   'reviewHeadline',
                   'reviewFiles',

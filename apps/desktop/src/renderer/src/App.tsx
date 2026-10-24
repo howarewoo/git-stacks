@@ -163,7 +163,7 @@ function App() {
   const [, updateRunningOperations] = React.useReducer((value: number) => value + 1, 0)
   const [discoveryWorktrees, setDiscoveryWorktrees] = React.useState(false)
   const [discoveryPage, setDiscoveryPage] = React.useState(0)
-  const [historyOpen, setHistoryOpen] = React.useState(false)
+  const [historyContext, setHistoryContext] = React.useState<InspectionContext | null>(null)
   const [notificationOpen, setNotificationOpen] = React.useState(false)
   const [credentialOpen, setCredentialOpen] = React.useState(false)
   const [notificationInbox, setNotificationInbox] = React.useState<NotificationInbox | null>(null)
@@ -312,8 +312,25 @@ function App() {
   }, [inventory.data?.repositories.map((repo) => repo.identity.id).join('\0')])
   const repository = inventory.data?.repositories.find((repo) => repo.identity.id === repositoryId)
   const selected = snapshot.branches.find(
-    (branch) => branch.id === current.selectedId && branch.repositoryId === repositoryId,
+    (branch) =>
+      branch.repositoryId === repositoryId &&
+      (branch.id === current.selectedId ||
+        branch.localRef?.id === current.selectedId ||
+        branch.remoteRef?.id === current.selectedId),
   )
+  const selectedInventoryRef = selected
+    ? repository?.refs.find((ref) => ref.id === selected.id)
+    : undefined
+  const selectedUpstreamRef = selectedInventoryRef?.upstream
+    ? repository?.refs.find((ref) => ref.id === selectedInventoryRef.upstream)
+    : undefined
+  const isExplicitRemote = Boolean(
+    selected?.remoteRef && current.selectedId === selected.remoteRef.id,
+  )
+  const isExplicitLocal = Boolean(selected?.localRef && current.selectedId === selected.localRef.id)
+  const isSelectedRemoteFacet =
+    isExplicitRemote ||
+    (!isExplicitLocal && Boolean(selected?.remoteRef && current.view.refScope === 'remote'))
   const selectedTree =
     selected?.worktrees.find((tree) => tree.id === current.view.worktreeId) ??
     (current.view.worktreeId === null &&
@@ -321,16 +338,27 @@ function App() {
     selected.worktrees.length === 1
       ? selected.worktrees[0]
       : undefined)
-  const selectedRefId = repository?.refs.some((ref) => ref.id === selected?.id)
-    ? selected?.id
+  const primaryRefId = isSelectedRemoteFacet
+    ? (selected?.remoteRef?.id ?? selected?.localRef?.id ?? selected?.id)
+    : (selected?.localRef?.id ?? selected?.remoteRef?.id ?? selected?.id)
+  const selectedRefId = repository?.refs.some((ref) => ref.id === primaryRefId)
+    ? primaryRefId
     : undefined
   const context: InspectionContext = React.useMemo(
-    () => ({ repositoryId, refId: selectedRefId, worktreeId: selectedTree?.id }),
-    [repositoryId, selectedRefId, selectedTree?.id],
+    () => ({
+      repositoryId,
+      refId: selectedTree ? selected?.localRef?.id : selectedRefId,
+      worktreeId: selectedTree?.id,
+    }),
+    [repositoryId, selected?.localRef?.id, selectedRefId, selectedTree?.id],
   )
   const scoped = React.useMemo(
     () => (desktop ? inspectionAPI(desktop, context) : null),
     [desktop, context],
+  )
+  const historyAPI = React.useMemo(
+    () => (desktop && historyContext ? inspectionAPI(desktop, historyContext) : null),
+    [desktop, historyContext],
   )
   const publishedContext: InspectionContext = React.useMemo(
     () => ({ repositoryId, refId: context.refId, pullRequestId: selected?.pullRequest?.id }),
@@ -410,6 +438,72 @@ function App() {
     },
     gcTime: 0,
   })
+  const metricRefId = selected?.localRef?.id ?? selected?.remoteRef?.id
+  const metricTipOid = selected?.localRef?.oid ?? selected?.remoteRef?.oid ?? null
+  const parentRefId = selected?.dependencyParentRefId ?? null
+  const parentOid = selected?.dependencyParentOid ?? null
+  const branchCommitsQuery = useQuery({
+    queryKey: [
+      'workbench-branch-commits',
+      repositoryId,
+      metricRefId,
+      parentRefId,
+      parentOid,
+      metricTipOid,
+      repository?.dependencyRevision,
+      repository?.dependenciesRead?.state,
+    ],
+    enabled: Boolean(
+      desktop?.inspect &&
+        metricRefId &&
+        parentRefId &&
+        !selected?.trunk &&
+        metricTipOid &&
+        repository?.dependenciesRead?.state === 'complete' &&
+        !selected?.dependencyParentIssue,
+    ),
+    queryFn: async ({ signal }) => {
+      const id = `commits-${crypto.randomUUID()}`
+      const localApi = inspectionAPI(desktop!, { repositoryId, refId: metricRefId })
+      const cancel = () => void localApi.cancel(id)
+      signal.addEventListener('abort', cancel, { once: true })
+      try {
+        const result = await localApi.branchCommits!(parentRefId!, id)
+        signal.throwIfAborted()
+        if (result.branchOid !== metricTipOid || result.parentOid !== parentOid) {
+          throw new Error('Compared endpoints changed while counting branch commits.')
+        }
+        return result
+      } finally {
+        signal.removeEventListener('abort', cancel)
+      }
+    },
+    gcTime: 0,
+  })
+  const branchCommitsIssue =
+    repository?.dependenciesRead?.state !== 'complete'
+      ? (repository?.dependenciesRead?.error ?? 'Dependency observations unavailable')
+      : selected?.trunk
+        ? 'na'
+        : selected?.dependencyParentIssue
+          ? selected.dependencyParentIssue
+          : !selected?.dependencyParentRefId
+            ? 'na'
+            : branchCommitsQuery.isError
+              ? 'Failed to count branch commits'
+              : branchCommitsQuery.isPending
+                ? 'loading'
+                : undefined
+  const branchCommitsValue = branchCommitsIssue ? null : (branchCommitsQuery.data?.commits ?? null)
+  const collaborationBranches = React.useMemo(
+    () =>
+      snapshot.branches.map((branch) =>
+        branch.id === selected?.id
+          ? { ...branch, commits: branchCommitsValue, commitsIssue: branchCommitsIssue }
+          : branch,
+      ),
+    [snapshot.branches, selected?.id, branchCommitsValue, branchCommitsIssue],
+  )
   const operationRecords = useQuery({
     queryKey: ['workbench-operation-records', providerEpoch],
     enabled: Boolean(desktop?.operationRecords),
@@ -455,8 +549,11 @@ function App() {
     operationScope.current?.authority,
   ])
   const refRevision = repository?.refs.map((ref) => `${ref.id}:${ref.oid}`).join('\0')
+  const detailWorktreeId = repository?.worktrees.find(
+    (tree) => !tree.missing && tree.kind !== 'bare',
+  )?.id
   const repoRead = useQuery<RepositorySnapshot>({
-    queryKey: ['inspection-repository', repositoryId, refRevision, providerEpoch],
+    queryKey: ['inspection-repository', repositoryId, refRevision, providerEpoch, detailWorktreeId],
     enabled: Boolean(desktop?.inspect && repositoryId),
     placeholderData: (previous, query) =>
       query?.queryKey[1] === repositoryId && query.queryKey[3] === providerEpoch
@@ -464,10 +561,11 @@ function App() {
         : undefined,
     queryFn: async ({ signal }) => {
       const id = `repository-inspection-${crypto.randomUUID()}`
-      const cancel = () => void desktop!.inspect!({ repositoryId }, 'cancel', [id])
+      const detailContext = { repositoryId, worktreeId: detailWorktreeId }
+      const cancel = () => void desktop!.inspect!(detailContext, 'cancel', [id])
       signal.addEventListener('abort', cancel, { once: true })
       try {
-        const value = await desktop!.inspect!({ repositoryId }, 'refresh', [], id)
+        const value = await desktop!.inspect!(detailContext, 'refresh', ['reuse'], id)
         signal.throwIfAborted()
         return value
       } finally {
@@ -1130,8 +1228,14 @@ function App() {
         return
       }
       if (action === 'delete-local' || action === 'delete-remote') {
-        const refs = ids.map((id) => repo.refs.find((ref) => ref.id === id))
         const remote = action === 'delete-remote'
+        const rows = ids.map((id) =>
+          snapshot.branches.find((b) => b.id === id && b.repositoryId === repo.identity.id),
+        )
+        const targetRefIds = rows.map(
+          (r, i) => (remote ? r?.remoteRef?.id : (r?.localRef?.id ?? r?.id)) ?? ids[i],
+        )
+        const refs = targetRefIds.map((targetId) => repo.refs.find((ref) => ref.id === targetId))
         if (refs.some((ref) => !ref || ref.kind !== (remote ? 'remote' : 'local'))) {
           setError(
             `Every selected target must be a qualified ${remote ? 'remote tracking' : 'local'} branch; no rejected target is dropped.`,
@@ -1143,7 +1247,14 @@ function App() {
           setExecutionChoiceId('')
           return
         }
-        const branches = refs.map((ref) => ({ ref: ref!.name, expectedOid: ref!.oid }))
+        const uniqueRefs = [
+          ...new Map(
+            refs
+              .filter((r): r is NonNullable<typeof r> => Boolean(r))
+              .map((ref) => [ref.name, ref]),
+          ).values(),
+        ]
+        const branches = uniqueRefs.map((ref) => ({ ref: ref.name, expectedOid: ref.oid }))
         void prepareWorkflow(
           {
             kind: 'confirm',
@@ -1188,15 +1299,11 @@ function App() {
       return
     }
     if (action === 'history') {
-      if (captured.branchId) {
-        const saved = memoryRef.current[captured.repositoryId] ?? emptyRepositoryMemory
-        navigate(captured.repositoryId, 'branches', captured.branchId)
-        updateMemory(captured.repositoryId, {
-          selectedId: captured.branchId,
-          view: { ...saved.view, worktreeId: captured.worktreeId ?? null },
-        })
-      }
-      setHistoryOpen(true)
+      setHistoryContext({
+        repositoryId: captured.repositoryId,
+        refId: captured.branchId,
+        worktreeId: captured.branchId ? undefined : captured.worktreeId,
+      })
       return
     }
     if (action === 'open-directory') {
@@ -1311,19 +1418,26 @@ function App() {
       )
     else if (action === 'rename' || action === 'parent' || action === 'upstream') {
       void (async () => {
-        const value = await captureOperationalTarget(target)
-        const selected = value.branches.find((item) => !item.remote && item.name === branch.ref)
+        const localRefId = branch.localRef?.id ?? branch.id
+        const localRefName = branch.localRef?.name ?? `refs/heads/${branch.ref}`
+        const operationalTarget = { ...target, refId: localRefId }
+        const value = await captureOperationalTarget(operationalTarget)
+        const selected = value.branches.find(
+          (item) => !item.remote && (item.ref === localRefName || item.name === branch.ref),
+        )
         if (!selected) throw new Error('The captured qualified branch is unavailable.')
         setWorkflow({ kind: action, branch: selected })
       })().catch((value) => setError(String(value)))
     } else if (action === 'delete-local') {
+      const targetRefId = branch.localRef?.id ?? branch.id
       const ref = inventory.data?.repositories
         .find((repo) => repo.identity.id === captured.repositoryId)
-        ?.refs.find((ref) => ref.id === branch.id)
-      if (!ref) {
+        ?.refs.find((ref) => ref.id === targetRefId)
+      if (!ref || ref.kind !== 'local') {
         setError('Captured branch tip is unavailable.')
         return
       }
+      const operationalTarget = { ...target, refId: ref.id }
       void prepareWorkflow(
         {
           kind: 'confirm',
@@ -1333,16 +1447,18 @@ function App() {
           label: 'Delete captured local branch',
           destructive: true,
         },
-        target,
+        operationalTarget,
       )
     } else if (action === 'delete-remote') {
+      const targetRefId = branch.remoteRef?.id ?? branch.id
       const ref = inventory.data?.repositories
         .find((repo) => repo.identity.id === captured.repositoryId)
-        ?.refs.find((ref) => ref.id === branch.id)
+        ?.refs.find((ref) => ref.id === targetRefId)
       if (!ref || ref.kind !== 'remote') {
         setError('Choose a qualified remote tracking ref.')
         return
       }
+      const operationalTarget = { ...target, refId: ref.id }
       void prepareWorkflow(
         {
           kind: 'confirm',
@@ -1352,7 +1468,7 @@ function App() {
           label: 'Delete captured remote branch',
           destructive: true,
         },
-        target,
+        operationalTarget,
       )
     } else if (action === 'insert-layer')
       void prepareWorkflow(
@@ -1659,7 +1775,7 @@ function App() {
         id: branch.id,
         repositoryId: branch.repositoryId,
         branchId: branch.id,
-        label: `${branch.refKind ?? 'Published'} · ${branch.ref}${branch.pullRequest ? ` · #${branch.pullRequest.number} ${branch.title}` : ''}`,
+        label: `${branch.refKind ?? 'Published'} · ${branch.ref}${branch.remoteRef ? ` · ${branch.remoteRef.name.replace(/^refs\/remotes\//, '')} · ${branch.remoteRef.name}` : ''}${branch.pullRequest ? ` · #${branch.pullRequest.number} ${branch.title}` : ''}`,
         context: `${repo?.owner}/${repo?.name} · ${branch.worktrees.map((tree) => tree.path).join(' · ') || 'No worktree'}`,
       })
     }
@@ -1740,7 +1856,14 @@ function App() {
           generation: navigationGeneration.current,
         })
     } else {
-      navigate(target.repositoryId, 'branches', target.branchId, target.worktreeId)
+      const row = snapshot.branches.find(
+        (branch) =>
+          branch.repositoryId === target.repositoryId &&
+          (branch.id === target.branchId ||
+            branch.localRef?.id === target.branchId ||
+            branch.remoteRef?.id === target.branchId),
+      )
+      navigate(target.repositoryId, 'branches', target.branchId ?? row?.id, target.worktreeId)
     }
   }
   const attention = React.useMemo(
@@ -1772,38 +1895,121 @@ function App() {
       ? ['Confirmed review baseline unavailable; changed-head attention is unknown']
       : []),
   ].join(' · ')
-  const attentionComplete =
-    inventory.data?.state === 'complete' &&
-    inbox.data?.refresh.state === 'fresh' &&
-    inbox.data.refresh.repositories.every((repo) => repo.status === 'ok' && Boolean(repo.viewer)) &&
-    inbox.data.items.every(
-      (item) =>
-        item.state !== 'OPEN' ||
-        (item.metadata === 'full' &&
-          Boolean(item.headOid) &&
-          Boolean(item.author) &&
-          item.reviewRequestsComplete !== false &&
-          item.checksKnown !== false &&
-          item.reviewKnown !== false &&
-          item.reviewBaselineState !== 'unavailable'),
-    ) &&
-    inventory.data.repositories.every(
-      (repo) =>
-        repo.dependenciesRead?.state === 'complete' &&
-        repo.worktrees.every((tree) => tree.kind === 'bare' || tree.read.state === 'complete'),
-    )
+  const getRepoAttentionProvenance = React.useCallback(
+    (repoId: string) => {
+      const repo = inventory.data?.repositories.find((r) => r.identity.id === repoId)
+      if (!repo) return { state: 'unavailable', reason: 'Repository not found in inventory' }
+      if (repo.discovery.state !== 'complete')
+        return {
+          state: repo.discovery.state,
+          reason: repo.discovery.error ?? 'Worktree discovery incomplete',
+        }
+      if (repo.refsRead.state !== 'complete')
+        return { state: repo.refsRead.state, reason: repo.refsRead.error ?? 'Refs read incomplete' }
+      const repoTreesOk = repo.worktrees.every(
+        (tree) => tree.kind === 'bare' || tree.read.state === 'complete',
+      )
+      if (!repoTreesOk) return { state: 'partial', reason: 'Worktree file inspections incomplete' }
+      if (repo.dependenciesRead && repo.dependenciesRead.state !== 'complete')
+        return {
+          state: repo.dependenciesRead.state,
+          reason: repo.dependenciesRead.error ?? 'Dependencies read incomplete',
+        }
+      if (!repo.remote) return { state: 'complete' }
+      const remote = repo.remote
+      const inboxRepo = inbox.data?.refresh.repositories.find(
+        (r) =>
+          repo.registeredPaths.includes(r.path) ||
+          (r.host?.toLowerCase() === remote.host.toLowerCase() &&
+            r.repository.toLowerCase() === remote.fullName.toLowerCase()),
+      )
+      if (!inboxRepo) return { state: 'unavailable', reason: 'Pull request inbox not loaded' }
+      if (inboxRepo.status !== 'ok')
+        return {
+          state:
+            inboxRepo.status === 'unauthorized'
+              ? 'unauthorized'
+              : inboxRepo.status === 'rate-limited'
+                ? 'rate-limited'
+                : 'unavailable',
+          reason: inboxRepo.detail ?? `Inbox status ${inboxRepo.status}`,
+        }
+      if (!inboxRepo.viewer)
+        return { state: 'unauthorized', reason: 'Viewer identity not confirmed' }
+      const repoItems = (inbox.data?.items ?? []).filter(
+        (item) =>
+          item.host.toLowerCase() === remote.host.toLowerCase() &&
+          item.repository.toLowerCase() === remote.fullName.toLowerCase(),
+      )
+      const itemsOk = repoItems.every(
+        (item) =>
+          item.state !== 'OPEN' ||
+          (item.metadata === 'full' &&
+            Boolean(item.headOid) &&
+            Boolean(item.author) &&
+            item.reviewRequestsComplete !== false &&
+            item.checksKnown !== false &&
+            item.reviewKnown !== false &&
+            item.reviewBaselineState !== 'unavailable'),
+      )
+      if (!itemsOk) return { state: 'partial', reason: 'Some pull request details incomplete' }
+      return { state: 'complete' }
+    },
+    [inventory.data, inbox.data],
+  )
+  const attentionMissingCoverage: { name: string; reason?: string }[] = []
+  let sumConfirmedAttention: number | null = null
+  for (const repo of snapshot.repositories) {
+    const prov = getRepoAttentionProvenance(repo.id)
+    if (prov.state === 'complete') {
+      const count = attention.filter((item) => item.target.repositoryId === repo.id).length
+      sumConfirmedAttention = (sumConfirmedAttention ?? 0) + count
+    } else {
+      attentionMissingCoverage.push({ name: repo.name, reason: prov.reason })
+    }
+  }
+  for (const failure of inventory.data?.failures ?? []) {
+    const failureName = failure.path.split(/[\\/]/).pop() ?? failure.path
+    if (!attentionMissingCoverage.some((entry) => entry.name === failureName)) {
+      attentionMissingCoverage.push({ name: failureName, reason: failure.error })
+    }
+  }
+  if (inventory.data?.state !== 'complete' && attentionMissingCoverage.length === 0) {
+    attentionMissingCoverage.push({ name: 'Inventory loading', reason: 'Local inventory reading' })
+  }
+  const attentionGlobalCount =
+    attentionMissingCoverage.length === 0 && inventory.data?.state === 'complete'
+      ? attention.length
+      : sumConfirmedAttention
+  const attentionReason = attentionMissingCoverage.length
+    ? `Missing coverage: ${attentionMissingCoverage.map((e) => (e.reason ? `${e.name} (${e.reason})` : e.name)).join(', ')}`
+    : undefined
   const collaborationSnapshot = {
     ...snapshot,
     globalCounts: {
       readyToMerge: snapshot.globalCounts?.readyToMerge ?? null,
-      attention: attentionComplete ? attention.length : null,
+      readyReason: snapshot.globalCounts?.readyReason,
+      attention: attentionGlobalCount,
+      attentionMissingCoverage: attentionMissingCoverage.length
+        ? attentionMissingCoverage.map((e) => e.name)
+        : undefined,
+      attentionReason,
     },
-    repositories: snapshot.repositories.map((repo) => ({
-      ...repo,
-      attentionCount: attentionComplete
-        ? attention.filter((item) => item.target.repositoryId === repo.id).length
-        : null,
-    })),
+    repositories: snapshot.repositories.map((repo) => {
+      const prov = getRepoAttentionProvenance(repo.id)
+      return {
+        ...repo,
+        attentionCount:
+          prov.state === 'complete'
+            ? attention.filter((item) => item.target.repositoryId === repo.id).length
+            : null,
+        countProvenance: {
+          ...repo.countProvenance,
+          attention: prov,
+        },
+      }
+    }),
+    branches: collaborationBranches,
   }
   const registrationNavigation = inspectionNavigation.current
   const mainPanel = (
@@ -2084,7 +2290,7 @@ function App() {
         }
         snapshot={collaborationSnapshot}
         repositoryId={repositoryId}
-        selectedBranchId={current.selectedId}
+        selectedBranchId={selected?.id ?? current.selectedId}
         viewState={current.view}
         onViewStateChange={setView}
         onWorktreeChange={setWorktree}
@@ -2161,7 +2367,9 @@ function App() {
                 sync: {},
                 publish: {},
                 'native-stack': {},
-                'delete-remote': {},
+                'delete-remote': selected?.remoteRef
+                  ? {}
+                  : { reason: 'Choose a branch with a remote tracking ref' },
                 'move-layer': {},
               }
             : {}),
@@ -2170,11 +2378,11 @@ function App() {
           fetch: repository ? {} : { reason: 'Choose a repository' },
           'refresh-metadata': repository ? {} : { reason: 'Choose a repository' },
           reconcile: repository ? {} : { reason: 'Choose a repository' },
-          rename: repository ? {} : { reason: 'Choose a qualified local branch' },
-          parent: repository ? {} : { reason: 'Choose a qualified local branch' },
-          upstream: repository ? {} : { reason: 'Choose a qualified local branch' },
+          rename: selected?.localRef ? {} : { reason: 'Choose a qualified local branch' },
+          parent: selected?.localRef ? {} : { reason: 'Choose a qualified local branch' },
+          upstream: selected?.localRef ? {} : { reason: 'Choose a qualified local branch' },
           merge: repository ? {} : { reason: 'Choose a qualified reviewed PR' },
-          'delete-local': repository ? {} : { reason: 'Choose a qualified local branch' },
+          'delete-local': selected?.localRef ? {} : { reason: 'Choose a qualified local branch' },
           'insert-layer': repository ? {} : { reason: 'Choose a qualified local branch' },
           'remove-layer': repository ? {} : { reason: 'Choose a qualified local branch' },
           'unregister-worktree': selectedTree
@@ -2226,10 +2434,18 @@ function App() {
                 variant="ghost"
                 onClick={() => {
                   const target = operationContext.current!
+                  const row = snapshot.branches.find(
+                    (b) =>
+                      b.repositoryId === target.repositoryId &&
+                      (b.id === target.refId ||
+                        b.localRef?.id === target.refId ||
+                        b.remoteRef?.id === target.refId),
+                  )
+                  const branchTargetId = target.refId ?? row?.id ?? target.worktreeId
                   const saved = memoryRef.current[target.repositoryId] ?? emptyRepositoryMemory
-                  navigate(target.repositoryId, 'branches', target.refId ?? target.worktreeId)
+                  navigate(target.repositoryId, 'branches', branchTargetId)
                   updateMemory(target.repositoryId, {
-                    selectedId: target.refId ?? target.worktreeId ?? null,
+                    selectedId: branchTargetId ?? null,
                     view: { ...saved.view, worktreeId: target.worktreeId ?? null },
                   })
                   setRecoveryOpen(true)
@@ -2285,21 +2501,26 @@ function App() {
                     ) : null}
                     <p>
                       Published PR head:{' '}
-                      <code>{selected?.pullRequest?.publishedHead ?? 'Unknown / no PR'}</code>
-                    </p>
-                    <p>
-                      Upstream:{' '}
                       <code>
-                        {repository?.refs.find(
-                          (ref) =>
-                            ref.id ===
-                            repository.refs.find((ref) => ref.id === selected?.id)?.upstream,
-                        )?.name ?? 'Missing / unknown'}
+                        {selected?.pullRequest?.publishedHead ??
+                          selected?.pullRequestIssue ??
+                          (selected?.pullRequest === null
+                            ? 'N/A: no associated pull request'
+                            : 'Unavailable: published PR head not observed')}
                       </code>
                     </p>
                     <p>
+                      Upstream: <code>{selectedUpstreamRef?.name ?? 'Missing / unknown'}</code>
+                    </p>
+                    <p>
                       Published base:{' '}
-                      <code>{selected?.pullRequest?.baseRef ?? 'Unknown / no PR'}</code>
+                      <code>
+                        {selected?.pullRequest?.baseRef ??
+                          selected?.pullRequestIssue ??
+                          (selected?.pullRequest === null
+                            ? 'N/A: no associated pull request'
+                            : 'Unavailable: published PR base not observed')}
+                      </code>
                     </p>
                     <p>
                       Native stack:{' '}
@@ -2418,9 +2639,9 @@ function App() {
                   )
                     .filter(([action]) =>
                       action === 'delete-local'
-                        ? selected.refKind === 'local'
+                        ? Boolean(selected.localRef)
                         : action === 'delete-remote'
-                          ? selected.refKind === 'remote'
+                          ? Boolean(selected.remoteRef)
                           : true,
                     )
                     .filter(([, label]) => label.toLowerCase().includes(globalQuery.toLowerCase()))
@@ -2524,18 +2745,27 @@ function App() {
           </Button>
         </DialogContent>
       </Dialog>
-      <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
+      <Dialog
+        open={Boolean(historyContext)}
+        onOpenChange={(open) => {
+          if (!open) setHistoryContext(null)
+        }}
+      >
         <DialogContent className="wb-history-dialog">
           <DialogHeader>
             <DialogTitle>Selected committed history</DialogTitle>
             <DialogDescription>Read-only context, independent of checkout.</DialogDescription>
           </DialogHeader>
-          {scoped && selected ? (
+          {historyAPI && historyContext ? (
             <ContextHistory
-              key={identity}
-              api={scoped}
-              identity={identity}
-              ref={repository?.refs.find((ref) => ref.id === selected.id)?.name ?? 'HEAD'}
+              key={JSON.stringify(historyContext)}
+              api={historyAPI}
+              identity={JSON.stringify(historyContext)}
+              ref={
+                inventory.data?.repositories
+                  .find((repo) => repo.identity.id === historyContext.repositoryId)
+                  ?.refs.find((ref) => ref.id === historyContext.refId)?.name ?? 'HEAD'
+              }
             />
           ) : (
             <p>Select a qualified branch or worktree.</p>

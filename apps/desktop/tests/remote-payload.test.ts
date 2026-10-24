@@ -1,13 +1,25 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, stat, writeFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { getSnapshot, retireConfirmedGitHubPayloads } from '../src/main/git'
+import {
+  getSnapshot,
+  retireConfirmedGitHubPayloads,
+  confirmedGitHubPayload,
+  beginConfirmedPullRequestRead,
+  adoptConfirmedPullRequestRead,
+  isCurrentConfirmedSnapshot,
+  isCurrentConfirmedPullRequestRead,
+  resolveBranchCommitDependency,
+  getBranchCommitCount,
+} from '../src/main/git'
 import { CommandCancelled } from '../src/main/git-core'
 import { RepositoryScheduler } from '../src/main/repository-scheduler'
+import { WorktreeInventoryService } from '../src/main/worktree-inventory'
 import { setGitHubHostTransport, type GitHubTransport } from '../src/main/github-transport'
+import type { PullRequest, RepositorySnapshot } from '@git-stacks/shared/types'
 
 interface Gate {
   promise: Promise<void>
@@ -319,6 +331,238 @@ test('independent clones share qualified provider reads without sharing local st
     retireConfirmedGitHubPayloads()
     setGitHubHostTransport('github.com', null)
     setGitHubHostTransport('github.enterprise.invalid', null)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('adopted bounded PR bases recompute both clone parents without refreshing full coverage or admitting older reads', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'adopted-pr-parent-')))
+  const first = join(root, 'first')
+  const second = join(root, 'second')
+  const origin = 'https://github.com/acme/widgets.git'
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: 'pipe' }).trim()
+  const base = 'base-a'
+  let tip = ''
+  let requests = 0
+  let gate: Gate | null = null
+  let entered: Gate | null = null
+  let pendingFull: Promise<RepositorySnapshot> | null = null
+  const inventory = new WorktreeInventoryService(new RepositoryScheduler(), () => {})
+  inventory.setActive(false)
+  const transport: GitHubTransport = {
+    kind: 'gh',
+    destinationHost: 'github.com',
+    async credentialAuthority() {
+      return 'bounded-parent-account'
+    },
+    async rest() {
+      throw new Error('Native stacks unavailable in owned fixture')
+    },
+    async paginate() {
+      throw new Error('Unexpected pagination')
+    },
+    async graphql<T>(query: string): Promise<T> {
+      requests++
+      const observedBase = base
+      entered?.resolve()
+      await gate?.promise
+      const nodes = query.includes('issues(first:')
+        ? []
+        : [
+            {
+              number: 7,
+              title: 'Topic',
+              url: 'https://github.com/acme/widgets/pull/7',
+              headRefName: 'topic',
+              headRefOid: tip,
+              baseRefName: observedBase,
+              isDraft: false,
+              state: 'OPEN',
+              body: '',
+              headRepository: { nameWithOwner: 'acme/widgets' },
+              reviewDecision: 'APPROVED',
+              commits: { nodes: [{ commit: { statusCheckRollup: { state: 'SUCCESS' } } }] },
+            },
+          ]
+      const connection = { nodes, pageInfo: { hasNextPage: false, endCursor: null } }
+      return {
+        repository: query.includes('issues(first:')
+          ? { issues: connection }
+          : { pullRequests: connection },
+      } as T
+    },
+  }
+  try {
+    execFileSync('git', ['init', '-b', 'main', first], { stdio: 'pipe' })
+    git(first, 'config', 'user.name', 'Fixture')
+    git(first, 'config', 'user.email', 'fixture@example.invalid')
+    git(first, 'commit', '--allow-empty', '-m', 'base')
+    git(first, 'branch', 'base-a')
+    git(first, 'commit', '--allow-empty', '-m', 'middle')
+    git(first, 'branch', 'base-b')
+    git(first, 'switch', '-c', 'topic')
+    git(first, 'commit', '--allow-empty', '-m', 'topic')
+    tip = git(first, 'rev-parse', 'HEAD')
+    const publishedHead = git(
+      first,
+      'commit-tree',
+      'HEAD^{tree}',
+      '-p',
+      tip,
+      '-m',
+      'new published head',
+    )
+    git(first, 'remote', 'add', 'origin', origin)
+    execFileSync('git', ['clone', first, second], { stdio: 'pipe' })
+    git(second, 'remote', 'set-url', 'origin', 'git@github.com:acme/widgets.git')
+    git(second, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+    setGitHubHostTransport('github.com', transport)
+    retireConfirmedGitHubPayloads()
+    const initial = await getSnapshot(first, undefined, 0, 'live')
+    await getSnapshot(second, undefined, 0, 'reuse')
+    const original = confirmedGitHubPayload(first, origin)!
+    assert.equal(original.data.pullRequests[0].reviewDecision, 'APPROVED')
+    assert.equal(original.data.pullRequests[0].checks, 'passing')
+    assert.equal(
+      (await resolveBranchCommitDependency(first, 'refs/heads/topic')).parentRef,
+      'refs/heads/base-a',
+    )
+    const olderPage = await beginConfirmedPullRequestRead(first, origin)
+    gate = Promise.withResolvers<void>()
+    entered = Promise.withResolvers<void>()
+    const olderFull = getSnapshot(first, undefined, 0, 'live')
+    pendingFull = olderFull
+    await entered.promise
+    const held = gate
+    const newerPage = await beginConfirmedPullRequestRead(first, origin)
+    const observed: PullRequest = {
+      number: 7,
+      title: 'Topic',
+      url: 'https://github.com/acme/widgets/pull/7',
+      head: 'topic',
+      headOid: publishedHead,
+      headRepository: 'acme/widgets',
+      base: 'base-b',
+      state: 'OPEN',
+      draft: false,
+      checks: 'pending',
+    }
+    const inboxScoped = {
+      ...observed,
+      repositoryPath: first,
+      reviewBaseline: { headOid: tip, reviewedAt: '2026-01-01T00:00:00Z' },
+    }
+    assert.equal(await adoptConfirmedPullRequestRead(newerPage, [inboxScoped]), true)
+    const adopted = confirmedGitHubPayload(first, origin)!
+    assert.equal(adopted.fetchedAt, original.fetchedAt)
+    assert.deepEqual(adopted.issues, original.issues)
+    assert.equal(adopted.data.pullRequests[0].reviewDecision, undefined)
+    assert.equal(adopted.data.pullRequests[0].checks, 'pending')
+    assert.equal(adopted.data.pullRequests[0].headOid, publishedHead)
+    assert.equal('repositoryPath' in adopted.data.pullRequests[0], false)
+    assert.equal('reviewBaseline' in adopted.data.pullRequests[0], false)
+    assert.equal(
+      await adoptConfirmedPullRequestRead(olderPage, [{ ...observed, base: 'base-a' }]),
+      false,
+    )
+    held.resolve()
+    const obsolete = await olderFull
+    pendingFull = null
+    gate = null
+    entered = null
+    assert.equal(isCurrentConfirmedSnapshot(obsolete), false)
+    assert.equal(isCurrentConfirmedSnapshot(initial), false)
+    const fullObservedAt = original.fetchedAt
+    assert.ok(fullObservedAt)
+    inventory.register([first, second])
+    await inventory.read({ requestId: 'held-provider-validation' })
+    inventory.adoptRemote({
+      ...initial,
+      remote: {
+        state: 'fresh',
+        fetchedAt: fullObservedAt,
+        checkedAt: fullObservedAt,
+        detail: null,
+        rateLimitReset: null,
+        pendingMutations: [],
+      },
+    })
+    const beforeValidation = await beginConfirmedPullRequestRead(first, origin)
+    const oldFacts = [{ ...observed, base: 'base-a' }]
+    assert.equal(await adoptConfirmedPullRequestRead(beforeValidation, oldFacts), true)
+    assert.equal(isCurrentConfirmedPullRequestRead(beforeValidation), true)
+    const validation = Promise.withResolvers<void>()
+    const heldPublication = (async () => {
+      await validation.promise
+      if (isCurrentConfirmedPullRequestRead(beforeValidation))
+        inventory.adoptPullRequestPage(
+          inventory.current().repositories[0].identity.id,
+          oldFacts,
+          origin,
+          fullObservedAt,
+        )
+    })()
+    try {
+      const secondOrigin = git(second, 'remote', 'get-url', 'origin')
+      const duringValidation = await beginConfirmedPullRequestRead(second, secondOrigin)
+      assert.equal(await adoptConfirmedPullRequestRead(duringValidation, [observed]), true)
+      assert.equal(isCurrentConfirmedPullRequestRead(duringValidation), true)
+      inventory.adoptPullRequestPage(
+        inventory.current().repositories[1].identity.id,
+        [observed],
+        secondOrigin,
+        fullObservedAt,
+      )
+      assert.equal(isCurrentConfirmedPullRequestRead(beforeValidation), false)
+    } finally {
+      validation.resolve()
+      await heldPublication
+    }
+    assert.equal(inventory.current().repositories.length, 2)
+    for (const repository of inventory.current().repositories) {
+      assert.equal(repository.pullRequests.find((pr) => pr.number === 7)?.facts.base, 'base-b')
+      assert.equal(repository.remoteFreshness?.fetchedAt, original.fetchedAt)
+    }
+    const beforeLocalReads = requests
+    for (const directory of [first, second]) {
+      const current = await getSnapshot(directory, undefined, 0, 'reuse')
+      assert.ok(current.githubStale, 'bounded adoption does not make full provider coverage fresh')
+      assert.equal(
+        current.branches.find((branch) => branch.ref === 'refs/heads/topic')?.parent,
+        'base-b',
+      )
+      const dependency = await resolveBranchCommitDependency(directory, 'refs/heads/topic')
+      assert.match(dependency.parentRef!, /base-b$/u)
+      const parent = git(directory, 'rev-parse', dependency.parentRef!)
+      assert.equal((await getBranchCommitCount(directory, tip, parent)).commits, 1)
+    }
+    assert.equal(
+      requests,
+      beforeLocalReads,
+      'local dependency recomputation spends no provider request',
+    )
+    const retired = await beginConfirmedPullRequestRead(first, origin)
+    retireConfirmedGitHubPayloads()
+    assert.equal(await adoptConfirmedPullRequestRead(retired, [observed]), false)
+    const boundedOnly = await beginConfirmedPullRequestRead(first, origin)
+    assert.equal(await adoptConfirmedPullRequestRead(boundedOnly, [observed]), true)
+    assert.equal(confirmedGitHubPayload(first, origin)!.data.available, false)
+    assert.equal(confirmedGitHubPayload(first, origin)!.fetchedAt, null)
+    const partial = await getSnapshot(first, undefined, 0, 'reuse')
+    assert.equal(partial.github.available, false)
+    assert.ok(partial.issuesMessage)
+    assert.equal(
+      partial.branches.find((branch) => branch.ref === 'refs/heads/topic')?.parent,
+      'base-b',
+    )
+    assert.equal(requests, beforeLocalReads)
+  } finally {
+    inventory.stop()
+    gate?.resolve()
+    await pendingFull?.catch(() => {})
+    retireConfirmedGitHubPayloads()
+    setGitHubHostTransport('github.com', null)
     await rm(root, { recursive: true, force: true })
   }
 })

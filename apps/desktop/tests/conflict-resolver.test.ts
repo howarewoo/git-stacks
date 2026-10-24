@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { access, chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import {
+  access,
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+  realpath,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { join } from 'node:path'
@@ -26,7 +36,7 @@ import {
 import type { GitOperation } from '@git-stacks/shared/types'
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-conflict-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'git-stacks-conflict-')))
   const repo = join(root, 'workspace')
   await mkdir(repo)
   /** A command that must succeed. */

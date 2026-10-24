@@ -177,6 +177,66 @@ test('independent repository restoration preserves search and does not borrow a 
   ).toEqual([])
 })
 
+test('compact repository and route returns retain both scrollports and qualified inspection', async ({
+  page,
+}) => {
+  const scenario = cutoverScale(250)
+  await openGallery(page, { scenario: 'cutover-250', viewport: { width: 720, height: 470 } })
+  const filter = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
+  await filter.fill('graph/change-250')
+  const pane = page.getByRole('main', { name: 'Branch workbench', exact: true })
+  const inner = pane.locator('.bw-main-scroll')
+  await pane.locator('.bw-panel-bottom').scrollIntoViewIfNeeded()
+  await inner.evaluate((node) => {
+    node.scrollTop = Math.floor((node.scrollHeight - node.clientHeight) / 2)
+  })
+  await settle(page)
+  const offsets = () =>
+    pane.evaluate((node) => ({
+      outer: node.scrollTop,
+      inner: node.querySelector('.bw-main-scroll')!.scrollTop,
+    }))
+  const before = await offsets()
+  expect(before.outer).toBeGreaterThan(0)
+  expect(before.inner).toBeGreaterThan(0)
+  const selected = () =>
+    page
+      .locator('.bw-selected[data-branch-id]')
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute('data-branch-id')))
+  const selection = await selected()
+  const repository = (path: string) =>
+    page
+      .getByRole('complementary', { name: 'Workspace navigation' })
+      .getByRole('button')
+      .and(page.getByTitle(path, { exact: true }))
+  const [primary, clone] = scenario.inventory!.repositories
+  await repository(clone.registeredPaths[0]).click()
+  await expect(repository(clone.registeredPaths[0])).toHaveAttribute('aria-pressed', 'true')
+  await expect(filter).toHaveValue('')
+  await expect.poll(offsets).toEqual({ outer: 0, inner: 0 })
+  await repository(primary.registeredPaths[0]).click()
+  await expect(filter).toHaveValue('graph/change-250')
+  await expect.poll(offsets).toEqual(before)
+  expect(await selected()).toEqual(selection)
+  await page
+    .getByRole('complementary', { name: 'Workspace navigation' })
+    .getByRole('button', { name: /^Activity/ })
+    .click()
+  await page
+    .getByRole('complementary', { name: 'Workspace navigation' })
+    .getByRole('button', { name: /^Branches/ })
+    .click()
+  await expect.poll(offsets).toEqual(before)
+  await expect(filter).toHaveValue('graph/change-250')
+  expect(await selected()).toEqual(selection)
+  await page.reload()
+  await settle(page)
+  await expect.poll(offsets).toEqual(before)
+  await expect(filter).toHaveValue('graph/change-250')
+  expect(await selected()).toEqual(selection)
+  expect(await page.evaluate(() => window.fixture.actions)).toEqual([])
+})
+
 test('filter projection cost is included in the matching layout metric', async ({ page }) => {
   await openGallery(page, { scenario: 'cutover-reference' })
   await settle(page)

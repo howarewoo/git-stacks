@@ -53,6 +53,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isRecord } from '@git-stacks/shared/guards'
 import {
   getSnapshot,
+  beginConfirmedPullRequestRead,
+  adoptConfirmedPullRequestRead,
+  isCurrentConfirmedSnapshot,
+  isCurrentConfirmedPullRequestRead,
   getWorktreeInspectionStatus,
   resolveRepository,
   runAction,
@@ -60,6 +64,8 @@ import {
   getConflictView,
   getHistory,
   getCommitDiff,
+  getBranchCommitCount,
+  resolveBranchCommitDependency,
   getPushPreview,
   retireConfirmedGitHubPayloads,
 } from './git'
@@ -397,6 +403,7 @@ sync.onEvent((event) => {
   if (!window || window.isDestroyed()) return
   if (event.kind === 'snapshot' && event.snapshot) {
     if (event.snapshot.path !== activeRepository) return
+    if (!isCurrentConfirmedSnapshot(event.snapshot)) return
     if (prIndex.current()) {
       const origin = parseRemote(event.snapshot.remoteUrl)
       const host = remoteHostContext(origin)
@@ -1692,11 +1699,15 @@ function installHandlers() {
       )
     },
   )
-  ipcMain.handle('inspection:snapshot', () => {
+  ipcMain.handle('inspection:snapshot', (_event, remotePolicy?: unknown) => {
     if (!inspectionAuthority.getStore()) throw new Error('Captured repository context is required.')
+    if (remotePolicy !== undefined && remotePolicy !== 'reuse') {
+      throw new Error('Unsupported inspection snapshot refresh policy')
+    }
     return readRepository(
       async (root, signal) => {
-        const local = Boolean(inspectionAuthority.getStore()?.context.worktreeId)
+        const local =
+          remotePolicy === 'reuse' || Boolean(inspectionAuthority.getStore()?.context.worktreeId)
         const snapshot = await getSnapshot(
           root,
           signal,
@@ -2130,6 +2141,18 @@ function installHandlers() {
               if (argsValue[0] !== selectedRef?.name && !(known && argsValue[0] === 'HEAD'))
                 throw new Error('History must address the selected qualified ref or worktree HEAD.')
             }
+            if (operation === 'branchCommits') {
+              if (!context.refId)
+                throw new Error('branchCommits requires a selected qualified ref.')
+              const parentId = argsValue[0]
+              if (typeof parentId !== 'string' || !parentId)
+                throw new Error('branchCommits requires a qualified parent ref identity.')
+              const parentRef = fresh.refs.find((ref) => ref.id === parentId)
+              if (!parentRef)
+                throw new Error(
+                  'The compared parent ref is unavailable in the current observed scope.',
+                )
+            }
             if (context.pullRequestId) {
               const pr = registered.pullRequests.find(
                 (candidate) => candidate.id === context.pullRequestId,
@@ -2179,6 +2202,18 @@ function installHandlers() {
               known ? tree.id === known.id : tree.path === root,
             )
             const initialRef = fresh.refs.find((ref) => ref.id === context.refId)
+            const initialParentRef =
+              operation === 'branchCommits' && typeof argsValue[0] === 'string'
+                ? fresh.refs.find((ref) => ref.id === argsValue[0])
+                : undefined
+            const initialDependency =
+              initialParentRef && initialRef
+                ? await inGitRuntime(() =>
+                    resolveBranchCommitDependency(root, initialRef.name, signal),
+                  )
+                : undefined
+            if (initialDependency && initialDependency.parentRef !== initialParentRef?.name)
+              throw new Error('The supplied parent is not the main-resolved dependency parent.')
             const validate = async () => {
               signal.throwIfAborted()
               if (context.operationToken) {
@@ -2221,6 +2256,16 @@ function installHandlers() {
               const ref = initialRef
                 ? after.refs.find((ref) => ref.id === initialRef.id)
                 : undefined
+              const parentRef = initialParentRef
+                ? after.refs.find((ref) => ref.id === initialParentRef.id)
+                : undefined
+              if (initialDependency && initialRef) {
+                const dependency = await inGitRuntime(() =>
+                  resolveBranchCommitDependency(root, initialRef.name, signal),
+                )
+                if (dependency.evidence !== initialDependency.evidence)
+                  throw new Error('The dependency relationship changed; this request was retired.')
+              }
               if (
                 after.identity.id !== fresh.identity.id ||
                 (initialTree &&
@@ -2232,6 +2277,10 @@ function installHandlers() {
                     tree.headOid !== initialTree.headOid)) ||
                 (initialRef &&
                   (!ref || ref.oid !== initialRef.oid || ref.kind !== initialRef.kind)) ||
+                (initialParentRef &&
+                  (!parentRef ||
+                    parentRef.oid !== initialParentRef.oid ||
+                    parentRef.kind !== initialParentRef.kind)) ||
                 after.remote?.id !== fresh.remote?.id
               )
                 throw new Error(
@@ -2258,31 +2307,50 @@ function installHandlers() {
               signal.throwIfAborted()
             }
             await validate()
+            const providerObservation =
+              originUrl && (operation === 'pullRequestPage' || operation === 'pullRequestLayer')
+                ? await beginConfirmedPullRequestRead(root, originUrl)
+                : null
             const result = await inspectionAuthority.run(
               { root, context, signal, origin, originUrl, validate },
               () => listener(event, ...argsValue),
             )
             await validate()
             signal.throwIfAborted()
-            if (operation === 'refresh' && !context.worktreeId)
+            if (
+              operation === 'refresh' &&
+              !context.worktreeId &&
+              isCurrentConfirmedSnapshot(result as RepositorySnapshot)
+            )
               inventory.adoptRemote(result as RepositorySnapshot)
             if (operation === 'pullRequestPage' && originUrl) {
               const page = result as PullRequestPage
-              inventory.adoptPullRequestPage(
-                context.repositoryId,
-                page.pullRequests,
-                originUrl,
-                page.observedAt,
-              )
+              if (
+                await adoptConfirmedPullRequestRead(providerObservation, page.pullRequests, signal)
+              ) {
+                await validate()
+                if (isCurrentConfirmedPullRequestRead(providerObservation))
+                  inventory.adoptPullRequestPage(
+                    context.repositoryId,
+                    page.pullRequests,
+                    originUrl,
+                    page.observedAt,
+                  )
+              }
             }
             if (operation === 'pullRequestLayer' && originUrl) {
               const layer = result as PullRequestLayerRead
-              inventory.adoptPullRequestPage(
-                context.repositoryId,
-                [layer.pullRequest, layer.sourcePullRequest],
-                originUrl,
-                layer.observedAt,
-              )
+              const facts = [layer.pullRequest, layer.sourcePullRequest]
+              if (await adoptConfirmedPullRequestRead(providerObservation, facts, signal)) {
+                await validate()
+                if (isCurrentConfirmedPullRequestRead(providerObservation))
+                  inventory.adoptPullRequestPage(
+                    context.repositoryId,
+                    facts,
+                    originUrl,
+                    layer.observedAt,
+                  )
+              }
             }
             return result
           },
@@ -2639,6 +2707,38 @@ function installHandlers() {
   })
   ipcMain.handle('repository:commit-diff', (event, oid: string, requestId?: string) => {
     return readRepository((root, signal) => getCommitDiff(root, oid, signal), requestId)
+  })
+  ipcMain.handle('repository:branch-commits', (event, parentRefId: unknown, requestId?: string) => {
+    const context = inspectionAuthority.getStore()?.context
+    if (!context?.refId) throw new Error('Select a branch before counting branch commits.')
+    const parentId = requireString(parentRefId, 'parent ref identity')
+    return readRepository(
+      async (root, signal) => {
+        const fresh = await inGitRuntime(() => discoverWorktrees(root, signal))
+        const childRef = fresh.refs.find((ref) => ref.id === context.refId)
+        const parentRef = fresh.refs.find((ref) => ref.id === parentId)
+        if (!childRef || !parentRef)
+          throw new Error(
+            'The selected qualified refs are unavailable in the current observed scope.',
+          )
+        const result = await getBranchCommitCount(root, childRef.oid, parentRef.oid, signal)
+        const after = await inGitRuntime(() => discoverWorktrees(root, signal))
+        const afterChild = after.refs.find((ref) => ref.id === context.refId)
+        const afterParent = after.refs.find((ref) => ref.id === parentId)
+        if (
+          !afterChild ||
+          afterChild.oid !== childRef.oid ||
+          !afterParent ||
+          afterParent.oid !== parentRef.oid
+        ) {
+          throw new Error(
+            'The compared refs changed while counting branch commits; this request was retired.',
+          )
+        }
+        return result
+      },
+      requestIdClaim(requestId, 'branch-commits'),
+    )
   })
   ipcMain.handle('repository:push-preview', (event) => {
     return readRepository((root) => getPushPreview(root))
@@ -3158,6 +3258,19 @@ function installHandlers() {
             // Fenced after the targets are resolved, so the hosts this read asks
             // are the hosts whose credentials the identity names.
             const identity = await inboxIdentityNow()
+            const providerObservations = new Map(
+              await Promise.all(
+                targets.map(
+                  async (target) =>
+                    [
+                      target.path,
+                      target.originUrl
+                        ? await beginConfirmedPullRequestRead(target.path, target.originUrl)
+                        : null,
+                    ] as const,
+                ),
+              ),
+            )
             const report = await inGitRuntime(() =>
               inboxService.refresh(targets, {
                 ...(mergedWithinDays ? { mergedWithinDays } : {}),
@@ -3192,13 +3305,24 @@ function installHandlers() {
                 entry.facts.push(item)
                 listed.set(repo.identity.id, entry)
               }
-              for (const [id, page] of listed)
-                inventory.adoptPullRequestPage(
-                  id,
-                  page.facts,
-                  page.originUrl,
-                  report.refresh.confirmedAt,
-                )
+              for (const [id, page] of listed) {
+                const repository = current.repositories.find((repo) => repo.identity.id === id)!
+                const observation =
+                  repository.registeredPaths
+                    .map((path) => providerObservations.get(path))
+                    .find((value) => value?.originUrl === page.originUrl) ?? null
+                if (
+                  (await adoptConfirmedPullRequestRead(observation, page.facts, combined)) &&
+                  isCurrentConfirmedPullRequestRead(observation)
+                ) {
+                  inventory.adoptPullRequestPage(
+                    id,
+                    page.facts,
+                    page.originUrl,
+                    report.refresh.confirmedAt,
+                  )
+                }
+              }
             }
             return report
           },

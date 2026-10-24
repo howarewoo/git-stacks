@@ -46,10 +46,10 @@ test('filter keeps actual ancestors and excludes context from page selection', a
 test('repository switching restores filter and qualified selected context', async ({ page }) => {
   const filter = page.getByRole('textbox', { name: 'Filter branches by branch, PR, or path' })
   await filter.fill('registry')
-  await page.getByRole('button', { name: 'howarewoo/toolkit', exact: true }).click()
+  await page.getByRole('button', { name: /^howarewoo\/toolkit ·/ }).click()
   await expect(filter).toHaveValue('')
   await expect(page.locator('.bw-inspector h2')).toHaveText('Carry request context across services')
-  await page.getByRole('button', { name: 'howarewoo/git-stacks', exact: true }).click()
+  await page.getByRole('button', { name: /^howarewoo\/git-stacks ·/ }).click()
   await expect(filter).toHaveValue('registry')
   await expect(page.locator('.bw-inspector h2')).toHaveText('Discover and track linked worktrees')
 })
@@ -60,7 +60,13 @@ test('degraded local and provider facts remain unknown rather than clean or pass
   await page.goto('/?scenario=shell-connected&workbench=degraded#/workbench-v5')
   await expect(page.locator('.bw-data-notice')).toContainText('GitHub offline')
   await expect(page.locator('.bw-inspector')).toContainText('Worktree and GitHub data unavailable')
-  await expect(page.locator('.bw-facts')).toContainText('Unknown')
+  const unavailableCounts = page.locator('.bw-facts > div').filter({
+    has: page.getByText(/^(uncommitted files|unpushed commits)$/),
+  })
+  await expect(unavailableCounts).toHaveCount(2)
+  for (const count of await unavailableCounts.locator('strong').all()) {
+    await expect(count).not.toHaveText(/^\d+$/)
+  }
   await expect(page.locator('.bw-inspector .bw-readiness').first()).toContainText('Unavailable')
   await expect(page.locator('.bw-directory')).not.toContainText('Clean')
   await expect(page.getByRole('button', { name: /All branches.*Unknown/ })).toBeVisible()
@@ -130,14 +136,16 @@ test('icon-only repository rail keeps full names and switches qualified context'
   await page.setViewportSize({ width: 720, height: 700 })
   await page.reload()
   for (const name of ['howarewoo/git-stacks', 'howarewoo/toolkit', 'howarewoo/web-platform']) {
-    await expect(page.getByRole('button', { name, exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: new RegExp(`^${name} ·`) })).toBeVisible()
   }
-  await page.getByRole('button', { name: 'howarewoo/toolkit', exact: true }).click()
-  await expect(
-    page.getByRole('button', { name: 'howarewoo/toolkit', exact: true }),
-  ).toHaveAttribute('aria-pressed', 'true')
-  await expect(
-    page.getByRole('button', { name: 'howarewoo/git-stacks', exact: true }),
-  ).toHaveAttribute('aria-pressed', 'false')
+  await page.getByRole('button', { name: /^howarewoo\/toolkit ·/ }).click()
+  await expect(page.getByRole('button', { name: /^howarewoo\/toolkit ·/ })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await expect(page.getByRole('button', { name: /^howarewoo\/git-stacks ·/ })).toHaveAttribute(
+    'aria-pressed',
+    'false',
+  )
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })

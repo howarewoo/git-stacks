@@ -743,7 +743,12 @@ export async function listStatus(
   const { text, truncated } = await runGitCapped(
     repoPath,
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
-    { maxBytes: MAX_STATUS_BYTES, boundary: '\0', signal },
+    {
+      maxBytes: MAX_STATUS_BYTES,
+      boundary: '\0',
+      signal,
+      env: { GIT_OPTIONAL_LOCKS: '0' },
+    },
   )
   return { files: parseStatus(text, truncated), truncated }
 }

@@ -123,6 +123,62 @@ jobs:
           path: |
             apps/design/test-results/
             apps/design/playwright-report/
+  root-suite:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm --filter design exec playwright install --with-deps chromium
+      - name: Complete root suite
+        run: pnpm test
+  native-lane-envelope:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install virtual display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends xvfb xauth
+      - name: Build production desktop
+        run: pnpm run build
+      - name: Provision pinned Git runtime
+        run: pnpm --filter git-stacks run provision:git-runtime
+      - name: Verify pinned Git runtime
+        run: pnpm --filter git-stacks run verify:git-runtime
+      - name: Configure pinned Electron sandbox helper
+        run: |
+          pnpm --filter git-stacks exec install-electron
+          sandbox="$(realpath apps/desktop/node_modules/electron/dist/chrome-sandbox)"
+          test -f "$sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+      - name: Measure native lane envelopes
+        run: xvfb-run -a pnpm --filter git-stacks exec tsx scripts/perf/run-benchmarks.ts --lanes-only --out benchmarks/lanes
+      - name: Upload native lane evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-lane-envelope
+          path: apps/desktop/benchmarks/lanes/
+          if-no-files-found: warn
   budgets:
     needs: selection
     if: always()

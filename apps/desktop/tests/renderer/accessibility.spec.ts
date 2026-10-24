@@ -8,6 +8,7 @@ import {
   measureFocusIndicatorContrast,
   scanElementsContrast,
 } from './helpers/contrast'
+import { scenarios } from './fixtures/scenarios'
 
 function recordContrast(measurements: unknown): void {
   test
@@ -162,16 +163,29 @@ test.describe('Automated accessibility audits and contrast', () => {
   }) => {
     await openGallery(page, { scenario: 'ancestry-cycle' })
     const rows = page.locator('.bw-lane-row')
-    expect(await rows.count()).toBeGreaterThan(0)
+    const snapshot = scenarios['ancestry-cycle'].snapshot!
+    const expectedRefs = [
+      ...snapshot.branches.map((branch) => branch.name),
+      ...snapshot.pullRequests
+        .filter((pr) => !snapshot.branches.some((branch) => branch.pr?.number === pr.number))
+        .map((pr) => pr.head),
+    ]
+    await expect(rows).toHaveCount(expectedRefs.length)
     const names = await rows.evaluateAll((elements) =>
       elements.map((element) => element.getAttribute('aria-label') ?? ''),
     )
     for (const name of names) {
       expect(name).toMatch(/Parent:|Published base|No recorded parent|cycle/i)
       expect(name).toMatch(/worktree|clean|dirty|changes/i)
-      expect(name).toMatch(/pull request|PR association|review|approved|requested/i)
     }
     expect(names.some((name) => /cycle/i.test(name))).toBe(true)
+    for (const name of expectedRefs) {
+      const row = rows.filter({
+        has: page.getByRole('button', { name, exact: true }),
+      })
+      const ref = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      await expect(row).toHaveAccessibleName(new RegExp(`^${ref}(?:\\.|\\s|$)`))
+    }
   })
 
   test('filtered branch ancestry remains reachable and names prerequisite context', async ({

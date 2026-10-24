@@ -785,6 +785,7 @@ if (action === 'minimize') window.minimize()
 else if (action === 'restore') window.restore()
 else if (action === 'maximize') window.maximize()
 else if (action === 'unmaximize') window.unmaximize()
+else if (action === 'focus') { window.show(); window.focus() }
 else if (action !== 'read') throw new Error('Unknown window action ' + action)
 const visibilityState = window.webContents
   ? await window.webContents.executeJavaScript('document.visibilityState')
@@ -2508,6 +2509,8 @@ async function run(options) {
                 const primary = repository.worktrees.find((tree) => tree.path === repo)
                 const worktree = repository.worktrees.find((tree) => tree.path === linked)
                 if (!primary || !worktree) return null
+                if (primary.read.state !== 'complete' || worktree.read.state !== 'complete')
+                  return null
                 return inventory
               }
               const consume = (inventory) => {
@@ -2516,7 +2519,8 @@ async function run(options) {
                 if (value) finish(null, value)
               }
               const timer = setTimeout(
-                () => finish(new Error('Published inventory never reached the wanted discovery.')),
+                () =>
+                  finish(new Error('Published inventory never reached the wanted inspections.')),
                 20_000,
               )
               try {
@@ -2629,6 +2633,9 @@ async function run(options) {
         // helper proves the inventory actually discovered the second
         // repository, so the multi-repository records query below cannot pass
         // against a partial registration state.
+        // The driver owns this window: registration is not itself React navigation or focus.
+        // Foreground it before awaiting discovery so a superseding automatic read can publish.
+        await inspector.call(MAIN_WINDOW_STATE, 'focus')
         await capturedContext(page, second)
         const records = await page.evaluate(() => window.desktop.operationRecords())
         assert(Array.isArray(records), 'Operation records did not answer an array')
@@ -2650,14 +2657,15 @@ async function run(options) {
       async () => {
         const context = await capturedContext(page, canonicalRepo)
         const packagedLog = join(workspace.evidence, 'packaged-app.log')
-        const handlerErrors = () =>
+        const handlerDiagnostics = () =>
           existsSync(packagedLog)
             ? readFileSync(packagedLog, 'utf8')
                 .split('\n')
                 .filter((line) =>
                   line.includes("Error occurred in handler for 'inspection:request'"),
-                ).length
-            : 0
+                )
+            : []
+        const handlerErrors = () => handlerDiagnostics().length
         const before = handlerErrors()
         const requestId = 'packaged-transport-cancellation'
         // The suspended read has to be genuinely provider-backed. The dispatch
@@ -2771,6 +2779,15 @@ async function run(options) {
           genuine.name && genuine.name !== 'CommandCancelled',
           'A genuine failure adopted the cancellation name',
         )
+        const diagnostic = genuine.message.replace(
+          /^Error invoking remote method 'inspection:request': /u,
+          '',
+        )
+        const loggedGenuine = () => handlerDiagnostics().some((line) => line.endsWith(diagnostic))
+        const loggedBy = Date.now() + UI_TIMEOUT
+        while (!loggedGenuine() && Date.now() < loggedBy)
+          await new Promise((wait) => setTimeout(wait, 50))
+        assert(loggedGenuine(), 'The genuine handler diagnostic was not logged')
         assertEqual(handlerErrors(), before + 1, 'A genuine failure was not logged for the record')
         return 'cancelled read stayed plaintext without a new handler error line, genuine failure stayed logged'
       },

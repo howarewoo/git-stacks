@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import type {
   ActionResult,
   Branch,
+  BranchCommitsRead,
   ChangedFile,
   ConflictChoice,
   ConflictFile,
@@ -41,6 +42,7 @@ import {
   MAX_FILE_BYTES,
   MAX_HISTORY_BYTES,
   SNAPSHOT_BRANCH_BUDGET,
+  LIST_PAGE_SIZE,
   type SnapshotLimits,
 } from '@git-stacks/shared/performance'
 import {
@@ -4669,6 +4671,109 @@ export async function getCommitDiff(
   )
 }
 
+/** Resolve only the selected dependency; never inspect unrelated branch histories or worktrees. */
+export async function resolveBranchCommitDependency(
+  root: string,
+  refName: string,
+  signal?: AbortSignal,
+): Promise<{ parentRef: string | null; evidence: string }> {
+  const [refs, currentBranch, originUrl] = await Promise.all([
+    getRefs(root, signal),
+    getCurrentBranch(root, signal),
+    getOriginUrl(root, signal),
+  ])
+  const child = refs.find((ref) => ref.refname === refName && !ref.symref)
+  if (!child) throw new Error('The selected qualified branch is unavailable')
+  const defaultBranch = await getDefaultBranch(root, refs, currentBranch, signal)
+  const local = refName.startsWith('refs/heads/')
+  const originRemote = refName.startsWith('refs/remotes/origin/')
+  const name = local
+    ? refName.slice('refs/heads/'.length)
+    : originRemote
+      ? refName.slice('refs/remotes/origin/'.length)
+      : null
+  const recorded = name ? await getConfigValue(root, `branch.${name}.parent`, signal) : null
+  const confirmed = confirmedGitHubPayload(root, originUrl)
+  const provider = confirmed
+    ? await withTrackedPullRequests(root, originUrl, confirmed.data, signal, false)
+    : null
+  const assertProviderCurrent = () => {
+    if (confirmedGitHubPayload(root, originUrl) !== confirmed) {
+      throw new Error('Provider dependency authority changed during the selected branch read')
+    }
+  }
+  assertProviderCurrent()
+  const pr = name
+    ? provider?.pullRequests.find((pr, index) => provider.sameRepository(index) && pr.head === name)
+    : undefined
+  let parent = recorded ?? pr?.stack?.base ?? pr?.base ?? null
+  const effectiveDefault = await parentTarget(root, defaultBranch, defaultBranch, false, signal)
+  const trunk =
+    refName === `refs/heads/${defaultBranch}` || refName === `refs/remotes/origin/${defaultBranch}`
+  const inferenceDefault =
+    refs.find((ref) => ref.refname === `refs/heads/${defaultBranch}`) ??
+    refs.find((ref) => ref.refname === `refs/remotes/origin/${defaultBranch}`)
+  if (!parent && !trunk && (local || originRemote) && inferenceDefault) {
+    const mergeBase = await tryGit(
+      root,
+      ['merge-base', child.objectName, inferenceDefault.objectName],
+      signal,
+    )
+    if (mergeBase !== null) parent = defaultBranch
+  }
+  const resolved = trunk
+    ? null
+    : parent
+      ? ((parent === defaultBranch && effectiveDefault
+          ? refs.find((ref) => ref.refname === effectiveDefault.ref)
+          : undefined) ??
+        refs.find((ref) => ref.refname === `refs/heads/${parent}`) ??
+        refs.find((ref) => ref.refname === `refs/remotes/${parent}`) ??
+        refs.find((ref) => ref.refname === `refs/remotes/origin/${parent}`))
+      : undefined
+  assertProviderCurrent()
+  return {
+    parentRef: resolved?.refname ?? null,
+    evidence: JSON.stringify([
+      refName,
+      child.objectName,
+      defaultBranch,
+      recorded,
+      pr?.number,
+      pr?.base,
+      pr?.stack?.base,
+      confirmed?.generation,
+      confirmed?.read,
+      parent,
+      resolved?.refname,
+      resolved?.objectName,
+    ]),
+  }
+}
+
+export async function getBranchCommitCount(
+  repoPath: string,
+  branchOid: string,
+  parentOid: string,
+  signal?: AbortSignal,
+): Promise<BranchCommitsRead> {
+  const root = await resolveRepository(repoPath, signal)
+  const child = requireOid(branchOid, 'branch oid')!
+  const parent = requireOid(parentOid, 'parent oid')!
+  if (child === parent) {
+    return { commits: 0, branchOid: child, parentOid: parent }
+  }
+  const { text } = await runGitCapped(root, ['rev-list', '--count', `${parent}..${child}`, '--'], {
+    maxBytes: 1024,
+    signal,
+  })
+  const count = Number(text.trim())
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error('Git returned an invalid commit count')
+  }
+  return { commits: count, branchOid: child, parentOid: parent }
+}
+
 export async function getPushPreview(repoPath: string): Promise<PushPreview> {
   const root = await resolveRepository(repoPath)
   const target = await getPushTarget(root, true)
@@ -4746,7 +4851,7 @@ interface ConfirmedGitHubPayload {
   originUrl: string | null
   data: GitHubResult
   issues: { issues: RepositoryIssue[]; message: string }
-  fetchedAt: string
+  fetchedAt: string | null
   /**
    * Where this read sat among the reads that asked GitHub. Overlapping reads
    * answer out of order, so the payload a newer read confirmed must survive an
@@ -4880,6 +4985,151 @@ export function confirmedGitHubPayload(
     return null
   }
   return cached
+}
+
+export interface ConfirmedPullRequestRead {
+  root: string
+  originUrl: string
+  authority: string
+  generation: number
+  read: number
+}
+
+/** Reserve ordering before the bounded provider request, not when it finishes. */
+export async function beginConfirmedPullRequestRead(
+  root: string,
+  originUrl: string,
+): Promise<ConfirmedPullRequestRead | null> {
+  const generation = confirmedPayloadGeneration
+  const read = ++confirmedReadOrder
+  const authority = await payloadAuthority(originUrl)
+  if (!authority || generation !== confirmedPayloadGeneration) return null
+  return { root, originUrl, authority, generation, read }
+}
+
+function bindPayloadAuthority(root: string, originUrl: string | null, key: string): void {
+  payloadAuthorities.delete(root)
+  payloadAuthorities.set(root, { originUrl, key })
+  while (payloadAuthorities.size > MAX_CONFIRMED_PAYLOADS) {
+    const oldest = payloadAuthorities.keys().next()
+    if (oldest.done) break
+    payloadAuthorities.delete(oldest.value)
+  }
+}
+
+/**
+ * Merge only the PRs the bounded read actually observed. Replacing a PR, rather
+ * than spreading its old fields, cannot carry old-head checks onto a new head.
+ * Full-list/issue coverage and its fetchedAt are never refreshed by this read.
+ */
+export async function adoptConfirmedPullRequestRead(
+  observation: ConfirmedPullRequestRead | null,
+  facts: readonly PullRequest[],
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (!observation) return false
+  signal?.throwIfAborted()
+  const authority = await payloadAuthority(observation.originUrl)
+  signal?.throwIfAborted()
+  if (
+    !authority ||
+    observation.generation !== confirmedPayloadGeneration ||
+    authority !== observation.authority
+  )
+    return false
+  const previous = confirmedPayloads.get(authority)
+  if (previous && previous.read > observation.read) return false
+  const remote = parseRemote(observation.originUrl)
+  if (!remote) return false
+  const fullName = remote.fullName.toLowerCase()
+  // Inbox rows also carry clone-local paths and durable review annotations.
+  // Only provider facts belong in the cache shared by independent clones.
+  const incoming = new Map(
+    facts.map((pr) => [
+      pr.number,
+      {
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        head: pr.head,
+        base: pr.base,
+        state: pr.state,
+        draft: pr.draft,
+        checks: pr.checks,
+        headOid: pr.headOid,
+        baseOid: pr.baseOid,
+        mergeOid: pr.mergeOid,
+        headRepository: pr.headRepository,
+        reviewDecision: pr.reviewDecision,
+        mergeState: pr.mergeState,
+        canUpdate: pr.canUpdate,
+        repositoryDefaultBranch: pr.repositoryDefaultBranch,
+        stack: pr.stack,
+        author: pr.author,
+        reviewRequested: pr.reviewRequested,
+        reviewRequestsComplete: pr.reviewRequestsComplete,
+        metadata: pr.metadata,
+      },
+    ]),
+  )
+  const oldIndices = new Map(
+    previous?.data.pullRequests.map((pr, index) => [pr.number, index]) ?? [],
+  )
+  const all = [
+    ...incoming.values(),
+    ...(previous?.data.pullRequests.filter((pr) => !incoming.has(pr.number)) ?? []),
+  ]
+  const truncated = all.length > LIST_PAGE_SIZE
+  const pullRequests = truncated ? all.slice(0, LIST_PAGE_SIZE) : all
+  const sameRepository = pullRequests.map((pr) =>
+    incoming.has(pr.number)
+      ? pr.headRepository?.toLowerCase() === fullName
+      : previous?.data.sameRepository(oldIndices.get(pr.number)) === true,
+  )
+  const data =
+    previous?.data ??
+    unavailableGitHubResult(
+      'Only bounded PR metadata is confirmed; complete provider data has not been read',
+    )
+  rememberConfirmedPayload(
+    authority,
+    {
+      originUrl: observation.originUrl,
+      data: {
+        ...data,
+        pullRequests,
+        available: data.available && !truncated,
+        message: truncated
+          ? 'Bounded PR metadata exceeds complete cached-list coverage'
+          : data.message,
+        sameRepository: (value) => typeof value === 'number' && sameRepository[value] === true,
+      },
+      issues: previous?.issues ?? { issues: [], message: 'Repository issues have not been read' },
+      fetchedAt: previous?.fetchedAt ?? null,
+      read: observation.read,
+      generation: observation.generation,
+    },
+    observation.generation,
+  )
+  bindPayloadAuthority(observation.root, observation.originUrl, authority)
+  return true
+}
+
+/** Check again after a caller's final await, immediately before publication. */
+export function isCurrentConfirmedPullRequestRead(
+  observation: ConfirmedPullRequestRead | null,
+): boolean {
+  return (
+    observation !== null &&
+    observation.generation === confirmedPayloadGeneration &&
+    confirmedGitHubPayload(observation.root, observation.originUrl)?.read === observation.read
+  )
+}
+
+/** Older full reads must not republish after a newer bounded observation won. */
+export function isCurrentConfirmedSnapshot(snapshot: RepositorySnapshot): boolean {
+  if (!remoteHostContext(parseRemote(snapshot.remoteUrl))) return true
+  return confirmedGitHubPayload(snapshot.path, snapshot.remoteUrl)?.read === snapshot.providerRead
 }
 async function classifyInspectionFiles(root: string, files: ChangedFile[]) {
   if (!files.length) return
@@ -5072,13 +5322,7 @@ export async function getSnapshot(
   // again: there is nothing here for a second replacement to take away.
   const authority = localOnly ? null : await payloadAuthority(originUrl)
   if (authority) {
-    payloadAuthorities.delete(root)
-    payloadAuthorities.set(root, { originUrl, key: authority })
-    while (payloadAuthorities.size > MAX_CONFIRMED_PAYLOADS) {
-      const oldest = payloadAuthorities.keys().next()
-      if (oldest.done) break
-      payloadAuthorities.delete(oldest.value)
-    }
+    bindPayloadAuthority(root, originUrl, authority)
   } else {
     payloadAuthorities.delete(root)
   }
@@ -5095,7 +5339,7 @@ export async function getSnapshot(
   // A local refresh ('reuse') must never hit the network, even when no confirmed
   // payload exists yet: it preserves local independence and spends zero GitHub quota.
   let live: RemotePayloadRead | null = null
-  if (remote !== 'reuse' && !(remote === 'select' && confirmed)) {
+  if (remote !== 'reuse' && !(remote === 'select' && confirmed?.data.available)) {
     const pending = authority && remote === 'select' ? pendingPayloads.get(authority) : undefined
     if (pending) {
       live = await waitForPayload(pending.work, signal)
@@ -5197,7 +5441,7 @@ export async function getSnapshot(
   const issueData =
     live === null || !issuesAnswered
       ? mayFallBack && confirmed
-        ? { issues: fallbackIssues.issues, message: live?.[1].message ?? '' }
+        ? { issues: fallbackIssues.issues, message: live?.[1].message ?? fallbackIssues.message }
         : live
           ? live[1]
           : fallbackIssues
@@ -5396,6 +5640,8 @@ export async function getSnapshot(
   limits.branchesAnalyzed = analyzed.size
   limits.branchesSkipped = skipped.size
 
+  const publishedProvider =
+    live !== null && answered ? confirmedGitHubPayload(root, originUrl) : null
   const snapshot: RepositorySnapshot = {
     path: root,
     name: path.basename(root) || root,
@@ -5412,6 +5658,12 @@ export async function getSnapshot(
     operation: operationState.operation,
     stackOperation,
     headOid,
+    providerRead:
+      live !== null && answered
+        ? publishedProvider?.data === live[0]
+          ? publishedProvider.read
+          : read
+        : confirmed?.read,
     github: { available: github.available, message: github.message },
     nativeStacks: github.nativeStacks ?? [],
     nativeStackPreviewAvailable: github.nativeStackPreviewAvailable ?? false,

@@ -238,9 +238,12 @@
 .bw-main {
   container-type: inline-size;
   container-name: branchworkbench;
+  overflow-y: auto;
 }
 .bw-main > div:nth-child(2) {
   display: flex;
+  /* Preserve the sticky labels plus one standard row when the whole pane is short. */
+  min-height: calc(36px + 92px);
 }
 .bw-panel-head {
   padding: 24px 20px 16px;
@@ -306,6 +309,7 @@
 }
 .bw-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 0 20px 12px;
@@ -339,6 +343,7 @@
   width: 100%;
   padding: 0 12px 12px;
   scrollbar-gutter: stable;
+  scroll-padding-block-start: 36px;
 }
 .bw-lane-guide {
   display: flex;
@@ -884,9 +889,6 @@
   }
   .bw-lane-guide > span:last-child {
     display: none;
-  }
-  .bw-toolbar {
-    flex-wrap: wrap;
   }
   .bw-panel-bottom > span:last-child {
     display: none;

@@ -110,9 +110,13 @@ test('viewed and unviewed records survive same-head return but not a moved head 
   await switchDestination(page, 'branches')
   await page
     .getByRole('complementary', { name: 'Workspace navigation' })
-    .getByRole('button', { name: `other/widgets · ${snapshot.path}-other`, exact: true })
+    .getByRole('button', { name: /^other\/widgets ·/ })
+    .and(page.getByTitle(`${snapshot.path}-other`, { exact: true }))
     .click()
-  await page.getByRole('button', { name: snapshot.currentBranch!, exact: true }).click()
+  await page
+    .locator('.bw-lane-row')
+    .getByRole('button', { name: snapshot.currentBranch!, exact: true })
+    .click()
   await switchDestination(page, 'review')
   await expect(page.locator('.review-headline')).toContainText('#42')
   await expect(page.getByRole('button', { name: 'Mark file as viewed', exact: true })).toBeVisible()

@@ -11,7 +11,7 @@
     "start": "electron-vite preview",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --import ./tests/setup/owned-cli-boundary.cjs tests/*.test.ts",
+    "test": "tsx --test --test-concurrency=2 --import ./tests/setup/owned-cli-boundary.cjs tests/*.test.ts",
     "test:live": "tsx tests/live/cli.ts --controlled",
     "bench:performance": "tsx scripts/perf/run-benchmarks.ts",
     "gallery": "vite --config tests/renderer/vite.config.ts",
