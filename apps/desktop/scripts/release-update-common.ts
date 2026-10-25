@@ -356,11 +356,14 @@ function bankedSequenceOf(channel: UpdateChannel, name: string): number | null {
  * published release with `gh` into a directory of its own and is what every
  * release run uses; a caller with the bytes already in hand (a test) passes
  * them in, and gets the same decisions made about them.
+ * `observeHistory` sees every verified version, including versions superseded
+ * by a rollback, so beta allocation cannot reset a counter from only the tip.
  */
 export function publishedManifest(
   channel: UpdateChannel,
   repo: string,
   reader?: ReleaseReader,
+  observeHistory?: (history: PublishedManifest) => void,
 ): PublishedManifest | null {
   const fileName = manifestFileName(channel)
   const signatureName = signatureFileName(channel)
@@ -407,6 +410,7 @@ export function publishedManifest(
       console.log(`release-update: ${channel} has no published ${fileName} yet.`)
       return null
     }
+    for (const history of histories) observeHistory?.(history)
     const newest = histories.reduce((left, right) =>
       right.sequence > left.sequence ? right : left,
     )

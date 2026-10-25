@@ -15,12 +15,15 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { admitOwnedProviderCliRoot } from './fixtures/owned-provider-cli'
 import {
   assetNameFor,
   historyFileName,
   historySignatureFileName,
   releaseLocation,
+  sha256Of,
+  sizeOf,
 } from '../scripts/release-update-common'
 import { trustedUpdateKeys, type TrustedUpdateKey } from '../src/main/update/keys'
 import { isRecord } from '@git-stacks/shared/guards'
@@ -45,7 +48,7 @@ import {
  * deletes the asset it is about to replace and then fails, exactly as a cancelled
  * runner leaves it.
  */
-const ROOT = new URL('..', import.meta.url).pathname
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const TSX = createRequire(import.meta.url).resolve('tsx/cli')
 const REPO = 'howarewoo/git-stacks'
 const CHANNEL = 'stable'
@@ -414,15 +417,40 @@ test('release verification refuses a manifest that expires while an earlier inst
   const key = ephemeralKey('release-expiry')
   declarePublished(space, key)
   try {
-    const published = release(space, { version: '0.1.0', key })
-    assert.equal(published.code, 0, published.out)
+    const injected = injectKeys(space, {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: key.keyId,
+    })
+    assert.equal(injected.code, 0, injected.out)
+    stageInstallers(space, '0.1.0')
+    mkdirSync(join(space.root, 'channel-feed'))
+    mkdirSync(join(space.root, 'channel-assets'))
     const manifestPath = join(space.root, 'channel-feed', MANIFEST)
-    const parsed = parseUpdateManifest(readFileSync(manifestPath))
-    if (!parsed.ok) throw new Error(parsed.failure.message)
     const now = Date.now()
     const expiresAt = now + 1000
     const manifest = {
-      ...parsed.value,
+      schema: 1,
+      channel: CHANNEL,
+      version: '0.1.0',
+      sequence: 1,
+      notes: 'Locally signed expiry fixture.',
+      rollbackOf: null,
+      artifacts: BUILDS.map((build) => {
+        const fileName = assetNameFor(build.file('0.1.0'))
+        const path = join(space.root, 'channel-assets', fileName)
+        copyFileSync(join(space.root, 'signed-release', build.file('0.1.0')), path)
+        return {
+          platform: build.platform,
+          arch: build.arch,
+          kind:
+            build.platform === 'darwin' ? 'dmg' : build.platform === 'win32' ? 'nsis' : 'AppImage',
+          fileName,
+          url: `${releaseLocation(CHANNEL).origin}${releaseLocation(CHANNEL).pathPrefix}${fileName}`,
+          sha256: sha256Of(path),
+          size: sizeOf(path),
+        }
+      }),
       issuedAt: new Date(now - 60_000).toISOString(),
       expiresAt: new Date(expiresAt).toISOString(),
     }

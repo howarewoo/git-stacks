@@ -27,7 +27,7 @@
  */
 import { createPrivateKey } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { evaluateUpdateManifest } from '@git-stacks/shared/update'
 import {
   fail,
@@ -52,10 +52,10 @@ const signaturePath = flag(
   join(dirname(manifestPath), signatureFileName(channel)),
 )
 const artifactDir = flag(flags, 'artifact-dir')
-if (manifestPath.split('/').pop() !== manifestFileName(channel)) {
+if (basename(manifestPath) !== manifestFileName(channel)) {
   fail(`${manifestPath} is not the ${channel} manifest (${manifestFileName(channel)}).`)
 }
-if (signaturePath.split('/').pop() !== signatureFileName(channel)) {
+if (basename(signaturePath) !== signatureFileName(channel)) {
   fail(`${signaturePath} is not the ${channel} signature (${signatureFileName(channel)}).`)
 }
 

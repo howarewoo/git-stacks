@@ -21,7 +21,7 @@
  */
 import { createPrivateKey, sign, type KeyObject } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { keyIsCurrent, type TrustedUpdateKey } from '../src/main/update/keys'
 import { verifyDetachedSignature } from '../src/main/update/signature'
 import { MAX_UPDATE_SIGNATURE_BYTES, UPDATE_SIGNATURE_SCHEMA } from '@git-stacks/shared/update'
@@ -79,7 +79,7 @@ const channel = requireChannel(flag(flags, 'channel'))
 const manifestPath = flag(flags, 'manifest')
 const outPath = flag(flags, 'out', join(dirname(manifestPath), signatureFileName(channel)))
 if (manifestPath.endsWith('/')) fail(`--manifest ${manifestPath} names a directory.`)
-if (manifestFileName(channel) !== manifestPath.split('/').pop()) {
+if (manifestFileName(channel) !== basename(manifestPath)) {
   fail(`--manifest ${manifestPath} is not the ${channel} manifest (${manifestFileName(channel)}).`)
 }
 
