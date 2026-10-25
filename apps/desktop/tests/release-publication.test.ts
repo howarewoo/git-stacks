@@ -80,8 +80,25 @@ const BUILDS = [
  */
 const GH_STAND_IN = [
   `#!${process.execPath}`,
-  'const { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } = require("node:fs")',
+  'const { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } = require("node:fs")',
   'const { basename, join } = require("node:path")',
+  'if (process.argv[2] === "api" && process.env.FIXTURE_VERSIONED_SOURCE) {',
+  '  const path = process.argv[3].split("?")[0]',
+  '  const tag = process.env.RELEASE_TAG',
+  '  const dir = join(process.env.FIXTURE_RELEASE_DIR, tag)',
+  '  const names = existsSync(dir) ? readdirSync(dir) : []',
+  '  let result',
+  '  if (path.includes("/git/ref/tags/")) result = { object: { type: "commit", sha: process.env.FIXTURE_VERSIONED_SOURCE } }',
+  '  else if (path.endsWith("/tags")) result = [{ name: tag }]',
+  '  else if (path.endsWith("/releases")) result = [{ id: 1, tag_name: tag, body: "Manual release", draft: false, prerelease: false }]',
+  '  else if (path.endsWith("/releases/1/assets")) result = names.map((name, id) => ({ id: id + 1, name }))',
+  '  else if (path.includes("/releases/assets/")) {',
+  '    process.stdout.write(readFileSync(join(dir, names[Number(path.split("/").at(-1)) - 1])))',
+  '    process.exit(0)',
+  '  } else throw new Error(`unexpected API path ${path}`)',
+  '  process.stdout.write(JSON.stringify(result))',
+  '  process.exit(0)',
+  '}',
   '// argv[0] is node and argv[1] this file, so `gh release <verb> <tag>` lands here.',
   'const verb = process.argv[3]',
   'const tag = process.argv[4]',
@@ -106,7 +123,8 @@ const GH_STAND_IN = [
   '  // The workflow creates the moving release before this runs, so the release exists by then.',
   '  mkdirSync(dir, { recursive: true })',
   '  for (const file of operands) {',
-  '    const target = join(dir, basename(file))',
+  '    const target = join(dir, basename(file).replace(/[^A-Za-z0-9._-]/g, "."))',
+  '    if (process.env.FIXTURE_VERSIONED_SOURCE && existsSync(target)) throw new Error("immutable asset already exists")',
   '    if (args.includes("--clobber")) rmSync(target, { force: true })',
   '    if (doomed.includes(basename(file))) {',
   '      process.stderr.write("failed to upload: the runner was cancelled\\n")',
@@ -196,6 +214,55 @@ function workspace(): Workspace {
     },
   }
 }
+
+test('versioned installer uploads use hosted-safe names and retry without overwriting signed bytes', {
+  skip: process.platform === 'win32',
+}, () => {
+  const space = workspace()
+  const version = '0.1.0'
+  const tag = `v${version}`
+  const source = 'a'.repeat(40)
+  const env = {
+    FIXTURE_VERSIONED_SOURCE: source,
+    SOURCE_SHA: source,
+    RELEASE_VERSION: version,
+    RELEASE_TAG: tag,
+    CHANNEL: 'stable',
+    AUTOMATIC: 'false',
+    REPOSITORY: REPO,
+  }
+  try {
+    const files = BUILDS.map((build) => {
+      const path = join(space.root, build.file(version))
+      writeFileSync(path, `signed ${build.platform} ${build.arch}`)
+      return path
+    })
+    const payload = join(space.root, 'signed-release-payload.tar')
+    writeFileSync(payload, 'original recovery archive with original filenames')
+    const upload = () => space.run('release-desktop.ts', ['upload', payload, ...files], env)
+    const initial = upload()
+    assert.equal(initial.code, 0, initial.out)
+    for (const file of [payload, ...files]) {
+      assert.deepEqual(
+        readFileSync(join(space.releaseDir, tag, assetNameFor(basename(file)))),
+        readFileSync(file),
+      )
+    }
+    const retry = upload()
+    assert.equal(retry.code, 0, retry.out)
+    writeFileSync(files[0], 'different rebuilt signature')
+    const conflict = upload()
+    assert.notEqual(conflict.code, 0)
+    assert.match(conflict.out, /different immutable bytes/)
+    assert.equal(
+      readFileSync(join(space.releaseDir, tag, assetNameFor(basename(files[0]))), 'utf8'),
+      'signed darwin arm64',
+    )
+    assert.equal(readFileSync(payload, 'utf8'), 'original recovery archive with original filenames')
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
 
 /** The key set this run's builds carry, written by the real injection step. */
 function injectKeys(space: Workspace, env: Record<string, string>): { code: number; out: string } {

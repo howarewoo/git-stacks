@@ -1,11 +1,26 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { compareVersions, parseVersion } from '@git-stacks/shared/update'
 import { isRecord } from '@git-stacks/shared/guards'
-import { flag, parseFlags, publishedManifest, sha256Of } from './release-update-common'
+import {
+  assetNameFor,
+  flag,
+  parseFlags,
+  publishedManifest,
+  sha256Of,
+} from './release-update-common'
 
 const RESERVATION_KIND = 'git-stacks-automatic-beta'
 const PAYLOAD = 'signed-release-payload.tar'
@@ -436,7 +451,7 @@ function upload(repo: string, identity: ReleaseIdentity, files: string[]): void 
   const release = check(repo, identity)
   const assets = pages<{ id: number; name: string }>(`repos/${repo}/releases/${release.id}/assets`)
   for (const path of files) {
-    const name = basename(path)
+    const name = assetNameFor(basename(path))
     publishImmutable(
       name,
       readFileSync(path),
@@ -455,7 +470,14 @@ function upload(repo: string, identity: ReleaseIdentity, files: string[]): void 
         )
       },
       () => {
-        gh(['release', 'upload', identity.tag, path, '--repo', repo])
+        const staging = mkdtempSync(join(tmpdir(), 'git-stacks-release-upload-'))
+        try {
+          const staged = join(staging, name)
+          copyFileSync(path, staged)
+          gh(['release', 'upload', identity.tag, staged, '--repo', repo])
+        } finally {
+          rmSync(staging, { recursive: true, force: true })
+        }
         const refreshed = pages<{ id: number; name: string }>(
           `repos/${repo}/releases/${release.id}/assets`,
         )
