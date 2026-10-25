@@ -1,18 +1,95 @@
 name: Signed desktop release
 
-# One trigger, and it is the only publication path: a GitHub release being
-# published. There is no workflow_dispatch, no schedule, no canary and no
-# publish-from-branch trigger, so nothing in this file can mint a release or a
-# signed manifest that a person did not publish a release for.
+# Main CI calls this workflow explicitly; human-published releases retain the
+# same packaging path. The caller holds no release lock, so this lock cannot
+# deadlock a reusable call. It covers reservation through feed verification.
 on:
+  workflow_call:
+    inputs:
+      source-sha:
+        type: string
+        required: true
+      channel:
+        type: string
+        required: true
+      automatic:
+        type: boolean
+        default: false
+      version:
+        type: string
+        default: ''
   release:
     types: [published]
+
+concurrency:
+  group: signed-desktop-release-${{ inputs.channel || (github.event.release.prerelease && 'beta' || 'stable') }}
+  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
 
 jobs:
+  identity:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.identity.outputs.source }}
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      channel: ${{ steps.identity.outputs.channel }}
+      automatic: ${{ steps.identity.outputs.automatic }}
+      reuse: ${{ steps.identity.outputs.reuse }}
+      notes: ${{ steps.identity.outputs.notes }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.source-sha || github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Authenticate history with the declared release keys
+        working-directory: apps/desktop
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
+          UPDATE_SIGNING_KEY_ID: ${{ secrets.UPDATE_SIGNING_KEY_ID }}
+          UPDATE_SIGNING_KEY_VALID_FROM: ${{ secrets.UPDATE_SIGNING_KEY_VALID_FROM }}
+          UPDATE_SIGNING_KEY_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_KEY_VALID_UNTIL }}
+          UPDATE_SIGNING_ADDITIONAL_KEY_ID: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_KEY_ID }}
+          UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PUBLIC_KEY }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
+          UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
+        run: pnpm exec tsx scripts/release-trusted-keys.ts inject
+      - name: Reserve or recover the immutable source and version identity
+        id: identity
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ inputs.source-sha || github.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_VERSION: ${{ inputs.version || github.event.release.tag_name }}
+          CHANNEL: ${{ inputs.channel || (github.event.release.prerelease && 'beta' || 'stable') }}
+          AUTOMATIC: ${{ inputs.automatic || false }}
+        run: |
+          RELEASE_VERSION="${RELEASE_VERSION#v}"
+          export RELEASE_VERSION
+          pnpm exec tsx scripts/release-desktop.ts prepare
+
   package:
+    needs: identity
+    if: needs.identity.outputs.reuse != 'true'
+    env:
+      SOURCE_SHA: ${{ needs.identity.outputs.source }}
+      RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+      RELEASE_TAG: ${{ needs.identity.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ needs.identity.outputs.source }}
           persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -46,7 +124,7 @@ jobs:
       - name: Check release identity and signing prerequisites
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ needs.identity.outputs.tag }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -59,7 +137,8 @@ jobs:
           UPDATE_SIGNING_ADDITIONAL_VALID_FROM: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_FROM }}
           UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_VALID_UNTIL }}
         run: |
-          test "$RELEASE_TAG" = "v$(node -p 'require("./apps/desktop/package.json").version')"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           if [[ '${{ matrix.platform }}' != linux ]]; then
             test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD"
           fi
@@ -84,6 +163,8 @@ jobs:
             exit 1
           fi
       - run: pnpm install --frozen-lockfile
+      - name: Install the pinned browser required by the complete root suite
+        run: pnpm --filter design exec playwright install --with-deps chromium
       - name: Put the MSVC toolchain on PATH
         # The clone promotion helper is compiled from source at build time, and a
         # Windows runner does not put MSVC on PATH by itself. Without this the
@@ -111,6 +192,10 @@ jobs:
         # empty, so a release can never make a test pass or fail by the key it
         # happens to inject. Everything after this is about the key.
         run: pnpm test
+      - name: Apply the reserved version to every workspace build input
+        working-directory: apps/desktop
+        shell: bash
+        run: pnpm exec tsx scripts/release-desktop.ts stamp --version "$RELEASE_VERSION"
       - name: Inject the release update key into this build
         working-directory: apps/desktop
         shell: bash
@@ -419,45 +504,84 @@ jobs:
           retention-days: 7
 
   release-assets:
-    # Puts the verified installers on the release, and only after the
-    # dependency checks have passed. A known-vulnerable tree stops here: the
-    # artifacts stay in the run and nothing is published.
-    needs: [package, supply-chain]
+    # Bank the complete verified payload before uploading any individual asset.
+    # A retry restores these exact signed bytes, not a nondeterministic rebuild.
+    needs: [identity, package, supply-chain]
+    if: always() && needs.identity.result == 'success' && needs.supply-chain.result == 'success' && (needs.package.result == 'success' || (needs.package.result == 'skipped' && needs.identity.outputs.reuse == 'true'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      attestations: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      SOURCE_SHA: ${{ needs.identity.outputs.source }}
+      RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+      RELEASE_TAG: ${{ needs.identity.outputs.tag }}
+      CHANNEL: ${{ needs.identity.outputs.channel }}
+      AUTOMATIC: ${{ needs.identity.outputs.automatic }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ needs.identity.outputs.source }}
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-      - name: Collect the verified artifacts
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Rediscover durable state even when only failed jobs are rerun
+        id: recovery
+        run: pnpm --filter git-stacks exec tsx scripts/release-desktop.ts recovery
+      - name: Restore the previously verified payload
+        if: steps.recovery.outputs.reuse == 'true'
+        shell: bash
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --pattern signed-release-payload.tar
+          gh attestation verify signed-release-payload.tar --repo "$REPOSITORY" \
+            --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-desktop.yml"
+          tar -xf signed-release-payload.tar
+      - name: Collect newly verified artifacts and descriptors
+        if: steps.recovery.outputs.reuse != 'true'
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: signed-release-*
           path: .
           merge-multiple: true
-      - name: Prove every artifact is the one this repository's runner attested
+      - name: Collect the packaged key sets
+        if: steps.recovery.outputs.reuse != 'true'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: update-key-set-*
+          path: injected-key-sets
+          merge-multiple: true
+      - name: Prove every artifact was attested for this source and packaging workflow
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           shopt -s nullglob
           artifacts=(signed-release/*)
-          test "${#artifacts[@]}" -gt 0
+          test "${#artifacts[@]}" -eq 4
           for artifact in "${artifacts[@]}"; do
-            gh attestation verify "$artifact" --repo "$REPOSITORY"
+            gh attestation verify "$artifact" --repo "$REPOSITORY" \
+              --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-desktop.yml"
           done
-      - name: Upload only verified release artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+      - name: Bank all release inputs in one recovery payload
+        if: steps.recovery.outputs.reuse != 'true'
         shell: bash
-        run: gh release upload "$RELEASE_TAG" signed-release/*
+        run: tar -cf signed-release-payload.tar signed-release descriptors injected-key-sets
+      - name: Attest the complete recovery payload
+        if: steps.recovery.outputs.reuse != 'true'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: signed-release-payload.tar
+      - name: Upload immutable payload, then installers, and read each back
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          pnpm exec tsx scripts/release-desktop.ts upload \
+            ../../signed-release-payload.tar ../../signed-release/*
 
   publish:
     # Mints, signs and publishes one signed update manifest per channel. It runs
@@ -466,31 +590,24 @@ jobs:
     # nothing at all unless the manifest verifies against the key the packaged
     # builds carry and every installer it names re-hashes to the digest it
     # published.
-    needs: [supply-chain, release-assets]
+    needs: [identity, supply-chain, release-assets]
+    if: always() && needs.identity.result == 'success' && needs.supply-chain.result == 'success' && needs.release-assets.result == 'success'
     runs-on: ubuntu-24.04
-    # One channel's history is read, this release's manifest is signed with the
-    # next sequence, and the feed is moved — as one step, never two at a time.
-    # Two releases published in the same moment would each read the same
-    # published history, each issue the same next sequence for different bytes,
-    # and the feed would then carry two releases claiming one sequence. Every
-    # app that had already taken the first would refuse the second for good,
-    # because a sequence is spent once used, and the release would be
-    # un-installable until some later release moved the sequence on. The group
-    # is per channel, so stable and beta publish independently, and a run that is
-    # already in progress is never cancelled part-way through: half a
-    # publication is the outcome this lock exists to prevent. A queued run waits
-    # and then reads the history the run before it left behind, and re-checks
-    # the version against the feed on its own terms, so waiting costs nothing
-    # and skipping the check would cost correctness.
-    concurrency:
-      group: signed-desktop-publish-${{ github.event.release.prerelease && 'beta' || 'stable' }}
-      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      SOURCE_SHA: ${{ needs.identity.outputs.source }}
+      RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+      RELEASE_TAG: ${{ needs.identity.outputs.tag }}
+      CHANNEL: ${{ needs.identity.outputs.channel }}
+      AUTOMATIC: ${{ needs.identity.outputs.automatic }}
     permissions:
       contents: write
       attestations: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ needs.identity.outputs.source }}
           persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -528,18 +645,13 @@ jobs:
             echo "::error::$declared of the four UPDATE_SIGNING_ADDITIONAL_* values are set; a rotation is all four or none"
             exit 1
           fi
-      - name: Collect the verified artifacts and their descriptors
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: signed-release-*
-          path: .
-          merge-multiple: true
-      - name: Collect the packaged key sets
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: update-key-set-*
-          path: injected-key-sets
-          merge-multiple: true
+      - name: Restore and verify the durable signed release inputs
+        shell: bash
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --pattern signed-release-payload.tar
+          gh attestation verify signed-release-payload.tar --repo "$REPOSITORY" \
+            --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-desktop.yml"
+          tar -xf signed-release-payload.tar
       - name: Inject the release update key again, and prove it is the key the builds carry
         working-directory: apps/desktop
         shell: bash
@@ -571,15 +683,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          PRERELEASE: ${{ github.event.release.prerelease }}
-          RELEASE_NOTES: ${{ github.event.release.body }}
+          RELEASE_NOTES: ${{ github.event.release.body || needs.identity.outputs.notes }}
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
           UPDATE_SIGNING_PUBLIC_KEY: ${{ secrets.UPDATE_SIGNING_PUBLIC_KEY }}
           # Set this repository variable to the version a rollback replaces. A
           # release of an older version without it is refused, so a downgrade is
           # always an explicit, signed decision rather than a quiet one.
-          ROLLBACK_OF: ${{ vars.UPDATE_ROLLBACK_OF }}
+          ROLLBACK_OF: ${{ needs.identity.outputs.automatic != 'true' && vars.UPDATE_ROLLBACK_OF || '' }}
         # A published release carries one update channel: a prerelease goes to
         # the beta channel, a full release to stable. The manifest names the
         # installers this release produced, on the pinned release location, with
@@ -602,8 +712,9 @@ jobs:
         # signature from disk, re-verified the signature with the key this
         # release injected, and re-hashed every installer.
         run: |
-          if [ "$PRERELEASE" = "true" ]; then CHANNEL=beta; else CHANNEL=stable; fi
-          VERSION="${RELEASE_TAG#v}"
+          VERSION="$RELEASE_VERSION"
+          pnpm exec tsx scripts/release-desktop.ts stamp --version "$VERSION"
+          pnpm exec tsx scripts/release-desktop.ts check
           test "$VERSION" = "$(node -p 'require("./package.json").version')"
           ROLLBACK=()
           if [ -n "$ROLLBACK_OF" ]; then ROLLBACK=(--rollback-of "$ROLLBACK_OF"); fi
@@ -625,48 +736,19 @@ jobs:
           staged=(channel-assets/*)
           test "${#staged[@]}" -gt 0
           for artifact in "${staged[@]}"; do
-            gh attestation verify "$artifact" --repo "$REPOSITORY"
+            gh attestation verify "$artifact" --repo "$REPOSITORY" \
+              --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-desktop.yml"
           done
-      - name: Publish the signed channel feed
+      - name: Publish the versioned prerelease before moving its beta feed
+        working-directory: apps/desktop
+        run: pnpm exec tsx scripts/release-desktop.ts publish-release
+      - name: Publish the signed channel feed and verify its live bytes
         working-directory: apps/desktop
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          if [ "$PRERELEASE" = "true" ]; then CHANNEL=beta; else CHANNEL=stable; fi
-          # A moving release tag per channel, so the feed URL the app resolves
-          # (https://github.com/howarewoo/git-stacks/releases/download/<tag>/)
-          # never has to change. It is only ever moved forward along this
-          # repository's history: a tag that has been moved elsewhere stops the
-          # release rather than being overwritten.
-          TAG="updates-$CHANNEL"
-          COMMIT="$(gh api "repos/$REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
-          CURRENT="$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
-          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$COMMIT" ]; then
-            AHEAD="$(gh api "repos/$REPOSITORY/compare/$CURRENT...$COMMIT" --jq .status)"
-            if [ "$AHEAD" != ahead ] && [ "$AHEAD" != identical ]; then
-              echo "::error::the $TAG release tag is not an ancestor of $RELEASE_TAG; refusing to move it"
-              exit 1
-            fi
-            gh api -X PATCH "repos/$REPOSITORY/git/refs/tags/$TAG" -F force=true -f sha="$COMMIT" >/dev/null
-          elif [ -z "$CURRENT" ]; then
-            gh api -X POST "repos/$REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$COMMIT" >/dev/null
-          fi
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --target "$COMMIT" \
-              --title "Git Stacks $CHANNEL update feed" \
-              --notes "Moving release for the $CHANNEL update channel. The current manifest is update-$CHANNEL.json, signed with the project release key; its installers are the assets beside it."
-          fi
-          # The channel feed is published by a script, in an order that a run
-          # interrupted part way through cannot leave the channel without: the
-          # manifest and its signature are banked under names of their own
-          # first, then the installers, then the two fixed names a client
-          # fetches, and finally both fixed names are read back off the release
-          # and proved. Nothing is deleted, and nothing a client needs is only
-          # reachable after it exists somewhere that is never rewritten.
+          # The versioned release is now public. A feed failure fails this run,
+          # leaves immutable prior history intact, and is recovered on rerun.
+          pnpm exec tsx scripts/release-desktop.ts move-feed
           pnpm exec tsx scripts/release-update-publish.ts --channel "$CHANNEL" --repo "$REPOSITORY" \
             --feed ../../channel-feed --installers ../../channel-assets
 
@@ -674,13 +756,14 @@ jobs:
     # The dependency inventory for the packaged app, and a stop on a known
     # vulnerable dependency. Separate from packaging so a vulnerability is
     # reported once, against the whole tree, rather than four times per runner.
-    needs: package
+    needs: identity
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ needs.identity.outputs.source }}
           persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0

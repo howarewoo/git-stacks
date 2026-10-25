@@ -1312,23 +1312,72 @@ restarting a sequence at one would be a replay the app is right to refuse.
 
 ### How a release is published
 
-Publishing a GitHub release runs
+Every successful push to `main`, including documentation-only pushes, runs the
+full `Accessibility checks` workloads and the complete root `pnpm test` suite.
+Only after `selection`, `automated`, `design`, `budgets`, and `root-suite` succeed
+does it explicitly call
 [`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml)
-in three jobs. The packaging job refuses to start unless the release tag is `v`
-followed by the version in `package.json` and every signing prerequisite is
-present, injects the release update key into the build, runs the test suite, and
-packages macOS, Windows, and Linux. It uploads only what it verified: the macOS
-build must pass `codesign --verify` with a `Developer ID Application` authority, a
-`stapler`-validated notarisation ticket, and the expected team identifier, and
-the Windows installer is refused unless `Get-AuthenticodeSignature` reports
-`Valid`. Provenance is attested for the uploaded files, and a separate job
-refuses a known-vulnerable dependency and keeps a dependency inventory with the
-run.
+with the tested final SHA and the `beta` channel. A PR retains selective checks
+and cannot enter the release job or receive its signing secrets. Manual CI
+dispatch verifies without publishing.
 
-The publishing job then mints, signs, and re-verifies the channel's manifest and
-publishes it with its detached signature and the installers it names, on that
-channel's moving release tag, so a channel's feed address never has to be
-rebuilt:
+The reusable release workflow reserves an annotated `v<core>-beta.N` tag bound
+to that exact source SHA, generates GitHub release notes once, then creates a
+**draft prerelease** carrying those notes and a stable SHA/version ownership
+marker. Reruns preserve existing notes, including operator edits, while refusing
+missing or conflicting ownership markers. Allocation reads
+all version tags, releases (including drafts), and every verified stable/beta
+manifest in the immutable feed history. With the committed `0.1.0` core and no
+newer history, the first version is `0.1.1-beta.1`; numeric counters advance
+through `beta.9`, `beta.10`, and beyond. A newer stable core starts its next
+patch series; a newer prerelease series is continued or advanced rather than
+reset. Failed reservations can leave gaps. A rerun reuses its source's reservation,
+never takes someone else's tag, and never commits version bumps back to `main`.
+The reserved version is applied to all workspace package manifests only inside
+the build checkout, so the packaged application, installer names, and signed
+manifest describe the same version.
+
+Human publication remains available through GitHub's `release.published` event:
+publish `v<version>` at a commit whose desktop package has that exact version,
+as a full release for `stable` or a prerelease for `beta`. It uses the same
+packaging, verification and feed implementation. Automatic runs are always
+prereleases, always `make_latest: false`, never read the rollback override,
+and cannot move `updates-stable`. A release created with `GITHUB_TOKEN` does not
+trigger another workflow; the CI call above is intentional, not an event cascade.
+
+Every target retains the existing release gates. The packaging job requires
+all signing prerequisites, runs the committed checkout's tests before injecting
+keys, and packages macOS arm64/x64, Windows x64 and Linux x64. The macOS build
+must pass `codesign --verify` with a `Developer ID Application` authority, a
+`stapler`-validated notarisation ticket, and the expected team identifier; the
+disk image itself is also signed, notarised, stapled and assessed. Windows
+installers require a `Valid` Authenticode signature. Linux remains a best-effort
+AppImage, authenticated by provenance and the signed manifest, not an in-place
+updater. Provenance is attested for the files, and dependency audit/Trivy gates
+and dependency inventories remain required.
+
+After those gates, the workflow banks one attested `signed-release-payload.tar`
+on the draft before uploading individual installers. It contains the exact signed
+installers, descriptors and public key sets. Every upload is immutable and read
+back: existing identical bytes are reused; different bytes fail closed. A rerun,
+including a failed-job-only rerun, rediscovers and verifies that payload against
+the repository, source SHA and packaging workflow, then restores the original
+signed bytes instead of rebuilding signatures under an already-spent version.
+Missing recovery payloads with existing assets require operator recovery of the
+original run artifacts, not asset deletion or a blind overwrite.
+
+The publishing job compares every packaged key set, mints/signs/verifies the
+channel manifest, re-hashes every installer and verifies source-bound provenance.
+Only then does it publish the versioned prerelease with installers; only after
+that does it move and publish the beta feed. Packaging, scan or signature failure
+leaves the automatic release in draft. A feed failure can leave the versioned
+prerelease public, but fails the run and retains banked verified history for
+recovery. Full signed multi-platform publication, hosted concurrency and native
+installation require a suitably credentialed disposable GitHub repository and
+real signing identities; local allocator/feed fixtures do not establish that
+hosted acceptance, and the Windows packaged desktop smoke is unsupported.
+
+The moving channel release locations remain:
 
 | Channel  | Moving release tag | Manifest             | Detached signature       |
 | -------- | ------------------ | -------------------- | ------------------------ |
@@ -1385,17 +1434,25 @@ history. Re-run the release to put the live pair back; the operator floor
 (`--sequence`) exists for a channel whose history is being repaired by hand, and
 it can only ever move the counter up.
 
-One channel publishes one release at a time. The publishing job takes a lock
-named after the channel it is about to move, and a run already in progress is
-never cancelled part-way: without that lock two releases published in the same
-moment would each read the same published history, each issue the same next
-sequence for different bytes, and the feed would carry two releases claiming one
-sequence — which every app that had already taken the first would refuse for
-good, since a sequence is spent once used. A queued run waits and then reads
-the history the run before it left behind, and re-checks its own version against
-the feed, so waiting costs a queue slot and skipping the check would cost
-correctness. `stable` and `beta` hold separate locks and do not wait on each
-other.
+One channel releases at a time. The reusable workflow, not its CI caller or a
+nested publishing job, holds `signed-desktop-release-<channel>` from reservation
+through final feed verification. Manual and automatic beta publication share
+that lock; stable uses a separate lock. With `cancel-in-progress: false` and
+[`queue: max`](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
+GitHub allows up to 100 pending runs. Queue order is arrival at the lock, **not
+commit order**; overflow runs are cancelled. This is not a lossless unbounded
+queue. A newer SHA arriving first can make an older queued SHA fail visibly:
+reservation/feed ancestry checks refuse stale history, and every publication
+rechecks that the source is still on `main` and the moving feed tag is its
+ancestor. Force pushes and divergent tags require human reconciliation; no
+backwards overwrite is attempted. For a capacity cancellation, rerun the original
+CI run once capacity is available, in source ancestry order before newer releases
+advance. A stale older SHA cannot be recovered after its descendant has advanced
+the feed without changing the forward-only policy; leave that failure visible.
+For interrupted uploads, rerun the original failed release jobs (or the whole
+original CI run): the reservation and durable signed payload are reused, and a
+new manifest sequence may be issued from verified banked history. Do not delete
+reservations, recovery payloads or history to make a retry appear new.
 
 A manifest is issued, never edited in place. Its signing key is the
 `UPDATE_SIGNING_KEY` repository secret, and the packaging job injects that key's
@@ -2129,12 +2186,13 @@ every `main` push and `workflow_dispatch` runs the full existing nonvisual rende
 catalog, typecheck, keyboard/component unit, and performance workloads. Desktop
 renderer visual baselines remain a separate macOS-only local check.
 
-Manual dispatch also runs the independent `root-suite` job on native Ubuntu 24.04
-x64 with Node 24 and the pinned Playwright Chromium. It installs frozen dependencies
-and executes the normal root `pnpm test`, including the complete desktop unit suite
-and design manifest/browser tests, under a 30-minute job limit. This complete root
-coverage is dispatch-only; the existing affected-check selector and automatic
-push/PR workloads are unchanged.
+Every `main` push and manual dispatch also runs the independent `root-suite` job
+on native Ubuntu 24.04 x64 with Node 24 and the pinned Playwright Chromium. It
+installs frozen dependencies and executes the normal root `pnpm test`, including
+the complete desktop unit suite and design manifest/browser tests, under a
+30-minute job limit. On main pushes it is a required dependency of the explicit
+signed beta release call alongside all existing checks, even for docs-only
+pushes. PR selection is unchanged; PRs and manual CI dispatch do not publish.
 
 The separate dispatch-only `native-lane-envelope` job measures the real production
 Electron application at 250, 1000 and 5000 objects with 120 concurrent worktrees.
