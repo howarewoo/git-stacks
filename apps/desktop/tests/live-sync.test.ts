@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { renameSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -363,45 +364,57 @@ test('a moved repository is reported missing and picked up again when it returns
   }
 })
 
-test('a repository replaced at the same path re-arms the watch on the new directory', async () => {
-  const { root, repo, cleanup } = await disposableRepository()
-  const moved = join(root, 'moved-workspace')
-  const replacement = join(root, 'replacement-workspace')
-  await mkdir(replacement)
-  git(replacement, 'init', '-b', 'main')
-  git(replacement, 'config', 'user.name', 'Git Stacks test')
-  git(replacement, 'config', 'user.email', 'test@example.invalid')
-  await writeFile(join(replacement, 'shared.txt'), 'replacement\n')
-  git(replacement, 'add', '.')
-  git(replacement, 'commit', '-m', 'Replacement commit')
+for (const observeAbsence of [false, true])
+  test(`a repository replaced at the same path re-arms the watch (observed absence: ${observeAbsence})`, async () => {
+    const { root, repo, cleanup } = await disposableRepository()
+    const moved = join(root, 'moved-workspace')
+    const replacement = join(root, 'replacement-workspace')
+    await mkdir(replacement)
+    git(replacement, 'init', '-b', 'main')
+    git(replacement, 'config', 'user.name', 'Git Stacks test')
+    git(replacement, 'config', 'user.email', 'test@example.invalid')
+    await writeFile(join(replacement, 'shared.txt'), 'replacement\n')
+    git(replacement, 'add', '.')
+    git(replacement, 'commit', '-m', 'Replacement commit')
 
-  const log = new WatchLog()
-  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
-    debounceMs: 50,
-    maxDelayMs: 800,
-    sweepMs: 100,
-  })
-  try {
-    await watcher.start()
-    // The old tree is moved away and a different one takes the same path. The
-    // subscriptions in place belong to the tree that moved, and no event ever
-    // shows this path missing.
-    await rename(repo, moved)
-    await rename(replacement, repo)
-    await log.waitFor((reason) => reason === 'replaced')
-
-    // The new directory is what is watched now, so its worktree edits arrive.
-    await writeFile(join(repo, 'shared.txt'), 'edited in the replacement\n')
-    await log.waitFor((reason) => reason === 'change')
-    assert.ok(
-      !log.reasons.includes('missing'),
-      'the replacement was never absent, so nothing was reported missing',
+    const log = new WatchLog()
+    const editedPath = join(repo, 'after-replacement.txt')
+    const watcher = new RepositoryWatcher(
+      repo,
+      (event) => {
+        log.record(event.reason)
+        if (event.reason === 'change' && event.paths.includes(editedPath))
+          log.record('replacement-edit')
+      },
+      {
+        debounceMs: 50,
+        maxDelayMs: 800,
+        sweepMs: 100,
+      },
     )
-  } finally {
-    watcher.stop()
-    await cleanup()
-  }
-})
+    try {
+      await watcher.start()
+      // Same-turn renames cannot run a presence callback between the moves;
+      // the other case deliberately lets the watcher observe the missing tree.
+      if (observeAbsence) {
+        await rename(repo, moved)
+        await log.waitFor((reason) => reason === 'missing')
+        await rename(replacement, repo)
+        await log.waitFor((reason) => reason === 'restored')
+      } else {
+        renameSync(repo, moved)
+        renameSync(replacement, repo)
+        await log.waitFor((reason) => reason === 'replaced')
+      }
+
+      // Only this new-tree path can prove the replacement's subscription rearmed.
+      await writeFile(editedPath, 'edited in the replacement\n')
+      await log.waitFor((reason) => reason === 'replacement-edit')
+    } finally {
+      watcher.stop()
+      await cleanup()
+    }
+  })
 
 /**
  * A worktree whose Git directory lives outside it, as a linked worktree's
@@ -2303,21 +2316,29 @@ test('real repository watcher fires coordinator during rate limit and delivers l
 test('worktree file edit or creation without git triggers the watcher and notifies coordinator', async () => {
   const { repo, cleanup } = await disposableRepository()
   const log = new WatchLog()
-  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
-    debounceMs: 50,
-    maxDelayMs: 200,
-    sweepMs: 0,
-  })
+  const watcher = new RepositoryWatcher(
+    repo,
+    (event) => {
+      if (event.reason === 'change') {
+        for (const path of event.paths) log.record(path)
+      }
+    },
+    {
+      debounceMs: 50,
+      maxDelayMs: 200,
+      sweepMs: 0,
+    },
+  )
   try {
     await watcher.start()
 
     // 1. Create a brand new untracked file directly in the worktree WITHOUT running git:
     await writeFile(join(repo, 'untracked.txt'), 'hello from worktree')
-    await log.waitFor((reason) => reason === 'change')
+    await log.waitFor((path) => path === join(repo, 'untracked.txt'))
 
     // 2. Edit an existing tracked file directly in the worktree WITHOUT running git:
     await writeFile(join(repo, 'shared.txt'), 'modified without git\n')
-    await log.waitFor((reason) => reason === 'change')
+    await log.waitFor((path) => path === join(repo, 'shared.txt'))
   } finally {
     await watcher.stop()
     await cleanup()
