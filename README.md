@@ -131,6 +131,13 @@ hook runs `pnpm --filter git-stacks exec install-electron` to download the pinne
 Electron runtime when absent, before electron-vite starts. To provision it after an
 install with scripts disabled, run `pnpm run postinstall`.
 
+For release security updates, check current registry advisories and the dependency
+parents' supported ranges first. Prefer a compatible lockfile refresh for transitive
+patches over overrides or unrelated parent upgrades; keep direct Electron and Vite
+pins aligned with the patched versions. Commit the regenerated lockfile and verify
+it with `pnpm install --frozen-lockfile` and `pnpm audit --audit-level high`.
+The release audit and Trivy high/critical gates still apply to the resulting package.
+
 `pnpm run dev`, `pnpm run build`, `pnpm test`, `pnpm run package`, and `pnpm run
 dist` all build the clone promotion helper first, so a C compiler must be
 available on the build machine (`cc`, `gcc`, `clang`, or `cl`; set `CC` to
