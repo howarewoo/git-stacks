@@ -2183,13 +2183,14 @@ These are the extreme cases the app states rather than hanging or crashing on.
 The `Accessibility checks` workflow uses one selection job for the stable
 `automated`, `design`, and `budgets` checks. Pull requests select affected workloads;
 every `main` push and `workflow_dispatch` runs the full existing nonvisual renderer,
-catalog, typecheck, keyboard/component unit, and performance workloads. Desktop
-renderer visual baselines remain a separate macOS-only local check.
+catalog behavior, typecheck, keyboard/component unit, and performance workloads.
+Visual baselines remain separate host-specific checks: desktop on macOS, catalog
+on its documented macOS arm64 or Linux x64 baseline host.
 
 Every `main` push and manual dispatch also runs the independent `root-suite` job
 on native Ubuntu 24.04 x64 with Node 24 and the pinned Playwright Chromium. It
 installs frozen dependencies and executes the normal root `pnpm test`, including
-the complete desktop unit suite and design manifest/browser tests, under a
+the complete desktop unit suite and design manifest/nonvisual browser tests, under a
 30-minute job limit. On main pushes it is a required dependency of the explicit
 signed beta release call alongside all existing checks, even for docs-only
 pushes. PR selection is unchanged; PRs and manual CI dispatch do not publish.
@@ -2956,7 +2957,15 @@ pnpm --filter design preview
 pnpm --filter design typecheck
 pnpm --filter design check:manifest
 pnpm --filter design test:catalog
+CATALOG_PORT=5397 pnpm --filter design test:visual # supported baseline host only
 ```
+
+`test:catalog` runs every portable behavioral case, excluding only `@visual`
+screenshot comparisons. Root `pnpm test` and selected catalog CI use that same
+command; native release jobs retain the complete functional root suite before
+release-key injection. `test:visual` explicitly runs the existing representative
+light/dark screenshots on a matching baseline host. Windows has no catalog image
+baseline; do not generate one merely to make native packaging pass.
 
 The catalog uses port 5299 and produces `apps/design/dist`, independently of Electron, the native helper, Git provisioning, repositories and `gh` authentication. A root install still installs desktop dependencies. `VITE_BASE=/catalog/ pnpm --filter design build` selects a hosting subpath; preview that build with `VITE_BASE=/catalog/ pnpm --filter design preview` and open `http://localhost:5299/catalog/`. Keep the same base when previewing so asset requests resolve; no deployment is implied. Output remains fixed at `dist` so Turbo can restore the actual static assets.
 
@@ -3055,7 +3064,7 @@ catalog controls and desktop Git workflows are not globally restyled.
 
 The dated `apps/design/src/manifest.ts` records all 63 components plus Typography, Typeset and the owned Iconography foundation, the exact upstream inventory reconciliation, and owned API adaptations. CI checks this local inventory, canonical token references and the displayed imports against package exports, without a live scrape. Browser tests cover renderability, navigation, forms, calendar keyboard selection, table sorting, menus, focus return, theme overrides, rendered density dimensions, local Git simulations, supported attachment/bubble states, sidebar collapse and active/reduced-motion loading. Narrow browsing uses 390×844; 200% zoom-equivalent reflow uses a 640×450 CSS viewport (half of a 1280×900 window), checks reachable actions and dialogs, and is not a claim of browser-chrome zoom testing.
  
-Representative light/dark screenshots have separate committed Linux x64 and reviewed macOS Darwin arm64 baseline families. Use the pinned Playwright Chromium for the recorded platform, 1280×1600, device scale 1, en-US, UTC, system fonts and reduced motion. The taller viewport contains the Git composition and Button specimens, avoiding Chromium's beyond-viewport capture and its transient 1×1 responsive reflow. Each whole capture target is temporarily aligned to the nearest device-pixel origin; existing transformed targets are refused, internal layout is unchanged, and the prior inline transform is restored even if capture fails. Behavioral tests retain 1280×900 unless a scenario explicitly exercises another size. Accessibility cases select each theme through the catalog control and enter keyboard modality before focus probes; each theme retains full-page and open-dialog Axe scans. Capture intentional changes with `pnpm --filter design test:catalog --grep @visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:catalog` without update mode. Record the actual browser version/executable, OS/architecture, fonts and run settings with each baseline family. Neither family's result establishes pixel identity on another platform or Windows coverage. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
+Representative light/dark screenshots have separate committed Linux x64 and reviewed macOS Darwin arm64 baseline families. Use the pinned Playwright Chromium for the recorded platform, 1280×1600, device scale 1, en-US, UTC, system fonts and reduced motion. The taller viewport contains the Git composition and Button specimens, avoiding Chromium's beyond-viewport capture and its transient 1×1 responsive reflow. Each whole capture target is temporarily aligned to the nearest device-pixel origin; existing transformed targets are refused, internal layout is unchanged, and the prior inline transform is restored even if capture fails. Behavioral tests retain 1280×900 unless a scenario explicitly exercises another size. Accessibility cases select each theme through the catalog control and enter keyboard modality before focus probes; each theme retains full-page and open-dialog Axe scans. Capture intentional changes with `pnpm --filter design test:visual --update-snapshots`, inspect every image, then run `pnpm --filter design test:visual` without update mode. Record the actual browser version/executable, OS/architecture, fonts and run settings with each baseline family. Neither family's result establishes pixel identity on another platform or Windows coverage. Automated tests are not certification: manual screen-reader, physical touch, native browser zoom, OS high-contrast and cross-platform font checks remain explicit sign-off gaps when those environments are unavailable.
 
 When verifying the Card specimen, inspect both cards against the catalog canvas
 in light and dark themes, then follow Inspect composition to the local Git

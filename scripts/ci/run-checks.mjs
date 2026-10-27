@@ -117,7 +117,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       run(['--filter', '@git-stacks/ui', 'tokens:check'])
       run(['exec', 'turbo', 'run', 'build', '--filter=design'])
       const report = JSON.parse(
-        run(['--filter', 'design', 'exec', 'playwright', 'test', '--list', '--reporter=json'], {
+        run(['--filter', 'design', '--silent', 'test:catalog', '--list', '--reporter=json'], {
           capture: true,
         }),
       )
