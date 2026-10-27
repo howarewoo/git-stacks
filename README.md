@@ -1331,7 +1331,12 @@ dispatch verifies without publishing.
 The reusable release workflow reserves an annotated `v<core>-beta.N` tag bound
 to that exact source SHA, generates GitHub release notes once, then creates a
 **draft prerelease** carrying those notes and a stable SHA/version ownership
-marker. Reruns preserve existing notes, including operator edits, while refusing
+marker. Notes compare against the most recently published release by publication
+time, including prior betas and legacy previews even when their source history
+diverges. Drafts, the current tag, and moving `updates-stable`/`updates-beta`
+feeds are not comparison baselines. Only a first release with no published
+predecessor leaves GitHub to generate notes without an explicit baseline.
+Reruns preserve existing notes, including operator edits, while refusing
 missing or conflicting ownership markers. Allocation reads
 all version tags, releases (including drafts), and every verified stable/beta
 manifest in the immutable feed history. With the committed `0.1.0` core and no
@@ -1361,7 +1366,8 @@ disk image itself is also signed, notarised, stapled and assessed. Windows
 installers require a `Valid` Authenticode signature. Linux remains a best-effort
 AppImage, authenticated by provenance and the signed manifest, not an in-place
 updater. Provenance is attested for the files, and dependency audit/Trivy gates
-and dependency inventories remain required.
+and dependency inventories remain required. The dependency-tree inventory is
+uploaded once by the SBOM action and retained with the workflow run for 30 days.
 
 After those gates, the workflow banks one attested `signed-release-payload.tar`
 on the draft before uploading individual installers. It contains the exact signed
@@ -1383,6 +1389,14 @@ recovery. Full signed multi-platform publication, hosted concurrency and native
 installation require a suitably credentialed disposable GitHub repository and
 real signing identities; local allocator/feed fixtures do not establish that
 hosted acceptance, and the Windows packaged desktop smoke is unsupported.
+
+To install a published beta, open [GitHub Releases](https://github.com/howarewoo/git-stacks/releases),
+choose the versioned prerelease, and expand **Assets**. Download the Apple Silicon
+or Intel `.dmg` for your Mac, the Windows x64 `.exe`, or the Linux x64 `.AppImage`.
+Use the installer assets, not GitHub's source-code archives or the moving channel
+feed files. A failed run's draft is not a downloadable release; wait for the
+signed publication gates to finish. Automatic betas do not become GitHub's
+“Latest” stable release, so `/releases/latest` is not the beta download page.
 
 The moving channel release locations remain:
 
