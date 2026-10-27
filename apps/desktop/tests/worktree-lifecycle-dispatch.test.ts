@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { promisify } from 'node:util'
-import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, access, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { test } from 'node:test'
@@ -86,7 +86,7 @@ function git(root: string, ...args: string[]): string {
 }
 
 test('a real removal with a lost child confirmation remains durable unconfirmed and stops the rest of the batch', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-lifecycle-dispatch-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'git-stacks-lifecycle-dispatch-')))
   const repo = join(root, 'primary')
   try {
     await mkdir(repo)
@@ -154,7 +154,7 @@ test('a real removal with a lost child confirmation remains durable unconfirmed 
 })
 
 test('fresh cleanup refuses a still-present uncertain target owned by another worktree but preserves completed and not-run peers', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'git-stacks-lifecycle-retained-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'git-stacks-lifecycle-retained-')))
   const repo = join(root, 'primary')
   try {
     await mkdir(repo)

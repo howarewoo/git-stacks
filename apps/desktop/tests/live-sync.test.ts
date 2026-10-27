@@ -2316,21 +2316,29 @@ test('real repository watcher fires coordinator during rate limit and delivers l
 test('worktree file edit or creation without git triggers the watcher and notifies coordinator', async () => {
   const { repo, cleanup } = await disposableRepository()
   const log = new WatchLog()
-  const watcher = new RepositoryWatcher(repo, (event) => log.record(event.reason), {
-    debounceMs: 50,
-    maxDelayMs: 200,
-    sweepMs: 0,
-  })
+  const watcher = new RepositoryWatcher(
+    repo,
+    (event) => {
+      if (event.reason === 'change') {
+        for (const path of event.paths) log.record(path)
+      }
+    },
+    {
+      debounceMs: 50,
+      maxDelayMs: 200,
+      sweepMs: 0,
+    },
+  )
   try {
     await watcher.start()
 
     // 1. Create a brand new untracked file directly in the worktree WITHOUT running git:
     await writeFile(join(repo, 'untracked.txt'), 'hello from worktree')
-    await log.waitFor((reason) => reason === 'change')
+    await log.waitFor((path) => path === join(repo, 'untracked.txt'))
 
     // 2. Edit an existing tracked file directly in the worktree WITHOUT running git:
     await writeFile(join(repo, 'shared.txt'), 'modified without git\n')
-    await log.waitFor((reason) => reason === 'change')
+    await log.waitFor((path) => path === join(repo, 'shared.txt'))
   } finally {
     await watcher.stop()
     await cleanup()
