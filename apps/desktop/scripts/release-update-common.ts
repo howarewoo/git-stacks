@@ -26,7 +26,6 @@ import {
   parseUpdateManifest,
   UPDATE_ARCHITECTURES,
   UPDATE_CHANNELS,
-  UPDATE_PLATFORMS,
   type UpdateArchitecture,
   type UpdateChannel,
   type UpdateManifest,
@@ -57,7 +56,7 @@ export function requireChannel(value: string): UpdateChannel {
 }
 
 export function requirePlatform(value: unknown): UpdatePlatform {
-  if (typeof value !== 'string' || !(UPDATE_PLATFORMS as readonly string[]).includes(value)) {
+  if (value !== 'darwin') {
     fail(`${String(value)} is not a platform this app builds an installer for.`)
   }
   return value as UpdatePlatform
@@ -578,6 +577,19 @@ export function proveManifestBytes(
     fail(
       `the manifest publishes the ${manifest.value.channel} channel and is being published as ${channel}.`,
     )
+  }
+  // This is publication admission, not historical parsing: old signed feeds
+  // remain readable below, but new feeds must contain exactly the two Mac builds.
+  if (
+    manifest.value.artifacts.length !== 2 ||
+    manifest.value.artifacts.some(
+      (artifact) => artifact.platform !== 'darwin' || artifact.kind !== 'dmg',
+    ) ||
+    !UPDATE_ARCHITECTURES.every((arch) =>
+      manifest.value.artifacts.some((artifact) => artifact.arch === arch),
+    )
+  ) {
+    fail('new manifests must contain exactly darwin-arm64 and darwin-x64 disk images.')
   }
   return { manifest: manifest.value, key, trusted }
 }

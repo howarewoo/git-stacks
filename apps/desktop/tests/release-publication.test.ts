@@ -64,8 +64,6 @@ const BUILDS = [
     file: (version: string) => `Git Stacks-${version}-arm64.dmg`,
   },
   { platform: 'darwin', arch: 'x64', file: (version: string) => `Git Stacks-${version}.dmg` },
-  { platform: 'win32', arch: 'x64', file: (version: string) => `Git Stacks Setup ${version}.exe` },
-  { platform: 'linux', arch: 'x64', file: (version: string) => `Git Stacks-${version}.AppImage` },
 ] as const
 
 /**
@@ -308,6 +306,59 @@ function stageInstallers(space: Workspace, version: string, body = 'an installer
   }
 }
 
+test('new manifests reject unsupported platforms and require both Mac architectures', () => {
+  const space = workspace()
+  try {
+    const key = ephemeralKey('mac-only')
+    const injected = injectKeys(space, {
+      UPDATE_SIGNING_KEY: key.secret,
+      UPDATE_SIGNING_PUBLIC_KEY: key.registry.publicKey,
+      UPDATE_SIGNING_KEY_ID: key.keyId,
+    })
+    assert.equal(injected.code, 0, injected.out)
+    for (const platform of ['win32', 'linux']) {
+      const result = space.run('release-update-manifest.ts', [
+        'describe',
+        '--platform',
+        platform,
+        '--arch',
+        'x64',
+        '--dir',
+        'signed-release',
+        '--out',
+        'unsupported.json',
+      ])
+      assert.equal(result.code, 1, result.out)
+      assert.match(result.out, /not a platform this app builds an installer for/u)
+    }
+    stageInstallers(space, '0.1.0')
+    rmSync(join(space.root, 'descriptors', 'darwin-x64.json'))
+    const missing = space.run('release-update-manifest.ts', [
+      'build',
+      '--channel',
+      CHANNEL,
+      '--version',
+      '0.1.0',
+      '--descriptors',
+      'descriptors',
+      '--artifact-dir',
+      'signed-release',
+      '--out-dir',
+      'channel-feed',
+      '--stage-dir',
+      'channel-assets',
+      '--repo',
+      REPO,
+      '--notes',
+      'Mac-only release.',
+    ])
+    assert.equal(missing.code, 1, missing.out)
+    assert.match(missing.out, /darwin-x64/u)
+  } finally {
+    rmSync(space.root, { recursive: true, force: true })
+  }
+})
+
 interface ReleaseRun {
   code: number
   out: string
@@ -510,8 +561,7 @@ test('release verification refuses a manifest that expires while an earlier inst
         return {
           platform: build.platform,
           arch: build.arch,
-          kind:
-            build.platform === 'darwin' ? 'dmg' : build.platform === 'win32' ? 'nsis' : 'AppImage',
+          kind: 'dmg',
           fileName,
           url: `${releaseLocation(CHANNEL).origin}${releaseLocation(CHANNEL).pathPrefix}${fileName}`,
           sha256: sha256Of(path),

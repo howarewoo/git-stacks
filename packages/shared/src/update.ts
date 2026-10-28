@@ -12,6 +12,7 @@ import { isRecord } from './guards'
 export const UPDATE_CHANNELS = ['stable', 'beta'] as const
 export type UpdateChannel = (typeof UPDATE_CHANNELS)[number]
 
+/** Historical signed-feed vocabulary, not the current desktop support matrix. */
 export const UPDATE_PLATFORMS = ['darwin', 'win32', 'linux'] as const
 export type UpdatePlatform = (typeof UPDATE_PLATFORMS)[number]
 

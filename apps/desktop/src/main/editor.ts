@@ -37,16 +37,7 @@ export function resolveEditorInvocation(
       reason: 'this platform’s default text editor',
     }
   }
-  if (process.platform === 'win32') {
-    return {
-      invocation: { command: 'notepad', args: [targetPath] },
-      reason: 'this platform’s default text editor',
-    }
-  }
-  return {
-    invocation: { command: 'gedit', args: [targetPath] },
-    reason: 'this platform’s default text editor',
-  }
+  return { invocation: null, reason: 'Desktop integration supports macOS only' }
 }
 
 export function resolveEditorCommand(configured: string | null): {
@@ -164,15 +155,10 @@ export async function locateTool(
   if (isAbsolute(command)) {
     return { available: await isExecutable(command), label: command }
   }
-  const separator = process.platform === 'win32' ? ';' : ':'
-  const extensions =
-    process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : ['']
-  for (const directory of (process.env.PATH ?? '').split(separator)) {
+  for (const directory of (process.env.PATH ?? '').split(':')) {
     if (!directory) continue
-    for (const extension of extensions) {
-      if (await isExecutable(resolve(directory, `${command}${extension}`))) {
-        return { available: true, label: command }
-      }
+    if (await isExecutable(resolve(directory, command))) {
+      return { available: true, label: command }
     }
   }
   return { available: false, label: command }

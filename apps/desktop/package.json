@@ -50,7 +50,6 @@
         "filter": ["**/*"]
       }
     ],
-    "afterPack": "scripts/refresh-win-git-runtime.cjs",
     "mac": {
       "icon": "resources/icon.icns",
       "category": "public.app-category.developer-tools",
@@ -58,15 +57,6 @@
       "sign": "scripts/sign-mac-git-runtime.cjs",
       "signIgnore": "Contents/Resources/git/",
       "target": ["dmg"]
-    },
-    "win": {
-      "icon": "resources/icon.ico",
-      "target": ["nsis"]
-    },
-    "linux": {
-      "icon": "resources/icon.png",
-      "target": ["AppImage"],
-      "category": "Development"
     }
   },
   "dependencies": {

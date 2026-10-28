@@ -39,11 +39,16 @@ and may download it when absent.
   Visual baselines are macOS-specific. Gallery dispatch proves renderer intent,
   not Git success.
 - For preload, CSP, IPC sender validation, packaging, or local Git integration, use
-  the [packaged desktop smoke](README.md#packaged-desktop-smoke); its Windows path
-  is not supported. Keep manual assistive-technology evidence separate from automation.
+  the [packaged desktop smoke](README.md#packaged-desktop-smoke), on macOS only.
+  Keep manual assistive-technology evidence separate from automation.
 - For performance changes, use [Performance budgets](README.md#performance-budgets)
   and `pnpm run bench:performance` after a build. Budget values belong in
   `packages/shared/src/performance.ts`, not duplicated constants.
+
+Desktop distribution, native resources, packaging and install execution support
+macOS arm64 and x64 only. Keep historical signed update manifest vocabulary
+readable for signature authentication and monotonic channel history. Independent
+browser/catalog checks may run on Linux; that does not imply desktop support.
 
 ## Implementation boundaries
 

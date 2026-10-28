@@ -188,9 +188,7 @@ export class UpdateService {
       this.failure = this.stateFailure
       this.phase = 'failed'
     } else if (!installSupportFor(this.options.platform)) {
-      // Linux is distributed as a single AppImage the user runs from wherever
-      // they put it. There is no installed copy to replace and no signature to
-      // check before running one, so it is never updated in place.
+      // Historical feed entries do not grant executable support outside macOS.
       this.phase = 'unsupported'
     }
     this.publish()
@@ -302,7 +300,7 @@ export class UpdateService {
       trust: trustedUpdateKeys(this.options.env, this.options.packaged).trust,
       // Only the build this run just verified, for the release on offer, may be
       // installed. An installer left over from an earlier offer is not this.
-      // Linux never supports in-place replacement, so readyToInstall is never true there.
+      // Unsupported platforms never become ready for in-place replacement.
       readyToInstall:
         this.phase === 'downloaded' &&
         this.candidate !== null &&

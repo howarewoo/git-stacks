@@ -128,7 +128,7 @@ Detailed behavior and limitations remain in the [README](README.md), including
   limits under current surface names; complete inventories are not truncated to
   a mounted page. The shipped application does not include fixture/prototype
   routes or standalone staging/commit/stash/development controls.
-- Automatic update discovery runs in the background on startup and every 24 hours while active, notifying developers unobtrusively without interrupting work. Updates are never automatically downloaded or installed; manual download and install decisions remain explicit user actions. On Linux, in-place update execution is prevented and manual installation handoff is provided.
+- Automatic update discovery runs in the background on startup and every 24 hours while active, notifying developers unobtrusively without interrupting work. Updates are never automatically downloaded or installed; manual download and install decisions remain explicit user actions. The desktop application supports macOS arm64 and x64 only; Windows and Linux distribution and update execution are unsupported.
 - The product is a desktop Git/GitHub workbench, not a mobile/web client or a CRM.
   The visual reference does not expand the runtime product scope.
 - Packaging for a platform is not proof of update or verification parity. See

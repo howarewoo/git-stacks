@@ -309,6 +309,16 @@ function signedManifest(
         sha256: createHash('sha256').update('build').digest('hex'),
         size: 5,
       },
+      ...[
+        { platform: 'win32', kind: 'nsis', fileName: 'Git-Stacks.exe' },
+        { platform: 'linux', kind: 'AppImage', fileName: 'Git-Stacks.AppImage' },
+      ].map((artifact) => ({
+        ...artifact,
+        arch: 'x64',
+        url: `https://github.com/howarewoo/git-stacks/releases/download/stable/${artifact.fileName}`,
+        sha256: createHash('sha256').update('historical build').digest('hex'),
+        size: 16,
+      })),
     ],
   }
 }

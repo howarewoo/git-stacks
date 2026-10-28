@@ -10,26 +10,11 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const source = join(root, 'native', 'promote-repository.c')
 const outputDirectory = join(root, 'resources', 'promote')
-const output = join(
-  outputDirectory,
-  process.platform === 'win32' ? 'promote-repository.exe' : 'promote-repository',
-)
+if (process.platform !== 'darwin') throw new Error('The desktop helper supports macOS only.')
+const output = join(outputDirectory, 'promote-repository')
 /** Compilers tried in order, each with the flags its dialect needs. */
 function candidates() {
-  // gnu11 rather than c11: the Linux branch calls syscall(), which strict
-  // standard mode hides behind __USE_MISC.
   const posix = { prefix: ['-O2', '-std=gnu11', '-Wall', '-Wextra'], suffix: [] }
-  if (process.platform === 'win32') {
-    // -municode links the wmain entry point, so the two arguments reach the
-    // helper as UTF-16 instead of bytes decoded with the console code page.
-    // MSVC's linker selects wmainCRTStartup on its own when it finds wmain.
-    const mingw = { prefix: ['-O2', '-std=gnu11', '-Wall', '-Wextra', '-municode'], suffix: [] }
-    const msvc = { command: 'cl', prefix: ['/nologo', '/O2', '/W3'], suffix: [] }
-    const chosen = process.env.CC
-      ? [process.env.CC === 'cl' ? msvc : { command: process.env.CC, ...mingw }]
-      : []
-    return [...chosen, { command: 'gcc', ...mingw }, { command: 'clang', ...mingw }, msvc]
-  }
   const chosen = process.env.CC ? [{ command: process.env.CC, ...posix }] : []
   return [
     ...chosen,
@@ -40,8 +25,7 @@ function candidates() {
 }
 
 function argumentsFor(candidate) {
-  const outputs =
-    process.platform === 'win32' && candidate.command === 'cl' ? [`/Fe:${output}`] : ['-o', output]
+  const outputs = ['-o', output]
   return [...candidate.prefix, source, ...outputs, ...candidate.suffix]
 }
 
@@ -64,7 +48,7 @@ for (const candidate of candidates()) {
     failures.push(`${candidate.command}: reported success but produced no binary`)
     continue
   }
-  if (process.platform !== 'win32') chmodSync(output, 0o755)
+  chmodSync(output, 0o755)
   console.log(`Built ${output.slice(root.length + 1)} with ${candidate.command}`)
   process.exit(0)
 }

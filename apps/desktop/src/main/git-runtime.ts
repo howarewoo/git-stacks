@@ -297,28 +297,11 @@ export function gitCommandEnvironment(
 ): NodeJS.ProcessEnv {
   if (runtime.source !== 'bundled') return environment
   const root = dirname(dirname(runtime.executable))
-  const windows = runtime.platform.startsWith('win32-')
   const env = { ...environment }
-  env.GIT_EXEC_PATH = join(
-    root,
-    windows ? (runtime.platform.endsWith('-arm64') ? 'clangarm64' : 'mingw64') : '',
-    'libexec',
-    'git-core',
-  )
-  if (windows) {
-    const prefix = runtime.platform.endsWith('-arm64') ? 'clangarm64' : 'mingw64'
-    env.PATH = [join(root, prefix, 'bin'), join(root, 'usr', 'bin'), env.PATH]
-      .filter(Boolean)
-      .join(';')
-  } else {
-    if (env.GIT_CONFIG_SYSTEM === undefined) env.GIT_CONFIG_SYSTEM = join(root, 'etc', 'gitconfig')
-    if (env.GIT_TEMPLATE_DIR === undefined)
-      env.GIT_TEMPLATE_DIR = join(root, 'share', 'git-core', 'templates')
-    if (runtime.platform.startsWith('linux-')) {
-      env.PREFIX = root
-      if (env.GIT_SSL_CAINFO === undefined) env.GIT_SSL_CAINFO = join(root, 'ssl', 'cacert.pem')
-    }
-  }
+  env.GIT_EXEC_PATH = join(root, 'libexec', 'git-core')
+  if (env.GIT_CONFIG_SYSTEM === undefined) env.GIT_CONFIG_SYSTEM = join(root, 'etc', 'gitconfig')
+  if (env.GIT_TEMPLATE_DIR === undefined)
+    env.GIT_TEMPLATE_DIR = join(root, 'share', 'git-core', 'templates')
   return env
 }
 
@@ -478,15 +461,7 @@ export async function resolveGitRuntime(): Promise<GitRuntimeRecord> {
     ? []
     : [
         !settings.packaged ? settings.env.GIT_STACKS_BUNDLED_GIT : null,
-        settings.resourcesRoot
-          ? join(
-              settings.resourcesRoot,
-              'git',
-              platform,
-              settings.platform === 'win32' ? 'cmd' : 'bin',
-              settings.platform === 'win32' ? 'git.exe' : 'git',
-            )
-          : null,
+        settings.resourcesRoot ? join(settings.resourcesRoot, 'git', platform, 'bin', 'git') : null,
       ].filter((candidate): candidate is string => Boolean(candidate))
 
   let executable = 'git'
