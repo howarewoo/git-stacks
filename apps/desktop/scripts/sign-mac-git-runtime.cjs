@@ -27,7 +27,9 @@ function signBinaries(root, identity, keychain) {
       }
       if (!['cffaedfe', 'cefaedfe', 'cafebabe', 'cafebabf'].includes(header.toString('hex')))
         continue
-      const args = ['--force', '--options', 'runtime', '--timestamp', '--sign', identity]
+      const args = ['--force', '--sign', identity]
+      if (identity === '-') args.push('--timestamp=none')
+      else args.push('--options', 'runtime', '--timestamp')
       if (keychain) args.push('--keychain', keychain)
       execFileSync('/usr/bin/codesign', [...args, path], { stdio: 'inherit' })
     }
@@ -36,7 +38,7 @@ function signBinaries(root, identity, keychain) {
 
 module.exports = async (options) => {
   if (!options.identity)
-    throw new Error('A Developer ID signing identity is required to ship bundled Git')
+    throw new Error('A signing identity is required to seal the app and bundled Git')
   const gitRoot = join(options.app, 'Contents', 'Resources', 'git')
   const platform = `darwin-${process.arch}`
   const manifestPath = join(gitRoot, 'runtime-manifest.json')

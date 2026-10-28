@@ -183,7 +183,7 @@ function reservationMarker(identity: ReleaseIdentity): string {
 
 export function automaticReleaseBody(identity: ReleaseIdentity, notes: string): string {
   const description = identity.unsignedPreview
-    ? `${PREVIEW_MARKER}\n\nUnsigned macOS preview ${identity.version}.\n\nNot signed or notarized. macOS may block opening this app. Automatic updates are not configured; install future previews manually.`
+    ? `${PREVIEW_MARKER}\n\nUnsigned macOS preview ${identity.version}.\n\nNot Developer ID signed or notarized. macOS may block opening this app. Automatic updates are not configured; install future previews manually.`
     : `Automatic signed beta ${identity.version}.`
   return `${reservationMarker(identity)}\n\n${description}\n\nSource commit: ${identity.sourceSha}\n\n${notes}`
 }

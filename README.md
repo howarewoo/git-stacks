@@ -147,6 +147,11 @@ that cannot compile it fails instead of shipping a build that would fall back to
 an unsafe rename. `pnpm run package` and `pnpm run dist` finish by running the
 helper from inside the packaged app, so a build that left it out fails there.
 
+Packaging options go to electron-builder before native-resource verification:
+`pnpm run dist --mac dmg -c.mac.identity=- -c.mac.hardenedRuntime=false -c.mac.notarize=false`.
+The packaging launcher uses pnpm's executable shims and runs the verifier
+separately, so builder options never become arguments to the verifier instead.
+
 ### Monorepo architecture and Turborepo
 
 The repository is structured as a pnpm workspace monorepo managed by Turborepo (`turbo.json`):
@@ -1331,15 +1336,21 @@ publishing job. Manual CI dispatch verifies without publishing.
 
 Automatic beta builds are explicitly labeled **unsigned macOS previews**. They
 provide Apple Silicon (`arm64`) and Intel (`x64`) DMGs, built on native macOS
-runners without Apple signing or notarization credentials. The workflow audits
-dependencies, runs the native desktop suite and packaged desktop smoke, and
-attests each installer to its source. It publishes the DMGs and `SHA256SUMS.txt`
-only after both targets succeed. GitHub's automatic source archives are not the app.
+runners without Apple signing or notarization credentials. Each app receives a
+complete **ad-hoc signature**, including the bundled Git runtime and its refreshed
+integrity manifest. The workflow audits dependencies, verifies the complete app
+seal with `codesign --verify --deep --strict`, runs the native desktop suite and
+packaged desktop smoke, and attests each installer to its source. It publishes
+the DMGs and `SHA256SUMS.txt` only after both targets succeed. GitHub's automatic
+source archives are not the app.
 
 Previews contain no trusted update keys, never publish a signed update manifest,
 and never move `updates-beta` or `updates-stable`. Install subsequent previews
-manually. macOS may block an unsigned app: after inspecting the download, approve
-it in **System Settings → Privacy & Security** only if you trust its source.
+manually. An ad-hoc signature does not satisfy Gatekeeper's default distribution
+policy: downloaded previews are not Developer ID signed or notarized. After
+verifying the source, use Apple's per-app
+[Open Anyway procedure](https://support.apple.com/en-us/102445) in
+**System Settings → Privacy & Security**. Do not disable Gatekeeper globally.
 
 The complete preview is banked as `unsigned-preview-payload.tar` before individual
 assets are uploaded. Reruns verify its provenance and restore the original bytes
@@ -1792,10 +1803,17 @@ than a guess.
 
 ### Unsigned previews are not signed updates
 
-`pnpm run dist` without a certificate produces an unsigned development package,
-not a signed release. The preview workflow explicitly disables signing with
-`CSC_IDENTITY_AUTO_DISCOVERY=false`, `-c.mac.identity=null` and `-c.mac.sign=null`,
-and publishes that package as an unsigned prerelease. Runner provenance and
+`pnpm run dist` without a certificate is not a Developer ID signed release.
+The preview workflow uses `CSC_IDENTITY_AUTO_DISCOVERY=false`,
+`-c.mac.identity=-`, `-c.mac.hardenedRuntime=false` and `-c.mac.notarize=false`.
+It retains the native signing hook so nested binaries are sealed and Git's
+integrity manifest records their final bytes before the application is sealed.
+Skipping signing with `identity=null` leaves Electron's incomplete linker
+signature and is not a distributable preview.
+
+A passing `codesign --verify --deep --strict` proves bundle integrity, not
+notarization or Gatekeeper approval. A damaged-app warning with a failing seal
+is a packaging defect, not a reason to clear quarantine. Runner provenance and
 checksums do not replace Developer ID signing or notarization.
 
 A packaged build takes its trusted keys from its own bundle and nowhere else.
