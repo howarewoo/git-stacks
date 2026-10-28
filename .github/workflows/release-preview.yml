@@ -102,15 +102,21 @@ jobs:
         run: pnpm --filter git-stacks exec tsx scripts/release-desktop.ts stamp --version "$RELEASE_VERSION"
       - name: Run the desktop suite on the native target
         run: pnpm exec turbo run test --filter=git-stacks
-      - name: Package without signing, notarization or update keys
+      - name: Package with an ad-hoc seal, without Developer ID or update keys
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
           node -e 'if (process.arch !== "${{ matrix.arch }}") throw new Error("Wrong native runner architecture")'
           node -e 'if (require("./apps/desktop/resources/update-trusted-keys.json").keys.length !== 0) throw new Error("A preview must not trust a release update key")'
-          pnpm exec turbo run build provision:git-runtime verify:git-runtime --filter=git-stacks
-          pnpm --filter git-stacks exec electron-builder --publish never --mac dmg -c.mac.identity=null -c.mac.sign=null "-c.artifactName=Git-Stacks-\${version}-darwin-\${arch}.\${ext}"
-          pnpm --filter git-stacks run verify:packaged-git-runtime
+          pnpm run dist --mac dmg -c.mac.identity=- -c.mac.hardenedRuntime=false -c.mac.notarize=false "-c.artifactName=Git-Stacks-\${version}-darwin-\${arch}.\${ext}"
+      - name: Verify the complete application signature before publication
+        shell: bash
+        run: |
+          shopt -s nullglob
+          apps=(apps/desktop/release/mac*/"Git Stacks.app")
+          test "${#apps[@]}" -eq 1
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          codesign -dv --verbose=4 "${apps[0]}"
       - name: Exercise the packaged application in disposable repositories
         run: pnpm --filter git-stacks run test:desktop
       - name: Select the native DMG

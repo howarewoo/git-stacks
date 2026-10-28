@@ -134,8 +134,9 @@ Detailed behavior and limitations remain in the [README](README.md), including
 - Packaging for a platform is not proof of update or verification parity. See
   [Platform support](README.md#platform-support) for the update matrix and
   [Packaged desktop smoke](README.md#packaged-desktop-smoke) for verification limits.
-- Automatic downloadable macOS previews are explicitly unsigned and not notarized.
-  They require manual installation and never participate in the signed-update
+- Automatic downloadable macOS previews are explicitly not Developer ID signed or
+  notarized. Ad-hoc signatures seal their bundles but do not provide Gatekeeper
+  trust. They require manual installation and never participate in the signed-update
   feed; the separate signed-release path retains its signing and verification gates.
 
 ### Future provider direction
