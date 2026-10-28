@@ -297,6 +297,35 @@ function output(values: Record<string, string>): void {
   }
 }
 
+export function releaseNotesParameters(
+  tag: string,
+  sourceSha: string,
+  releases: readonly { tag_name: string; draft: boolean; published_at: string | null }[],
+): Record<string, string> {
+  let previous: string | undefined
+  let latestPublication = -Infinity
+  for (const release of releases) {
+    if (
+      release.draft ||
+      release.published_at === null ||
+      release.tag_name === tag ||
+      release.tag_name === 'updates-stable' ||
+      release.tag_name === 'updates-beta'
+    )
+      continue
+    const publication = Date.parse(release.published_at)
+    if (publication > latestPublication) {
+      latestPublication = publication
+      previous = release.tag_name
+    }
+  }
+  return {
+    tag_name: tag,
+    target_commitish: sourceSha,
+    ...(previous ? { previous_tag_name: previous } : {}),
+  }
+}
+
 function prepare(
   repo: string,
   sourceSha: string,
@@ -308,7 +337,7 @@ function prepare(
   if (committed !== sourceSha) throw new Error('Checkout is not the requested source SHA.')
   const established = JSON.parse(readFileSync('package.json', 'utf8')).version as string
   const tags = pages<{ name: string }>(`repos/${repo}/tags`)
-  const releases = pages<Release>(`repos/${repo}/releases`)
+  const releases = pages<Release & { published_at: string | null }>(`repos/${repo}/releases`)
   let identity: ReleaseIdentity
   if (automatic) {
     if (
@@ -370,13 +399,14 @@ function prepare(
       throw new Error('Manual release tag source changed.')
     assertLineage(repo, identity, tags)
   }
-  let release = releases.find((entry) => entry.tag_name === identity.tag)
+  let release: Release | undefined = releases.find((entry) => entry.tag_name === identity.tag)
   if (!release) {
     if (!automatic) throw new Error('Manual publication requires the existing GitHub release.')
-    const generated = api<{ body: string }>(`repos/${repo}/releases/generate-notes`, 'POST', {
-      tag_name: identity.tag,
-      target_commitish: sourceSha,
-    })
+    const generated = api<{ body: string }>(
+      `repos/${repo}/releases/generate-notes`,
+      'POST',
+      releaseNotesParameters(identity.tag, sourceSha, releases),
+    )
     if (typeof generated.body !== 'string')
       throw new Error('Generated release notes could not be read.')
     release = api<Release>(`repos/${repo}/releases`, 'POST', {

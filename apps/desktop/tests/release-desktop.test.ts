@@ -14,6 +14,7 @@ import {
   nextBetaVersion,
   publishImmutable,
   readReservation,
+  releaseNotesParameters,
   requireReleaseOwner,
   type ReleaseIdentity,
   type Tag,
@@ -175,6 +176,52 @@ test('tag and release identity cannot be borrowed from a different SHA or channe
       ),
     /not owned/,
   )
+})
+
+test('release notes compare against the latest published release, including betas and legacy previews', () => {
+  const legacy = {
+    tag_name: 'dev-preview-20261017.3',
+    draft: false,
+    published_at: '2026-10-17T12:00:00Z',
+  }
+  const beta = {
+    tag_name: 'v0.1.1-beta.1',
+    draft: false,
+    published_at: '2026-10-20T12:00:00Z',
+  }
+  const excluded = [
+    { ...beta, tag_name: 'v0.1.1-beta.2', draft: true },
+    { ...beta, tag_name: 'updates-stable' },
+    { ...beta, tag_name: 'updates-beta' },
+    { ...beta, tag_name: identity.tag },
+    { ...beta, tag_name: 'unpublished', published_at: null },
+  ].map((release) => ({
+    ...release,
+    published_at: release.published_at && '2026-10-27T12:00:00Z',
+  }))
+  assert.equal(
+    releaseNotesParameters(identity.tag, first, [legacy, ...excluded]).previous_tag_name,
+    legacy.tag_name,
+    'legacy preview is eligible without requiring ancestry or a version-shaped tag',
+  )
+  // The current tag is deliberately different from the prior published beta.
+  for (const releases of [
+    [legacy, beta],
+    [beta, legacy],
+  ]) {
+    assert.equal(
+      releaseNotesParameters('v0.1.1-beta.3', first, releases).previous_tag_name,
+      beta.tag_name,
+      'publication time, not API order, selects the preceding beta',
+    )
+  }
+  for (const releases of [[], excluded]) {
+    assert.equal(
+      releaseNotesParameters(identity.tag, first, releases).previous_tag_name,
+      undefined,
+      'only a first publication omits the comparison baseline',
+    )
+  }
 })
 
 test('generated notes and operator edits survive rerun while conflicting reservation markers fail', () => {
