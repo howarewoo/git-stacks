@@ -40,6 +40,7 @@ const identity: ReleaseIdentity = {
   tag: 'v0.1.1-beta.1',
   channel: 'beta',
   automatic: true,
+  unsignedPreview: false,
 }
 
 test('allocation advances numeric beta history, drafts and established stable cores', () => {
@@ -176,6 +177,27 @@ test('tag and release identity cannot be borrowed from a different SHA or channe
       ),
     /not owned/,
   )
+})
+
+test('unsigned previews and signed releases cannot reuse each other’s assets', () => {
+  const preview = { ...identity, unsignedPreview: true }
+  const release = {
+    id: 1,
+    tag_name: identity.tag,
+    body: automaticReleaseBody(preview, 'Preview changes.'),
+    draft: true,
+    prerelease: true,
+  }
+  assert.throws(() => requireReleaseOwner(identity, release), /not owned/)
+  assert.throws(
+    () =>
+      requireReleaseOwner(preview, {
+        ...release,
+        body: automaticReleaseBody(identity, 'Signed changes.'),
+      }),
+    /not owned/,
+  )
+  requireReleaseOwner(preview, release)
 })
 
 test('release notes compare against the latest published release, including betas and legacy previews', () => {

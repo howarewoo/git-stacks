@@ -1,0 +1,192 @@
+name: Unsigned macOS preview
+
+on:
+  workflow_call:
+    inputs:
+      source-sha:
+        type: string
+        required: true
+
+concurrency:
+  group: signed-desktop-release-beta
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+env:
+  UNSIGNED_PREVIEW: 'true'
+  CHANNEL: beta
+  AUTOMATIC: 'true'
+
+jobs:
+  identity:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.identity.outputs.source }}
+      version: ${{ steps.identity.outputs.version }}
+      tag: ${{ steps.identity.outputs.tag }}
+      reuse: ${{ steps.identity.outputs.reuse }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.source-sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --audit-level=high
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: 'v0.75.0'
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          skip-dirs: node_modules
+          exit-code: '1'
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          artifact-name: sbom-macos-preview
+          output-file: sbom-macos-preview.cdx.json
+          format: cyclonedx-json
+          upload-artifact-retention: 30
+          upload-release-assets: false
+      - name: Reserve the source, version and bounded release notes
+        id: identity
+        working-directory: apps/desktop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
+        run: pnpm exec tsx scripts/release-desktop.ts prepare
+
+  package:
+    needs: identity
+    if: needs.identity.outputs.reuse != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.identity.outputs.source }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Stamp the version before provisioning version-bound native resources
+        env:
+          RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+        run: pnpm --filter git-stacks exec tsx scripts/release-desktop.ts stamp --version "$RELEASE_VERSION"
+      - name: Run the desktop suite on the native target
+        run: pnpm exec turbo run test --filter=git-stacks
+      - name: Package without signing, notarization or update keys
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          node -e 'if (process.arch !== "${{ matrix.arch }}") throw new Error("Wrong native runner architecture")'
+          node -e 'if (require("./apps/desktop/resources/update-trusted-keys.json").keys.length !== 0) throw new Error("A preview must not trust a release update key")'
+          pnpm run dist --mac dmg -c.mac.identity=null -c.mac.sign=null "-c.artifactName=Git-Stacks-\${version}-darwin-\${arch}.\${ext}"
+      - name: Exercise the packaged application in disposable repositories
+        run: pnpm --filter git-stacks run test:desktop
+      - name: Select the native DMG
+        shell: bash
+        run: |
+          shopt -s nullglob
+          images=(apps/desktop/release/*.dmg)
+          test "${#images[@]}" -eq 1
+          mkdir preview-release
+          cp "${images[0]}" preview-release/
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: preview-release/*.dmg
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preview-dmg-${{ matrix.arch }}
+          path: preview-release/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [identity, package]
+    if: always() && needs.identity.result == 'success' && (needs.package.result == 'success' || (needs.package.result == 'skipped' && needs.identity.outputs.reuse == 'true'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      SOURCE_SHA: ${{ needs.identity.outputs.source }}
+      RELEASE_VERSION: ${{ needs.identity.outputs.version }}
+      RELEASE_TAG: ${{ needs.identity.outputs.tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.identity.outputs.source }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Rediscover immutable recovery state
+        id: recovery
+        run: pnpm --filter git-stacks exec tsx scripts/release-desktop.ts recovery
+      - name: Restore the original preview bytes
+        if: steps.recovery.outputs.reuse == 'true'
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --pattern unsigned-preview-payload.tar
+          gh attestation verify unsigned-preview-payload.tar --repo "$REPOSITORY" --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-preview.yml"
+          tar -xf unsigned-preview-payload.tar
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        if: steps.recovery.outputs.reuse != 'true'
+        with:
+          pattern: preview-dmg-*
+          path: preview-release
+          merge-multiple: true
+      - name: Verify both native installers and record checksums
+        shell: bash
+        run: |
+          shopt -s nullglob
+          images=(preview-release/*.dmg)
+          test "${#images[@]}" -eq 2
+          for image in "${images[@]}"; do
+            gh attestation verify "$image" --repo "$REPOSITORY" --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-preview.yml"
+          done
+          (cd preview-release && sha256sum -- *.dmg > SHA256SUMS.txt)
+      - name: Bank the complete preview for immutable retries
+        if: steps.recovery.outputs.reuse != 'true'
+        run: tar -cf unsigned-preview-payload.tar preview-release
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        if: steps.recovery.outputs.reuse != 'true'
+        with:
+          subject-path: unsigned-preview-payload.tar
+      - name: Upload and read back the installers before publishing
+        run: |
+          pnpm --filter git-stacks exec tsx scripts/release-desktop.ts upload ../../unsigned-preview-payload.tar ../../preview-release/*
+          pnpm --filter git-stacks exec tsx scripts/release-desktop.ts publish-release

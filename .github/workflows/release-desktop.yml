@@ -1,8 +1,8 @@
 name: Signed desktop release
 
-# Main CI calls this workflow explicitly; human-published releases retain the
-# same packaging path. The caller holds no release lock, so this lock cannot
-# deadlock a reusable call. It covers reservation through feed verification.
+# Signed releases remain separate from the unsigned macOS preview workflow.
+# Explicit callers and human-published releases share this packaging path.
+# This lock covers reservation through feed verification.
 on:
   workflow_call:
     inputs:
@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   identity:
+    if: github.event_name != 'release' || !contains(github.event.release.body, '<!-- git-stacks-unsigned-preview -->')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -140,10 +141,10 @@ jobs:
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           if [[ '${{ matrix.platform }}' != linux ]]; then
-            test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD"
+            test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" || { echo '::error::CSC_LINK and CSC_KEY_PASSWORD are required for a signed release'; exit 1; }
           fi
           if [[ '${{ matrix.platform }}' == darwin ]]; then
-            test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
+            test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID" || { echo '::error::APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID are required for a signed macOS release'; exit 1; }
           fi
           # The update feed is signed with a key this repository holds, not with
           # one this run makes up. Both halves are named here so a repository
