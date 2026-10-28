@@ -24,6 +24,8 @@ import {
 
 const RESERVATION_KIND = 'git-stacks-automatic-beta'
 const PAYLOAD = 'signed-release-payload.tar'
+const PREVIEW_PAYLOAD = 'unsigned-preview-payload.tar'
+const PREVIEW_MARKER = '<!-- git-stacks-unsigned-preview -->'
 const SHA = /^[0-9a-f]{40}$/
 const CORE = '(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)'
 const VERSION = new RegExp(`^${CORE}(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
@@ -42,6 +44,7 @@ export interface ReleaseIdentity {
   tag: string
   channel: 'beta' | 'stable'
   automatic: boolean
+  unsignedPreview: boolean
 }
 
 export interface Release {
@@ -150,7 +153,14 @@ export function chooseBeta(options: {
       ...options.versions,
       ...tags.map((tag) => tag.name.replace(/^v/, '')),
     ])
-  return { sourceSha, version, tag: `v${version}`, channel: 'beta', automatic: true }
+  return {
+    sourceSha,
+    version,
+    tag: `v${version}`,
+    channel: 'beta',
+    automatic: true,
+    unsignedPreview: false,
+  }
 }
 
 export function requireReleaseOwner(identity: ReleaseIdentity, release: Release): void {
@@ -160,6 +170,7 @@ export function requireReleaseOwner(identity: ReleaseIdentity, release: Release)
   if (
     release.tag_name !== identity.tag ||
     release.prerelease !== (identity.channel === 'beta') ||
+    (release.body ?? '').includes(PREVIEW_MARKER) !== identity.unsignedPreview ||
     (identity.automatic && (markers.length !== 1 || markers[0] !== reservationMarker(identity)))
   ) {
     throw new Error(`Release ${identity.tag} is not owned by this source/channel identity.`)
@@ -171,7 +182,10 @@ function reservationMarker(identity: ReleaseIdentity): string {
 }
 
 export function automaticReleaseBody(identity: ReleaseIdentity, notes: string): string {
-  return `${reservationMarker(identity)}\n\nAutomatic signed beta ${identity.version}.\n\nSource commit: ${identity.sourceSha}\n\n${notes}`
+  const description = identity.unsignedPreview
+    ? `${PREVIEW_MARKER}\n\nUnsigned macOS preview ${identity.version}.\n\nNot signed or notarized. macOS may block opening this app. Automatic updates are not configured; install future previews manually.`
+    : `Automatic signed beta ${identity.version}.`
+  return `${reservationMarker(identity)}\n\n${description}\n\nSource commit: ${identity.sourceSha}\n\n${notes}`
 }
 
 /** Compare before upload; a lost response is recovered by reading, never by clobbering. */
@@ -365,6 +379,7 @@ function prepare(
       ],
       isAncestor: (before, after) => ancestor(repo, before, after),
     })
+    identity.unsignedPreview = process.env.UNSIGNED_PREVIEW === 'true'
     assertLineage(repo, identity, tags)
     if (!tags.some((tag) => tag.name === identity.tag)) {
       const reservation: Reservation = {
@@ -394,7 +409,7 @@ function prepare(
       throw new Error('Manual release tag must equal the committed desktop version.')
     if (channel === 'stable' && version.includes('-'))
       throw new Error('A stable release requires a stable version.')
-    identity = { sourceSha, version, tag, channel, automatic: false }
+    identity = { sourceSha, version, tag, channel, automatic: false, unsignedPreview: false }
     if (tagIdentity(repo, tag).sourceSha !== sourceSha)
       throw new Error('Manual release tag source changed.')
     assertLineage(repo, identity, tags)
@@ -412,7 +427,7 @@ function prepare(
     release = api<Release>(`repos/${repo}/releases`, 'POST', {
       tag_name: identity.tag,
       target_commitish: sourceSha,
-      name: `Git Stacks ${identity.version}`,
+      name: `Git Stacks ${identity.version}${identity.unsignedPreview ? ' (unsigned macOS preview)' : ''}`,
       body: automaticReleaseBody(identity, generated.body),
       draft: true,
       prerelease: true,
@@ -421,7 +436,8 @@ function prepare(
   }
   requireReleaseOwner(identity, release)
   const assets = pages<{ name: string }>(`repos/${repo}/releases/${release.id}/assets`)
-  const reuse = assets.some((asset) => asset.name === PAYLOAD)
+  const payload = identity.unsignedPreview ? PREVIEW_PAYLOAD : PAYLOAD
+  const reuse = assets.some((asset) => asset.name === payload)
   if (!reuse && assets.length !== 0)
     throw new Error(
       'Release has assets without its verified recovery payload; recover original run artifacts rather than rebuild or overwrite them.',
@@ -452,10 +468,12 @@ function environmentIdentity(): ReleaseIdentity {
     tag: `v${version}`,
     channel,
     automatic: process.env.AUTOMATIC === 'true',
+    unsignedPreview: process.env.UNSIGNED_PREVIEW === 'true',
   } as ReleaseIdentity
   if (
     process.env.RELEASE_TAG !== identity.tag ||
-    (identity.automatic && (channel !== 'beta' || !BETA.test(version)))
+    (identity.automatic && (channel !== 'beta' || !BETA.test(version))) ||
+    (identity.unsignedPreview && !identity.automatic)
   )
     throw new Error('Conflicting release identity.')
   return identity
@@ -540,12 +558,15 @@ function main(): void {
   else if (command === 'recovery') {
     const release = check(repo, identity)
     const assets = pages<{ name: string }>(`repos/${repo}/releases/${release.id}/assets`)
-    output({ reuse: String(assets.some((asset) => asset.name === PAYLOAD)) })
+    const payload = identity.unsignedPreview ? PREVIEW_PAYLOAD : PAYLOAD
+    output({ reuse: String(assets.some((asset) => asset.name === payload)) })
   } else if (command === 'check') check(repo, identity)
   else if (command === 'publish-release') {
     const release = check(repo, identity)
     if (identity.automatic && release.draft)
       api(`repos/${repo}/releases/${release.id}`, 'PATCH', {
+        tag_name: identity.tag,
+        target_commitish: identity.sourceSha,
         draft: false,
         prerelease: true,
         make_latest: 'false',
@@ -553,6 +574,8 @@ function main(): void {
     const after = check(repo, identity)
     if (after.draft) throw new Error('Versioned release publication could not be confirmed.')
   } else if (command === 'move-feed') {
+    if (identity.unsignedPreview)
+      throw new Error('Unsigned previews cannot publish an update feed.')
     check(repo, identity)
     const tag = `updates-${identity.channel}`
     const tags = pages<{ name: string }>(`repos/${repo}/tags`)

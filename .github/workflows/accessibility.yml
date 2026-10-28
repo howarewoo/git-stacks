@@ -232,16 +232,13 @@ jobs:
 
   beta-release:
     # A reusable call is explicit: releases created by GITHUB_TOKEN do not
-    # trigger release.published workflows. PRs never enter this secret-bearing job.
+    # trigger release.published workflows. PRs never enter the publishing job.
     needs: [selection, automated, design, budgets, root-suite]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
       id-token: write
       attestations: write
-    uses: ./.github/workflows/release-desktop.yml
+    uses: ./.github/workflows/release-preview.yml
     with:
       source-sha: ${{ github.sha }}
-      channel: beta
-      automatic: true
-    secrets: inherit

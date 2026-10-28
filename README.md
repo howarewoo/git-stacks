@@ -1323,12 +1323,33 @@ Every successful push to `main`, including documentation-only pushes, runs the
 full `Accessibility checks` workloads and the complete root `pnpm test` suite.
 Only after `selection`, `automated`, `design`, `budgets`, and `root-suite` succeed
 does it explicitly call
-[`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml)
-with the tested final SHA and the `beta` channel. A PR retains selective checks
-and cannot enter the release job or receive its signing secrets. Manual CI
-dispatch verifies without publishing.
+[`.github/workflows/release-preview.yml`](.github/workflows/release-preview.yml)
+with the tested final SHA. A PR retains selective checks and cannot enter the
+publishing job. Manual CI dispatch verifies without publishing.
 
-The reusable release workflow reserves an annotated `v<core>-beta.N` tag bound
+#### Unsigned macOS previews
+
+Automatic beta builds are explicitly labeled **unsigned macOS previews**. They
+provide Apple Silicon (`arm64`) and Intel (`x64`) DMGs, built on native macOS
+runners without Apple signing or notarization credentials. The workflow audits
+dependencies, runs the native desktop suite and packaged desktop smoke, and
+attests each installer to its source. It publishes the DMGs and `SHA256SUMS.txt`
+only after both targets succeed. GitHub's automatic source archives are not the app.
+
+Previews contain no trusted update keys, never publish a signed update manifest,
+and never move `updates-beta` or `updates-stable`. Install subsequent previews
+manually. macOS may block an unsigned app: after inspecting the download, approve
+it in **System Settings → Privacy & Security** only if you trust its source.
+
+The complete preview is banked as `unsigned-preview-payload.tar` before individual
+assets are uploaded. Reruns verify its provenance and restore the original bytes
+rather than rebuilding an already-used version. Signed and unsigned releases
+cannot reuse one another's assets. Both workflows use the same beta publication
+lock and version allocator.
+
+#### Version identity and release notes
+
+The automatic workflow reserves an annotated `v<core>-beta.N` tag bound
 to that exact source SHA, generates GitHub release notes once, then creates a
 **draft prerelease** carrying those notes and a stable SHA/version ownership
 marker. Notes compare against the most recently published release by publication
@@ -1346,16 +1367,20 @@ patch series; a newer prerelease series is continued or advanced rather than
 reset. Failed reservations can leave gaps. A rerun reuses its source's reservation,
 never takes someone else's tag, and never commits version bumps back to `main`.
 The reserved version is applied to all workspace package manifests only inside
-the build checkout, so the packaged application, installer names, and signed
-manifest describe the same version.
+the build checkout, so the packaged application and installer names describe the
+same version; signed releases also use it in their update manifest.
 
-Human publication remains available through GitHub's `release.published` event:
-publish `v<version>` at a commit whose desktop package has that exact version,
-as a full release for `stable` or a prerelease for `beta`. It uses the same
-packaging, verification and feed implementation. Automatic runs are always
-prereleases, always `make_latest: false`, never read the rollback override,
-and cannot move `updates-stable`. A release created with `GITHUB_TOKEN` does not
-trigger another workflow; the CI call above is intentional, not an event cascade.
+#### Signed releases
+
+Signed publication remains available through
+[`.github/workflows/release-desktop.yml`](.github/workflows/release-desktop.yml)
+and GitHub's `release.published` event: publish `v<version>` at a commit whose
+desktop package has that exact version, as a full release for `stable` or a
+prerelease for `beta`. Releases marked as unsigned previews do not enter this
+workflow. Missing certificate or Apple notarization inputs fail the signing
+prerequisite check; an unsigned preview is never a fallback for a signed release.
+A release created with `GITHUB_TOKEN` does not trigger another workflow; the
+explicit reusable calls are intentional, not an event cascade.
 
 Every target retains the existing release gates. The packaging job requires
 all signing prerequisites, runs the committed checkout's tests before injecting
@@ -1390,13 +1415,14 @@ installation require a suitably credentialed disposable GitHub repository and
 real signing identities; local allocator/feed fixtures do not establish that
 hosted acceptance, and the Windows packaged desktop smoke is unsupported.
 
-To install a published beta, open [GitHub Releases](https://github.com/howarewoo/git-stacks/releases),
-choose the versioned prerelease, and expand **Assets**. Download the Apple Silicon
-or Intel `.dmg` for your Mac, the Windows x64 `.exe`, or the Linux x64 `.AppImage`.
-Use the installer assets, not GitHub's source-code archives or the moving channel
-feed files. A failed run's draft is not a downloadable release; wait for the
-signed publication gates to finish. Automatic betas do not become GitHub's
-“Latest” stable release, so `/releases/latest` is not the beta download page.
+To install a preview or signed beta, open
+[GitHub Releases](https://github.com/howarewoo/git-stacks/releases), choose the
+versioned prerelease, and expand **Assets**. Download the Apple Silicon or Intel
+`.dmg` for your Mac; signed multi-platform releases also offer Windows x64 `.exe`
+and Linux x64 `.AppImage` installers. Use installer assets, not GitHub's
+source-code archives or moving channel feed files. A failed run's draft is not a
+downloadable release. Automatic betas do not become GitHub's “Latest” stable
+release, so `/releases/latest` is not the preview download page.
 
 The moving channel release locations remain:
 
@@ -1764,14 +1790,17 @@ release claims — matched by name and team rather than by a bare team selector,
 because a selector is a search term — and none or several is a refusal rather
 than a guess.
 
-### An unsigned build is not a release
+### Unsigned previews are not signed updates
 
-`pnpm run dist` run locally packages the app without a certificate, so the output
-is a development package, not a release: it is not signed, not notarised, not
-attested, and not offered to anyone else. It also refuses to install updates. A
-packaged build takes its trusted keys from its own bundle and nowhere else, and a
-local package carries none because only the release job injects one, so it
-reports updates as not configured, and the app will not fetch a manifest or
+`pnpm run dist` without a certificate produces an unsigned development package,
+not a signed release. The preview workflow explicitly disables signing with
+`CSC_IDENTITY_AUTO_DISCOVERY=false`, `-c.mac.identity=null` and `-c.mac.sign=null`,
+and publishes that package as an unsigned prerelease. Runner provenance and
+checksums do not replace Developer ID signing or notarization.
+
+A packaged build takes its trusted keys from its own bundle and nowhere else.
+Local packages and unsigned previews carry none, so they report updates as not
+configured: the app will not fetch a manifest or
 install anything. An unpackaged `pnpm run dev` build may instead take one key
 from `GIT_STACKS_UPDATE_KEY_ID` and `GIT_STACKS_UPDATE_PUBLIC_KEY` for fixtures,
 and **Settings → Updates** says so when it is running on such a key; that path
@@ -2213,7 +2242,7 @@ on native Ubuntu 24.04 x64 with Node 24 and the pinned Playwright Chromium. It
 installs frozen dependencies and executes the normal root `pnpm test`, including
 the complete desktop unit suite and design manifest/nonvisual browser tests, under a
 30-minute job limit. On main pushes it is a required dependency of the explicit
-signed beta release call alongside all existing checks, even for docs-only
+unsigned macOS preview call alongside all existing checks, even for docs-only
 pushes. PR selection is unchanged; PRs and manual CI dispatch do not publish.
 
 The separate dispatch-only `native-lane-envelope` job measures the real production
