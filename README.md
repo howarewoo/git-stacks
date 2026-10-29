@@ -246,11 +246,22 @@ Use the Biome editor extension for on-save formatting with the same configuratio
 
 ### Shared persistence and IPC boundaries
 
-Main-process handlers register through the local `ipcMain` wrapper in
-`apps/desktop/src/main/index.ts`. It validates the sender before invoking a handler and keeps
-untrusted requests out of the failure log. Register new handlers through that
-wrapper, not directly through Electron's `ipcMain`. Verify changes to this
-boundary with the [packaged desktop smoke](#packaged-desktop-smoke).
+`apps/desktop/src/main/application.ts` owns the Electron-independent application
+backend. Register handlers through its local `ipcMain` wrapper so inspection
+dispatch, cancellation tokens and safe failure recording retain one implementation.
+The actual Electron consumer, `apps/desktop/src/main/index.ts`, supplies
+`ApplicationHost` native capabilities and authenticates the sender, main frame and
+origin before backend dispatch; untrusted requests never enter the failure log.
+Its `createApplicationBackend` instance is constructed before native readiness,
+then `start()` loads registrations, policy/settings, updates, Git runtime and
+credential retirement before installing handlers and opening the window.
+`windowClosed()` stops repository sync and inventory; the host's live renderer
+endpoint retains destruction/navigation invalidation for update readiness.
+Native dialogs, secret protection, external-link opening and app lifecycle stay
+in the Electron host. Keep filesystem, Git/GitHub authority, request ownership,
+captured previews and persistence in the backend and existing domain services.
+Verify changes to this boundary with the
+[packaged desktop smoke](#packaged-desktop-smoke).
 
 `apps/desktop/src/main/review-journal.ts` owns common-directory journal paths, versioned reads,
 and owner-only, synced atomic writes for review drafts, snapshots, and viewed
