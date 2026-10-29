@@ -469,8 +469,9 @@ jobs:
         run: |
           shopt -s nullglob
           artifacts=(signed-release/*)
-          test "${#artifacts[@]}" -eq 4
+          test "${#artifacts[@]}" -eq 2
           for artifact in "${artifacts[@]}"; do
+            [[ "$artifact" == *.dmg ]]
             gh attestation verify "$artifact" --repo "$REPOSITORY" \
               --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-desktop.yml"
           done

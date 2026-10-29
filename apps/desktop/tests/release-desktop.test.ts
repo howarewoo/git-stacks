@@ -43,6 +43,68 @@ const identity: ReleaseIdentity = {
   unsignedPreview: false,
 }
 
+test('the aggregate workflow gate admits two DMGs and verifies each provenance', () => {
+  const workflow = readFileSync(
+    new URL('../../../.github/workflows/release-desktop.yml', import.meta.url),
+    'utf8',
+  )
+  const block = workflow.match(
+    /- name: Prove every artifact was attested for this source and packaging workflow\n        shell: bash\n        run: \|\n((?:          .+\n)+)/u,
+  )?.[1]
+  assert.ok(block, 'the aggregate provenance step must exist')
+  const script = block.replace(/^          /gmu, '')
+  const dmgs = ['Git-Stacks-arm64.dmg', 'Git-Stacks-x64.dmg']
+  for (const scenario of [
+    { files: dmgs, accepted: true, verified: dmgs },
+    { files: [], accepted: false, verified: [] },
+    { files: dmgs.slice(0, 1), accepted: false, verified: [] },
+    { files: [...dmgs, 'extra.dmg'], accepted: false, verified: [] },
+    { files: [...dmgs, 'legacy.exe'], accepted: false, verified: [] },
+    { files: ['legacy.exe', 'legacy.AppImage'], accepted: false, verified: [] },
+    { files: dmgs, accepted: false, verified: dmgs.slice(0, 1), refusal: '1' },
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), 'git-stacks-artifact-gate-'))
+    try {
+      mkdirSync(join(root, 'signed-release'))
+      for (const file of scenario.files) writeFileSync(join(root, 'signed-release', file), '')
+      const log = join(root, 'verified')
+      writeFileSync(log, '')
+      const run = spawnSync(
+        'bash',
+        [
+          '-euo',
+          'pipefail',
+          '-c',
+          'gh() { printf "%s\\n" "$*" >> "$VERIFY_LOG"; return "$VERIFY_STATUS"; }\n' + script,
+        ],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REPOSITORY: 'owner/repo',
+            SOURCE_SHA: first,
+            VERIFY_LOG: log,
+            VERIFY_STATUS: scenario.refusal ?? '0',
+          },
+        },
+      )
+      assert.equal(run.status === 0, scenario.accepted, `${scenario.files}: ${run.stderr}`)
+      assert.equal(
+        readFileSync(log, 'utf8'),
+        scenario.verified
+          .map(
+            (file) =>
+              `attestation verify signed-release/${file} --repo owner/repo --source-digest ${first} --signer-workflow owner/repo/.github/workflows/release-desktop.yml\n`,
+          )
+          .join(''),
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+})
+
 test('allocation advances numeric beta history, drafts and established stable cores', () => {
   assert.equal(nextBetaVersion('0.1.0', []), '0.1.1-beta.1')
   assert.equal(nextBetaVersion('0.1.0', ['0.1.1-beta.9', '0.1.1-beta.10']), '0.1.1-beta.11')
