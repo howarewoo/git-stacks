@@ -307,6 +307,7 @@ export function BranchWorkbench({
   const viewState = suppliedViewState ?? initialWorkbenchView
   const controlledInspector = suppliedViewState !== undefined && onViewStateChange !== undefined
   const repository = snapshot.repositories.find((repo) => repo.id === repositoryId)
+  const repositoryAvailable = repository !== undefined
   const branches = useMemo(
     () => snapshot.branches.filter((branch) => branch.repositoryId === repositoryId),
     [snapshot.branches, repositoryId],
@@ -367,6 +368,7 @@ export function BranchWorkbench({
   }, [])
   const scroll = useRef<HTMLDivElement>(null)
   const pane = useRef<HTMLElement>(null)
+  const restoringScroll = useRef(false)
   const pendingRowFocus = useRef<string | null>(null)
   useLayoutEffect(() => {
     const id = pendingRowFocus.current
@@ -379,10 +381,20 @@ export function BranchWorkbench({
     }
   }, [page, focusedBranchId])
   useLayoutEffect(() => {
-    pane.current = scroll.current?.closest<HTMLElement>('.bw-main') ?? null
-    if (scroll.current) scroll.current.scrollTop = viewState.scroll
-    if (pane.current) pane.current.scrollTop = viewState.paneScroll
-  }, [surface, repositoryId])
+    if (!repositoryAvailable) return
+    restoringScroll.current = true
+    // Container-query wrapping settles after the inventory's first layout.
+    const frame = requestAnimationFrame(() => {
+      pane.current = scroll.current?.closest<HTMLElement>('.bw-main') ?? null
+      if (scroll.current) scroll.current.scrollTop = viewState.scroll
+      if (pane.current) pane.current.scrollTop = viewState.paneScroll
+      restoringScroll.current = false
+    })
+    return () => {
+      cancelAnimationFrame(frame)
+      restoringScroll.current = false
+    }
+  }, [surface, repositoryId, repositoryAvailable])
   const filtering = Boolean(query) || filter !== filters[0] || scope !== 'all' || refScope !== 'all'
   const unfiltered = useRef({
     scroll: viewState.unfilteredScroll ?? viewState.scroll,
@@ -393,6 +405,7 @@ export function BranchWorkbench({
     scrollTop = scroll.current?.scrollTop ?? viewState.scroll,
     overrides: Partial<WorkbenchViewState> = {},
   ) => {
+    if (!repositoryAvailable || restoringScroll.current) return
     if (!filtering && !restoringFilter.current) unfiltered.current = { scroll: scrollTop, page }
     onViewStateChange?.({
       query,
@@ -420,7 +433,18 @@ export function BranchWorkbench({
   }
   useEffect(() => {
     persistView()
-  }, [query, filter, scope, refScope, folded, tab, worktreeId, page, displayDensity])
+  }, [
+    query,
+    filter,
+    scope,
+    refScope,
+    folded,
+    tab,
+    worktreeId,
+    page,
+    displayDensity,
+    repositoryAvailable,
+  ])
   const filterIdentity = `${query}\0${filter}\0${scope}\0${refScope}`
   const previousFilter = useRef({ identity: filterIdentity, active: filtering })
   useLayoutEffect(() => {

@@ -2313,6 +2313,12 @@ retries, drop assertions or disable the sandbox to conceal stalls.
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
 
+The renderer suite's `Desktop Chrome` profile advertises Windows on every host.
+Shortcut checks use `Control` for `Mod` to match that emulated platform, not the
+host-dependent `ControlOrMeta` alias.
+Scroll-retention checks capture the reading position after the last line-selection
+click, which may legitimately scroll the selected comment gutter into view.
+
 ### Integrated v5 cutover and matched visual evidence
 
 The current visual/product contract is [#243](https://github.com/howarewoo/git-stacks/issues/243)
@@ -2452,6 +2458,8 @@ page, never trunk, context rows or unmounted matches; it resets as view scope ch
 `workbench-context.ts` stores versioned view-only per-repository memory: exact
 selection, surface, inspector tab/directory, filters, folds, density, page and scroll.
 It is not a settings store, remote cache or authored-draft/operation journal.
+The lane and outer-pane scrollports restore after repository inventory and
+container-query layout are ready; loading placeholders do not overwrite saved offsets.
 Account retirement cancels captured reads and retires PR targets without deleting
 original authored text. Attention/Review return restores the originating surface.
 Global search is independent of local lane filters and includes full path/ref-kind

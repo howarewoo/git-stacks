@@ -321,7 +321,6 @@ test('context switches preserve code scroll, selected line, whitespace mode and 
   await region.evaluate((element) => {
     element.scrollTop = 200
   })
-  const top = await region.evaluate((element) => element.scrollTop)
   await page
     .getByRole('button', { name: 'Comment on src/long-review.ts line 12 on the head', exact: true })
     .click()
@@ -334,6 +333,8 @@ test('context switches preserve code scroll, selected line, whitespace mode and 
   await page
     .getByRole('button', { name: 'Comment on src/long-review.ts line 12 on the head', exact: true })
     .click()
+  // Selecting a line may scroll it into view before context navigation starts.
+  const top = await region.evaluate((element) => element.scrollTop)
   await page.getByRole('button', { name: 'Conversation', exact: true }).click()
   await page.getByRole('textbox', { name: 'Review summary' }).fill('Summary survives too.')
   await page

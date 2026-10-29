@@ -15,7 +15,7 @@ test.describe('Keyboard routes and accessibility navigation', () => {
     await page.keyboard.press('/')
     await expect(filter).toBeFocused()
     await filter.blur()
-    await page.keyboard.press('ControlOrMeta+k')
+    await page.keyboard.press('Control+k')
     const search = page.getByRole('dialog', { name: 'Global search' })
     await expect(search).toBeVisible()
     await expect(search.getByRole('combobox')).toBeFocused()
