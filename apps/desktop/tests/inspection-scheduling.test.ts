@@ -17,7 +17,7 @@ async function handlers(
   fileRead: (root: string, signal: AbortSignal) => Promise<unknown>,
   action: () => Promise<unknown>,
 ) {
-  const source = await readFile(new URL('../src/main/index.ts', import.meta.url), 'utf8')
+  const source = await readFile(new URL('../src/main/application.ts', import.meta.url), 'utf8')
   function section(startMarker: string, endMarker: string) {
     const start = source.indexOf(startMarker)
     assert.notEqual(start, -1, `Missing production section: ${startMarker}`)
@@ -26,12 +26,12 @@ async function handlers(
     return source.slice(start, end + endMarker.length)
   }
   const declarations = ['repository()', 'readRepository<T>('].map((name) =>
-    section(`function ${name}`, '\n}'),
+    section(`function ${name}`, '\n  }'),
   )
   const registrations = [
-    section("  ipcMain.handle(\n    'inspection:request',", '\n  )'),
-    section("  ipcMain.handle('repository:file',", '\n  })'),
-    section("  ipcMain.handle('repository:action',", '\n  })'),
+    section("    ipcMain.handle(\n      'inspection:request',", '\n    )'),
+    section("    ipcMain.handle('repository:file',", '\n    })'),
+    section("    ipcMain.handle('repository:action',", '\n    })'),
   ]
   const scheduler = new RepositoryScheduler(1)
   const operations = new RepositoryOperations()
@@ -108,7 +108,6 @@ async function handlers(
   return {
     inspect: (other = false) =>
       output['inspection:request'](
-        {},
         {
           repositoryId: other ? 'other-authority' : 'shared-git-authority',
           worktreeId: other ? 'other-tree' : 'linked',
@@ -116,7 +115,7 @@ async function handlers(
         'fileView',
         ['file.txt'],
       ),
-    mutate: () => output['repository:action']({}, { type: 'stage' }),
+    mutate: () => output['repository:action']({ type: 'stage' }),
   }
 }
 
