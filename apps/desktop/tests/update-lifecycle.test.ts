@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
@@ -21,9 +21,15 @@ import { UpdateService, type UpdateServiceOptions } from '../src/main/update/ser
 import { UpdateScheduler } from '../src/main/update/scheduler'
 import { InstallAdmissionFence } from '../src/main/update/admission'
 import { privateInstallHandoff, type StagedUpdate } from '../src/main/update/artifact'
-import { beginHandoff } from '../src/main/update/install'
 import type { UpdateChannel } from '@git-stacks/shared/update'
 import { DEFAULT_SETTINGS, type AppSettings } from '@git-stacks/shared/settings'
+
+/** Create the request an older Windows release left before its installer ran. */
+async function beginHandoff(directory: string): Promise<string> {
+  const token = randomBytes(16).toString('hex')
+  await writeFile(join(directory, 'git-stacks-handoff.txt'), token, { mode: 0o600 })
+  return token
+}
 
 /**
  * The real update path, over a real socket, against a real HTTPS release

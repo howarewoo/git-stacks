@@ -101,12 +101,6 @@ jobs:
           - os: macos-15-intel
             platform: darwin
             arch: x64
-          - os: windows-2025
-            platform: win32
-            arch: x64
-          - os: ubuntu-24.04
-            platform: linux
-            arch: x64
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -140,12 +134,8 @@ jobs:
         run: |
           test "$RELEASE_TAG" = "v$RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          if [[ '${{ matrix.platform }}' != linux ]]; then
-            test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" || { echo '::error::CSC_LINK and CSC_KEY_PASSWORD are required for a signed release'; exit 1; }
-          fi
-          if [[ '${{ matrix.platform }}' == darwin ]]; then
-            test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID" || { echo '::error::APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID are required for a signed macOS release'; exit 1; }
-          fi
+          test -n "$CSC_LINK" && test -n "$CSC_KEY_PASSWORD" || { echo '::error::CSC_LINK and CSC_KEY_PASSWORD are required for a signed release'; exit 1; }
+          test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID" || { echo '::error::APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID are required for a signed macOS release'; exit 1; }
           # The update feed is signed with a key this repository holds, not with
           # one this run makes up. Both halves are named here so a repository
           # that has not been given them says so before anything is built.
@@ -166,28 +156,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Install the pinned browser required by the complete root suite
         run: pnpm --filter design exec playwright install --with-deps chromium
-      - name: Put the MSVC toolchain on PATH
-        # The clone promotion helper is compiled from source at build time, and a
-        # Windows runner does not put MSVC on PATH by itself. Without this the
-        # release build stops where it has no way to promote a clone.
-        if: matrix.platform == 'win32'
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'No Visual Studio C++ toolchain on this runner' }
-          $environment = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set"
-          $toolchain = $false
-          foreach ($line in $environment) {
-            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
-            if ($matches[1] -eq 'Path') {
-              if ($matches[2] -match 'VC\\Tools\\MSVC') { $toolchain = $true }
-              $matches[2] -split ';' | Where-Object { $_ } >> $env:GITHUB_PATH
-            } else {
-              "$line" >> $env:GITHUB_ENV
-            }
-          }
-          if (-not $toolchain) { throw 'The MSVC toolchain did not reach PATH' }
       - name: Prove the checkout on its own, before a release key is in it
         # The suite is run against the repository as committed, with the key set
         # empty, so a release can never make a test pass or fail by the key it
@@ -263,17 +231,6 @@ jobs:
           codesign -dv --verbose=4 "${apps[0]}" 2>&1 | grep -Fq 'Authority=Developer ID Application:'
           xcrun stapler validate "${apps[0]}"
           test "$(codesign -dv --verbose=2 "${apps[0]}" 2>&1 | sed -n 's/^TeamIdentifier=//p')" = "$APPLE_TEAM_ID"
-      - name: Verify Windows installer signature
-        if: matrix.platform == 'win32'
-        shell: pwsh
-        run: |
-          $artifacts = @(Get-ChildItem apps/desktop/release -Filter *.exe)
-          if ($artifacts.Count -eq 0) { throw 'No signed installer found' }
-          foreach ($artifact in $artifacts) {
-            if ((Get-AuthenticodeSignature $artifact.FullName).Status -ne 'Valid') {
-              throw "Invalid Authenticode signature: $($artifact.Name)"
-            }
-          }
       - name: Sign, notarise, and staple the disk image
         if: matrix.platform == 'darwin'
         shell: bash
@@ -427,7 +384,7 @@ jobs:
         run: |
           mkdir signed-release
           shopt -s nullglob
-          artifacts=(apps/desktop/release/*.dmg apps/desktop/release/*.exe apps/desktop/release/*.AppImage)
+          artifacts=(apps/desktop/release/*.dmg)
           test "${#artifacts[@]}" -gt 0
           cp "${artifacts[@]}" signed-release/
       - name: Record what this runner packaged
@@ -439,57 +396,6 @@ jobs:
           pnpm --filter git-stacks exec tsx scripts/release-update-manifest.ts describe \
             --platform '${{ matrix.platform }}' --arch '${{ matrix.arch }}' \
             --dir ../../signed-release --out "../../descriptors/${{ matrix.platform }}-${{ matrix.arch }}.json"
-      - name: State the Linux support policy this release ships
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          # Checked-in policy line, printed on every Linux release:
-          #   linux: best-effort artifact — built, published and signed, never updated in place by the app
-          # The AppImage is published for someone to download and run from
-          # wherever they put it. It is not updated in place because the app has
-          # no way to: `installSupportFor()` in src/main/update/install.ts lists
-          # only darwin and win32, so a packaged Linux build reports
-          # `supported: false` and sits in the `unsupported` phase, and an
-          # install offer on Linux is a refusal before the verified bytes are
-          # looked at rather than a half-finished replacement.
-          #
-          # That is asserted by running the shipped code, not by reading it: the
-          # test asks the installer what it supports on Linux, installs a staged
-          # update anyway, and requires a refusal that writes nothing, starts
-          # nothing and restarts nothing. A Linux installer appearing in the
-          # source would fail this step because the app would answer differently
-          # — and that is the moment the policy line above has to be rewritten,
-          # rather than something that has to be remembered.
-          #
-          # Only that policy file runs here, and it is invoked by name. The rest
-          # of the update tests are about the release key, and by this point in
-          # the job the key set has been injected, so a suite-wide run would be
-          # testing the checkout this release is building rather than the policy
-          # it is stating.
-          #
-          # The step is required to be handed a proof, not to print a word that
-          # looks like one. Selecting a test by name out of a file and reading a
-          # test report for the count was the earlier way to do this, and it is
-          # fragile in a way that fails open: on Node 22, a name pattern that
-          # matched nothing exited 0 and reported one passing test, because the
-          # file that matched nothing was itself a passing test. The
-          # report is also worded differently between versions, and the report
-          # line for the file and the line for the test inside it differ only by
-          # a name. So the test records what it proved into the file this job
-          # names, and the job requires that file: a renamed test, a deleted
-          # test, or a runner that skipped it all leave no proof, and the step
-          # fails rather than passing on silence.
-          GIT_STACKS_POLICY_PROOF="$RUNNER_TEMP/linux-policy.proved" \
-            pnpm --filter git-stacks exec tsx --test tests/update-linux-policy.test.ts
-          test -s "$RUNNER_TEMP/linux-policy.proved" || {
-            echo "::error::the Linux policy check left no proof, so this step proved nothing"
-            exit 1
-          }
-          cat "$RUNNER_TEMP/linux-policy.proved"
-          echo 'release policy — linux: best-effort artifact — built, published and signed, never updated in place by the app'
-          shopt -s nullglob
-          appimages=(signed-release/*.AppImage)
-          test "${#appimages[@]}" -gt 0
       - name: Attest the packaged release artifacts
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
@@ -563,8 +469,9 @@ jobs:
         run: |
           shopt -s nullglob
           artifacts=(signed-release/*)
-          test "${#artifacts[@]}" -eq 4
+          test "${#artifacts[@]}" -eq 2
           for artifact in "${artifacts[@]}"; do
+            [[ "$artifact" == *.dmg ]]
             gh attestation verify "$artifact" --repo "$REPOSITORY" \
               --source-digest "$SOURCE_SHA" --signer-workflow "$REPOSITORY/.github/workflows/release-desktop.yml"
           done

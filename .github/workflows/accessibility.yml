@@ -41,7 +41,7 @@ jobs:
   automated:
     needs: selection
     if: always()
-    runs-on: ubuntu-24.04-arm
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       SELECTION_RESULT: ${{ needs.selection.result }}
@@ -66,18 +66,13 @@ jobs:
       - name: Shared keyboard and state-label contracts
         if: needs.selection.outputs.automated == 'true'
         run: node scripts/ci/run-checks.mjs unit
-      - name: Install virtual display dependencies
-        if: fromJSON(needs.selection.outputs.plan).desktop != 'skip'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb xauth
       - name: Install Playwright Chromium
         if: fromJSON(needs.selection.outputs.plan).desktop != 'skip'
         run: pnpm --filter git-stacks exec playwright install --with-deps chromium
       - name: Selected nonvisual renderer checks
         if: fromJSON(needs.selection.outputs.plan).desktop != 'skip'
         # Root Turbo invocation retains build:gallery; macOS pixel baselines stay local.
-        run: xvfb-run -a node scripts/ci/run-checks.mjs desktop
+        run: node scripts/ci/run-checks.mjs desktop
       - name: Upload the Playwright report
         if: always()
         uses: actions/upload-artifact@v4
@@ -125,7 +120,7 @@ jobs:
             apps/design/playwright-report/
   root-suite:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -142,7 +137,7 @@ jobs:
         run: pnpm test
   native-lane-envelope:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -153,25 +148,14 @@ jobs:
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Install virtual display dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb xauth
       - name: Build production desktop
         run: pnpm run build
       - name: Provision pinned Git runtime
         run: pnpm --filter git-stacks run provision:git-runtime
       - name: Verify pinned Git runtime
         run: pnpm --filter git-stacks run verify:git-runtime
-      - name: Configure pinned Electron sandbox helper
-        run: |
-          pnpm --filter git-stacks exec install-electron
-          sandbox="$(realpath apps/desktop/node_modules/electron/dist/chrome-sandbox)"
-          test -f "$sandbox"
-          sudo chown root:root "$sandbox"
-          sudo chmod 4755 "$sandbox"
       - name: Measure native lane envelopes
-        run: xvfb-run -a pnpm --filter git-stacks exec tsx scripts/perf/run-benchmarks.ts --lanes-only --out benchmarks/lanes
+        run: pnpm --filter git-stacks exec tsx scripts/perf/run-benchmarks.ts --lanes-only --out benchmarks/lanes
       - name: Upload native lane evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -182,7 +166,7 @@ jobs:
   budgets:
     needs: selection
     if: always()
-    runs-on: ubuntu-24.04-arm
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       SELECTION_RESULT: ${{ needs.selection.result }}
@@ -196,11 +180,6 @@ jobs:
           package-manager-cache: false
       - name: Validate selection and explain intentional skips
         run: node scripts/ci/run-checks.mjs gate budgets
-      - name: Install virtual display dependencies
-        if: needs.selection.outputs.performance == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends xvfb xauth
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         if: needs.selection.outputs.performance == 'true'
       - name: Install dependencies
@@ -209,19 +188,10 @@ jobs:
       - name: Build production desktop
         if: needs.selection.outputs.performance == 'true'
         run: pnpm run build
-      - name: Configure pinned Electron sandbox helper
-        if: needs.selection.outputs.performance == 'true'
-        run: |
-          pnpm --filter git-stacks exec install-electron
-          sandbox="$(realpath apps/desktop/node_modules/electron/dist/chrome-sandbox)"
-          test -f "$sandbox"
-          sudo chown root:root "$sandbox"
-          sudo chmod 4755 "$sandbox"
       - name: Measure real desktop startup and interaction with bounded fixtures
         if: needs.selection.outputs.performance == 'true'
-        # Xvfb provides an actual Chromium paint surface on the Linux runner.
         # Fixtures use the runner's own git; no clone, token, or private repository.
-        run: xvfb-run -a pnpm run bench:performance
+        run: pnpm run bench:performance
       - name: Upload trend data
         if: always()
         uses: actions/upload-artifact@v4

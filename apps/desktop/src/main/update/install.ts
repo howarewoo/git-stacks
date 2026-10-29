@@ -1,4 +1,4 @@
-import { execFile as execFileCallback, spawn } from 'node:child_process'
+import { execFile as execFileCallback } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   mkdir,
@@ -12,7 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from 'node:fs'
-import { basename, dirname, join, win32 as winPath } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import type { StagedUpdate } from './artifact'
@@ -23,12 +23,8 @@ const execFile = promisify(execFileCallback)
  * The platform tools this module runs, named by the absolute path the operating
  * system keeps them at.
  *
- * A tool name on its own is resolved through `PATH`, and on Windows through the
- * current directory as well — which is the repository the app was started in. A
- * `powershell.exe` sitting in that repository would be executed, and believed
- * about a signature, before anything had checked anything. Every tool here is
- * therefore the full path, and a tool that is not at its path is not run: the
- * call fails, and a verifier that cannot run refuses rather than guessing.
+ * Tools are absolute paths rather than PATH lookups: a repository-controlled
+ * executable must never answer a signature check. Missing tools fail closed.
  *
  * These are all part of a stock macOS: `codesign`, `spctl`, `plutil`, `hdiutil`
  * and `ditto` are what the system itself uses to answer the same questions.
@@ -42,36 +38,6 @@ export const MACOS_TOOLS = {
   hdiutil: '/usr/bin/hdiutil',
   ditto: '/usr/bin/ditto',
 } as const
-
-const WINDOWS_POWERSHELL = 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-
-/**
- * The absolute path of the Windows PowerShell this module runs, derived from the
- * system directory Windows itself reports.
- *
- * `SystemRoot` is the one environment value that can be trusted to name the
- * operating system, and it is required to be an absolute Windows path with no
- * way out of it: a relative value, a value with a `..` in it, or anything that
- * does not end in the interpreter's own directory is a refusal, not something to
- * repair. The result is used only if a file is actually there.
- */
-export function windowsPowerShellPath(systemRoot: string | undefined): string {
-  if (!systemRoot || !winPath.isAbsolute(systemRoot)) {
-    throw new Error('Windows reported no system directory, so no signature can be read.')
-  }
-  // The check is on the value as reported, before it is normalised: a path that
-  // steps out of the system directory is refused rather than resolved to
-  // somewhere it should never have been allowed to reach.
-  if (systemRoot.split(/[\\/]+/u).some((segment) => segment === '..')) {
-    throw new Error('The Windows system directory is not a directory, so no signature can be read.')
-  }
-  const root = winPath.normalize(systemRoot)
-  const executable = winPath.join(root, WINDOWS_POWERSHELL)
-  if (!winPath.isAbsolute(executable) || !executable.endsWith(winPath.join(WINDOWS_POWERSHELL))) {
-    throw new Error('The Windows PowerShell path is not a system path.')
-  }
-  return executable
-}
 
 /** Prefixes this app alone creates, so a cleanup can never touch anything else. */
 const STAGING_PREFIX = '.git-stacks-updating-'
@@ -92,52 +58,12 @@ export const HANDOFF_PREFIX = 'run-'
 /** The marker a run leaves when the installer it started outlives the call. */
 const RETAINED_MARKER = 'retained-handoff.json'
 
-/**
- * The two files that live inside a run's handoff directory, and that no other
- * process on this computer may write: the one this app leaves for the
- * installer to read, and the one the installer leaves when it is finished.
- *
- * Their names are part of the contract with the installer this repository
- * builds, in `build/installer.nsh`. Both are named here and there so a change
- * to one that is not made to the other reads as unfinished rather than as a
- * handoff nobody can ever complete.
- */
-const HANDOFF_REQUEST = 'git-stacks-handoff.txt'
+/** Legacy completion evidence retained only for safe cleanup of existing records. */
 const HANDOFF_COMPLETE = 'git-stacks-install-complete.txt'
 
-/**
- * Leaves the token the installer will echo back, and returns it.
- *
- * The token is written before the installer exists, into the directory this
- * attempt made, so that whichever instance of the installer does the work has
- * something to answer with. A value nobody can predict, in a directory only
- * this user's app can write, is what makes that answer worth reading: an echo
- * naming a different token belongs to a different attempt, and is not an
- * answer about this one.
- *
- * The request contains only the 32-character ASCII token, terminated by EOF.
- * NSIS FileRead echoes it without prefix stripping or newline normalization.
- */
-export async function beginHandoff(directory: string): Promise<string> {
-  const token = randomBytes(16).toString('hex')
-  await writeFile(join(directory, HANDOFF_REQUEST), token, { mode: 0o600 })
-  return token
-}
-
-/**
- * The installer formats this build knows how to apply, by platform.
- *
- * Linux is absent on purpose: it ships as a single AppImage the person runs
- * from wherever they put it, with no installed copy to replace and no signature
- * to check before running one, so it is never replaced from inside itself.
- */
-const INSTALLABLE_PLATFORMS: Record<string, 'dmg' | 'nsis'> = {
-  darwin: 'dmg',
-  win32: 'nsis',
-}
-
-export function installSupportFor(platform: string): 'dmg' | 'nsis' | null {
-  return INSTALLABLE_PLATFORMS[platform] ?? null
+/** Only macOS has executable update support; legacy manifest kinds remain readable. */
+export function installSupportFor(platform: string): 'dmg' | null {
+  return platform === 'darwin' ? 'dmg' : null
 }
 
 /**
@@ -172,11 +98,10 @@ export interface InstallOutcome {
  * On macOS what runs is `<App>.app/Contents/MacOS/<name>`, so replacing the
  * executable path would destroy the app; the bundle is the unit, and it is
  * found by walking back over the real path of the running executable to the
- * `.app` that contains it. On Windows the executable is the unit. Nothing here
- * follows a link to some other place on the machine.
+ * `.app` that contains it. Nothing here follows a link to another location.
  */
 export interface InstallTarget {
-  /** The bundle root on macOS, the executable on Windows. */
+  /** The installed macOS bundle root. */
   identityPath: string
   /** The directory the bundle or executable is replaced in. */
   parent: string
@@ -186,9 +111,6 @@ export async function resolveInstallTarget(
   platform: string,
   appPath: string,
 ): Promise<{ ok: true; target: InstallTarget } | { ok: false; reason: string }> {
-  if (platform === 'win32') {
-    return { ok: true, target: { identityPath: appPath, parent: dirname(appPath) } }
-  }
   if (platform !== 'darwin') {
     return { ok: false, reason: 'This platform has no in-app installer.' }
   }
@@ -233,19 +155,6 @@ export async function currentSigningIdentity(
         },
       )
       return /TeamIdentifier=([A-Z0-9]+)/u.exec(stderr)?.[1] ?? null
-    }
-    if (platform === 'win32') {
-      const { stdout } = await execFile(
-        windowsPowerShellPath(process.env.SystemRoot ?? process.env.WINDIR),
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `(Get-AuthenticodeSignature -LiteralPath '${identityPath.replace(/'/gu, "''")}').SignerCertificate.Subject`,
-        ],
-        { maxBuffer: 1 << 20 },
-      )
-      return stdout.trim() || null
     }
   } catch {
     // An identity this build cannot read is an identity it cannot compare, and
@@ -552,27 +461,6 @@ async function verifyAppBundle(bundle: string, expected: Expectations): Promise<
   }
 }
 
-async function verifyNsisIdentity(staged: StagedUpdate, expectedSubject: string): Promise<void> {
-  const { stdout } = await execFile(
-    windowsPowerShellPath(process.env.SystemRoot ?? process.env.WINDIR),
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `$signature = Get-AuthenticodeSignature -LiteralPath '${staged.path.replace(/'/gu, "''")}';` +
-        `$signature.Status; $signature.SignerCertificate.Subject`,
-    ],
-    { maxBuffer: 1 << 20 },
-  )
-  const [status, subject] = stdout.trim().split(/\r?\n/u)
-  if (status !== 'Valid') {
-    throw new Error(`The downloaded installer is not validly signed (${status || 'unknown'}).`)
-  }
-  if (subject.trim() !== expectedSubject) {
-    throw new Error('The downloaded installer is signed by a different publisher than this app.')
-  }
-}
-
 export interface IdentityCheck {
   trusted: boolean
   reason: string
@@ -632,11 +520,7 @@ export async function installStagedUpdate(
     }
   }
   try {
-    if (kind === 'dmg') {
-      return await installDmg(staged, { ...options, target: target.target, team: identity })
-    }
-    await verifyNsisIdentity(staged, identity)
-    return await installNsis(staged, options)
+    return await installDmg(staged, { ...options, target: target.target, team: identity })
   } catch (error) {
     return { installed: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -739,76 +623,6 @@ async function installDmg(staged: StagedUpdate, options: DmgOptions): Promise<In
 }
 
 /**
- * Starts the Windows installer, and only reports an install once the installer
- * is actually running.
- *
- * A launch failure is not delivered by the call that starts it: Node reports it
- * on the child, after this function would already have returned. So the launch
- * is awaited, and this app is closed only once the installer owns the update. A
- * signature-verified file that the operating system refuses to run — an
- * application-control policy, an antivirus that removed it, a file that was
- * taken away in between — leaves this app running and reports the refusal,
- * rather than closing with no installer to finish the work.
- *
- * The installer is given a path, not a copy of itself in memory, and it is
- * still using that path after this function has returned. The outcome says so
- * rather than leaving the caller to assume the call was the whole of it.
- */
-async function installNsis(staged: StagedUpdate, options: InstallOptions): Promise<InstallOutcome> {
-  options.onProgress?.('Starting the installer and closing this app')
-  // The token goes out before the installer exists, so that whichever instance
-  // of it does the work has something to answer with when it finishes.
-  const token = await beginHandoff(dirname(staged.path))
-  options.beforeNativeCutover?.()
-  const child = spawn(staged.path, ['/S'], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  })
-  const started = await new Promise<{ ok: true } | { ok: false; reason: string }>(
-    (resolveLaunch) => {
-      const settle = (outcome: { ok: true } | { ok: false; reason: string }) =>
-        resolveLaunch(outcome)
-      child.once('spawn', () => settle({ ok: true }))
-      child.once('error', (error) =>
-        settle({
-          ok: false,
-          reason: `The installer could not be started, so the update did not happen: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        }),
-      )
-    },
-  )
-  if (!started.ok) return { installed: false, reason: started.reason }
-  // The installer replaces files this app is running from, so it cannot finish
-  // while this process holds them open. It is detached, this app then closes,
-  // and the installer completes on its own.
-  child.unref()
-  options.onNativeCutover?.()
-  // Being spawned is not the same as having read the file. A Windows installer
-  // opens its own executable again after it starts, and elevation hands the
-  // work to a second instance of it that begins after this process has gone,
-  // so the prepared copy is still in use while this app is still running, and
-  // removing it here is what left an update installing from a file that had
-  // already been unlinked.
-  //
-  // No process this app knows of can say when that work is over — the one it
-  // spawned is not the one that does it — so it is not asked. The token is
-  // carried instead, and the installer writes it back with the process that
-  // finished. This app removes the copy only after a later launch has read
-  // that back and found that process gone; anything else leaves it in place.
-  const retained: RetainedInstall = { token }
-  await options.onRetain?.(retained)
-  options.quit?.()
-  return {
-    installed: true,
-    reason: 'The installer is running. This app closes and the update finishes on its own.',
-    retains: retained,
-  }
-}
-
-/**
  * Records a prepared copy that a platform installer was handed and has not
  * finished with, together with the token that installer has to echo back.
  *
@@ -880,7 +694,7 @@ export async function reapRetainedHandoff(userDataPath: string): Promise<void> {
   // built before this protocol existed. There is nothing to believe, so the
   // copy stays.
   if (completion === null) return
-  // Accept only the two complete fields emitted by build/installer.nsh.
+  // Accept only the two complete fields emitted by the historical installer.
   const answer = /^token=([0-9a-f]{32})\r?\npid=([1-9][0-9]*)\r?\n$/u.exec(completion)
   if (!answer || answer[1] !== token) return
   const pid = Number(answer[2])

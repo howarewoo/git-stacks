@@ -49,12 +49,10 @@ import {
   UPDATE_MANIFEST_MAX_AGE_MS,
   UPDATE_MANIFEST_SCHEMA,
   compareVersions,
-  expectedArtifactKind,
   evaluateUpdateManifest,
   parseUpdateManifest,
   parseVersion,
   type UpdateArchitecture,
-  type UpdateArtifactKind,
   type UpdateChannel,
   type UpdateManifestArtifact,
   type UpdatePlatform,
@@ -85,20 +83,6 @@ import {
 const REQUIRED_BUILDS: Record<string, true> = {
   'darwin-arm64': true,
   'darwin-x64': true,
-  'win32-x64': true,
-  'linux-x64': true,
-}
-
-/**
- * What each installer kind is written as. The kinds are the app's, the
- * extensions are electron-builder's, and the two do not line up by name: a
- * Windows `nsis` installer is an `.exe`. A file whose name does not match the
- * kind it is described as is a manifest that would offer the wrong installer.
- */
-const KIND_EXTENSIONS: Record<UpdateArtifactKind, string> = {
-  dmg: '.dmg',
-  nsis: '.exe',
-  AppImage: '.AppImage',
 }
 
 interface DescriptorFile {
@@ -117,11 +101,8 @@ function describe(flags: Map<string, string>): void {
   const arch = requireArchitecture(flag(flags, 'arch'))
   const directory = flag(flags, 'dir')
   const out = flag(flags, 'out')
-  // The installers this project builds are exactly the ones electron-builder
-  // writes for a kind below, so a kind added there is an installer this
-  // records without a second extension list to keep in step.
   const files = readdirSync(directory)
-    .filter((fileName) => Object.values(KIND_EXTENSIONS).includes(extname(fileName)))
+    .filter((fileName) => extname(fileName) === '.dmg')
     .sort()
     .map((fileName) => ({ fileName, assetName: assetNameFor(fileName) }))
   if (files.length === 0) fail(`${directory} holds no installer for ${platform} ${arch}.`)
@@ -257,13 +238,10 @@ function build(flags: Map<string, string>): void {
   const names = new Set<string>()
   const builds = new Set<string>()
   for (const descriptor of descriptors) {
-    const kind = expectedArtifactKind(descriptor.platform)
-    if (kind === null) {
-      fail(`${descriptor.platform} has no installer kind in the app, so it cannot be published.`)
-    }
+    const kind = 'dmg'
     builds.add(`${descriptor.platform}-${descriptor.arch}`)
     for (const file of descriptor.files) {
-      if (extname(file.assetName).toLowerCase() !== KIND_EXTENSIONS[kind].toLowerCase()) {
+      if (extname(file.assetName).toLowerCase() !== '.dmg') {
         fail(
           `${file.assetName} is described as a ${descriptor.platform} ${kind}, which its file name does not look like.`,
         )

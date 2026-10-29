@@ -37,20 +37,14 @@ export function configurePromotionHelper(root: string | null): void {
 
 function helperPath(): string {
   const base = resourcesRoot ?? fileURLToPath(new URL('../../resources', import.meta.url))
-  return join(
-    base,
-    'promote',
-    process.platform === 'win32' ? 'promote-repository.exe' : 'promote-repository',
-  )
+  return join(base, 'promote', 'promote-repository')
 }
 
 /**
  * Moves the finished clone to its destination with one atomic rename that
  * refuses to replace anything already there.
  *
- * The rename itself is a single syscall on the platform — `renamex_np` with
- * `RENAME_EXCL` on Darwin, `renameat2` with `RENAME_NOREPLACE` on Linux, and a
- * `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` on Windows — so the commit
+ * The rename itself is macOS `renamex_np` with `RENAME_EXCL`, so the commit
  * point of a clone cannot be separated from the claim of its destination. A
  * kernel or filesystem without that primitive, and a build whose helper is
  * missing, are both reported as refusals: this never degrades into a

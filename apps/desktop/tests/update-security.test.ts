@@ -659,28 +659,3 @@ test('the architecture check compares one name on both sides', async () => {
   assert.equal(canonicalArchitecture('sparc'), 'sparc')
   assert.deepEqual(machArchitectures('x86_64'), ['x64', 'x86_64'])
 })
-
-test('the Windows PowerShell is named by the system directory, or not at all', async () => {
-  const { windowsPowerShellPath } = await import('../src/main/update/install')
-  // The one value Windows itself reports is the only thing trusted to name the
-  // interpreter: a `powershell.exe` in the directory the app was started in would
-  // otherwise be run, and believed about a signature, before anything had been
-  // checked.
-  assert.equal(
-    windowsPowerShellPath('C:\\Windows'),
-    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-  )
-  for (const refused of [
-    undefined,
-    '',
-    'Windows',
-    'System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    'C:\\Windows\\..\\..\\Program Files',
-  ]) {
-    assert.throws(
-      () => windowsPowerShellPath(refused),
-      /system directory|absolute Windows path|system path/u,
-      `refuses ${JSON.stringify(refused)}`,
-    )
-  }
-})

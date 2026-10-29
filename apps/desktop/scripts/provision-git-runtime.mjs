@@ -27,17 +27,6 @@ const releases = {
     'f9dc64635a5b62fbd7ad95db73268bbb8912255ac516d65d37bf7af22fcb8ffe',
   ],
   'darwin-x64': ['macOS-x64', 'ae6686718aa34f4140424db16b92a47dcffd6d1f312eb8b5f3b267f7404e2680'],
-  'linux-arm': ['ubuntu-arm', '9d858586217c24abed503cd5243fd8b7e3711d9fde5c6d9717d1434022193820'],
-  'linux-arm64': [
-    'ubuntu-arm64',
-    'a161f45af4626bb7e0c688854bd4a9aee47cc514bca404cff0a5e3536ef1c0af',
-  ],
-  'linux-x64': ['ubuntu-x64', 'cca76aa31ad9e835e771ee7f55b73934777fbd8d16757a10d307ba06de860901'],
-  'win32-arm64': [
-    'windows-arm64',
-    '1abbeb3a2ce06e9b80e75bb888dce959b6c73bdb11ccc670a01a71d64f4422a5',
-  ],
-  'win32-x64': ['windows-x64', '7b76bc5c32c0d7c5984efdc2a8a32697cf1e8a43bc55176fbf9869c0ee995130'],
 }
 const release = releases[platform]
 if (!release) throw new Error(`No pinned Git runtime for ${platform}`)
@@ -68,7 +57,7 @@ async function download(url, destination, redirects = 0) {
   })
 }
 
-const executableRelativePath = process.platform === 'win32' ? 'cmd/git.exe' : 'bin/git'
+const executableRelativePath = 'bin/git'
 
 const destination = join(runtimeRoot, platform)
 const manifestPath = join(runtimeRoot, 'runtime-manifest.json')

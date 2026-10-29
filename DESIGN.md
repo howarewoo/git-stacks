@@ -938,7 +938,7 @@ The advanced Git runtime choice uses a labeled two-way control: **Bundled runtim
 
 Display the active source, version, executable path, minimum-version result, and capability labels as text rather than color alone. If resolution fails, say that the runtime is unavailable instead of showing stale details.
 
-Both runtime choices use the same Git operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, including Windows drive letters; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Passing local runtime tests does not establish that a signed Windows or macOS release artifact was produced; signing and shipment remain release-workflow gates.
+Both Git runtime choices use the same operation guards. Custom `files:` reference-storage paths are decoded as native absolute file paths, preserving Git compatibility handling; a remote host, credentials, query, fragment, malformed escape, or NUL is refused instead of treated as a local lock path. Local runtime tests do not establish production signing or shipment. The desktop application supports macOS arm64 and x64 only.
 
 ### Updates
 
@@ -950,7 +950,7 @@ The Updates section states what this build is before it offers anything to do: t
 - **Progress is progress:** A download in progress reports how far it has got against the size the signed manifest recorded, and stays cancellable while it does. A control that is merely disabled, or a spinner with no state behind it, is not a progress state.
 
 - **Workbench awareness without interruption:** Background discovery surfaces available or downloaded updates via a quiet, nonmodal status indicator and utility action on the workbench rather than intrusive modal prompts. Navigating through the notification opens Settings directly to Updates.
-- **Linux verified handoff:** On platforms where in-place replacement is unsupported (Linux AppImage), the UI presents a "Show downloaded file" action and clear manual update instructions instead of an in-place install button, honoring the platform's execution model without executing unverified code.
+- **Supported update execution:** In-place update actions are available only on macOS. Historical manifest vocabulary does not establish Windows or Linux product support.
 ### Settings, theming, and privacy
 
 Settings is a sectioned dialog: a left rail names the sections (Account, Git, Appearance, Shortcuts, Privacy, Diagnostics) and the right pane shows one at a time. Every control is a two-way control, a single-value field, or a text input; there are no controls that store a value nothing reads.

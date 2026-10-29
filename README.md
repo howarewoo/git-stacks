@@ -179,9 +179,7 @@ Root `pnpm` commands orchestrate tasks across workspaces with Turborepo (`turbo 
   ```sh
   pnpm --filter git-stacks exec tsx --test --test-name-pattern="clone" --import tests/setup/owned-cli-boundary.cjs tests/*.test.ts
   ```
-The signed release workflow compiles on a runner for each target platform and
-puts the Visual Studio toolchain on `PATH` for its Windows runner, which does
-not have `cl` by default.
+The signed release workflow compiles on native macOS arm64 and x64 runners.
 
 When changing `GitAction`, update the renderer fixture's action messages in
 `apps/desktop/tests/renderer/fixtures/control.ts` and affected test payloads. `pnpm run build`
@@ -1406,13 +1404,11 @@ explicit reusable calls are intentional, not an event cascade.
 
 Every target retains the existing release gates. The packaging job requires
 all signing prerequisites, runs the committed checkout's tests before injecting
-keys, and packages macOS arm64/x64, Windows x64 and Linux x64. The macOS build
+keys, and packages macOS arm64 and x64 only. Each build
 must pass `codesign --verify` with a `Developer ID Application` authority, a
 `stapler`-validated notarisation ticket, and the expected team identifier; the
-disk image itself is also signed, notarised, stapled and assessed. Windows
-installers require a `Valid` Authenticode signature. Linux remains a best-effort
-AppImage, authenticated by provenance and the signed manifest, not an in-place
-updater. Provenance is attested for the files, and dependency audit/Trivy gates
+disk image itself is also signed, notarised, stapled and assessed.
+Provenance is attested for the files, and dependency audit/Trivy gates
 and dependency inventories remain required. The dependency-tree inventory is
 uploaded once by the SBOM action and retained with the workflow run for 30 days.
 
@@ -1435,13 +1431,13 @@ prerelease public, but fails the run and retains banked verified history for
 recovery. Full signed multi-platform publication, hosted concurrency and native
 installation require a suitably credentialed disposable GitHub repository and
 real signing identities; local allocator/feed fixtures do not establish that
-hosted acceptance, and the Windows packaged desktop smoke is unsupported.
+hosted acceptance. Desktop packaging and smoke support macOS only.
 
 To install a preview or signed beta, open
 [GitHub Releases](https://github.com/howarewoo/git-stacks/releases), choose the
 versioned prerelease, and expand **Assets**. Download the Apple Silicon or Intel
-`.dmg` for your Mac; signed multi-platform releases also offer Windows x64 `.exe`
-and Linux x64 `.AppImage` installers. Use installer assets, not GitHub's
+`.dmg` for your Mac. Windows and Linux artifacts are no longer distributed.
+Use installer assets, not GitHub's
 source-code archives or moving channel feed files. A failed run's draft is not a
 downloadable release. Automatic betas do not become GitHub's “Latest” stable
 release, so `/releases/latest` is not the preview download page.
@@ -1583,10 +1579,9 @@ The order is the point, and it belongs to the app rather than to the feed:
    anybody else is refused even when its digest matches the manifest exactly.
    The programs that answer those questions are named by absolute path —
    `/usr/bin/codesign`, `/usr/sbin/spctl`, `/usr/bin/plutil`, `/usr/bin/hdiutil`,
-   `/usr/bin/ditto`, and on Windows the interpreter under the system directory
-   Windows itself reports — because a program named on its own is found through
-   `PATH`, and on Windows through the current directory too, which is the
-   repository the app was started in. Nothing on the install path needs Xcode or
+   `/usr/bin/ditto` — because a program named on its own is found through
+   `PATH`, which may contain a repository-controlled executable.
+   Nothing on the install path needs Xcode or
    any other developer tool: the architecture is read out of the Mach-O header
    rather than asked of `lipo`, and the notarisation ticket is left to
    Gatekeeper's own assessment rather than to `xcrun stapler`, which is a
@@ -1605,19 +1600,10 @@ The order is the point, and it belongs to the app rather than to the feed:
    where the platform installer has to replace files this process is running
    from, the app closes and the installer finishes on its own.
 
-The Windows installer retains its prepared copy after dispatch. An elevated
-install may continue in a different process, so the originally spawned PID
-exiting does not prove the executable is free.
-
-Before dispatch, the app writes a random 32-character ASCII token beside the
-copy, with no prefix or newline. `build/installer.nsh`, included by
-electron-builder at its default `nsis.include` path, echoes it after the install
-work with the actual installer's PID as `token=...` and `pid=...` CRLF lines.
-On a later launch, cleanup requires that exact token, a complete response inside
-the owned handoff directory, and `ESRCH` when probing the reported installer PID.
-Missing, malformed, foreign, still-running, or unprobeable evidence retains the
-copy. The app's version is not completion evidence. A refused launch or a stop
-before dispatch still removes the directory that attempt created.
+Legacy retained-handoff records remain subject to their original cleanup guards:
+only a matching token and proof that the completing process has exited allow
+removal of an owned handoff directory. Missing or foreign evidence preserves it.
+No Windows installer is built, verified, or executed by this application.
 
 Once the platform installer owns the files, the update cannot be stopped: a
 cancel or a channel change at that point is reported as too late rather than
@@ -1634,7 +1620,7 @@ Installing an update cannot race repository mutations or lose unsent authored re
    - Review draft composition is frozen against racing edits during readiness.
    - The renderer window's lifecycle is bound to the attempt: if the window is closed, destroyed, reloaded, or crashes before native cutover, readiness fails closed and installation is cancelled.
 3. **Safe refusal and candidate retention.** If admission is refused or if pre-dispatch fails before native cutover, the fence is released and editor usability is restored immediately. The verified downloaded update and `downloaded` phase are preserved, enabling safe retry without re-downloading.
-4. **Authoritative native cutover boundary.** The fence transitions to installing and remains permanently held only when the native cutover step is actually dispatched (macOS live bundle replacement or Windows detached NSIS installer launch). The final readiness revalidation runs immediately before live bundle replacement or installer spawn with no intervening await.
+4. **Authoritative native cutover boundary.** The fence transitions to installing and remains permanently held only when macOS live bundle replacement is dispatched. The final readiness revalidation runs immediately before live bundle replacement with no intervening await.
 
 One thing happens at a time. A check, a download, an install, and a channel
 change are each a single operation, and the second of them waits for the first
@@ -1648,13 +1634,8 @@ than whatever is in the staging directory at the time.
 A release becomes offerable only after the history that records having seen it
 is written and flushed to the disk: a temporary file of its own, flushed
 through its own handle, and then moved into place, with the directory entry
-flushed as well on macOS and Linux. Windows has no way to flush a directory
-entry from Node's standard library — `FlushFileBuffers` requires a handle
-opened for `GENERIC_WRITE`, and a writable directory handle needs
-`FILE_FLAG_BACKUP_SEMANTICS` — so there the file's own flush and the atomic
-replacement are what this code performs, and the durability of the name across a
-power loss is left to the platform rather than claimed here. A write or a
-replacement that fails is a failure: the check offers nothing. A check that cannot record what it saw
+flushed as well on macOS. A write or a replacement that fails is a failure:
+the check offers nothing. A check that cannot record what it saw
 offers nothing, revokes a build already downloaded for the same release, and
 stops every later download and install, because the replay guard is the thing
 that keeps an older release from being offered as a new one. A cancelled
@@ -1673,7 +1654,7 @@ The updater writes only to the app's own user-data directory, and on macOS to a
 staged and a moved-aside copy of the bundle beside the installed one, both
 carrying this app's own prefix. It never reads or writes a repository.
 
-### Automatic discovery and Linux updates
+### Automatic discovery
 
 Signed updates are checked automatically in the background shortly after startup
 and every 24 hours while the application is running. Resuming from system sleep
@@ -1689,32 +1670,12 @@ Check attempt and authenticated success timestamps are recorded per channel in
 guard sequences; corrupt or missing timestamps fall back gracefully and never
 invalidate replay defense or make the updater state unusable.
 
-On Linux, automatic in-place replacement is not supported for AppImage bundles.
-When a signed Linux update is downloaded and verified against the release
-manifest and signature, the application offers **Show downloaded file** to reveal
-the verified AppImage in the desktop file manager without executing it, accompanied
-by clear manual replacement instructions.
 
-**What a fixture cannot prove.** The test suite stages an installer and runs the
-real code over it, which proves the digests, the manifest, the channel, the
-sequencing and the refusals. It cannot prove a native install: `codesign`,
-`spctl`, `hdiutil`, `Get-AuthenticodeSignature` and the NSIS installer are not
-run in a test process on any platform, so a path that asks the operating system
-about a signature is only ever exercised as far as the operating system answers. Installing a real signed release is the
-acceptance step, and it is written out under Platform support below. The
-handoff's directory and file modes describe POSIX protection; the equivalent
-Windows isolation is a documented limit, not something the tests establish.
-The lifecycle fixture uses two real processes: the process started by the app
-is not the process reporting completion. It checks retention before completion
-and while that process is running, removal after a matching answer and process
-exit, preservation of foreign siblings, and refusal of malformed evidence. The
-stand-in reads the raw request without prefix stripping and writes the same
-CRLF response fields as `build/installer.nsh`.
-
-Compile the installer hook through electron-builder's NSIS include chain to
-check its `customHeader` and `customInstall` integration. Compilation and the
-two-process fixture do not execute the Windows installer; installation of a
-real signed release on Windows remains the platform acceptance step below.
+**What a fixture cannot prove.** The test suite proves digests, manifest parsing,
+channel sequencing and refusal behavior. It does not prove a native signed
+installation. Real `codesign`, `spctl`, `hdiutil`, bundle replacement and relaunch
+require the signed-release acceptance below. Legacy lifecycle fixtures retain
+coverage for safe cleanup of existing retained-handoff records.
 
 ### Channels
 
@@ -1763,17 +1724,12 @@ chosen.
 | Platform | Package                                              | Signing                                                                                              | Updated in place                                                                                                                                                                                                                                             |
 | -------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | macOS    | `dmg`                                                | Developer ID Application for the app and for the image, notarised and stapled                        | Yes. The download is checked against the installed app's own signing identity, team, bundle identifier, version, and architecture, staged beside the running bundle and proved again there, then moved into the bundle's place and the app restarts into it. |
-| Windows  | NSIS installer                                       | Authenticode, verified before it runs                                                                | Yes. The installer's Authenticode identity is compared with the installed app's own; the installer is then started, this app closes, and the update finishes on its own.                                                                                     |
-| Linux    | AppImage, also covered by the packaged desktop smoke | No platform signature exists to check; the release's own manifest signature is what authenticates it | No. An AppImage is a single file the person runs from wherever they put it, with no installed copy to replace and no signature to check before running it, so in-place updates are unsupported there and a download is offered to run instead.               |
 
-The release states the Linux policy in its own log on every Linux build — "linux:
-best-effort artifact — built, published and signed, never updated in place by the
-app" — and the step that prints it runs the shipped code to make it true: it
-asks the installer what it supports on Linux, hands it a staged update anyway,
-and requires a refusal that writes nothing, starts nothing and restarts
-nothing. A Linux installer that appeared would make the app answer differently
-and fail that step, which is the moment the policy line has to be rewritten with
-it.
+The desktop application supports macOS arm64 and x64 only. New signed manifests
+require both Mac artifacts and refuse other platforms. Historical signed channel
+manifests may still contain Windows/Linux artifacts: their protocol vocabulary
+remains readable so signatures, sequence allocation and replay protection continue
+across the support change. Existing keys and channel history are never reset.
 
 Signing needs a code-signing certificate (`CSC_LINK`, `CSC_KEY_PASSWORD`), and
 macOS notarisation needs an Apple developer account (`APPLE_ID`,
@@ -1790,8 +1746,6 @@ as delivered:
    by the expected team, that `xcrun stapler validate` accepts the ticket, and
    that `spctl --assess --type open` accepts the image, on a machine that has
    never seen the download.
-3. On Windows, confirm `Get-AuthenticodeSignature` reports `Valid` and the
-   signer's subject matches the installed app's own.
 4. Install the published release on a clean machine, then publish the next
    pre-release and let an installed build take it: the digest re-check, the
    native signature checks, the handoff, the replacement, and the relaunch all
@@ -1927,8 +1881,6 @@ after it reads as a finished clone. Promotion is the single commit point, and it
 is one atomic rename that refuses to replace anything already there:
 
 - Darwin: `renamex_np(RENAME_EXCL)`
-- Linux: `renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE)`
-- Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`
 
 Node exposes none of these, so they are reached through a small helper,
 [`apps/desktop/native/promote-repository.c`](apps/desktop/native/promote-repository.c), compiled for the
@@ -2063,11 +2015,9 @@ since filesystem and process startup costs vary by machine. Hosted-runner
 measurements start a new comparison series; the old self-hosted timings are not
 a directly comparable baseline. The existing performance budgets still apply.
 
-Desktop benchmarks retain Electron's OS sandbox. Linux runs need the official
-pinned Electron sandbox helper installed with its supported ownership and mode,
-or an environment that supports Chromium's namespace sandbox. A helper setup
-failure is an unmet runtime prerequisite, not permission to use `--no-sandbox`
-or `ELECTRON_DISABLE_SANDBOX` to report passing startup/interaction budgets.
+Desktop benchmarks run on macOS and retain Electron's OS sandbox. Never use
+`--no-sandbox` or `ELECTRON_DISABLE_SANDBOX` to report passing startup or
+interaction budgets.
 
 The dedicated lane envelope uses the actual built, sandboxed Electron consumer.
 It creates 250/1000/5000-object deep/wide/disconnected fixtures with 120 real
@@ -2267,7 +2217,7 @@ Visual baselines remain separate host-specific checks: desktop on macOS, catalog
 on its documented macOS arm64 or Linux x64 baseline host.
 
 Every `main` push and manual dispatch also runs the independent `root-suite` job
-on native Ubuntu 24.04 x64 with Node 24 and the pinned Playwright Chromium. It
+on native macOS arm64 with Node 24 and the pinned Playwright Chromium. It
 installs frozen dependencies and executes the normal root `pnpm test`, including
 the complete desktop unit suite and design manifest/nonvisual browser tests, under a
 30-minute job limit. On main pushes it is a required dependency of the explicit
@@ -2362,6 +2312,12 @@ retries, drop assertions or disable the sandbox to conceal stalls.
 ## Renderer verification
 
 These fixtures exercise Git Stacks, not the Journey prototype. Production React components, tokens, and the real `App` are imported by a separate Vite entry point under `apps/desktop/tests/renderer`; the packaged renderer does not expose a fixture route or install a fake desktop API.
+
+The renderer suite's `Desktop Chrome` profile advertises Windows on every host.
+Shortcut checks use `Control` for `Mod` to match that emulated platform, not the
+host-dependent `ControlOrMeta` alias.
+Scroll-retention checks capture the reading position after the last line-selection
+click, which may legitimately scroll the selected comment gutter into view.
 
 ### Integrated v5 cutover and matched visual evidence
 
@@ -2502,6 +2458,8 @@ page, never trunk, context rows or unmounted matches; it resets as view scope ch
 `workbench-context.ts` stores versioned view-only per-repository memory: exact
 selection, surface, inspector tab/directory, filters, folds, density, page and scroll.
 It is not a settings store, remote cache or authored-draft/operation journal.
+The lane and outer-pane scrollports restore after repository inventory and
+container-query layout are ready; loading placeholders do not overwrite saved offsets.
 Account retirement cancels captured reads and retires PR targets without deleting
 original authored text. Attention/Review return restores the originating surface.
 Global search is independent of local lane filters and includes full path/ref-kind
@@ -2755,11 +2713,10 @@ Residual #39 implementation and acceptance remain separately observable:
 
 For a final-source manual run, use Node 24, the committed frozen lockfile, then
 `pnpm run package` in the retained final allocation. Launch the freshly produced
-unpacked executable, not a previous parent/Foundation artifact: Linux
-`apps/desktop/release/linux-unpacked/git-stacks`, macOS
+unpacked executable, not a previous parent/Foundation artifact:
 `apps/desktop/release/mac-arm64/Git Stacks.app/Contents/MacOS/Git Stacks` (or the
 architecture-matching `release/mac` variant). The associated delivery PR identifies
-the actual generated path and resource hashes. Windows packaged smoke is unsupported.
+the actual generated path and resource hashes. Desktop smoke supports macOS only.
 Use owned disposable repositories and isolated app/Git/gh state as described in
 the packaged/manual procedures below; never personal repositories or inherited
 provider credentials for acceptance. Keep source/package identity with every result.
@@ -2898,23 +2855,8 @@ pnpm run package
 pnpm run test:desktop
 ```
 
-On Linux, the unpacked Electron package needs its official `chrome-sandbox`
-helper installed with root ownership and mode `4755`. After the frozen install,
-run `pnpm --filter git-stacks exec install-electron` to materialize the pinned
-official Electron reference distribution without launching the application.
-Before an authorized
-privileged installation, verify that the generated helper is a regular,
-non-symlink file inside the workspace and matches
-`apps/desktop/node_modules/electron/dist/chrome-sandbox` byte-for-byte; record its original
-ownership and mode. Configure only that generated helper using existing
-administrative permission, then run the smoke script directly against the same
-package so repackaging does not overwrite the setup. Restore the original
-ownership and mode after a temporary development verification. Do not disable
-sandboxing, change privilege policy, or repair unrelated host services to make
-this check pass. If the required installation cannot be performed, report the
-packaged native checks as blocked rather than replacing them with renderer tests.
 
-The smoke launches `release/mac-arm64/Git Stacks.app` by default on macOS and `release/linux-unpacked/git-stacks` on Linux; Windows is unsupported until its process-tree cleanup can be verified. `node apps/desktop/scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates a disposable repository and local bare remote, isolates the Chromium user data, the temporary directory, the Git configuration and the gh configuration inside the workspace, strips inherited Git/GitHub and credential-shaped environment variables, and cleans the temporary workspace. On macOS the app inherits the host home directory, because the system only spawns the app's sandboxed helper processes against the home the password database reports: with a synthetic `HOME` the browser process never brings those helpers up and stops answering on its own DevTools endpoint, so the smoke can never reach the renderer. Nothing the app, git or gh reads comes from that home — user data is the redirected `--user-data-dir`, and `GIT_CONFIG_NOSYSTEM=1` with an empty `GIT_CONFIG_GLOBAL` and a disposable `GH_CONFIG_DIR` keep the machine's own Git identity, credential helpers and GitHub login out of the fixture. A `browserType.connectOverCDP` timeout on the first `/json/version` request is that dead endpoint, not a slow start. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
+The smoke launches `release/mac-arm64/Git Stacks.app` or `release/mac/Git Stacks.app` on macOS only. `node apps/desktop/scripts/packaged-desktop-smoke.mjs --help` lists the explicit app-path option. It creates disposable repositories and isolated app/Git/gh state, strips inherited credentials and cleans its workspace. Preserve the host `HOME` so macOS sandboxed helpers can launch; redirected user data, `GIT_CONFIG_NOSYSTEM=1`, an empty `GIT_CONFIG_GLOBAL` and disposable `GH_CONFIG_DIR` exclude host Git identity and provider login. Reports and failure screenshots remain under `out/packaged-smoke/<timestamp>/`.
 
 The packaged executable, preload bridge, CSP, window lifecycle, real 200% page zoom, external-link policy, and local Git workflows are exercised rather than inferred from a dev server. No GitHub mutation or personal repository is used. Native window-state API checks (minimize/restore document visibility and bounds, maximize/unmaximize) are not physical title-bar-button or VoiceOver verification; record those manual boundaries separately. The shared isolated desktop fixture is installed before the production main loads (an early Node-inspector pause, `--use-mock-keychain` and `--password-store=basic` on the launch), so this proof covers the actual shipped bundle and CSP under synthetic credential sealing: it is not a proof of the native OS secret store, and it is not proof of a signed release.
 
@@ -3204,9 +3146,9 @@ When adding a variant or migrating a view:
 
 Automated axe and contrast checks supplement, not replace, human keyboard and assistive-technology review. Final migration sign-off requires an explicitly recorded manual pass; missing evidence is a blocker, not an implied pass. The `Accessibility checks` workflow automates what a machine can judge; the script below is the part it cannot.
 
-**Two platforms, two records.** The target readers are VoiceOver on macOS and Narrator or NVDA on Windows; the `Accessibility checks` workflow runs headless Chromium on Linux and is evidence for no reader. One record per platform, each naming the reviewer, the date, the OS version and build, the app revision under test (`git rev-parse HEAD`), the reader with its version and settings, display scaling, the keyboard input modes in force (Sticky, Filter, and Slow Keys on Windows; keyboard menu navigation on macOS), and whether the chords are the shipped defaults or the ones set in Settings → Keyboard shortcuts. A macOS record does not answer the Windows one, an unrun platform is recorded as not run, and the evidence belongs in the pull request.
+**macOS reader evidence.** The target reader is VoiceOver on macOS. The independent browser/catalog accessibility checks may run on Linux but establish no native reader acceptance. Record the reviewer, date, macOS version/build, app revision, VoiceOver version/settings, display scaling, keyboard navigation settings and configured chords in the pull request. Unrun manual acceptance remains explicitly not run.
 
-**What to launch.** `pnpm install --frozen-lockfile`, then `pnpm run package`, then the unpacked application from `release/`: macOS `release/mac-arm64/Git Stacks.app/Contents/MacOS/Git Stacks` (or `release/mac/Git Stacks.app/Contents/MacOS/Git Stacks`), Linux `release/linux-unpacked/git-stacks`, Windows `release/win-unpacked/Git Stacks.exe`. `pnpm run test:desktop` is the automated packaged smoke: it supports macOS and Linux and refuses Windows ("Packaged desktop smoke supports macOS and Linux only; Windows process-tree cleanup is not implemented"), so the Windows pass is manual, and on the platforms it supports `--keep` retains its disposable workspace and prints the path. That smoke runs an unsigned, locally built artifact against fixtures: it is not evidence of a signed release, of the operating system's native credential store, or of any manual acceptance pass.
+**What to launch.** Run `pnpm install --frozen-lockfile`, then `pnpm run package`, then `release/mac-arm64/Git Stacks.app/Contents/MacOS/Git Stacks` (or the architecture-matching `release/mac` variant). The macOS-only `pnpm run test:desktop --keep` retains its disposable workspace. Its unsigned fixture artifact is not evidence of a signed release, native credential-store acceptance, or a manual reader pass.
 
 **An owned, credential-free run.** Everything the pass touches lives in one directory this pass creates, and the app is launched from a shell that carries none of the machine's Git, GitHub, or credential state. A fresh `--user-data-dir` is part of that, not all of it: it holds `settings.json`, `repositories.json`, and the notification state, while the CLI session comes from the CLI itself. `GH_CONFIG_DIR` is the one GitHub variable this run points somewhere: it names a directory, so it points at the empty one this run created, which is how the CLI finds no stored session to authenticate with. The four token variables are not directories and are not pointed anywhere — `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and `GITHUB_ENTERPRISE_TOKEN` must be **unset**, because the CLI reads any one of them as a credential in preference to its own configuration, and the run would then authenticate as whoever owns that token. With them gone the CLI reports itself signed out and the run reaches no real account. On macOS leave `HOME` as it is: the app brings its sandboxed helpers up only against the home the password database reports.
 
@@ -3223,22 +3165,10 @@ env -i \
   sh
 ```
 
-```powershell
-# Windows PowerShell: a GUID root, then strip the ambient variables in place
-$root = Join-Path ([System.IO.Path]::GetTempPath()) ("git-stacks-a11y-" + [guid]::NewGuid())
-New-Item -ItemType Directory $root | Out-Null
-New-Item -ItemType File (Join-Path $root 'gitconfig') | Out-Null
-New-Item -ItemType Directory (Join-Path $root 'gh') | Out-Null
-Set-Location $root
-Get-ChildItem Env: | Where-Object { $_.Name -match '^(GIT_|GH_|GITHUB_|GIT_STACKS_|SSH_AUTH_SOCK|NODE_OPTIONS|NODE_TLS|NODE_EXTRA|ELECTRON_)|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
-Get-ChildItem Env: | Where-Object { $_.Name -match '^(GIT_|GH_|GITHUB_|GIT_STACKS_|SSH_AUTH_SOCK|NODE_OPTIONS|NODE_TLS|NODE_EXTRA|ELECTRON_)|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|API_?KEY' } | Select-Object -ExpandProperty Name
-$env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = Join-Path $root 'gitconfig'
-$env:GH_CONFIG_DIR = Join-Path $root 'gh'; $env:GIT_TERMINAL_PROMPT = '0'
-```
 
-The shell that block opens is where the rest of the run happens: the fixture block below, and the packaged app itself with `--user-data-dir="$root/user-data"`. `exit` leaves it. `env -i` is what makes the run credential-free — nothing from the outer shell survives, so no `GITHUB_TOKEN`, `GH_TOKEN`, or host-scoped token, no `GIT_DIR`, `GIT_WORK_TREE`, or counted `GIT_CONFIG_*` pair, no `SSH_AUTH_SOCK`, `NODE_OPTIONS`, or Electron override reaches it — and `root` is passed into it explicitly, because an empty environment has nothing else to expand. The PowerShell block is one session rather than a subshell: it sets `$root`, moves into it with `Set-Location`, strips the ambient variables, and then runs the same fixture block and the same app launch, where the argument is `--user-data-dir=$root\user-data`; its query must print nothing, and anything it lists is unset before continuing. `GIT_CONFIG_NOSYSTEM` with an empty `GIT_CONFIG_GLOBAL` means Git reads no system or global configuration at all — no credential helper, `include`, signing, or hook path — and the empty `gh` directory means no `gh` login. Every Git the app starts inherits the launching environment, so the app is launched from that same session.
+The shell that block opens is where the rest of the run happens: the fixture block below and the packaged app with `--user-data-dir="$root/user-data"`. `exit` leaves it. `env -i` strips inherited Git/GitHub, credential, SSH, Node and Electron overrides. `GIT_CONFIG_NOSYSTEM` and an empty `GIT_CONFIG_GLOBAL` prevent global credential helpers, includes, signing and hooks; the empty `GH_CONFIG_DIR` excludes provider login. Launch the app from this same session.
 
-**The fixture.** Both setups have moved into the run root, so this block's relative paths land inside it. Every line is a `git` call or a directory step that both shells spell the same way, and the tree starts empty, so nothing depends on how a shell would encode a file it wrote:
+**The fixture.** The shell has moved into the owned run root, so this block's relative paths land inside it:
 
 ```sh
 mkdir a11y-fixture
@@ -3263,7 +3193,7 @@ Add a file of your own when a step needs a working change; what the app reads is
 
 A dependency parent is recorded as `branch.<name>.parent`. Build an owned fixture past 64 branch rows (`LANE_ROW_PAGE_SIZE`) for cross-page lane focus and past 32 relationships (`LANE_RELATIONSHIP_PAGE_SIZE`) for inspector paging; ordinary lists retain their separate 200-row budget. Use the package's **Add repository** folder picker, never a personal repository, and delete only the disposable fixture root after the manual run.
 
-**Readers.** `Mod` is `Cmd` on macOS and `Ctrl` on Windows/Linux. Confirm the reader does not intercept the configured chords. Run lane, Review-member and dialog keyboard checks in the reader's interaction/focus mode; record browse/scan-mode announcements separately. Automation is not reader acceptance.
+**Readers.** `Mod` is `Cmd` on macOS. Confirm VoiceOver does not intercept configured chords. Run lane, Review-member and dialog keyboard checks in the reader's interaction/focus mode; record browse-mode announcements separately. Automation is not reader acceptance.
 
 1. Record platform, exact package/source SHA, reader and reader mode. Tab to **Add repository**, record the native folder picker and the registered repository name/path announcements.
 2. **Navigation.** Tab through Branches, Pull requests, Needs attention and Activity; open Review from an actual qualified PR row. Verify heading/focus announcements, Settings, optional Notifications and explicit recovery dialogs. Use `Mod+K` from non-editable focus for global search; local lane search must remain independent. Inspect configured shortcuts rather than expecting retired Stacks/Changes/History/Stashes/Inbox destinations.
@@ -3273,7 +3203,7 @@ A dependency parent is recorded as `branch.<name>.parent`. Build an owned fixtur
 6. **Zoom and motion.** Exercise all current surfaces at real 200% Electron zoom and at the 1000×700 minimum separately, including the narrow inspector Sheet. Check horizontal overflow, clipped actions, focus restoration and reduced-motion status truthfulness. Record native limits independently from browser geometry.
 7. **State without colour.** Inspect lanes, Attention, Review, CLI/Diagnostics Settings and recovery under high contrast/monochrome. Lifecycle, checks, authorization and unknown/unavailable observations must remain readable as words.
 8. **Errors and recovery.** Use owned unavailable-metadata, history-read, stale-preview, busy and paused/conflicted cases. Confirm original qualified authority remains explicit and opening/dismissing recovery never replays or retargets a journal. Continue/Skip/Abort require an explicit supported captured decision, not browsing or navigation.
-9. **Native window controls.** With the reader and no pointer, reach the window's own controls and confirm each is announced by the name of its action — minimize, zoom, and close on macOS; minimize, maximize or restore, and close on Windows — that activating each does what its name says, and that returning from full screen leaves the same names in the same order. A control announced by its icon, its position, or an untranslated name is a finding.
+9. **Native window controls.** With VoiceOver and no pointer, reach the window's minimize, zoom and close controls. Confirm each action is named and works, and returning from full screen preserves names and order. Icon-only, positional or untranslated announcements are findings.
 10. Record findings and platform limits in the pull request. Sign off only after blocking keyboard, contrast, state-truthfulness, and safety-dispatch findings are resolved.
 
 Real GitHub mutations require a separately designated test repository and explicit authorization; none is included in routine fixtures or CI.

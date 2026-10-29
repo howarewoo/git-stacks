@@ -108,11 +108,9 @@ function parseArgs(argv) {
 function resolveTarget(explicit) {
   const candidates = explicit
     ? [resolve(ROOT, explicit)]
-    : (
-        {
-          darwin: ['release/mac-arm64/Git Stacks.app', 'release/mac/Git Stacks.app'],
-        }[process.platform] ?? ['release/linux-unpacked/git-stacks']
-      ).map((candidate) => join(ROOT, candidate))
+    : ['release/mac-arm64/Git Stacks.app', 'release/mac/Git Stacks.app'].map((candidate) =>
+        join(ROOT, candidate),
+      )
   const found = candidates.find((candidate) => existsSync(candidate))
   if (!found) {
     throw new Error(
@@ -1339,10 +1337,8 @@ async function waitForViewport(page, expectedWidth, timeout = 15_000) {
 }
 
 async function run(options) {
-  if (process.platform === 'win32') {
-    throw new Error(
-      'Packaged desktop smoke supports macOS and Linux only; Windows process-tree cleanup is not implemented.',
-    )
+  if (process.platform !== 'darwin') {
+    throw new Error('Packaged desktop smoke supports macOS only.')
   }
   const target = resolveTarget(options.app)
   const shipped = payload(target)

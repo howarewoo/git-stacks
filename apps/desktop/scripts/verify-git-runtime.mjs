@@ -14,7 +14,7 @@ const runtimeRoot = process.argv[2]
   : join(repositoryRoot, 'resources', 'git')
 const manifestPath = join(runtimeRoot, 'runtime-manifest.json')
 const platform = `${process.platform}-${process.arch}`
-const executableName = process.platform === 'win32' ? 'cmd/git.exe' : 'bin/git'
+const executableName = 'bin/git'
 
 function fail(message) {
   console.error(`git-runtime: ${message}`)
@@ -55,7 +55,10 @@ for (const name of provisioned) {
   }
 }
 for (const [name, entry] of Object.entries(manifest.platforms ?? {})) {
-  const executable = join(runtimeRoot, name, name.startsWith('win32-') ? 'cmd/git.exe' : 'bin/git')
+  if (!['darwin-arm64', 'darwin-x64'].includes(name)) {
+    fail(`the release manifest contains unsupported desktop runtime ${name}.`)
+  }
+  const executable = join(runtimeRoot, name, 'bin/git')
   if (!existsSync(executable)) {
     fail(`the manifest records ${name} but ${executable} is missing.`)
   }
@@ -86,7 +89,7 @@ const version = /(\d+\.\d+(?:\.\d+)?)/u.exec(reported)?.[1] ?? null
 if (version !== host.gitVersion) {
   fail(`${hostExecutable} reports ${reported} but the manifest records ${host.gitVersion}.`)
 }
-if (process.platform === 'win32' || statSync(hostExecutable).mode & 0o111) {
+if (statSync(hostExecutable).mode & 0o111) {
   // POSIX executable bits are not represented by the content digest.
   console.log(
     `git-runtime: ${platform} Git ${version} (${host.source}) verified against the ${appVersion} release manifest.`,
